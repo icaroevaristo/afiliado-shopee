@@ -22,6 +22,7 @@ import type {
   CommercialPipelineRunFilters,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
+  CommercialPromotionCandidateRecord,
   ShopeeOfferRecord,
   ShopeeOfferRepository,
   WhatsAppDispatchDetails,
@@ -87,6 +88,31 @@ export type CommercialPipelineDryRunResult = {
   dispatchWillBeCreated: false;
   jobWillBeCreated: false;
   messageWillBeSent: false;
+};
+
+export type CommercialPromotionCandidatePipelineSelection = {
+  candidate: Pick<
+    CommercialPromotionCandidateRecord,
+    | 'id'
+    | 'productId'
+    | 'commercialScore'
+    | 'scorePolicyVersion'
+    | 'minimumScoreUsed'
+    | 'rankPosition'
+    | 'scoreBreakdown'
+  > & {
+    productName: string;
+    price: string;
+  };
+  group: Pick<WhatsAppGroupRecord, 'id' | 'name' | 'fingerprint'>;
+  campaign: string;
+  copyPreview: string;
+  candidateCount: number;
+  eligibleCount: number;
+  rejectedCount: number;
+  rejectionSummary: Partial<
+    Record<CommercialPipelineRejectionCode, number>
+  >;
 };
 
 export type CommercialPipelineServiceOptions = {
@@ -518,6 +544,121 @@ export class CommercialPipelineService {
           'Commercial pipeline dry-run failed',
         );
       }
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'Falha segura no pipeline comercial',
+        'COMMERCIAL_PIPELINE_FAILED',
+      );
+    }
+  }
+
+  async dryRunFromPromotionCandidate(
+    input: CommercialPromotionCandidatePipelineSelection,
+  ): Promise<CommercialPipelineDryRunResult> {
+    const startedAt = this.clock();
+    const tracking = buildShopeeAffiliateTrackingMetadata({
+      groupFingerprint: input.group.fingerprint,
+      campaign: input.campaign,
+      date: startedAt,
+    });
+    const plannedSubIds = toPlannedShopeeSubIds(
+      this.options.subIdPrefix,
+      tracking,
+    );
+    const selectionReasons = [
+      'Candidato selecionado pela fila de promocoes comerciais',
+      `Politica de score: ${input.candidate.scorePolicyVersion}`,
+      `Score final: ${input.candidate.commercialScore}`,
+      `Score minimo: ${input.candidate.minimumScoreUsed}`,
+      `Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`,
+    ];
+    const run = await this.options.runs.create({
+      mode: 'DRY_RUN',
+      status: 'STARTED',
+      candidateCount: input.candidateCount,
+      eligibleCount: input.eligibleCount,
+      rejectedCount: input.rejectedCount,
+      rejectionSummary: input.rejectionSummary,
+      selectionReasons: [],
+      plannedSubIds: [],
+      createdAt: startedAt,
+      completedAt: null,
+    });
+
+    try {
+      await this.options.runs.update(run.id, {
+        status: 'COMPLETED',
+        productId: input.candidate.productId,
+        groupDestinationId: input.group.id,
+        productName: input.candidate.productName,
+        productPrice: input.candidate.price,
+        groupName: input.group.name,
+        groupFingerprint: input.group.fingerprint,
+        score: input.candidate.commercialScore,
+        scorePolicyVersion: input.candidate.scorePolicyVersion,
+        minimumScoreUsed: input.candidate.minimumScoreUsed,
+        maximumScoreObserved: input.candidate.commercialScore,
+        selectedScoreBreakdown: input.candidate.scoreBreakdown,
+        candidateCount: input.candidateCount,
+        eligibleCount: input.eligibleCount,
+        rejectedCount: input.rejectedCount,
+        rejectionSummary: input.rejectionSummary,
+        selectionReasons,
+        copyPreview: input.copyPreview,
+        plannedSubIds,
+        failureCode: null,
+        completedAt: this.clock(),
+      });
+      this.options.logger.info(
+        {
+          event: 'commercial-pipeline.candidate-dry-run.completed',
+          runId: run.id,
+          candidateId: input.candidate.id,
+        },
+        'Commercial pipeline candidate dry-run completed',
+      );
+      return {
+        runId: run.id,
+        mode: 'dry-run',
+        status: 'ready',
+        provider: 'official',
+        candidateCount: input.candidateCount,
+        eligibleCount: input.eligibleCount,
+        rejectedCount: input.rejectedCount,
+        rejectionSummary: input.rejectionSummary,
+        scorePolicyVersion: input.candidate.scorePolicyVersion,
+        minimumScoreUsed: input.candidate.minimumScoreUsed,
+        maximumScoreObserved: input.candidate.commercialScore,
+        selectedScoreBreakdown: input.candidate.scoreBreakdown,
+        selectedProduct: {
+          id: input.candidate.productId,
+          name: input.candidate.productName,
+          price: input.candidate.price,
+          score: input.candidate.commercialScore,
+          affiliateLinkPresent: true,
+        },
+        selectedGroup: input.group,
+        selectionReasons,
+        copyPreview: input.copyPreview,
+        plannedSubIds,
+        dispatchWillBeCreated: false,
+        jobWillBeCreated: false,
+        messageWillBeSent: false,
+      };
+    } catch (error) {
+      await this.options.runs.update(run.id, {
+        status: 'FAILED',
+        failureCode: 'COMMERCIAL_PIPELINE_FAILED',
+        completedAt: this.clock(),
+      });
+      this.options.logger.error(
+        {
+          event: 'commercial-pipeline.candidate-dry-run.failed',
+          runId: run.id,
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Commercial pipeline candidate dry-run failed',
+      );
       if (error instanceof AppError) throw error;
       throw new AppError(
         'Falha segura no pipeline comercial',

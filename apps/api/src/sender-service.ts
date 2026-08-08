@@ -11,7 +11,10 @@ import type {
 } from './repositories';
 import type { WhatsAppGroupSendPolicy } from './whatsapp-group-send-policy';
 
-import type { CommercialMessageDraftService } from './commercial-message-draft-service';
+import {
+  COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+  type CommercialMessageDraftService,
+} from './commercial-message-draft-service';
 
 export type SenderServiceOptions = {
   dispatches: WhatsAppDispatchRepository;
@@ -109,17 +112,19 @@ export class SenderService {
 
       try {
         const draft = this.options.draftService.createDraft(candidate);
-        message = draft.caption;
-        if (draft.deliveryMode === 'IMAGE' && draft.imageUrl) {
-          imageUrl = draft.imageUrl;
-          deliveryMode = 'IMAGE';
-        }
-        if (draft.warnings && draft.warnings.length > 0) {
-          this.options.logger.info(
-            { event: 'whatsapp.dispatch.draft_warning', dispatchId, warningCodes: draft.warnings },
-            'Commercial message draft generated with warnings'
+        if (
+          draft.deliveryMode !== 'IMAGE' ||
+          !draft.imageUrl ||
+          draft.warnings.length > 0
+        ) {
+          throw new AppError(
+            'Automacao comercial exige rascunho de imagem',
+            COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
           );
         }
+        message = draft.caption;
+        imageUrl = draft.imageUrl;
+        deliveryMode = 'IMAGE';
       } catch (error) {
         let errorCode = 'COMMERCIAL_MESSAGE_DRAFT_FAILED';
         if (error instanceof AppError) {

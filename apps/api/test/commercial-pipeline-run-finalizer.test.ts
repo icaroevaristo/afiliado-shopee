@@ -32,7 +32,14 @@ const build = (investigationRequired = false) => {
       return run;
     },
   } as CommercialPipelineRunRepository;
-  return { runs, getRun: () => run };
+  const promotionCandidates = {
+    markDispatchedByGeneratedCopyId: vi.fn(async () => ({
+      kind: 'DISPATCHED' as const,
+      candidateId: 'candidate-id',
+      transitioned: true,
+    })),
+  };
+  return { runs, promotionCandidates, getRun: () => run };
 };
 
 const dispatch = (
@@ -52,6 +59,7 @@ describe('finalizeCommercialPipelineRun', () => {
     const state = build();
     await finalizeCommercialPipelineRun({
       runs: state.runs,
+      promotionCandidates: state.promotionCandidates,
       dispatch: dispatch('SENT'),
       failed: false,
       logger: { info: vi.fn(), error: vi.fn() },
@@ -63,12 +71,16 @@ describe('finalizeCommercialPipelineRun', () => {
       investigationRequired: false,
       completedAt: now,
     });
+    expect(
+      state.promotionCandidates.markDispatchedByGeneratedCopyId,
+    ).toHaveBeenCalledWith('copy-id');
   });
 
   it('persiste falha sem autorizar retry', async () => {
     const state = build();
     await finalizeCommercialPipelineRun({
       runs: state.runs,
+      promotionCandidates: state.promotionCandidates,
       dispatch: dispatch('FAILED'),
       failed: true,
       logger: { info: vi.fn(), error: vi.fn() },
@@ -86,6 +98,7 @@ describe('finalizeCommercialPipelineRun', () => {
     const state = build(true);
     await finalizeCommercialPipelineRun({
       runs: state.runs,
+      promotionCandidates: state.promotionCandidates,
       dispatch: dispatch('SENT'),
       failed: false,
       logger: { info: vi.fn(), error: vi.fn() },
@@ -94,6 +107,28 @@ describe('finalizeCommercialPipelineRun', () => {
     expect(state.getRun()).toMatchObject({
       finalStatus: 'PENDING',
       investigationRequired: true,
+    });
+  });
+
+  it('propaga falha do lifecycle depois de SENT sem normalizar como sucesso', async () => {
+    const state = build();
+    state.promotionCandidates.markDispatchedByGeneratedCopyId.mockRejectedValue(
+      new Error('candidate finalization failed'),
+    );
+
+    await expect(
+      finalizeCommercialPipelineRun({
+        runs: state.runs,
+        promotionCandidates: state.promotionCandidates,
+        dispatch: dispatch('SENT'),
+        failed: false,
+        logger: { info: vi.fn(), error: vi.fn() },
+        clock: () => now,
+      }),
+    ).rejects.toThrow('candidate finalization failed');
+    expect(state.getRun()).toMatchObject({
+      status: 'STARTED',
+      finalStatus: 'PENDING',
     });
   });
 });

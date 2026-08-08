@@ -28,7 +28,12 @@ export type WhatsAppDispatchWorkerLogger = {
 export type WhatsAppDispatchProcessorRepositories = Pick<
   ApplicationRepositories,
   'whatsappDispatches' | 'commercialRuns'
->;
+> & {
+  commercialPromotions?: Pick<
+    ApplicationRepositories['commercialPromotions'],
+    'markDispatchedByGeneratedCopyId'
+  >;
+};
 
 type WhatsAppDispatchProcessorBaseOptions = {
   logger: WhatsAppDispatchWorkerLogger;
@@ -91,6 +96,7 @@ export const processWhatsAppDispatchJob = async (
     const dispatch = await sender.sendDispatch(job.data.dispatchId);
     await finalizeCommercialPipelineRun({
       runs: repositories.commercialRuns,
+      promotionCandidates: repositories.commercialPromotions,
       dispatch,
       failed: false,
       logger: options.logger,
@@ -103,6 +109,7 @@ export const processWhatsAppDispatchJob = async (
     if (dispatch) {
       await finalizeCommercialPipelineRun({
         runs: repositories.commercialRuns,
+        promotionCandidates: repositories.commercialPromotions,
         dispatch,
         failed: true,
         logger: options.logger,

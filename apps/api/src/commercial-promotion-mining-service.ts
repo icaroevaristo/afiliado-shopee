@@ -27,6 +27,9 @@ const MAX_EVALUATED_PRODUCTS = 2_000;
 const MAX_PREVIEW_CANDIDATES = 20;
 const PROTECTED_STATUSES = new Set(['COPY_READY', 'RESERVED']);
 
+export const COMMERCIAL_PROMOTION_MINING_CONFIRMATION =
+  'MINERAR_PROMOCOES';
+
 type PromotionSummary = Partial<
   Record<CommercialPromotionRejectionCode, number>
 >;
@@ -175,7 +178,8 @@ const parseMineConfirmation = (input: unknown) => {
     typeof input !== 'object' ||
     Array.isArray(input) ||
     Object.keys(input).length !== 1 ||
-    (input as Record<string, unknown>).confirm !== 'MINERAR_PROMOCOES'
+    (input as Record<string, unknown>).confirm !==
+      COMMERCIAL_PROMOTION_MINING_CONFIRMATION
   ) {
     promotionError(
       'Confirmacao de mineracao invalida',

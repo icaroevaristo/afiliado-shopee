@@ -1,0 +1,498 @@
+import { describe, expect, it, vi } from 'vitest';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
+
+import {
+  CommercialAutomationCandidateFlowService,
+  COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+} from '../src/commercial-automation-candidate-flow-service';
+import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
+import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-service';
+import type {
+  CommercialGroupCampaignRecord,
+  CommercialPromotionCopyContext,
+  CommercialPromotionCandidateRecord,
+  CommercialPromotionQueueItem,
+  GeneratedCopyRecord,
+  WhatsAppGroupRecord,
+} from '../src/repositories';
+
+const NOW = new Date('2026-08-08T12:00:00.000Z');
+const GROUP_FINGERPRINT = 'grp_123456789abc';
+const AFFILIATE_LINK = 'https://example.invalid/affiliate/product-1';
+
+const candidateRecord = (
+  overrides: Partial<CommercialPromotionCandidateRecord> = {},
+): CommercialPromotionCandidateRecord => ({
+  id: 'candidate-1',
+  campaignId: 'campaign-1',
+  productId: 'product-1',
+  snapshotId: 'snapshot-1',
+  generatedCopyId: 'copy-1',
+  status: 'COPY_READY',
+  rankPosition: 1,
+  commercialScore: 88,
+  scorePolicyVersion: 'official-v2',
+  minimumScoreUsed: 60,
+  scoreBreakdown: {
+    policyVersion: 'official-v2',
+    rawTotal: 88,
+    finalScore: 88,
+    components: { promotion: 88 },
+  },
+  promotionSignals: ['PRICE_DROP'],
+  priceDropPercent: '10',
+  queuedAt: NOW,
+  lastEvaluatedAt: NOW,
+  expiresAt: new Date('2026-08-09T12:00:00.000Z'),
+  dedupeUntil: null,
+  blockedReason: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+  ...overrides,
+});
+
+const campaign = (
+  overrides: Partial<CommercialGroupCampaignRecord> = {},
+): CommercialGroupCampaignRecord => ({
+  id: 'campaign-1',
+  name: 'Campanha do grupo',
+  logicalGroupFingerprint: GROUP_FINGERPRINT,
+  anchorDestinationId: 'group-1',
+  nicheId: 'niche-1',
+  niche: {
+    id: 'niche-1',
+    name: 'Casa',
+    slug: 'casa',
+    active: true,
+  },
+  anchorDestination: {
+    id: 'group-1',
+    name: 'Grupo comercial',
+    fingerprint: GROUP_FINGERPRINT,
+    active: true,
+    available: true,
+  },
+  active: true,
+  cadenceMinutes: 15,
+  timezone: 'America/Sao_Paulo',
+  allowedStartTime: '07:00',
+  allowedEndTime: '22:00',
+  dailyLimit: 60,
+  queueTargetSize: 40,
+  dedupeDays: 30,
+  createdAt: NOW,
+  updatedAt: NOW,
+  ...overrides,
+});
+
+const group = (
+  overrides: Partial<WhatsAppGroupRecord> = {},
+): WhatsAppGroupRecord => ({
+  id: 'group-1',
+  name: 'Grupo comercial',
+  destination: '120363000000000000@g.us',
+  active: true,
+  type: 'GROUP',
+  available: true,
+  fingerprint: GROUP_FINGERPRINT,
+  sourceInstanceName: 'affiliate-bot',
+  discoveredAt: NOW,
+  lastSyncedAt: NOW,
+  ...overrides,
+});
+
+const copy = (): GeneratedCopyRecord => ({
+  id: 'copy-1',
+  productId: 'product-1',
+  titulo: 'Oferta especial',
+  mensagem: 'Produto validado para o grupo.',
+  cta: AFFILIATE_LINK,
+  hashtags: '#oferta',
+  source: 'AI',
+  provider: 'openai',
+  model: 'test-model',
+  promptVersion: 'commercial-ai-copy-v1',
+  validationVersion: 'commercial-ai-copy-v1',
+  inputFingerprint: 'fingerprint-1',
+  snapshotId: 'snapshot-1',
+  createdFromCandidateId: 'candidate-1',
+  createdAt: NOW,
+});
+
+const context = (
+  overrides: Partial<CommercialPromotionCopyContext['candidate']> = {},
+  productOverrides: Partial<CommercialPromotionCopyContext['product']> = {},
+): CommercialPromotionCopyContext => ({
+  candidate: candidateRecord(overrides),
+  campaign: campaign(),
+  niche: {
+    id: 'niche-1',
+    name: 'Casa',
+    slug: 'casa',
+    active: true,
+    categoryIds: [],
+    includeKeywords: [],
+    excludeKeywords: [],
+    minPrice: null,
+    maxPrice: null,
+    minDiscountRate: 0,
+    minRating: 0,
+    minSales: 0,
+    minCommissionRate: 0,
+    minimumScore: 60,
+    createdAt: NOW,
+    updatedAt: NOW,
+  },
+  product: {
+    id: 'product-1',
+    source: 'OFFICIAL',
+    productName: 'Produto validado',
+    shopName: 'Loja validada',
+    price: '99.90',
+    discountRate: 20,
+    rating: 4.8,
+    sales: 100,
+    affiliateLink: AFFILIATE_LINK,
+    urlImagem: 'https://example.invalid/image.jpg',
+    offerEndsAt: new Date('2026-08-09T12:00:00.000Z'),
+    unavailableAt: null,
+    commercialSnapshotRevision: 1,
+    commercialSnapshotFingerprint: 'snapshot-fingerprint-1',
+    updatedAt: NOW,
+    ...productOverrides,
+  },
+  snapshot: {
+    id: 'snapshot-1',
+    productId: 'product-1',
+    revision: 1,
+    fingerprint: 'snapshot-fingerprint-1',
+    price: '99.90',
+    priceMin: null,
+    priceMax: null,
+    discountRate: 20,
+    commissionRate: 10,
+    observedRating: 4.8,
+    observedSales: 100,
+    offerStartsAt: null,
+    offerEndsAt: new Date('2026-08-09T12:00:00.000Z'),
+    unavailableAt: null,
+    capturedAt: NOW,
+    createdAt: NOW,
+  },
+  previousSnapshot: null,
+});
+
+const queueItem = (
+  overrides: Partial<CommercialPromotionQueueItem> = {},
+): CommercialPromotionQueueItem => {
+  const candidate = candidateRecord(overrides);
+  const { scoreBreakdown: _scoreBreakdown, ...withoutBreakdown } = candidate;
+  void _scoreBreakdown;
+  return {
+    ...withoutBreakdown,
+    productName: 'Produto validado',
+    price: '99.90',
+    discountRate: 20,
+    snapshotRevision: 1,
+  };
+};
+
+const pipelineResult = (): CommercialPipelineDryRunResult => ({
+  runId: 'run-1',
+  mode: 'dry-run',
+  status: 'ready',
+  provider: 'official',
+  candidateCount: 1,
+  eligibleCount: 1,
+  rejectedCount: 0,
+  rejectionSummary: {},
+  scorePolicyVersion: 'official-v2',
+  minimumScoreUsed: 60,
+  maximumScoreObserved: 88,
+  selectedScoreBreakdown: {
+    policyVersion: 'official-v2',
+    rawTotal: 88,
+    finalScore: 88,
+    components: { promotion: 88 },
+  },
+  selectedProduct: {
+    id: 'product-1',
+    name: 'Produto validado',
+    price: '99.90',
+    score: 88,
+    affiliateLinkPresent: true,
+  },
+  selectedGroup: {
+    id: 'group-1',
+    name: 'Grupo comercial',
+    fingerprint: GROUP_FINGERPRINT,
+  },
+  selectionReasons: [],
+  copyPreview: 'copy',
+  plannedSubIds: [],
+  dispatchWillBeCreated: false,
+  jobWillBeCreated: false,
+  messageWillBeSent: false,
+});
+
+const createSubject = (input: {
+  candidate?: Partial<CommercialPromotionCandidateRecord>;
+  product?: Partial<CommercialPromotionCopyContext['product']>;
+  campaign?: Partial<CommercialGroupCampaignRecord>;
+  group?: Partial<WhatsAppGroupRecord>;
+} = {}) => {
+  let currentCandidate = candidateRecord(input.candidate);
+  const currentCampaign = campaign(input.campaign);
+  const currentGroup = group(input.group);
+  const currentContext = () =>
+    context(currentCandidate, input.product);
+  const copyRecord = copy();
+  const queue = queueItem(currentCandidate);
+  const groups = { list: vi.fn(async () => [currentGroup]) };
+  const campaigns = {
+    list: vi.fn(async () => ({ items: [currentCampaign], total: 1 })),
+    findByLogicalGroupFingerprint: vi.fn(),
+  };
+  campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
+  const candidates = {
+    listQueue: vi.fn(async () => ({ items: [queue], total: 1 })),
+  };
+  const copies = {
+    loadContext: vi.fn(async () => currentContext()),
+    findCopyForCandidate: vi.fn(async () => ({
+      candidate: candidateRecord({ status: 'COPY_READY' }),
+      copy: copyRecord,
+      snapshotRevision: 1,
+    })),
+  };
+  const copyGeneration = {
+    findCopy: vi.fn(),
+    preview: vi.fn(),
+    generate: vi.fn(),
+  };
+  copyGeneration.findCopy.mockResolvedValue({
+    candidateId: 'candidate-1',
+    status: 'COPY_READY' as const,
+    generatedCopyId: 'copy-1',
+    source: 'AI' as const,
+    provider: 'openai',
+    model: 'test-model',
+    promptVersion: 'commercial-ai-copy-v1',
+    validationVersion: 'commercial-ai-copy-v1',
+    snapshotRevision: 1,
+    sanitizedCopy: {
+      titulo: 'Oferta especial',
+      mensagem: 'Produto validado para o grupo.',
+      cta: '[LINK_AFILIADO]',
+      hashtags: '#oferta',
+    },
+    createdAt: NOW,
+  });
+  copyGeneration.preview.mockResolvedValue({ eligible: true });
+  copyGeneration.generate.mockImplementation(async () => {
+      currentCandidate = candidateRecord({
+        status: 'COPY_READY',
+        generatedCopyId: 'copy-1',
+      });
+      return undefined;
+  });
+  const mining = {
+    mine: vi.fn(),
+  };
+  mining.mine.mockResolvedValue({ rejectionSummary: {} });
+  const deliveryHistory = {
+    wasProductSentToGroup: vi.fn(async () => false),
+  };
+  const pipeline = {
+    dryRunFromPromotionCandidate: vi.fn(async () => pipelineResult()),
+  };
+  const service = new CommercialAutomationCandidateFlowService({
+    groups,
+    campaigns,
+    candidates,
+    deliveryHistory,
+    copies,
+    mining,
+    copyGeneration,
+    draft: new CommercialMessageDraftService(),
+    pipeline,
+    instanceName: 'affiliate-bot',
+    clock: () => NOW,
+  });
+  return {
+    service,
+    groups,
+    campaigns,
+    candidates,
+    copies,
+    copyGeneration,
+    mining,
+    deliveryHistory,
+    pipeline,
+    setCandidate: (value: Partial<CommercialPromotionCandidateRecord>) => {
+      currentCandidate = candidateRecord(value);
+    },
+  };
+};
+
+describe('CommercialAutomationCandidateFlowService', () => {
+  it('reutiliza COPY_READY e preserva o ranking da fila', async () => {
+    const subject = createSubject();
+
+    const result = await subject.service.prepare();
+
+    expect(result).toMatchObject({
+      runId: 'run-1',
+      candidateId: 'candidate-1',
+      generatedCopyId: 'copy-1',
+      groupId: 'group-1',
+      deliveryMode: 'IMAGE',
+    });
+    expect(subject.mining.mine).toHaveBeenCalledWith('campaign-1', {
+      confirm: 'MINERAR_PROMOCOES',
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).toHaveBeenCalledOnce();
+  });
+
+  it('usa copy generation existente para QUEUED com uma unica tentativa', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+
+    const result = await subject.service.prepare();
+
+    expect(result.generatedCopyId).toBe('copy-1');
+    expect(subject.copyGeneration.preview).toHaveBeenCalledOnce();
+    expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+  });
+
+  it('ignora copy pronta ja entregue e procura o proximo candidato sem duplicar', async () => {
+    const subject = createSubject();
+    subject.deliveryHistory.wasProductSentToGroup.mockResolvedValue(true);
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+    });
+    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia fallback TEXT antes de criar o run candidato', async () => {
+    const subject = createSubject({ product: { urlImagem: '' } });
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+    });
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia campanha ausente antes da mineracao', async () => {
+    const subject = createSubject();
+    subject.campaigns.findByLogicalGroupFingerprint.mockResolvedValue(
+      null,
+    );
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia grupo inativo ou indisponivel', async () => {
+    const subject = createSubject({
+      group: { active: false, available: false },
+    });
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'NO_AUTHORIZED_GROUP',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia mais de um grupo autorizado', async () => {
+    const subject = createSubject();
+    subject.groups.list.mockResolvedValue([
+      group(),
+      group({ id: 'group-2', fingerprint: 'grp_abcdef123456' }),
+    ]);
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'MULTIPLE_AUTHORIZED_GROUPS',
+    });
+    expect(subject.campaigns.findByLogicalGroupFingerprint).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia campanha inativa antes da mineracao', async () => {
+    const subject = createSubject();
+    subject.campaigns.findByLogicalGroupFingerprint.mockResolvedValue(
+      campaign({ active: false }),
+    );
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'CAMPAIGN_INACTIVE',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia imagem com URL invalida', async () => {
+    const subject = createSubject({
+      product: { urlImagem: 'ftp://example.invalid/image.jpg' },
+    });
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+    });
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia link de afiliado inconsistente antes do pipeline', async () => {
+    const subject = createSubject({
+      product: {
+        affiliateLink: 'https://example.invalid/affiliate/changed',
+      },
+    });
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'COMMERCIAL_MESSAGE_INVALID_LINK_OCCURRENCES',
+    });
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('revalida copy, campanha, grupo e IMAGE antes da confirmacao', async () => {
+    const subject = createSubject();
+    const prepared = await subject.service.prepare();
+
+    await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
+    expect(subject.copyGeneration.findCopy).toHaveBeenCalledTimes(2);
+  });
+
+  it('nao segue com candidato expirado ou copy invalida', async () => {
+    const subject = createSubject({
+      candidate: { expiresAt: new Date('2026-08-07T12:00:00.000Z') },
+    });
+    subject.copyGeneration.findCopy.mockRejectedValue(
+      new AppError('Candidato expirado', 'COMMERCIAL_AI_COPY_OFFER_EXPIRED'),
+    );
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+    });
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('exige fingerprint da campanha correspondente ao grupo', async () => {
+    const subject = createSubject({
+      campaign: { logicalGroupFingerprint: 'grp_abcdef123456' },
+    });
+    subject.campaigns.findByLogicalGroupFingerprint.mockResolvedValue(
+      campaign({ logicalGroupFingerprint: 'grp_abcdef123456' }),
+    );
+
+    await expect(subject.service.prepare()).rejects.toMatchObject({
+      code: 'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+});

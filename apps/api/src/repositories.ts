@@ -261,14 +261,23 @@ export type CommercialDispatchOutboxPublicationContext = {
   dispatch: Pick<WhatsAppDispatchRecord, 'id' | 'status' | 'attemptCount'>;
 };
 
-export type CommercialConfirmationPersistenceInput = {
+type CommercialConfirmationPersistenceInputBase = {
   outboxId: string;
   runId: string;
   confirmedAt: Date;
-  copy: GeneratedCopyData & { id: string };
   dispatch: WhatsAppDispatchCreateData & { id: string };
   jobId: string;
 };
+
+export type CommercialConfirmationPersistenceInput =
+  | (CommercialConfirmationPersistenceInputBase & {
+      copy: GeneratedCopyData & { id: string };
+      existingGeneratedCopyId?: never;
+    })
+  | (CommercialConfirmationPersistenceInputBase & {
+      existingGeneratedCopyId: string;
+      copy?: never;
+    });
 
 export interface CommercialDispatchOutboxRepository {
   createPendingConfirmation(
@@ -552,6 +561,9 @@ export interface CommercialGroupCampaignRepository {
     filters: CommercialGroupCampaignFilters,
   ): Promise<{ items: CommercialGroupCampaignRecord[]; total: number }>;
   findById(id: string): Promise<CommercialGroupCampaignRecord | null>;
+  findByLogicalGroupFingerprint?(
+    logicalGroupFingerprint: string,
+  ): Promise<CommercialGroupCampaignRecord | null>;
   update(
     id: string,
     data: CommercialGroupCampaignUpdateData,
@@ -562,6 +574,10 @@ export interface CommercialGroupCampaignRepository {
 
 export type CommercialPromotionCandidateStatus =
   'QUEUED' | 'COPY_READY' | 'RESERVED' | 'DISPATCHED' | 'EXPIRED' | 'BLOCKED';
+
+export type CommercialPromotionDispatchFinalization =
+  | { kind: 'LEGACY' }
+  | { kind: 'DISPATCHED'; candidateId: string; transitioned: boolean };
 
 export type CommercialPromotionSignal =
   'PRICE_DROP' | 'DISCOUNT_INCREASE' | 'NEWLY_OBSERVED' | 'CURRENT_DISCOUNT';
@@ -628,7 +644,7 @@ export type CommercialPromotionCandidateRecord = {
   status: CommercialPromotionCandidateStatus;
   rankPosition: number | null;
   commercialScore: number;
-  scorePolicyVersion: string;
+  scorePolicyVersion: CommercialOfferScorePolicyVersion;
   minimumScoreUsed: number;
   scoreBreakdown: CommercialPipelineScoreBreakdown;
   promotionSignals: CommercialPromotionSignal[];
@@ -716,6 +732,9 @@ export interface CommercialPromotionCandidateRepository {
     limit: number;
     status?: CommercialPromotionCandidateStatus;
   }): Promise<{ items: CommercialPromotionQueueItem[]; total: number }>;
+  markDispatchedByGeneratedCopyId(
+    generatedCopyId: string,
+  ): Promise<CommercialPromotionDispatchFinalization>;
 }
 
 export type CommercialCopyGenerationAttemptStatus =
@@ -786,6 +805,7 @@ export type CommercialPromotionCopyContext = {
     rating: number;
     sales: number;
     affiliateLink: string | null;
+    urlImagem?: string;
     offerEndsAt: Date | null;
     unavailableAt: Date | null;
     commercialSnapshotRevision: number;

@@ -40,6 +40,9 @@ export type CommercialMessageDraft = {
   warnings: string[];
 };
 
+export const COMMERCIAL_AUTOMATION_IMAGE_REQUIRED =
+  'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED';
+
 export class CommercialMessageDraftService {
   createDraft(
     candidate: CommercialMessageDraftCandidate,
@@ -47,7 +50,7 @@ export class CommercialMessageDraftService {
   ): CommercialMessageDraft {
     const now = (deps.now ?? (() => new Date()))();
 
-    if (candidate.status !== 'COPY_READY') {
+    if (candidate.status !== 'COPY_READY' && candidate.status !== 'RESERVED') {
       throw new Error('COMMERCIAL_MESSAGE_CANDIDATE_NOT_READY');
     }
     if (!candidate.generatedCopyId || !candidate.generatedCopy) {

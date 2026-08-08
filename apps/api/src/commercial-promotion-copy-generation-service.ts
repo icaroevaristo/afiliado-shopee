@@ -166,13 +166,19 @@ export class CommercialPromotionCopyGenerationService {
     return context;
   }
 
-  private fingerprint(context: CommercialPromotionCopyContext) {
-    const model = this.options.config.model;
+  private fingerprint(
+    context: CommercialPromotionCopyContext,
+    configuration: {
+      provider: string;
+      model: string | null;
+    } = this.options.config,
+  ) {
+    const model = configuration.model;
     if (!model || !context.product.affiliateLink) return null;
     return commercialAiCopyInputFingerprint({
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
-      provider: this.options.config.provider,
+      provider: configuration.provider,
       model,
       campaignId: context.campaign.id,
       campaignUpdatedAt: context.campaign.updatedAt,
@@ -226,16 +232,22 @@ export class CommercialPromotionCopyGenerationService {
     copy: GeneratedCopyRecord,
     context: CommercialPromotionCopyContext,
   ) {
-    const fingerprint = this.fingerprint(context);
+    const model = this.options.config.model ?? copy.model ?? null;
+    const provider = this.options.config.provider ?? copy.provider ?? '';
+    const fingerprint = model
+      ? this.fingerprint(context, { provider, model })
+      : null;
     return Boolean(
+      model &&
       copy.id === context.candidate.generatedCopyId &&
       copy.source === 'AI' &&
-      copy.provider === this.options.config.provider &&
-      copy.model === this.options.config.model &&
+      copy.provider === provider &&
+      copy.model === model &&
       copy.promptVersion === COMMERCIAL_AI_COPY_PROMPT_VERSION &&
       copy.validationVersion === COMMERCIAL_AI_COPY_VALIDATION_VERSION &&
-      fingerprint &&
-      copy.inputFingerprint === fingerprint &&
+      (fingerprint
+        ? copy.inputFingerprint === fingerprint
+        : Boolean(copy.inputFingerprint)) &&
       copy.snapshotId === context.snapshot.id &&
       copy.productId === context.product.id &&
       copy.createdFromCandidateId === context.candidate.id &&
@@ -481,7 +493,6 @@ export class CommercialPromotionCopyGenerationService {
         'COMMERCIAL_AI_COPY_CONFIRMATION_INVALID',
       );
     }
-    const provider = this.assertProvider();
     const context = await this.context(candidateId);
     if (
       context.candidate.status === 'COPY_READY' &&
@@ -503,12 +514,20 @@ export class CommercialPromotionCopyGenerationService {
     }
     assertNoBlockers(candidateBlockers(context, this.clock()));
     const providerFacts = this.providerFacts(context);
-    const fingerprint = this.fingerprint(context) as string;
+    const fingerprint = this.fingerprint(context);
+    if (!fingerprint) {
+      this.assertProvider();
+      throw new AppError(
+        'Configuracao de copy por IA incompleta',
+        'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+      );
+    }
     const cached =
       await this.options.repository.findCopyByInputFingerprint(fingerprint);
     if (this.validCache(cached, context, fingerprint)) {
       return this.useCache(context, fingerprint, cached as GeneratedCopyRecord);
     }
+    const provider = this.assertProvider();
     const claimed = await this.options.repository.claim({
       candidateId: context.candidate.id,
       snapshotId: context.snapshot.id,

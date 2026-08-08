@@ -47,6 +47,10 @@ export type CommercialPipelineConfirmationResult = {
   investigationRequired: false;
 };
 
+export type CommercialPipelineConfirmationOptions = {
+  existingGeneratedCopyId?: string;
+};
+
 export type CommercialPipelineConfirmationServiceOptions = {
   runs: CommercialPipelineRunRepository;
   offers: ShopeeOfferRepository;
@@ -149,6 +153,7 @@ export class CommercialPipelineConfirmationService {
   async confirm(
     dryRunId: string,
     confirmation: string,
+    options: CommercialPipelineConfirmationOptions = {},
   ): Promise<CommercialPipelineConfirmationResult> {
     if (confirmation !== COMMERCIAL_CONFIRMATION_TOKEN) {
       changed(
@@ -157,6 +162,14 @@ export class CommercialPipelineConfirmationService {
       );
     }
     assertEnvironment(this.options.environment);
+    const existingGeneratedCopyId = options.existingGeneratedCopyId;
+    const hasExistingGeneratedCopy = existingGeneratedCopyId !== undefined;
+    if (existingGeneratedCopyId !== undefined && !existingGeneratedCopyId.trim()) {
+      changed(
+        'Copy candidate-scoped invalida',
+        'COMMERCIAL_OUTBOX_CANDIDATE_COPY_INVALID',
+      );
+    }
 
     const initial = assertReadyRun(await this.options.runs.findById(dryRunId));
     const ids = commercialConfirmationIds(dryRunId);
@@ -178,18 +191,27 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_PRODUCT_CHANGED',
         );
       }
-      const currentCopy = this.options.copy.generate({
-        productName: product.productName,
-        price: product.price,
-        discountRate: product.discountRate,
-        shopName: product.shopName,
-        affiliateLink: product.affiliateLink,
-      });
-      if (currentCopy !== run.copyPreview) {
-        return changed(
-          'Produto ou link mudou desde o dry-run',
-          'COMMERCIAL_PRODUCT_CHANGED',
-        );
+      if (hasExistingGeneratedCopy) {
+        if (!run.copyPreview.includes(product.affiliateLink)) {
+          return changed(
+            'Produto ou link mudou desde o dry-run',
+            'COMMERCIAL_PRODUCT_CHANGED',
+          );
+        }
+      } else {
+        const currentCopy = this.options.copy.generate({
+          productName: product.productName,
+          price: product.price,
+          discountRate: product.discountRate,
+          shopName: product.shopName,
+          affiliateLink: product.affiliateLink,
+        });
+        if (currentCopy !== run.copyPreview) {
+          return changed(
+            'Produto ou link mudou desde o dry-run',
+            'COMMERCIAL_PRODUCT_CHANGED',
+          );
+        }
       }
 
       const groups = (
@@ -225,26 +247,42 @@ export class CommercialPipelineConfirmationService {
         );
       }
 
-      const outbox = await this.options.outboxes.createPendingConfirmation({
-        outboxId: ids.outboxId,
-        runId: run.id,
-        confirmedAt,
-        copy: {
-          id: ids.copyId,
-          productId: run.productId,
-          titulo: '',
-          mensagem: run.copyPreview,
-          cta: '',
-          hashtags: '',
-        },
-        dispatch: {
-          id: ids.dispatchId,
-          productId: run.productId,
-          generatedCopyId: ids.copyId,
-          destinationId: group.id,
-        },
-        jobId: ids.jobId,
-      });
+      const outbox = await this.options.outboxes.createPendingConfirmation(
+        existingGeneratedCopyId !== undefined
+          ? {
+              outboxId: ids.outboxId,
+              runId: run.id,
+              confirmedAt,
+              existingGeneratedCopyId,
+              dispatch: {
+                id: ids.dispatchId,
+                productId: run.productId,
+                generatedCopyId: existingGeneratedCopyId,
+                destinationId: group.id,
+              },
+              jobId: ids.jobId,
+            }
+          : {
+              outboxId: ids.outboxId,
+              runId: run.id,
+              confirmedAt,
+              copy: {
+                id: ids.copyId,
+                productId: run.productId,
+                titulo: '',
+                mensagem: run.copyPreview,
+                cta: '',
+                hashtags: '',
+              },
+              dispatch: {
+                id: ids.dispatchId,
+                productId: run.productId,
+                generatedCopyId: ids.copyId,
+                destinationId: group.id,
+              },
+              jobId: ids.jobId,
+            },
+      );
       if (!outbox) {
         return changed(
           'Dry-run comercial ja foi confirmado',

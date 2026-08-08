@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
+  COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED,
   COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED,
   CommercialAutomationOrchestrator,
 } from '../src/commercial-automation-orchestrator';
@@ -165,7 +166,7 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
   }
 }
 
-const createSubject = () => {
+const createSubject = ({ withCandidateFlow = true } = {}) => {
   const executions = new MemoryExecutions();
   const policy = {
     evaluateAutomationReadiness: vi.fn(async () => ({
@@ -176,6 +177,16 @@ const createSubject = () => {
   const syncOffers = { run: vi.fn(async () => ({ synced: 1 })) };
   const pipeline = {
     dryRun: vi.fn(async () => ({ runId: 'run-1' })),
+  };
+  const candidateFlow = {
+    prepare: vi.fn(async () => ({
+      runId: 'run-1',
+      generatedCopyId: 'ai-copy-1',
+      candidateId: 'candidate-1',
+      campaignId: 'campaign-1',
+      groupId: 'group-1',
+    })),
+    revalidate: vi.fn(async () => undefined),
   };
   const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
   const commercialRuns = {
@@ -194,6 +205,7 @@ const createSubject = () => {
     policy: policy as never,
     syncOffers,
     pipeline: pipeline as never,
+    ...(withCandidateFlow ? { candidateFlow } : {}),
     confirmation: confirmation as never,
     commercialRuns: commercialRuns as never,
     executions,
@@ -209,6 +221,7 @@ const createSubject = () => {
     policy,
     syncOffers,
     pipeline,
+    candidateFlow,
     confirmation,
     commercialRuns,
   };
@@ -325,6 +338,23 @@ describe('CommercialAutomationOrchestrator', () => {
     },
   );
 
+  it('bloqueia send sem candidate flow em vez de cair no pipeline legacy', async () => {
+    const subject = createSubject({ withCandidateFlow: false });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: [COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED],
+    });
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
+  });
+
   it('confirma uma unica vez no modo send official totalmente mockado', async () => {
     const subject = createSubject();
 
@@ -340,11 +370,14 @@ describe('CommercialAutomationOrchestrator', () => {
       whatsappJobCreated: true,
       messageSent: false,
     });
-    expect(subject.pipeline.dryRun).toHaveBeenCalledOnce();
-    expect(subject.pipeline.dryRun).toHaveBeenCalledWith({
-      source: 'OFFICIAL',
-      campaign: 'commercial-automation',
-    });
+    expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.revalidate).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).toHaveBeenCalledWith(
+      'run-1',
+      expect.any(String),
+      { existingGeneratedCopyId: 'ai-copy-1' },
+    );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
 

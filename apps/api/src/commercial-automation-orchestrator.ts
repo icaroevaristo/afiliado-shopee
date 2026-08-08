@@ -31,6 +31,8 @@ import type {
 
 export const COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED =
   'COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED';
+export const COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED =
+  'COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED';
 
 export type { CommercialAutomationMode, CommercialAutomationProvider };
 
@@ -134,6 +136,21 @@ export class CommercialAutomationOrchestrator {
       >;
       syncOffers: { run(): Promise<unknown> };
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
+      candidateFlow?: {
+        prepare(): Promise<{
+          runId: string;
+          generatedCopyId: string;
+          candidateId: string;
+          campaignId: string;
+          groupId: string;
+        }>;
+        revalidate(input: {
+          candidateId: string;
+          generatedCopyId: string;
+          campaignId: string;
+          groupId: string;
+        }): Promise<void>;
+      };
       confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
       commercialRuns: Pick<CommercialPipelineRunRepository, 'findById'>;
       executions: CommercialAutomationExecutionRepository;
@@ -217,6 +234,15 @@ export class CommercialAutomationOrchestrator {
       return this.dependencies.executions.finish(ownership, data);
     };
     let commercialRunId: string | undefined;
+    let existingGeneratedCopyId: string | undefined;
+    let candidatePreparation:
+      | {
+          candidateId: string;
+          generatedCopyId: string;
+          campaignId: string;
+          groupId: string;
+        }
+      | undefined;
     let confirmationAttempted = false;
     try {
       const readiness =
@@ -244,13 +270,30 @@ export class CommercialAutomationOrchestrator {
       }
 
       await heartbeat.checkpoint();
+      if (input.mode === 'send' && !this.dependencies.candidateFlow) {
+        return publicResult(
+          await finish({
+            status: 'BLOCKED',
+            reasons: [COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED],
+            failureCode: COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED,
+            completedAt: this.clock(),
+          }),
+        );
+      }
       await this.dependencies.syncOffers.run();
       await heartbeat.checkpoint();
-      const dryRun = await this.dependencies.pipeline.dryRun({
-        source: toCommercialAutomationProviderSource(input.provider),
-        campaign: 'commercial-automation',
-      });
-      commercialRunId = dryRun.runId;
+      if (input.mode === 'send') {
+        const prepared = await this.dependencies.candidateFlow!.prepare();
+        commercialRunId = prepared.runId;
+        existingGeneratedCopyId = prepared.generatedCopyId;
+        candidatePreparation = prepared;
+      } else {
+        const dryRun = await this.dependencies.pipeline.dryRun({
+          source: toCommercialAutomationProviderSource(input.provider),
+          campaign: 'commercial-automation',
+        });
+        commercialRunId = dryRun.runId;
+      }
       if (input.mode === 'preview') {
         return publicResult(
           await finish({
@@ -277,10 +320,16 @@ export class CommercialAutomationOrchestrator {
       }
 
       await heartbeat.checkpoint();
+      if (candidatePreparation) {
+        await this.dependencies.candidateFlow!.revalidate(candidatePreparation);
+      }
       confirmationAttempted = true;
       await this.dependencies.confirmation.confirm(
         commercialRunId,
         COMMERCIAL_CONFIRMATION_TOKEN,
+        existingGeneratedCopyId
+          ? { existingGeneratedCopyId }
+          : undefined,
       );
       return publicResult(
         await finish({

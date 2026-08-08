@@ -198,6 +198,9 @@ const setup = ({
     findRecentlySentProductIds: vi.fn(async () => recentlySent),
     materialize,
     listQueue: vi.fn(async () => ({ items: [], total: 0 })),
+    markDispatchedByGeneratedCopyId: vi.fn(async () => ({
+      kind: 'LEGACY' as const,
+    })),
   };
   const scorePolicies = new CommercialOfferScorePolicyResolver({
     calculate: () => 0,

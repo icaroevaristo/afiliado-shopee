@@ -827,19 +827,37 @@ const commercialCampaignInclude = {
   },
 };
 
+type CommercialGroupCampaignPrismaClient = Pick<
+  DatabaseClient,
+  'commercialGroupCampaign'
+>;
+
+const findCommercialGroupCampaign = (
+  client: CommercialGroupCampaignPrismaClient,
+  where: { id: string } | { logicalGroupFingerprint: string },
+) =>
+  client.commercialGroupCampaign.findUnique({
+    where,
+    include: commercialCampaignInclude,
+  });
+
+type CommercialGroupCampaignWithRelations = NonNullable<
+  Awaited<ReturnType<typeof findCommercialGroupCampaign>>
+>;
+
 const mapCommercialGroupCampaign = (
-  record: Record<string, unknown>,
+  record: CommercialGroupCampaignWithRelations,
 ): CommercialGroupCampaignRecord => {
-  const anchor = record.anchorDestination as Record<string, unknown> | null;
+  const anchor = record.anchorDestination;
   return {
-    ...(record as unknown as CommercialGroupCampaignRecord),
+    ...record,
     anchorDestination: anchor
       ? {
-          id: String(anchor.id),
-          name: String(anchor.name),
-          fingerprint: (anchor.fingerprint as string | null) ?? null,
-          active: Boolean(anchor.active),
-          available: Boolean(anchor.available),
+          id: anchor.id,
+          name: anchor.name,
+          fingerprint: anchor.fingerprint,
+          active: anchor.active,
+          available: anchor.available,
         }
       : null,
   };
@@ -923,9 +941,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
           include: commercialCampaignInclude,
         });
       });
-      return mapCommercialGroupCampaign(
-        record as unknown as Record<string, unknown>,
-      );
+      return mapCommercialGroupCampaign(record);
     } catch (error) {
       if (isUniqueConstraintError(error)) {
         throw new AppError(
@@ -950,28 +966,32 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
       this.prisma.commercialGroupCampaign.count({ where }),
     ]);
     return {
-      items: records.map((record) =>
-        mapCommercialGroupCampaign(
-          record as unknown as Record<string, unknown>,
-        ),
-      ),
+      items: records.map((record) => mapCommercialGroupCampaign(record)),
       total,
     };
   }
 
   async findById(id: string) {
-    const record = await this.prisma.commercialGroupCampaign.findUnique({
-      where: { id },
-      include: commercialCampaignInclude,
+    const record = await findCommercialGroupCampaign(this.prisma, { id });
+    return record
+      ? mapCommercialGroupCampaign(record)
+      : null;
+  }
+
+  async findByLogicalGroupFingerprint(logicalGroupFingerprint: string) {
+    const record = await findCommercialGroupCampaign(this.prisma, {
+      logicalGroupFingerprint,
     });
     return record
-      ? mapCommercialGroupCampaign(record as unknown as Record<string, unknown>)
+      ? mapCommercialGroupCampaign(record)
       : null;
   }
 
   async update(id: string, data: CommercialGroupCampaignUpdateData) {
     try {
-      const updateCampaign = async (client: DatabaseClient) => {
+      const updateCampaign = async (
+        client: Pick<DatabaseClient, 'commercialGroupCampaign' | 'commercialNiche'>,
+      ) => {
         if (data.nicheId) {
           const [campaign, niche] = await Promise.all([
             client.commercialGroupCampaign.findUnique({
@@ -1004,14 +1024,12 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
         });
       };
       const record = data.nicheId
-        ? await this.prisma.$transaction(updateCampaign as never, {
+        ? await this.prisma.$transaction(updateCampaign, {
             isolationLevel: 'Serializable',
           })
         : await updateCampaign(this.prisma);
       if (!record) return null;
-      return mapCommercialGroupCampaign(
-        record as unknown as Record<string, unknown>,
-      );
+      return mapCommercialGroupCampaign(record);
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
       if (isTransactionConflictError(error)) {
@@ -1082,11 +1100,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
         },
         { isolationLevel: 'Serializable' },
       );
-      return record
-        ? mapCommercialGroupCampaign(
-            record as unknown as Record<string, unknown>,
-          )
-        : null;
+      return record ? mapCommercialGroupCampaign(record) : null;
     } catch (error) {
       if (isTransactionConflictError(error)) {
         throw new AppError(
@@ -1131,7 +1145,8 @@ const mapCommercialPromotionCandidate = (
   status: record.status as CommercialPromotionCandidateRecord['status'],
   rankPosition: (record.rankPosition as number | null) ?? null,
   commercialScore: Number(record.commercialScore),
-  scorePolicyVersion: String(record.scorePolicyVersion),
+  scorePolicyVersion:
+    record.scorePolicyVersion as CommercialPromotionCandidateRecord['scorePolicyVersion'],
   minimumScoreUsed: Number(record.minimumScoreUsed),
   scoreBreakdown:
     record.scoreBreakdown as CommercialPromotionCandidateRecord['scoreBreakdown'],
@@ -1204,7 +1219,7 @@ const commercialPromotionCopyContextFromRecord = (
   record: Record<string, unknown>,
   previousSnapshot: CommercialPromotionSnapshotRecord | null,
 ): CommercialPromotionCopyContext => {
-  const campaign = record.campaign as Record<string, unknown>;
+  const campaign = record.campaign as CommercialGroupCampaignWithRelations;
   const product = record.product as Record<string, unknown>;
   const snapshot = record.snapshot as Record<string, unknown>;
   return {
@@ -1222,6 +1237,7 @@ const commercialPromotionCopyContextFromRecord = (
       rating: Number(product.nota),
       sales: Number(product.vendidos),
       affiliateLink: (product.affiliateLink as string | null) ?? null,
+      urlImagem: String(product.urlImagem ?? ''),
       offerEndsAt: (product.offerEndsAt as Date | null) ?? null,
       unavailableAt: (product.unavailableAt as Date | null) ?? null,
       commercialSnapshotRevision: Number(product.commercialSnapshotRevision),
@@ -1774,6 +1790,72 @@ export class PrismaCommercialPromotionRepository
       }),
       total,
     };
+  }
+
+  async markDispatchedByGeneratedCopyId(generatedCopyId: string) {
+    const candidates =
+      await this.prisma.commercialPromotionCandidate.findMany({
+        where: { generatedCopyId },
+        select: { id: true, status: true },
+      });
+    if (candidates.length === 0) return { kind: 'LEGACY' as const };
+    if (candidates.length !== 1) {
+      throw new AppError(
+        'Copy candidate-scoped possui mais de um candidato',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+
+    const [candidate] = candidates;
+    if (candidate.status === 'DISPATCHED') {
+      return {
+        kind: 'DISPATCHED' as const,
+        candidateId: candidate.id,
+        transitioned: false,
+      };
+    }
+    if (candidate.status !== 'RESERVED') {
+      throw new AppError(
+        'Candidato promocional nao esta reservado para finalizacao',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+
+    const result = await this.prisma.commercialPromotionCandidate.updateMany({
+      where: {
+        id: candidate.id,
+        generatedCopyId,
+        status: 'RESERVED',
+      },
+      data: { status: 'DISPATCHED' },
+    });
+    if (result.count === 1) {
+      return {
+        kind: 'DISPATCHED' as const,
+        candidateId: candidate.id,
+        transitioned: true,
+      };
+    }
+
+    const current =
+      await this.prisma.commercialPromotionCandidate.findUnique({
+        where: { id: candidate.id },
+        select: { generatedCopyId: true, status: true },
+      });
+    if (
+      current?.generatedCopyId === generatedCopyId &&
+      current.status === 'DISPATCHED'
+    ) {
+      return {
+        kind: 'DISPATCHED' as const,
+        candidateId: candidate.id,
+        transitioned: false,
+      };
+    }
+    throw new AppError(
+      'Candidato promocional mudou durante a finalizacao',
+      'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+    );
   }
 
 }
@@ -2437,7 +2519,65 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
           throw new CommercialConfirmationNotClaimedError();
         }
 
-        await transaction.generatedCopy.create({ data: input.copy });
+        if ('existingGeneratedCopyId' in input) {
+          const existingCopy = await transaction.generatedCopy.findUnique({
+            where: { id: input.existingGeneratedCopyId },
+            select: {
+              id: true,
+              productId: true,
+              source: true,
+              snapshotId: true,
+              createdFromCandidateId: true,
+            },
+          });
+          if (
+            !existingCopy ||
+            existingCopy.id !== input.dispatch.generatedCopyId ||
+            existingCopy.productId !== input.dispatch.productId ||
+            existingCopy.source !== 'AI' ||
+            !existingCopy.snapshotId ||
+            !existingCopy.createdFromCandidateId
+          ) {
+            throw new AppError(
+              'Copy promocional candidate-scoped invalida',
+              'COMMERCIAL_OUTBOX_CANDIDATE_COPY_INVALID',
+            );
+          }
+          const candidate =
+            await transaction.commercialPromotionCandidate.findFirst({
+              where: {
+                id: existingCopy.createdFromCandidateId,
+                generatedCopyId: existingCopy.id,
+                productId: input.dispatch.productId,
+                snapshotId: existingCopy.snapshotId,
+                status: 'COPY_READY',
+              },
+              select: { id: true },
+            });
+          if (!candidate) {
+            throw new AppError(
+              'Candidato promocional nao esta pronto para envio',
+              'COMMERCIAL_OUTBOX_CANDIDATE_COPY_INVALID',
+            );
+          }
+          const reserved =
+            await transaction.commercialPromotionCandidate.updateMany({
+              where: {
+                id: candidate.id,
+                generatedCopyId: existingCopy.id,
+                status: 'COPY_READY',
+              },
+              data: { status: 'RESERVED' },
+            });
+          if (reserved.count !== 1) {
+            throw new AppError(
+              'Candidato promocional mudou antes da reserva',
+              'COMMERCIAL_OUTBOX_CANDIDATE_COPY_INVALID',
+            );
+          }
+        } else {
+          await transaction.generatedCopy.create({ data: input.copy });
+        }
         await transaction.whatsAppDispatch.create({
           data: { ...input.dispatch, status: 'PENDING', attemptCount: 0 },
         });

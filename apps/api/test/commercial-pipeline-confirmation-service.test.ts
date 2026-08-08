@@ -152,7 +152,9 @@ class MemoryOutboxes implements CommercialDispatchOutboxRepository {
       createdAt: input.confirmedAt,
       publishedAt: null,
     };
-    this.copies.push({ ...input.copy, createdAt: input.confirmedAt });
+    if ('copy' in input && input.copy) {
+      this.copies.push({ ...input.copy, createdAt: input.confirmedAt });
+    }
     this.dispatches.push({
       ...input.dispatch,
       status: 'PENDING',
@@ -420,5 +422,17 @@ describe('CommercialPipelineConfirmationService', () => {
     await state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN);
     expect(state.generate).toHaveBeenCalledOnce();
     expect(state.outboxes.copies[0].mensagem).toBe(preview);
+  });
+
+  it('reutiliza copy candidate-scoped sem criar GeneratedCopy legacy', async () => {
+    const state = build();
+
+    await state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN, {
+      existingGeneratedCopyId: 'ai-copy-1',
+    });
+
+    expect(state.generate).not.toHaveBeenCalled();
+    expect(state.outboxes.copies).toHaveLength(0);
+    expect(state.outboxes.dispatches[0].generatedCopyId).toBe('ai-copy-1');
   });
 });

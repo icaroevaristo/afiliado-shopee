@@ -55,6 +55,21 @@ describe('CommercialMessageDraftService', () => {
     expect(draft.caption).toBe(expectedCaption);
   });
 
+  it('should generate the same IMAGE draft for a reserved candidate', () => {
+    const copyReadyDraft = service.createDraft(createValidCandidate(), {
+      now: () => fixedNow,
+    });
+    const reservedCandidate = createValidCandidate();
+    reservedCandidate.status = 'RESERVED';
+
+    const reservedDraft = service.createDraft(reservedCandidate, {
+      now: () => fixedNow,
+    });
+
+    expect(reservedDraft).toEqual(copyReadyDraft);
+    expect(reservedDraft.deliveryMode).toBe('IMAGE');
+  });
+
   it('should fallback to TEXT when imageUrl is missing', () => {
     const candidate = createValidCandidate();
     candidate.product.urlImagem = '';
@@ -104,11 +119,14 @@ describe('CommercialMessageDraftService', () => {
     expect(() => service.createDraft(candidate, { now: () => fixedNow })).toThrowError('COMMERCIAL_MESSAGE_COPY_MISSING');
   });
 
-  it('should block if status is not COPY_READY', () => {
+  it.each(['QUEUED', 'DISPATCHED', 'EXPIRED', 'BLOCKED'] as const)(
+    'should block a %s candidate',
+    (status) => {
     const candidate = createValidCandidate();
-    candidate.status = 'QUEUED';
+    candidate.status = status;
     expect(() => service.createDraft(candidate, { now: () => fixedNow })).toThrowError('COMMERCIAL_MESSAGE_CANDIDATE_NOT_READY');
-  });
+    },
+  );
 
   it('should block if affiliate link is missing', () => {
     const candidate = createValidCandidate();

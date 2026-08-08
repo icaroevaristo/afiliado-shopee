@@ -7,11 +7,16 @@ import {
 
 import {
   createCommercialAutomationPolicyService,
+  createCommercialPromotionCopyGenerationService,
+  createCommercialPromotionMiningService,
   createCommercialPipelineConfirmationService,
   createCommercialPipelineService,
   createPrismaRepositories,
 } from '../../api/src/application-services';
+import { OpenAiCommercialAiCopyProvider } from '../../api/src/commercial-ai-copy-provider';
+import { CommercialAutomationCandidateFlowService } from '../../api/src/commercial-automation-candidate-flow-service';
 import { CommercialAutomationOrchestrator } from '../../api/src/commercial-automation-orchestrator';
+import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { CommercialDispatchOutboxQueue } from '../../api/src/commercial-dispatch-outbox-publisher';
 import { ScoreService } from '../../api/src/score-service';
 import { ShopeeOfferSyncService } from '../../api/src/shopee-offer-sync-service';
@@ -58,6 +63,53 @@ export const createCommercialAutomationOrchestratorRuntime = (
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     subIdPrefix: config.SHOPEE_AFFILIATE_SUB_ID_PREFIX,
     maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
+    logger,
+  });
+  const commercialAiCopyProvider =
+    config.COMMERCIAL_AUTOMATION_MODE === 'send' &&
+    config.COMMERCIAL_AI_COPY_ENABLED &&
+    config.OPENAI_API_KEY &&
+    config.COMMERCIAL_AI_COPY_MODEL
+      ? new OpenAiCommercialAiCopyProvider({
+          apiKey: config.OPENAI_API_KEY,
+          model: config.COMMERCIAL_AI_COPY_MODEL,
+          timeoutMs: config.COMMERCIAL_AI_COPY_TIMEOUT_MS,
+          maxOutputTokens: config.COMMERCIAL_AI_COPY_MAX_OUTPUT_TOKENS,
+          reasoningEffort: config.COMMERCIAL_AI_COPY_REASONING_EFFORT,
+        })
+      : undefined;
+  const promotionMining = createCommercialPromotionMiningService({
+    repositories,
+    score,
+    logger,
+  });
+  const promotionCopyGeneration =
+    createCommercialPromotionCopyGenerationService({
+      repositories,
+      provider: commercialAiCopyProvider,
+      config: {
+        enabled: config.COMMERCIAL_AI_COPY_ENABLED,
+        provider: config.COMMERCIAL_AI_COPY_PROVIDER,
+        model: config.COMMERCIAL_AI_COPY_MODEL ?? null,
+        apiKeyConfigured: Boolean(config.OPENAI_API_KEY?.trim()),
+        timeoutMs: config.COMMERCIAL_AI_COPY_TIMEOUT_MS,
+        maxOutputTokens: config.COMMERCIAL_AI_COPY_MAX_OUTPUT_TOKENS,
+        reasoningEffort: config.COMMERCIAL_AI_COPY_REASONING_EFFORT,
+        maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
+      },
+      logger,
+    });
+  const candidateFlow = new CommercialAutomationCandidateFlowService({
+    groups: repositories.whatsappGroups,
+    campaigns: repositories.commercialGroupCampaigns,
+    candidates: repositories.commercialPromotions,
+    deliveryHistory: repositories.commercialDeliveryHistory,
+    copies: repositories.commercialPromotionCopies,
+    mining: promotionMining,
+    copyGeneration: promotionCopyGeneration,
+    draft: new CommercialMessageDraftService(),
+    pipeline,
+    instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     logger,
   });
   const policy = createCommercialAutomationPolicyService({
@@ -117,6 +169,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
       policy,
       syncOffers,
       pipeline,
+      candidateFlow,
       confirmation,
       commercialRuns: repositories.commercialRuns,
       executions: repositories.commercialAutomationExecutions,

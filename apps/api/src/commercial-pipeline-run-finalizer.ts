@@ -1,18 +1,24 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type {
+  CommercialPromotionCandidateRepository,
   CommercialPipelineRunRepository,
   WhatsAppDispatchRecord,
 } from './repositories';
 
 export const finalizeCommercialPipelineRun = async ({
   runs,
+  promotionCandidates,
   dispatch,
   failed,
   logger,
   clock = () => new Date(),
 }: {
   runs: CommercialPipelineRunRepository;
+  promotionCandidates?: Pick<
+    CommercialPromotionCandidateRepository,
+    'markDispatchedByGeneratedCopyId'
+  >;
   dispatch: WhatsAppDispatchRecord;
   failed: boolean;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
@@ -34,6 +40,11 @@ export const finalizeCommercialPipelineRun = async ({
 
   const sent = !failed && dispatch.status === 'SENT';
   const failedSafely = dispatch.status === 'FAILED';
+  if (sent && promotionCandidates) {
+    await promotionCandidates.markDispatchedByGeneratedCopyId(
+      dispatch.generatedCopyId,
+    );
+  }
   await runs.update(run.id, {
     status: sent ? 'COMPLETED' : 'FAILED',
     finalStatus: sent ? 'SENT' : failedSafely ? 'FAILED' : 'AMBIGUOUS',
