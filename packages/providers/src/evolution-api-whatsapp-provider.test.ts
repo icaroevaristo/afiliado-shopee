@@ -7,6 +7,7 @@ import {
   type ProviderLogger,
 } from './evolution-api-whatsapp-provider';
 import { EvolutionGroupSendGuard } from './evolution-group-send-guard';
+import { EvolutionSendGuard } from './evolution-send-guard';
 import { MockWhatsAppProvider } from './index';
 import { createWhatsAppProvider } from './whatsapp-provider-factory';
 
@@ -414,6 +415,70 @@ describe('EvolutionApiWhatsAppProvider', () => {
         }),
       }),
     );
+  });
+
+  it('permite uma mensagem GROUP em cada run distinto com provider persistente', async () => {
+    const httpClient = vi
+      .fn()
+      .mockImplementation(async () =>
+        response({ key: { id: 'msg-group-run' } }),
+      );
+    const groupSendGuard = new EvolutionGroupSendGuard({
+      enabled: true,
+      safeMode: true,
+      maxMessagesPerRun: 1,
+    });
+    const provider = createProvider(httpClient, { groupSendGuard });
+    const input = {
+      destination: '120363000000000000@g.us',
+      destinationType: 'GROUP' as const,
+      message: 'Oferta em grupo',
+    };
+
+    provider.beginRun('run-a');
+    await provider.sendMessage(input);
+    provider.beginRun('run-b');
+    await provider.sendMessage(input);
+
+    provider.beginRun('run-a');
+    await expect(provider.sendMessage(input)).rejects.toMatchObject({
+      code: 'WHATSAPP_GROUP_LIMIT_REACHED',
+      deliveryMayHaveStarted: false,
+    });
+    expect(httpClient).toHaveBeenCalledTimes(2);
+  });
+
+  it('beginRun nao reinicia o limite individual por boot', async () => {
+    const destination = '5511999999999';
+    const httpClient = vi
+      .fn()
+      .mockResolvedValue(response({ key: { id: 'msg-individual-run' } }));
+    const sendGuard = new EvolutionSendGuard({
+      safeMode: true,
+      allowedDestinations: [destination],
+      maxMessagesPerBoot: 1,
+    });
+    const provider = createProvider(httpClient, {
+      sendGuard,
+      groupSendGuard: new EvolutionGroupSendGuard({
+        enabled: true,
+        safeMode: true,
+        maxMessagesPerRun: 1,
+      }),
+    });
+
+    provider.beginRun('run-a');
+    await provider.sendMessage({ destination, message: 'Oferta A' });
+    provider.beginRun('run-b');
+    await expect(
+      provider.sendMessage({ destination, message: 'Oferta B' }),
+    ).rejects.toMatchObject({
+      code: 'EVOLUTION_SAFE_LIMIT_REACHED',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(sendGuard.requestCount).toBe(1);
+    expect(httpClient).toHaveBeenCalledTimes(1);
   });
 
   it('impede request HTTP se groupSendGuard bloquear envio de imagem em grupo', async () => {

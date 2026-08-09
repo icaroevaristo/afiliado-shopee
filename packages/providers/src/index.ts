@@ -71,6 +71,7 @@ export type WhatsAppSendResult = {
 };
 
 export interface WhatsAppProvider {
+  beginRun?(runId: string): void;
   sendMessage(input: WhatsAppSendInput): Promise<WhatsAppSendResult>;
 }
 

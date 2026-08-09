@@ -14,7 +14,9 @@ export type EvolutionGroupSendGuardOptions = {
 };
 
 export class EvolutionGroupSendGuard {
-  private initiatedRequests = 0;
+  private currentRunId: string | undefined;
+  private legacyInitiatedRequests = 0;
+  private readonly initiatedRequestsByRun = new Map<string, number>();
 
   constructor(private readonly options: EvolutionGroupSendGuardOptions) {
     if (
@@ -38,7 +40,16 @@ export class EvolutionGroupSendGuard {
   }
 
   get requestCount() {
-    return this.initiatedRequests;
+    return this.currentRunId === undefined
+      ? this.legacyInitiatedRequests
+      : (this.initiatedRequestsByRun.get(this.currentRunId) ?? 0);
+  }
+
+  beginRun(runId: string) {
+    this.currentRunId = runId;
+    if (!this.initiatedRequestsByRun.has(runId)) {
+      this.initiatedRequestsByRun.set(runId, 0);
+    }
   }
 
   authorizeRequest(externalGroupId: string) {
@@ -58,7 +69,7 @@ export class EvolutionGroupSendGuard {
         fingerprint,
       );
     }
-    if (this.initiatedRequests >= this.options.maxMessagesPerRun) {
+    if (this.requestCount >= this.options.maxMessagesPerRun) {
       return this.block(
         'WHATSAPP_GROUP_LIMIT_REACHED',
         'Limite de mensagens para grupos atingido neste processo',
@@ -66,12 +77,16 @@ export class EvolutionGroupSendGuard {
       );
     }
 
-    this.initiatedRequests += 1;
+    if (this.currentRunId === undefined) {
+      this.legacyInitiatedRequests += 1;
+    } else {
+      this.initiatedRequestsByRun.set(this.currentRunId, this.requestCount + 1);
+    }
     this.options.logger?.info(
       {
         event: 'evolution.group-safe-mode.request-authorized',
         fingerprint,
-        currentCount: this.initiatedRequests,
+        currentCount: this.requestCount,
         maxMessagesPerRun: this.options.maxMessagesPerRun,
       },
       'Evolution group request authorized',
@@ -84,7 +99,7 @@ export class EvolutionGroupSendGuard {
         event: 'evolution.group-safe-mode.blocked',
         code,
         fingerprint,
-        currentCount: this.initiatedRequests,
+        currentCount: this.requestCount,
         maxMessagesPerRun: this.options.maxMessagesPerRun,
       },
       'Evolution group request blocked',

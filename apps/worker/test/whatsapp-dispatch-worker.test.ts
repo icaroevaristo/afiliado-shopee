@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { processWhatsAppDispatchJob, type WhatsAppDispatchProcessorRepositories } from '../src/whatsapp-dispatch-worker';
 import { JOB_NAMES, type WhatsAppDispatchJob } from '@shopee-auto-affiliate-ai/queue';
 import type { WhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
+import { fingerprintWhatsAppGroupId } from '@shopee-auto-affiliate-ai/providers';
 import type { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { Job } from 'bullmq';
 import type { WhatsAppDispatchDetails } from '../../api/src/repositories';
+import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 
 const fakeDestination = {
   id: 'dest-123',
@@ -101,6 +103,158 @@ const fakeDispatch: WhatsAppDispatchDetails = {
 };
 
 describe('processWhatsAppDispatchJob', () => {
+  it('inicia runs deterministicas para dois jobs GROUP no mesmo provider', async () => {
+    const groupId = '120363000000000000@g.us';
+    const destination = {
+      ...fakeDestination,
+      destination: groupId,
+      type: 'GROUP' as const,
+      fingerprint: fingerprintWhatsAppGroupId(groupId),
+    };
+    const dispatches = ['dispatch-a', 'dispatch-b'].map((id) => ({
+      ...fakeDispatch,
+      id,
+      destination,
+    }));
+    const createRepositories = (
+      dispatch: WhatsAppDispatchDetails,
+    ): WhatsAppDispatchProcessorRepositories => ({
+      whatsappDispatches: {
+        findByIdWithDetails: vi.fn().mockResolvedValue(dispatch),
+        markAttemptPending: vi.fn().mockResolvedValue(true),
+        markSent: vi.fn().mockResolvedValue({ ...dispatch, status: 'SENT' }),
+        createPending: vi.fn(),
+        findByIdForSending: vi.fn().mockResolvedValue(dispatch),
+        list: vi.fn(),
+        markFailed: vi.fn(),
+      },
+      commercialRuns: {
+        create: vi.fn(),
+        update: vi.fn(),
+        list: vi.fn(),
+        findById: vi.fn(),
+        findByDispatchId: vi.fn().mockResolvedValue(null),
+      },
+    });
+    const events: string[] = [];
+    const whatsAppProvider: WhatsAppProvider = {
+      beginRun: vi.fn((runId) => events.push(`begin:${runId}`)),
+      sendMessage: vi.fn(async () => {
+        events.push('send');
+        return {
+          status: 'sent' as const,
+          externalMessageId: 'external-id',
+          sentAt: new Date(),
+        };
+      }),
+    };
+    const groupSendPolicy = new WhatsAppGroupSendPolicy({
+      enabled: true,
+      safeMode: true,
+      instanceName: 'instance',
+    });
+    const draftService: Pick<CommercialMessageDraftService, 'createDraft'> = {
+      createDraft: vi.fn().mockReturnValue({
+        candidateId: 'candidate-123',
+        generatedCopyId: 'copy-123',
+        caption: 'draft text',
+        deliveryMode: 'IMAGE',
+        imageUrl: 'http://image',
+        warnings: [],
+      }),
+    };
+
+    await processWhatsAppDispatchJob(
+      {
+        id: 'job-a',
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: dispatches[0].id },
+      },
+      {
+        repositories: createRepositories(dispatches[0]),
+        whatsAppProvider,
+        logger: { info: vi.fn(), error: vi.fn() },
+        groupSendPolicy,
+        draftService,
+      },
+    );
+    await processWhatsAppDispatchJob(
+      {
+        id: 'job-b',
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: dispatches[1].id },
+      },
+      {
+        repositories: createRepositories(dispatches[1]),
+        whatsAppProvider,
+        logger: { info: vi.fn(), error: vi.fn() },
+        groupSendPolicy,
+        draftService,
+      },
+    );
+
+    expect(whatsAppProvider.beginRun).toHaveBeenNthCalledWith(1, 'job-a');
+    expect(whatsAppProvider.beginRun).toHaveBeenNthCalledWith(2, 'job-b');
+    expect(whatsAppProvider.sendMessage).toHaveBeenCalledTimes(2);
+    expect(events).toEqual(['begin:job-a', 'send', 'begin:job-b', 'send']);
+  });
+
+  it('usa dispatchId como identidade deterministica quando job.id esta ausente', async () => {
+    const whatsAppProvider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue({
+        status: 'sent',
+        externalMessageId: 'ext-123',
+        sentAt: new Date(),
+      }),
+    };
+    const repositories: WhatsAppDispatchProcessorRepositories = {
+      whatsappDispatches: {
+        findByIdWithDetails: vi.fn().mockResolvedValue(fakeDispatch),
+        markAttemptPending: vi.fn().mockResolvedValue(true),
+        markSent: vi.fn().mockResolvedValue(fakeDispatch),
+        createPending: vi.fn(),
+        findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
+        list: vi.fn(),
+        markFailed: vi.fn(),
+      },
+      commercialRuns: {
+        create: vi.fn(),
+        update: vi.fn(),
+        list: vi.fn(),
+        findById: vi.fn(),
+        findByDispatchId: vi.fn().mockResolvedValue(null),
+      },
+    };
+    const draftService: Pick<CommercialMessageDraftService, 'createDraft'> = {
+      createDraft: vi.fn().mockReturnValue({
+        candidateId: 'candidate-123',
+        generatedCopyId: 'copy-123',
+        caption: 'draft text',
+        deliveryMode: 'IMAGE',
+        imageUrl: 'http://image',
+        warnings: [],
+      }),
+    };
+
+    await processWhatsAppDispatchJob(
+      {
+        id: undefined,
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: 'dispatch-123' },
+      },
+      {
+        repositories,
+        whatsAppProvider,
+        logger: { info: vi.fn(), error: vi.fn() },
+        draftService,
+      },
+    );
+
+    expect(whatsAppProvider.beginRun).toHaveBeenCalledOnce();
+    expect(whatsAppProvider.beginRun).toHaveBeenCalledWith('dispatch-123');
+  });
+
   it('dispatch comercial recebe draftService sem COMMERCIAL_MESSAGE_DRAFT_SERVICE_UNAVAILABLE e chama provider uma vez para draft IMAGE', async () => {
     const markAttemptPending = vi.fn().mockResolvedValue(true);
     const markSent = vi.fn().mockResolvedValue(fakeDispatch);
