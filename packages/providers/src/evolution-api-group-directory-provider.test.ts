@@ -198,6 +198,33 @@ describe('EvolutionGroupSendGuard', () => {
     );
   });
 
+  it('limita requests por run sem resetar um run ja iniciado', () => {
+    const guard = new EvolutionGroupSendGuard({
+      enabled: true,
+      safeMode: true,
+      maxMessagesPerRun: 1,
+    });
+
+    guard.beginRun('run-a');
+    guard.authorizeRequest(GROUP_ID);
+    expect(() => guard.authorizeRequest(GROUP_ID)).toThrowError(
+      expect.objectContaining({ code: 'WHATSAPP_GROUP_LIMIT_REACHED' }),
+    );
+
+    guard.beginRun('run-a');
+    expect(() => guard.authorizeRequest(GROUP_ID)).toThrowError(
+      expect.objectContaining({ code: 'WHATSAPP_GROUP_LIMIT_REACHED' }),
+    );
+
+    guard.beginRun('run-b');
+    expect(() => guard.authorizeRequest(GROUP_ID)).not.toThrow();
+
+    guard.beginRun('run-a');
+    expect(() => guard.authorizeRequest(GROUP_ID)).toThrowError(
+      expect.objectContaining({ code: 'WHATSAPP_GROUP_LIMIT_REACHED' }),
+    );
+  });
+
   it('provider usa guard de grupo separado e loga apenas fingerprint', async () => {
     const info = vi.fn();
     const groupSendGuard = new EvolutionGroupSendGuard({

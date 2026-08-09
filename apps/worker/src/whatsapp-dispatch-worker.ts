@@ -82,6 +82,7 @@ export const processWhatsAppDispatchJob = async (
 ) => {
   if (job.name !== JOB_NAMES.whatsappDispatch) return { skipped: true };
 
+  options.whatsAppProvider.beginRun?.(job.id ?? job.data.dispatchId);
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
   const sender = createSenderService({

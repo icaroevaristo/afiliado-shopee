@@ -156,6 +156,10 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
     this.groupSendGuard = options.groupSendGuard;
   }
 
+  beginRun(runId: string) {
+    this.groupSendGuard?.beginRun(runId);
+  }
+
   async sendMessage(input: WhatsAppSendInput): Promise<WhatsAppSendResult> {
     let destination: string;
     let message: string;
