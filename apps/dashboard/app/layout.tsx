@@ -3,8 +3,8 @@ import type { Metadata } from 'next';
 import { AppShell } from '../components/app-shell';
 
 export const metadata: Metadata = {
-  title: 'Shopee Auto Affiliate AI',
-  description: 'Dashboard operacional do pipeline afiliado',
+  title: 'Shopee Affiliate | Operations Console',
+  description: 'Centro operacional da automacao comercial de afiliados',
 };
 
 export default function RootLayout({

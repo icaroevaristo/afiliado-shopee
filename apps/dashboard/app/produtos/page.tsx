@@ -14,6 +14,7 @@ import { EmptyState } from '../../components/empty-state';
 import { ErrorState } from '../../components/error-state';
 import { LoadingState } from '../../components/loading-state';
 import { PageHeader } from '../../components/page-header';
+import { SafeProductImage } from '../../components/safe-product-image';
 import { StatusBadge } from '../../components/status-badge';
 import {
   importManualShopeeOffers,
@@ -315,9 +316,8 @@ export default function ProductsPage() {
                   <tr key={offer.id} className="align-top">
                     <td className="max-w-sm px-4 py-3">
                       <div className="flex gap-3">
-                        <img
+                        <SafeProductImage
                           src={offer.imageUrl}
-                          alt=""
                           className="h-12 w-12 rounded-md border border-slate-200 object-cover"
                         />
                         <div>
@@ -372,9 +372,8 @@ export default function ProductsPage() {
                 className="rounded-lg border border-slate-200 bg-white p-4"
               >
                 <div className="flex gap-3">
-                  <img
+                  <SafeProductImage
                     src={offer.imageUrl}
-                    alt=""
                     className="h-16 w-16 rounded-md border object-cover"
                   />
                   <div>

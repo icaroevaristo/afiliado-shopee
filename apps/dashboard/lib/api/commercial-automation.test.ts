@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  getCommercialAutomationSchedulerStatus,
+  listCommercialAutomationExecutions,
+  listCommercialDispatchOutbox,
   getCommercialAutomationStatus,
   pauseCommercialAutomation,
   resumeCommercialAutomation,
@@ -15,7 +18,7 @@ const response = (body: unknown) =>
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue(response({ allowed: false })),
+    vi.fn().mockImplementation(() => Promise.resolve(response({ allowed: false }))),
   );
 });
 
@@ -24,7 +27,7 @@ describe('commercial automation API', () => {
     await getCommercialAutomationStatus();
 
     expect(fetch).toHaveBeenCalledWith(
-      'http://localhost:3333/commercial-automation/status',
+      '/api/commercial-automation/status',
       expect.objectContaining({ method: 'GET' }),
     );
   });
@@ -33,7 +36,7 @@ describe('commercial automation API', () => {
     await pauseCommercialAutomation();
 
     expect(fetch).toHaveBeenCalledWith(
-      'http://localhost:3333/commercial-automation/settings',
+      '/api/commercial-automation/settings',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({ paused: true }),
@@ -45,7 +48,7 @@ describe('commercial automation API', () => {
     await resumeCommercialAutomation('RETOMAR_AUTOMACAO_COMERCIAL');
 
     expect(fetch).toHaveBeenCalledWith(
-      'http://localhost:3333/commercial-automation/settings',
+      '/api/commercial-automation/settings',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({
@@ -53,6 +56,28 @@ describe('commercial automation API', () => {
           confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
         }),
       }),
+    );
+  });
+
+  it('consulta scheduler, executions e outbox sem alterar dados', async () => {
+    await getCommercialAutomationSchedulerStatus();
+    await listCommercialAutomationExecutions(2, 10);
+    await listCommercialDispatchOutbox(1, 5);
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/commercial-automation/scheduler',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/commercial-automation/executions?page=2&limit=10',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      '/api/commercial-automation/outbox?page=1&limit=5',
+      expect.objectContaining({ method: 'GET' }),
     );
   });
 });

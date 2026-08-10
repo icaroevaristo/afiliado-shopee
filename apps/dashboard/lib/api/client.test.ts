@@ -6,7 +6,7 @@ afterEach(() => {
 });
 
 describe('apiRequest', () => {
-  it('retorna JSON e usa a URL publica configurada', async () => {
+  it('retorna JSON usando o proxy same-origin do dashboard', async () => {
     vi.stubEnv('NEXT_PUBLIC_API_URL', 'http://localhost:3333/');
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
@@ -17,7 +17,7 @@ describe('apiRequest', () => {
 
     await expect(apiRequest('/health')).resolves.toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:3333/health',
+      '/api/health',
       expect.objectContaining({ headers: expect.any(Object) }),
     );
   });
