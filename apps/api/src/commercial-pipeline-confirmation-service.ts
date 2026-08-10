@@ -2,7 +2,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import type { CommercialCopyGenerator } from './commercial-copy-service';
-import { isCommercialAuthorizedGroup } from './commercial-group-selection';
+import {
+  duplicateLogicalGroupFingerprints,
+  isCommercialAuthorizedGroup,
+} from './commercial-group-selection';
 import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
   CommercialDeliveryHistoryRepository,
@@ -222,9 +225,16 @@ export class CommercialPipelineConfirmationService {
       ).filter((group): group is WhatsAppGroupRecord =>
         isCommercialAuthorizedGroup(group, this.options.instanceName),
       );
-      const group = groups[0];
+      if (duplicateLogicalGroupFingerprints(groups).length > 0) {
+        return changed(
+          'Mais de um destino representa o mesmo grupo logico',
+          'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
+        );
+      }
+      const group = groups.find(
+        (candidate) => candidate.id === run.groupDestinationId,
+      );
       if (
-        groups.length !== 1 ||
         !group ||
         group.id !== run.groupDestinationId ||
         group.name !== run.groupName ||

@@ -85,7 +85,7 @@ export default function AutomationPage() {
           <div className="ops-control"><div className="ops-control-label">Status operacional</div><div className="ops-control-value flex items-center gap-2"><span className="ops-status-dot" data-tone={operationalState.tone === 'neutral' ? 'warning' : operationalState.tone} />{operationalState.label}</div><div className="ops-control-sub">{operationalState.detail}</div></div>
           <div className="ops-control"><div className="ops-control-label">Readiness para envio</div><div className="ops-control-value"><OpsBadge tone={readinessState.tone}>{readinessState.label}</OpsBadge></div><div className="ops-control-sub ops-mono">{readinessDetails}</div></div>
           <div className="ops-control"><div className="ops-control-label">Proximo tick</div><div className="ops-control-value"><Countdown target={scheduler.nextRunAt} /></div><div className="ops-control-sub">{scheduler.nextRunAt ? formatDateTimeInTimezone(scheduler.nextRunAt, scheduler.timezone, '—', 'medium') : 'Nao disponivel'}</div></div>
-          <div className="ops-control"><div className="ops-control-label">Envios hoje</div><div className="ops-control-value">{status.globalSentToday} / {status.dailyGlobalLimit}</div><div className="ops-control-sub">grupo {status.groupSentToday} / {status.dailyGroupLimit}</div></div>
+          <div className="ops-control"><div className="ops-control-label">Envios hoje</div><div className="ops-control-value">{status.globalSentToday} / {status.dailyGlobalLimit}</div><div className="ops-control-sub">{status.groupSentToday === null ? 'grupo —' : `grupo ${status.groupSentToday} / ${status.dailyGroupLimit}`}</div></div>
           <div className="ops-control"><div className="ops-control-label">Modo</div><div className="ops-control-value">{scheduler.mode.toUpperCase()}</div><div className="ops-control-sub">janela {status.allowedStartTime}–{status.allowedEndTime} · {status.timezone}</div></div>
         </div>
         <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
@@ -104,7 +104,7 @@ export default function AutomationPage() {
               <div className="ops-health-row"><span className="ops-health-name"><ShieldCheck size={14} className="mr-2 inline" aria-hidden="true" />Pausa persistida</span><OpsBadge tone={status.paused ? 'warning' : 'success'}>{status.paused ? 'ATIVA' : 'NAO PAUSADA'}</OpsBadge></div>
               <div className="ops-health-row"><span className="ops-health-name">Grupo autorizado</span><span className="ops-mono">{status.authorizedGroupCount}</span></div>
               <div className="ops-health-row"><span className="ops-health-name">Limite global restante</span><span className="ops-mono">{status.globalRemainingToday}</span></div>
-              <div className="ops-health-row"><span className="ops-health-name">Limite do grupo restante</span><span className="ops-mono">{status.groupRemainingToday}</span></div>
+              <div className="ops-health-row"><span className="ops-health-name">Limite do grupo restante</span><span className="ops-mono">{status.groupRemainingToday ?? '—'}</span></div>
               <div className="ops-health-row"><span className="ops-health-name">Ultimo envio</span><span className="ops-mono">{formatDateTimeInTimezone(status.lastSentAt, status.timezone, '—', 'medium')}</span></div>
             </div>
           </OpsSection>

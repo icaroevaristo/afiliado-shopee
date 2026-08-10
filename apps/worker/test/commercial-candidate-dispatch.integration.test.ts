@@ -252,7 +252,10 @@ describe('commercial candidate dispatch integration', () => {
       offers: { findOfferById: vi.fn(async () => offer) } as never,
       groups: { list: vi.fn(async () => [group]) } as never,
       outboxes,
-      deliveryHistory: { wasProductSentToGroup: vi.fn(async () => false) },
+      deliveryHistory: {
+        wasProductSentToGroup: vi.fn(async () => false),
+        findLastSentAtByGroup: vi.fn(async () => null),
+      },
       copy: { generate: vi.fn(() => caption) },
       publisher: new CommercialDispatchOutboxPublisher({
         outboxes,

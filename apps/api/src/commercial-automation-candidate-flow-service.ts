@@ -15,9 +15,11 @@ import {
   type CommercialMessageDraft,
 } from './commercial-message-draft-service';
 import {
+  duplicateLogicalGroupFingerprints,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
 import type {
+  CommercialAutomationTarget,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
@@ -47,6 +49,8 @@ export type CommercialAutomationCandidateFlowResult = {
   generatedCopyId: string;
   campaignId: string;
   groupId: string;
+  logicalGroupFingerprint: string;
+  nicheId: string;
   deliveryMode: 'IMAGE';
   copyPreview: string;
   pipeline: CommercialPipelineDryRunResult;
@@ -55,7 +59,10 @@ export type CommercialAutomationCandidateFlowResult = {
 export type CommercialAutomationCandidateRevalidation = Pick<
   CommercialAutomationCandidateFlowResult,
   'candidateId' | 'generatedCopyId' | 'campaignId' | 'groupId'
->;
+> & {
+  logicalGroupFingerprint?: string;
+  nicheId?: string;
+};
 
 type CandidateFlowOptions = {
   groups: Pick<WhatsAppGroupDirectoryRepository, 'list'>;
@@ -66,7 +73,7 @@ type CandidateFlowOptions = {
   candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'>;
   deliveryHistory: Pick<
     CommercialDeliveryHistoryRepository,
-    'wasProductSentToGroup'
+    'wasProductSentToGroup' | 'findLastSentAtByGroup'
   >;
   copies: Pick<
     CommercialPromotionCopyRepository,
@@ -142,7 +149,7 @@ export class CommercialAutomationCandidateFlowService {
     this.clock = options.clock ?? (() => new Date());
   }
 
-  private async resolveGroup(): Promise<WhatsAppGroupRecord> {
+  private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
     const groups = (await this.options.groups.list(this.options.instanceName, {
       active: true,
       available: true,
@@ -155,13 +162,108 @@ export class CommercialAutomationCandidateFlowService {
         'NO_AUTHORIZED_GROUP',
       );
     }
-    if (groups.length !== 1) {
+    if (duplicateLogicalGroupFingerprints(groups).length > 0) {
       throw appError(
-        'Mais de um grupo autorizado esta disponivel',
-        'MULTIPLE_AUTHORIZED_GROUPS',
+        'Mais de um destino representa o mesmo grupo logico',
+        'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
       );
     }
-    return groups[0];
+    return groups.sort(
+      (left, right) =>
+        left.fingerprint.localeCompare(right.fingerprint) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+
+  private async resolveTarget(
+    target: CommercialAutomationTarget,
+  ): Promise<{
+    group: WhatsAppGroupRecord;
+    campaign: CommercialGroupCampaignRecord;
+  }> {
+    const groups = await this.listAuthorizedGroups();
+    const group = groups.find(
+      (candidate) =>
+        candidate.id === target.groupId &&
+        candidate.fingerprint === target.logicalGroupFingerprint,
+    );
+    if (!group) {
+      throw appError(
+        'Grupo selecionado mudou desde a resolucao',
+        'COMMERCIAL_AUTOMATION_TARGET_CHANGED',
+      );
+    }
+    const campaign = await this.resolveCampaign(group.fingerprint);
+    if (
+      campaign.id !== target.campaignId ||
+      campaign.nicheId !== target.nicheId
+    ) {
+      throw appError(
+        'Campanha selecionada mudou desde a resolucao',
+        'COMMERCIAL_AUTOMATION_TARGET_CHANGED',
+      );
+    }
+    return { group, campaign };
+  }
+
+  async listTargets(): Promise<CommercialAutomationTarget[]> {
+    const groups = await this.listAuthorizedGroups();
+    const targets: CommercialAutomationTarget[] = [];
+    let firstEligibilityError: AppError | undefined;
+    for (const group of groups) {
+      try {
+        const campaign = await this.resolveCampaign(group.fingerprint);
+        targets.push({
+          groupId: group.id,
+          groupName: group.name,
+          logicalGroupFingerprint: group.fingerprint,
+          campaignId: campaign.id,
+          nicheId: campaign.nicheId,
+        });
+      } catch (error) {
+        if (
+          error instanceof AppError &&
+          [
+            'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
+            'CAMPAIGN_INACTIVE',
+            'NICHE_INACTIVE',
+            'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+          ].includes(error.code)
+        ) {
+          firstEligibilityError ??= error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (targets.length === 0) {
+      if (firstEligibilityError) throw firstEligibilityError;
+      throw appError(
+        'Nenhum alvo comercial elegivel disponivel',
+        'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_TARGET',
+      );
+    }
+
+    const withLastSent = await Promise.all(
+      targets.map(async (target) => ({
+        target,
+        lastSentAt: await this.options.deliveryHistory.findLastSentAtByGroup(
+          target.groupId,
+        ),
+      })),
+    );
+    withLastSent.sort(
+      (left, right) =>
+        (left.lastSentAt === null ? -1 : 0) -
+          (right.lastSentAt === null ? -1 : 0) ||
+        (left.lastSentAt?.getTime() ?? Number.MIN_SAFE_INTEGER) -
+          (right.lastSentAt?.getTime() ?? Number.MIN_SAFE_INTEGER) ||
+        left.target.logicalGroupFingerprint.localeCompare(
+          right.target.logicalGroupFingerprint,
+        ) ||
+        left.target.groupId.localeCompare(right.target.groupId),
+    );
+    return withLastSent.map(({ target }) => target);
   }
 
   private async resolveCampaign(
@@ -364,9 +466,10 @@ export class CommercialAutomationCandidateFlowService {
     return null;
   }
 
-  async prepare(): Promise<CommercialAutomationCandidateFlowResult> {
-    const group = await this.resolveGroup();
-    const campaign = await this.resolveCampaign(group.fingerprint);
+  async prepare(
+    target: CommercialAutomationTarget,
+  ): Promise<CommercialAutomationCandidateFlowResult> {
+    const { group, campaign } = await this.resolveTarget(target);
     const miningReport = await this.options.mining.mine(campaign.id, {
       confirm: COMMERCIAL_PROMOTION_MINING_CONFIRMATION,
     });
@@ -430,6 +533,8 @@ export class CommercialAutomationCandidateFlowService {
       generatedCopyId: loaded.copy.id,
       campaignId: campaign.id,
       groupId: group.id,
+      logicalGroupFingerprint: group.fingerprint,
+      nicheId: campaign.nicheId,
       deliveryMode: 'IMAGE',
       copyPreview: draft.caption,
       pipeline,
@@ -437,12 +542,20 @@ export class CommercialAutomationCandidateFlowService {
   }
 
   async revalidate(input: CommercialAutomationCandidateRevalidation) {
-    const group = await this.resolveGroup();
-    if (group.id !== input.groupId) {
+    const groups = await this.listAuthorizedGroups();
+    const group = groups.find((candidate) => candidate.id === input.groupId);
+    if (
+      !group ||
+      (input.logicalGroupFingerprint &&
+        group.fingerprint !== input.logicalGroupFingerprint)
+    ) {
       throw appError('Grupo mudou desde o preparo', 'COMMERCIAL_GROUP_CHANGED');
     }
     const campaign = await this.resolveCampaign(group.fingerprint);
-    if (campaign.id !== input.campaignId) {
+    if (
+      campaign.id !== input.campaignId ||
+      (input.nicheId && campaign.nicheId !== input.nicheId)
+    ) {
       throw appError(
         'Campanha mudou desde o preparo',
         'COMMERCIAL_GROUP_CAMPAIGN_CHANGED',

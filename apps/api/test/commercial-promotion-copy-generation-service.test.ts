@@ -125,6 +125,8 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
   attempts = new Map<string, CommercialCopyGenerationAttemptRecord>();
   completionFailure: string | null = null;
 
+  constructor(private readonly copyId = 'copy-internal') {}
+
   async loadContext() {
     return this.context;
   }
@@ -190,7 +192,7 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
       return { completed: false as const, failureCode: this.completionFailure };
     }
     const copy: GeneratedCopyRecord = {
-      id: 'copy-internal',
+      id: this.copyId,
       ...input.copy,
       createdAt: input.completedAt,
     };
@@ -322,6 +324,57 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
+  });
+
+  it('mantem copy candidate-scoped separada para o mesmo produto em grupos diferentes', async () => {
+    const groupA = new MemoryCopyRepository('copy-group-a');
+    const groupB = new MemoryCopyRepository('copy-group-b');
+    const contextB = groupB.context!;
+    groupB.context = {
+      ...contextB,
+      candidate: {
+        ...contextB.candidate,
+        id: 'candidate-group-b',
+        campaignId: 'campaign-group-b',
+      },
+      campaign: {
+        ...contextB.campaign,
+        id: 'campaign-group-b',
+        logicalGroupFingerprint: 'grp_group_b',
+        nicheId: 'niche-group-b',
+        niche: {
+          ...contextB.campaign.niche,
+          id: 'niche-group-b',
+        },
+      },
+      niche: {
+        ...contextB.niche,
+        id: 'niche-group-b',
+      },
+    };
+    const providerA = validProvider();
+    const providerB = validProvider();
+
+    const resultA = await service(groupA, providerA).generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+    const resultB = await service(groupB, providerB).generate(
+      'candidate-group-b',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(resultA.generatedCopyId).toBe('copy-group-a');
+    expect(resultB.generatedCopyId).toBe('copy-group-b');
+    expect(resultA.generatedCopyId).not.toBe(resultB.generatedCopyId);
+    expect([...groupA.copies.values()][0]?.createdFromCandidateId).toBe(
+      'candidate-internal',
+    );
+    expect([...groupB.copies.values()][0]?.createdFromCandidateId).toBe(
+      'candidate-group-b',
+    );
+    expect(providerA.generate).toHaveBeenCalledOnce();
+    expect(providerB.generate).toHaveBeenCalledOnce();
   });
 
   it('normaliza fatos antes da fronteira do provider', async () => {

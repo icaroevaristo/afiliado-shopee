@@ -7,6 +7,8 @@ import type {
   CommercialPipelineRunFilters,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
+  CommercialAutomationTarget,
+  CommercialGroupCampaignRecord,
   ShopeeOfferRecord,
   WhatsAppGroupRecord,
 } from '../src/repositories';
@@ -115,6 +117,46 @@ const build = ({
   maximumCopyLength?: number;
 } = {}) => {
   const runs = new MemoryRuns();
+  const campaigns = {
+    findById: async (id: string): Promise<CommercialGroupCampaignRecord | null> => {
+      const targetGroup =
+        id === 'campaign-two'
+          ? groups.find((candidate) => candidate.id === 'two')
+          : groups[0];
+      if (!targetGroup) return null;
+      const nicheId = id === 'campaign-two' ? 'niche-two' : 'niche-1';
+      return {
+        id,
+        name: `Campanha ${id}`,
+        logicalGroupFingerprint: targetGroup.fingerprint,
+        anchorDestinationId: targetGroup.id,
+        nicheId,
+        active: true,
+        cadenceMinutes: 15,
+        timezone: 'America/Sao_Paulo',
+        allowedStartTime: '08:00',
+        allowedEndTime: '23:00',
+        dailyLimit: 60,
+        queueTargetSize: 20,
+        dedupeDays: 7,
+        niche: {
+          id: nicheId,
+          name: 'Nicho',
+          slug: 'nicho',
+          active: true,
+        },
+        anchorDestination: {
+          id: targetGroup.id,
+          name: targetGroup.name,
+          fingerprint: targetGroup.fingerprint,
+          active: targetGroup.active,
+          available: targetGroup.available,
+        },
+        createdAt: now,
+        updatedAt: now,
+      };
+    },
+  };
   const service = new CommercialPipelineService({
     offers: {
       listCommercialCandidates: async () => candidates,
@@ -122,6 +164,7 @@ const build = ({
     groups: {
       list: async () => groups,
     } as never,
+    campaigns,
     score: {
       calculate: (product) => scores[product.id] ?? 80,
     },
@@ -130,6 +173,7 @@ const build = ({
     deliveryHistory: {
       wasProductSentToGroup: async (productId, groupId) =>
         sent.has(`${productId}:${groupId}`),
+      findLastSentAtByGroup: async () => null,
     },
     instanceName: 'affiliate-bot',
     subIdPrefix: 'whatsapp',
@@ -357,10 +401,90 @@ describe('CommercialPipelineService', () => {
     );
   });
 
-  it('falha com multiplos grupos autorizados', async () => {
+  it('falha com destinos fisicos que repetem a mesma fingerprint logica', async () => {
     await expectCode(
       build({ groups: [group('one'), group('two')] }).service.dryRun(),
-      'MULTIPLE_AUTHORIZED_GROUPS',
+      'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
+    );
+  });
+
+  it('preserva o preview legado quando existe um unico grupo', async () => {
+    const { service } = build({ groups: [group('one')] });
+
+    const result = await service.dryRun();
+
+    expect(result.selectedGroup).toMatchObject({
+      id: 'one',
+      fingerprint: 'grp_123456789abc',
+    });
+  });
+
+  it('bloqueia preview legado sem alvo quando existem varios grupos logicos', async () => {
+    const first = group('one', { fingerprint: 'grp_eeeeeeeeeeee' });
+    const second = group('two', { fingerprint: 'grp_aaaaaaaaaaaa' });
+    const { service, runs } = build({ groups: [first, second] });
+
+    await expectCode(service.dryRun(), 'MULTIPLE_AUTHORIZED_GROUPS');
+    expect(runs.records[0]).toMatchObject({
+      status: 'BLOCKED',
+      failureCode: 'MULTIPLE_AUTHORIZED_GROUPS',
+    });
+    expect(runs.records[0]).not.toHaveProperty('groupDestinationId');
+  });
+
+  it('usa o alvo explicito quando existem grupos logicos distintos', async () => {
+    const secondGroup = group('two', { fingerprint: 'grp_abcdef123456' });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    const result = await service.dryRun({
+      target: {
+        groupId: 'two',
+        groupName: secondGroup.name,
+        logicalGroupFingerprint: secondGroup.fingerprint,
+        campaignId: 'campaign-two',
+        nicheId: 'niche-two',
+      } satisfies CommercialAutomationTarget,
+    });
+
+    expect(result.selectedGroup).toMatchObject({
+      id: 'two',
+      fingerprint: 'grp_abcdef123456',
+    });
+  });
+
+  it('bloqueia alvo explicito com campanha ou nicho divergente', async () => {
+    const secondGroup = group('two', { fingerprint: 'grp_abcdef123456' });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    await expectCode(
+      service.dryRun({
+        target: {
+          groupId: 'two',
+          groupName: secondGroup.name,
+          logicalGroupFingerprint: secondGroup.fingerprint,
+          campaignId: 'campaign-mismatch',
+          nicheId: 'niche-mismatch',
+        } satisfies CommercialAutomationTarget,
+      }),
+      'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
+    );
+  });
+
+  it('bloqueia alvo explicito inexistente', async () => {
+    const secondGroup = group('two', { fingerprint: 'grp_abcdef123456' });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    await expectCode(
+      service.dryRun({
+        target: {
+          groupId: 'missing',
+          groupName: 'Grupo ausente',
+          logicalGroupFingerprint: 'grp_missing0000',
+          campaignId: 'campaign-missing',
+          nicheId: 'niche-missing',
+        } satisfies CommercialAutomationTarget,
+      }),
+      'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
     );
   });
 

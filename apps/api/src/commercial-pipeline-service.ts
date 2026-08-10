@@ -5,7 +5,10 @@ import {
 } from '@shopee-auto-affiliate-ai/providers';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { CommercialCopyGenerator } from './commercial-copy-service';
-import { isCommercialAuthorizedGroup } from './commercial-group-selection';
+import {
+  duplicateLogicalGroupFingerprints,
+  isCommercialAuthorizedGroup,
+} from './commercial-group-selection';
 import {
   commercialProductRejections,
   incrementCommercialRejectionSummary,
@@ -16,6 +19,8 @@ import {
 } from './commercial-offer-score-policy';
 import type {
   CommercialDeliveryHistoryRepository,
+  CommercialAutomationTarget,
+  CommercialGroupCampaignRepository,
   CommercialOfferScorePolicyVersion,
   CommercialPipelineRejectionCode,
   CommercialPipelineScoreBreakdown,
@@ -44,6 +49,7 @@ export type CommercialPipelineInput = {
   minimumScore?: number;
   campaign?: string;
   limitCandidates?: number;
+  target?: CommercialAutomationTarget;
 };
 
 type NormalizedCommercialPipelineInput = Required<
@@ -118,6 +124,7 @@ export type CommercialPromotionCandidatePipelineSelection = {
 export type CommercialPipelineServiceOptions = {
   offers: ShopeeOfferRepository;
   groups: WhatsAppGroupDirectoryRepository;
+  campaigns: Pick<CommercialGroupCampaignRepository, 'findById'>;
   score: Pick<ScoreService, 'calculate'>;
   copy: CommercialCopyGenerator;
   runs: CommercialPipelineRunRepository;
@@ -294,6 +301,8 @@ export class CommercialPipelineService {
         | 'NO_ELIGIBLE_PRODUCT'
         | 'NO_AUTHORIZED_GROUP'
         | 'MULTIPLE_AUTHORIZED_GROUPS'
+        | 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP'
+        | 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'
         | 'PRODUCT_ALREADY_SENT',
       state: {
         candidateCount: number;
@@ -320,6 +329,10 @@ export class CommercialPipelineService {
           NO_AUTHORIZED_GROUP: 'Nenhum grupo autorizado disponivel',
           MULTIPLE_AUTHORIZED_GROUPS:
             'Mais de um grupo autorizado esta disponivel',
+          COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP:
+            'Mais de um destino representa o mesmo grupo logico',
+          COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE:
+            'O alvo comercial selecionado nao esta elegivel',
           PRODUCT_ALREADY_SENT: 'Produtos elegiveis ja foram enviados ao grupo',
         }[code],
         code,
@@ -392,15 +405,63 @@ export class CommercialPipelineService {
           rejectionSummary,
         });
       }
-      if (groups.length > 1) {
-        return await block('MULTIPLE_AUTHORIZED_GROUPS', {
+      const duplicateFingerprints = duplicateLogicalGroupFingerprints(groups);
+      if (duplicateFingerprints.length > 0) {
+        return await block('COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP', {
           candidateCount: candidates.length,
           eligibleCount: ranked.length,
           rejectedCount: initialRejectedCount,
           rejectionSummary,
         });
       }
-      const group = groups[0];
+      const target = input.target;
+      const orderedGroups = [...groups].sort(
+        (left, right) =>
+          left.fingerprint.localeCompare(right.fingerprint) ||
+          left.id.localeCompare(right.id),
+      );
+      const group = target
+        ? orderedGroups.find(
+            (candidate) =>
+              candidate.id === target.groupId &&
+              candidate.name === target.groupName &&
+              candidate.fingerprint === target.logicalGroupFingerprint,
+          )
+        : orderedGroups.length === 1
+          ? orderedGroups[0]
+          : undefined;
+      if (!group) {
+        return await block(
+          target
+            ? 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'
+            : 'MULTIPLE_AUTHORIZED_GROUPS',
+          {
+            candidateCount: candidates.length,
+            eligibleCount: ranked.length,
+            rejectedCount: initialRejectedCount,
+            rejectionSummary,
+          },
+        );
+      }
+      if (target) {
+        const campaign = await this.options.campaigns.findById(
+          target.campaignId,
+        );
+        if (
+          !campaign ||
+          !campaign.active ||
+          !campaign.niche.active ||
+          campaign.nicheId !== target.nicheId ||
+          campaign.logicalGroupFingerprint !== group.fingerprint
+        ) {
+          return await block('COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE', {
+            candidateCount: candidates.length,
+            eligibleCount: ranked.length,
+            rejectedCount: initialRejectedCount,
+            rejectionSummary,
+          });
+        }
+      }
       const sentChecks = await Promise.all(
         ranked.map(({ product }) =>
           this.options.deliveryHistory.wasProductSentToGroup(

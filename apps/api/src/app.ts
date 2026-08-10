@@ -1422,6 +1422,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
                 'NO_ELIGIBLE_PRODUCT',
                 'NO_AUTHORIZED_GROUP',
                 'MULTIPLE_AUTHORIZED_GROUPS',
+                'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
                 'PRODUCT_ALREADY_SENT',
               ].includes(code)
             ? 409

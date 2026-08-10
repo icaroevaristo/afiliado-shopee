@@ -94,6 +94,8 @@ describe('commercial automation Prisma repositories', () => {
       globalSentToday: 2,
       groupSentToday: 1,
       lastSentAt: new Date('2026-07-25T14:30:00.000Z'),
+      globalLastSentAt: new Date('2026-07-25T14:30:00.000Z'),
+      groupLastSentAt: new Date('2026-07-25T14:30:00.000Z'),
     });
     expect(groupBy).toHaveBeenCalledWith({
       by: ['destinationId'],
@@ -112,6 +114,14 @@ describe('commercial automation Prisma repositories', () => {
         where: expect.objectContaining({
           status: 'SENT',
           destination: { type: 'GROUP' },
+        }),
+      }),
+    );
+    expect(dispatchFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          destinationId: 'group-1',
+          sentAt: { not: null },
         }),
       }),
     );

@@ -193,8 +193,9 @@ export function CommercialAutomationControl() {
                   {automation.globalRemainingToday} restante(s)
                 </AutomationDetail>
                 <AutomationDetail label="Limite do grupo hoje">
-                  {automation.groupSentToday}/{automation.dailyGroupLimit} ·{' '}
-                  {automation.groupRemainingToday} restante(s)
+                  {automation.groupSentToday === null
+                    ? '—'
+                    : `${automation.groupSentToday}/${automation.dailyGroupLimit} · ${automation.groupRemainingToday} restante(s)`}
                 </AutomationDetail>
                 <AutomationDetail label="Último envio">
                   {formatCommercialAutomationDate(

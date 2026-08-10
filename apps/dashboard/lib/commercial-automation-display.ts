@@ -19,6 +19,10 @@ export const commercialAutomationReasonLabels: Record<
   MULTIPLE_AUTHORIZED_GROUPS: 'Mais de um grupo autorizado e disponível.',
   AMBIGUOUS_COMMERCIAL_RUN_EXISTS:
     'Existe uma execução comercial ambígua que exige investigação manual.',
+  COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP:
+    'Existem destinos físicos duplicando a mesma identidade lógica.',
+  COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE:
+    'O grupo selecionado deixou de ser elegível para este tick.',
 };
 
 export const formatCommercialAutomationDate = (
