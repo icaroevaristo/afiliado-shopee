@@ -95,6 +95,25 @@ describe('OverviewPage', () => {
     await screen.unmount();
   });
 
+  it('mantem a automacao operando enquanto aguarda a cadencia', async () => {
+    getAutomationStatusMock.mockResolvedValueOnce({
+      ...automationStatus,
+      allowed: false,
+      reasons: ['MINIMUM_INTERVAL_NOT_REACHED'],
+    });
+
+    const screen = await render(<OverviewPage />);
+    await flush();
+
+    expect(screen.container.textContent).toContain('OPERANDO');
+    expect(screen.container.textContent).toContain('AGUARDANDO CADÊNCIA');
+    expect(screen.container.textContent).toContain(
+      'MINIMUM_INTERVAL_NOT_REACHED',
+    );
+    expect(screen.container.textContent).not.toContain('bloqueada');
+    await screen.unmount();
+  });
+
   it('renderiza o ultimo envio com o grupo e modo persistidos', async () => {
     listDispatchesMock.mockResolvedValueOnce([{
       id: 'dispatch-1',

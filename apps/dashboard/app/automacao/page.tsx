@@ -10,6 +10,10 @@ import {
   type CommercialAutomationSchedulerStatus,
   type CommercialAutomationStatus,
 } from '../../lib/api';
+import {
+  getCommercialOperationalState,
+  getCommercialReadinessState,
+} from '../../lib/commercial-automation-display';
 import { Countdown, OpsBadge, OpsLoading, OpsPageHeading, OpsSection, OpsState, RefreshButton } from '../../components/ops-components';
 import { formatDateTimeInTimezone } from '../../lib/format';
 
@@ -50,6 +54,12 @@ export default function AutomationPage() {
     return () => window.clearInterval(timer);
   }, []);
 
+  const operationalState = getCommercialOperationalState(status, scheduler);
+  const readinessState = getCommercialReadinessState(status);
+  const readinessDetails = readinessState.reasonCodes.length > 0
+    ? `Reasons: ${readinessState.reasonCodes.join(' · ')}`
+    : 'Nenhum bloqueio de readiness';
+
   const applyAction = async () => {
     if (!action) return;
     setActionBusy(true);
@@ -72,7 +82,8 @@ export default function AutomationPage() {
       {error ? <OpsState title="Controle indisponivel" message={error} tone="danger" action={<button type="button" className="ops-button" onClick={() => void load()}>Tentar novamente</button>} /> : null}
       {status && scheduler ? <>
         <div className="ops-control-grid mb-4">
-          <div className="ops-control"><div className="ops-control-label">Status operacional</div><div className="ops-control-value flex items-center gap-2"><span className="ops-status-dot" data-tone={status.paused ? 'warning' : status.allowed ? 'success' : 'warning'} />{status.paused ? 'PAUSADA' : status.allowed ? 'ATIVA' : 'BLOQUEADA'}</div><div className="ops-control-sub">{status.reasons.length ? status.reasons.join(' · ') : 'readiness sem bloqueios'}</div></div>
+          <div className="ops-control"><div className="ops-control-label">Status operacional</div><div className="ops-control-value flex items-center gap-2"><span className="ops-status-dot" data-tone={operationalState.tone === 'neutral' ? 'warning' : operationalState.tone} />{operationalState.label}</div><div className="ops-control-sub">{operationalState.detail}</div></div>
+          <div className="ops-control"><div className="ops-control-label">Readiness para envio</div><div className="ops-control-value"><OpsBadge tone={readinessState.tone}>{readinessState.label}</OpsBadge></div><div className="ops-control-sub ops-mono">{readinessDetails}</div></div>
           <div className="ops-control"><div className="ops-control-label">Proximo tick</div><div className="ops-control-value"><Countdown target={scheduler.nextRunAt} /></div><div className="ops-control-sub">{scheduler.nextRunAt ? formatDateTimeInTimezone(scheduler.nextRunAt, scheduler.timezone, '—', 'medium') : 'Nao disponivel'}</div></div>
           <div className="ops-control"><div className="ops-control-label">Envios hoje</div><div className="ops-control-value">{status.globalSentToday} / {status.dailyGlobalLimit}</div><div className="ops-control-sub">grupo {status.groupSentToday} / {status.dailyGroupLimit}</div></div>
           <div className="ops-control"><div className="ops-control-label">Modo</div><div className="ops-control-value">{scheduler.mode.toUpperCase()}</div><div className="ops-control-sub">janela {status.allowedStartTime}–{status.allowedEndTime} · {status.timezone}</div></div>

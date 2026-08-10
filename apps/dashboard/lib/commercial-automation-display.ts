@@ -1,4 +1,8 @@
-import type { CommercialAutomationReason } from './api';
+import type {
+  CommercialAutomationReason,
+  CommercialAutomationSchedulerStatus,
+  CommercialAutomationStatus,
+} from './api';
 import { formatDateTimeInTimezone } from './format';
 
 export const commercialAutomationReasonLabels: Record<
@@ -21,3 +25,129 @@ export const formatCommercialAutomationDate = (
   value: string | null,
   timezone: string,
 ) => formatDateTimeInTimezone(value, timezone, 'Não registrado');
+
+export type CommercialOperationalState = {
+  code: 'OPERATING' | 'PAUSED' | 'DISABLED' | 'SCHEDULER_INACTIVE' | 'UNKNOWN';
+  label: string;
+  tone: 'success' | 'warning' | 'danger' | 'neutral';
+  detail: string;
+};
+
+export type CommercialReadinessState = {
+  code: 'READY' | 'CADENCE_WAIT' | 'OUTSIDE_WINDOW' | 'DAILY_LIMIT' | 'BLOCKED' | 'UNKNOWN';
+  label: string;
+  tone: 'success' | 'warning' | 'danger' | 'neutral';
+  reasonCodes: string[];
+};
+
+export const getCommercialOperationalState = (
+  status: CommercialAutomationStatus | null | undefined,
+  scheduler: CommercialAutomationSchedulerStatus | null | undefined,
+): CommercialOperationalState => {
+  if (!status) {
+    return {
+      code: 'UNKNOWN',
+      label: 'NÃO DISPONÍVEL',
+      tone: 'neutral',
+      detail: 'Aguardando estado operacional',
+    };
+  }
+
+  if (!status.enabled) {
+    return {
+      code: 'DISABLED',
+      label: 'DESATIVADA',
+      tone: 'danger',
+      detail: 'Automação desabilitada pelo ambiente',
+    };
+  }
+
+  if (status.paused) {
+    return {
+      code: 'PAUSED',
+      label: 'PAUSADA',
+      tone: 'warning',
+      detail: 'Pausa persistida operacionalmente',
+    };
+  }
+
+  if (scheduler?.status !== 'registered') {
+    return {
+      code: 'SCHEDULER_INACTIVE',
+      label: 'ATENÇÃO',
+      tone: 'warning',
+      detail: 'SCHEDULER INATIVO',
+    };
+  }
+
+  return {
+    code: 'OPERATING',
+    label: 'OPERANDO',
+    tone: 'success',
+    detail: 'Scheduler registrado',
+  };
+};
+
+export const getCommercialReadinessState = (
+  status: CommercialAutomationStatus | null | undefined,
+): CommercialReadinessState => {
+  if (!status) {
+    return {
+      code: 'UNKNOWN',
+      label: 'NÃO DISPONÍVEL',
+      tone: 'neutral',
+      reasonCodes: [],
+    };
+  }
+
+  const reasonCodes = [...status.reasons];
+
+  if (status.allowed) {
+    return {
+      code: 'READY',
+      label: 'PRONTA PARA O PRÓXIMO TICK',
+      tone: 'success',
+      reasonCodes,
+    };
+  }
+
+  if (
+    reasonCodes.length === 1 &&
+    reasonCodes[0] === 'MINIMUM_INTERVAL_NOT_REACHED'
+  ) {
+    return {
+      code: 'CADENCE_WAIT',
+      label: 'AGUARDANDO CADÊNCIA',
+      tone: 'warning',
+      reasonCodes,
+    };
+  }
+
+  if (reasonCodes.includes('OUTSIDE_ALLOWED_WINDOW')) {
+    return {
+      code: 'OUTSIDE_WINDOW',
+      label: 'FORA DA JANELA',
+      tone: 'warning',
+      reasonCodes,
+    };
+  }
+
+  if (
+    reasonCodes.includes('GLOBAL_DAILY_LIMIT_REACHED') ||
+    reasonCodes.includes('GROUP_DAILY_LIMIT_REACHED')
+  ) {
+    return {
+      code: 'DAILY_LIMIT',
+      label: 'LIMITE DIÁRIO ATINGIDO',
+      tone: 'warning',
+      reasonCodes,
+    };
+  }
+
+  return {
+    code: 'BLOCKED',
+    label: 'BLOQUEADA',
+    tone: 'danger',
+    reasonCodes,
+  };
+};

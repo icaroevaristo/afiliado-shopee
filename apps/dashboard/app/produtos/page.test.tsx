@@ -37,7 +37,7 @@ const offer = {
 
 beforeEach(() => {
   listMock.mockReset().mockResolvedValue({
-    provider: 'mock',
+    provider: 'official',
     items: [offer],
     page: 1,
     limit: 12,
@@ -52,7 +52,9 @@ describe('ProductsPage', () => {
 
     expect(screen.container.textContent).toContain('Produto ficticio');
     expect(screen.container.textContent).toContain('Provider atual');
+    expect(screen.container.textContent).toContain('Oficial');
     expect(screen.container.textContent).toContain('somente leitura');
+    expect(screen.container.textContent).not.toContain('Aguardando credenciais');
     expect(screen.container.textContent).not.toContain('Sincronizar ofertas');
     expect(screen.container.textContent).not.toContain('Importacao manual');
     expect(screen.container.textContent).not.toContain('Preview');

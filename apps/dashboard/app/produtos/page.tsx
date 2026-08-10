@@ -30,6 +30,7 @@ const initialFilters: ShopeeOfferFilters = {
 };
 
 const sourceLabel = { MOCK: 'Mock', MANUAL: 'Manual', OFFICIAL: 'Oficial' };
+const providerLabel = { mock: 'Mock', manual: 'Manual', official: 'Oficial' };
 const statusLabel = {
   ACTIVE: 'Ativa',
   EXPIRED: 'Expirada',
@@ -81,21 +82,13 @@ export default function ProductsPage() {
       <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-4">
         <span className="text-sm text-slate-600">Provider atual</span>
         <StatusBadge tone={result?.provider === 'official' ? 'warning' : 'ok'}>
-          {result?.provider ?? 'carregando'}
+          {result?.provider ? providerLabel[result.provider] : 'carregando'}
         </StatusBadge>
         <p className="text-sm text-slate-600">
           A atualizacao do catalogo acontece pelo fluxo operacional oficial; o
           console nao inicia sincronizacao, importacao ou geracao de copy.
         </p>
       </div>
-
-      {result?.provider === 'official' ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-          <strong>Aguardando credenciais da Shopee.</strong> Autenticacao e
-          transporte real aguardam credenciais e documentacao liberada para a
-          conta.
-        </div>
-      ) : null}
 
       {error ? <ErrorState message={error} onRetry={() => load()} /> : null}
       <section className="rounded-lg border border-slate-200 bg-white p-4">
