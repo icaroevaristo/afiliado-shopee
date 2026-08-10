@@ -1,54 +1,20 @@
 'use client';
 
-import { PlayCircle, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { CopyButton } from '../../components/copy-button';
 import { ErrorState } from '../../components/error-state';
 import { JobProgress } from '../../components/job-progress';
 import { LoadingState } from '../../components/loading-state';
 import { PageHeader } from '../../components/page-header';
-import {
-  getPipelineJob,
-  runPipeline,
-  type PipelineJobResponse,
-  type ProductFilters,
-} from '../../lib/api';
+import { getPipelineJob, type PipelineJobResponse } from '../../lib/api';
 
 const POLLING_MS = 5000;
 const ACTIVE_STATES = new Set(['active', 'waiting', 'delayed', 'queued']);
 
-type FilterForm = Record<keyof ProductFilters, string>;
-
-const initialFilters: FilterForm = {
-  categoria: '',
-  precoMin: '',
-  precoMax: '',
-  descontoMin: '',
-  notaMin: '',
-  vendidosMin: '',
-  comissaoMin: '',
-};
-
-const toFilters = (form: FilterForm): ProductFilters => {
-  const filters: ProductFilters = {};
-  for (const [key, value] of Object.entries(form)) {
-    if (!value) continue;
-    if (key === 'categoria') {
-      filters.categoria = value;
-    } else {
-      filters[key as Exclude<keyof ProductFilters, 'categoria'>] =
-        Number(value);
-    }
-  }
-  return filters;
-};
-
 export default function PipelinePage() {
-  const [filters, setFilters] = useState<FilterForm>(initialFilters);
   const [jobId, setJobId] = useState('');
   const [manualJobId, setManualJobId] = useState('');
   const [job, setJob] = useState<PipelineJobResponse | null>(null);
-  const [submitting, setSubmitting] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,35 +38,6 @@ export default function PipelinePage() {
     }
   };
 
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (submitting) return;
-
-    setSubmitting(true);
-    setError(null);
-    setJob(null);
-    try {
-      const response = await runPipeline(toFilters(filters));
-      const id = String(response.jobId ?? '');
-      setJobId(id);
-      setManualJobId(id);
-      sessionStorage.setItem('lastPipelineJobId', id);
-      setJob({
-        status: response.status,
-        progress: 'queued',
-        startedAt: null,
-        finishedAt: null,
-        result: null,
-        error: null,
-      });
-      if (id) await consultJob(id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   useEffect(() => {
     if (!currentJobIsActive || !jobId) return;
     const interval = window.setInterval(() => {
@@ -110,81 +47,27 @@ export default function PipelinePage() {
     return () => window.clearInterval(interval);
   }, [currentJobIsActive, jobId]);
 
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (manualJobId.trim()) await consultJob(manualJobId.trim());
+  };
+
   return (
     <div className="grid gap-6">
       <PageHeader
         title="Pipeline"
-        description="Execute POST /pipeline/run com filtros comerciais e acompanhe GET /pipeline/jobs/:id sem polling agressivo."
+        description="Acompanhe jobs existentes por ID. A criação manual de pipeline não é exposta no Operations Console."
       />
 
-      <form
-        onSubmit={submit}
-        className="rounded-lg border border-slate-200 bg-white p-5"
-      >
-        <div className="grid gap-4 md:grid-cols-4">
-          <label className="md:col-span-2">
-            <span className="text-sm font-medium text-slate-700">Categoria</span>
-            <input
-              value={filters.categoria}
-              onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
-                  categoria: event.target.value,
-                }))
-              }
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-              placeholder="Ex.: Eletronicos"
-            />
-          </label>
-          {[
-            ['precoMin', 'Preco minimo'],
-            ['precoMax', 'Preco maximo'],
-            ['descontoMin', 'Desconto minimo'],
-            ['notaMin', 'Nota minima'],
-            ['vendidosMin', 'Vendidos minimos'],
-            ['comissaoMin', 'Comissao minima'],
-          ].map(([name, label]) => (
-            <label key={name}>
-              <span className="text-sm font-medium text-slate-700">{label}</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={filters[name as keyof FilterForm]}
-                onChange={(event) =>
-                  setFilters((current) => ({
-                    ...current,
-                    [name]: event.target.value,
-                  }))
-                }
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-              />
-            </label>
-          ))}
-        </div>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button
-            type="submit"
-            disabled={submitting}
-            className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <PlayCircle className="h-4 w-4" aria-hidden="true" />
-            {submitting ? 'Enfileirando...' : 'Executar pipeline'}
-          </button>
-          {jobId ? <CopyButton value={jobId} label="Copiar jobId" /> : null}
-        </div>
-      </form>
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+        Esta tela é somente leitura e consulta apenas o estado persistido do
+        job informado.
+      </div>
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (manualJobId.trim()) void consultJob(manualJobId.trim());
-        }}
-        className="rounded-lg border border-slate-200 bg-white p-5"
-      >
+      <form onSubmit={submit} className="rounded-lg border border-slate-200 bg-white p-5">
         <label>
           <span className="text-sm font-medium text-slate-700">
-            Consultar outro jobId
+            Consultar jobId
           </span>
           <div className="mt-1 flex flex-col gap-2 sm:flex-row">
             <input
@@ -207,7 +90,6 @@ export default function PipelinePage() {
 
       {checking ? <LoadingState label="Consultando job" /> : null}
       {error ? <ErrorState message={error} /> : null}
-
       <JobProgress job={job} queuedJobId={jobId} />
 
       {job?.result ? (
@@ -221,4 +103,3 @@ export default function PipelinePage() {
     </div>
   );
 }
-

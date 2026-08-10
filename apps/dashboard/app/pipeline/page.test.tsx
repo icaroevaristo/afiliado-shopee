@@ -1,26 +1,21 @@
-import React from 'react';
-import { act } from 'react';
+import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { change, render, submit } from '../../test/render';
 import PipelinePage from './page';
 
-const runPipelineMock = vi.fn();
 const getPipelineJobMock = vi.fn();
 
 vi.mock('../../lib/api', () => ({
-  runPipeline: (...args: unknown[]) => runPipelineMock(...args),
   getPipelineJob: (...args: unknown[]) => getPipelineJobMock(...args),
 }));
 
 beforeEach(() => {
-  runPipelineMock.mockReset();
   getPipelineJobMock.mockReset();
   sessionStorage.clear();
 });
 
 describe('PipelinePage', () => {
-  it('dispara o pipeline e consulta o job criado', async () => {
-    runPipelineMock.mockResolvedValue({ jobId: 'job-1', status: 'queued' });
+  it('consulta um job existente sem expor criacao de pipeline', async () => {
     getPipelineJobMock.mockResolvedValue({
       status: 'completed',
       progress: 100,
@@ -31,15 +26,15 @@ describe('PipelinePage', () => {
     });
 
     const screen = await render(<PipelinePage />);
-    const category = screen.container.querySelector('input[placeholder="Ex.: Eletronicos"]');
+    const input = screen.container.querySelector('input[placeholder="Cole o jobId"]');
     const form = screen.container.querySelector('form');
-    expect(category).not.toBeNull();
+    expect(input).not.toBeNull();
     expect(form).not.toBeNull();
+    expect(screen.container.textContent).not.toContain('Executar pipeline');
 
-    await change(category as HTMLInputElement, 'Eletronicos');
+    await change(input as HTMLInputElement, 'job-1');
     await submit(form as HTMLFormElement);
 
-    expect(runPipelineMock).toHaveBeenCalledWith({ categoria: 'Eletronicos' });
     expect(getPipelineJobMock).toHaveBeenCalledWith('job-1');
     expect(sessionStorage.getItem('lastPipelineJobId')).toBe('job-1');
     expect(screen.container.textContent).toContain('completed');
@@ -48,7 +43,6 @@ describe('PipelinePage', () => {
 
   it('faz polling enquanto ativo e limpa o intervalo ao desmontar', async () => {
     vi.useFakeTimers();
-    runPipelineMock.mockResolvedValue({ jobId: 'job-2', status: 'queued' });
     getPipelineJobMock.mockResolvedValue({
       status: 'active',
       progress: 30,
@@ -59,7 +53,9 @@ describe('PipelinePage', () => {
     });
 
     const screen = await render(<PipelinePage />);
+    const input = screen.container.querySelector('input[placeholder="Cole o jobId"]');
     const form = screen.container.querySelector('form');
+    await change(input as HTMLInputElement, 'job-2');
     await submit(form as HTMLFormElement);
     expect(getPipelineJobMock).toHaveBeenCalledTimes(1);
 
@@ -76,12 +72,13 @@ describe('PipelinePage', () => {
     vi.useRealTimers();
   });
 
-  it('mostra erro quando o polling falha', async () => {
-    runPipelineMock.mockResolvedValue({ jobId: 'job-3', status: 'queued' });
+  it('mostra erro quando a consulta falha', async () => {
     getPipelineJobMock.mockRejectedValue(new Error('Job nao encontrado'));
 
     const screen = await render(<PipelinePage />);
+    const input = screen.container.querySelector('input[placeholder="Cole o jobId"]');
     const form = screen.container.querySelector('form');
+    await change(input as HTMLInputElement, 'job-3');
     await submit(form as HTMLFormElement);
 
     expect(screen.container.textContent).toContain('Job nao encontrado');

@@ -1,30 +1,18 @@
 import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { change, click, render } from '../../test/render';
+import { click, render } from '../../test/render';
 import CommercialPipelinePage from './page';
 
 const listMock = vi.fn();
-const runMock = vi.fn();
-const confirmMock = vi.fn();
 
 vi.mock('../../lib/api', () => ({
   listCommercialPipelineRuns: (...args: unknown[]) => listMock(...args),
-  runCommercialPipelineDryRun: (...args: unknown[]) => runMock(...args),
-  confirmCommercialPipelineRun: (...args: unknown[]) => confirmMock(...args),
 }));
 
-const result = {
-  runId: 'run-safe',
+const history = {
+  id: 'run-safe',
   mode: 'dry-run',
-  status: 'ready',
-  provider: 'mock',
-  candidateCount: 3,
-  eligibleCount: 1,
-  rejectedCount: 2,
-  rejectionSummary: {
-    MISSING_AFFILIATE_LINK: 1,
-    SCORE_BELOW_MINIMUM: 1,
-  },
+  status: 'completed',
   selectedProduct: {
     id: 'product-safe',
     name: 'Produto ficticio selecionado',
@@ -37,34 +25,16 @@ const result = {
     name: 'Grupo ficticio autorizado',
     fingerprint: 'grp_123456789abc',
   },
-  selectionReasons: ['Maior score elegivel: 82'],
-  copyPreview:
-    '🔥 Oferta encontrada!\n\n📦 Produto ficticio selecionado\n\n💰 Por R$ 99,90\n\n🛒 Aproveite pelo link:\nhttps://example.invalid/affiliate',
-  plannedSubIds: [
-    'whatsapp',
-    'whatsapp',
-    'grp_123456789abc',
-    'teste-local',
-    '2026-07-25',
-  ],
-  dispatchWillBeCreated: false,
-  jobWillBeCreated: false,
-  messageWillBeSent: false,
-};
-
-const history = {
-  id: 'run-safe',
-  mode: 'dry-run',
-  status: 'completed',
-  selectedProduct: result.selectedProduct,
-  selectedGroup: result.selectedGroup,
   candidateCount: 3,
   eligibleCount: 1,
   rejectedCount: 2,
-  rejectionSummary: result.rejectionSummary,
-  selectionReasons: result.selectionReasons,
-  copyPreview: result.copyPreview,
-  plannedSubIds: result.plannedSubIds,
+  rejectionSummary: {
+    MISSING_AFFILIATE_LINK: 1,
+    SCORE_BELOW_MINIMUM: 1,
+  },
+  selectionReasons: ['Maior score elegivel: 82'],
+  copyPreview: 'Oferta local para consulta',
+  plannedSubIds: ['whatsapp', 'teste-local'],
   failureCode: null,
   confirmedAt: null,
   finalStatus: null,
@@ -77,203 +47,81 @@ const history = {
   dispatchWasCreated: false,
   jobWasCreated: false,
   messageWasSent: false,
-  confirmationAvailable: true,
+  confirmationAvailable: false,
+};
+
+const emptyPage = {
+  items: [],
+  page: 1,
+  limit: 20,
+  total: 0,
+  totalPages: 1,
 };
 
 beforeEach(() => {
   listMock.mockReset().mockResolvedValue({
     items: [history],
     page: 1,
-    limit: 10,
+    limit: 20,
     total: 1,
     totalPages: 1,
   });
-  runMock.mockReset().mockResolvedValue(result);
-  confirmMock.mockReset().mockResolvedValue({ status: 'queued' });
 });
 
-const executeButton = (container: HTMLElement) =>
-  Array.from(container.querySelectorAll('button')).find((button) =>
-    button.textContent?.includes('Executar dry-run'),
-  ) as HTMLButtonElement;
-
 describe('CommercialPipelinePage', () => {
-  it('mostra loading inicial e historico sanitizado', async () => {
+  it('mostra loading e depois o historico somente leitura', async () => {
     let release: (value: unknown) => void = () => undefined;
     listMock.mockReturnValueOnce(
       new Promise((resolve) => {
         release = resolve;
       }),
     );
+
     const screen = await render(<CommercialPipelinePage />);
     expect(screen.container.textContent).toContain('Carregando historico');
     await act(async () => {
-      release({ items: [], page: 1, limit: 10, total: 0, totalPages: 1 });
+      release({ items: [history], page: 1, limit: 20, total: 1, totalPages: 1 });
     });
+    expect(screen.container.textContent).toContain('Produto ficticio selecionado');
+    expect(screen.container.textContent).not.toContain('Confirmar envio');
+    expect(screen.container.textContent).not.toContain('Executar dry-run');
     await screen.unmount();
   });
 
-  it('executa e apresenta produto, grupo, preview e resumo', async () => {
+  it('consulta o endpoint de historico sem executar acoes comerciais', async () => {
     const screen = await render(<CommercialPipelinePage />);
-    await click(executeButton(screen.container));
-    expect(runMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        source: 'MOCK',
-        minimumScore: 70,
-        campaign: 'teste-local',
-      }),
-    );
-    const text = screen.container.textContent ?? '';
-    expect(text).toContain('Produto ficticio selecionado');
-    expect(text).toContain('Score 82');
-    expect(text).toContain('Grupo ficticio autorizado');
-    expect(text).toContain('grp_123456789abc');
-    expect(text).toContain('Copiar preview');
-    expect(text).toContain('Sem link afiliado');
-    expect(text).toContain('Nenhuma mensagem foi enviada');
-    expect(text).not.toContain('Enviar mensagem');
-    expect(text).toContain('Confirmar envio real');
+
+    expect(listMock).toHaveBeenCalledWith(1, 20);
+    expect(screen.container.textContent).toContain('Grupo ficticio autorizado');
+    expect(screen.container.textContent).toContain('Oferta local para consulta');
+    expect(screen.container.textContent).toContain('grp_123456789abc');
+    expect(screen.container.textContent).toContain('somente leitura');
+    expect(screen.container.textContent).not.toContain('Enviar mensagem');
+    expect(screen.container.textContent).not.toContain('Confirmar envio real');
     await screen.unmount();
   });
 
-  it('exibe historico de dry-runs', async () => {
+  it('mostra estado vazio real', async () => {
+    listMock.mockResolvedValueOnce(emptyPage);
     const screen = await render(<CommercialPipelinePage />);
-    expect(screen.container.textContent).toContain('Historico comercial');
-    expect(screen.container.textContent).toContain(
-      'Produto ficticio selecionado',
-    );
-    expect(screen.container.textContent).not.toContain('@g.us');
+    expect(screen.container.textContent).toContain('Nenhuma execucao registrada');
     await screen.unmount();
   });
 
-  it('mostra erro de zero candidatos e permite retry', async () => {
-    runMock
-      .mockRejectedValueOnce(new Error('Nenhum produto elegivel encontrado'))
-      .mockResolvedValueOnce(result);
+  it('mostra erro e permite retry de leitura', async () => {
+    listMock
+      .mockRejectedValueOnce(new Error('API indisponivel'))
+      .mockResolvedValueOnce(emptyPage);
+
     const screen = await render(<CommercialPipelinePage />);
-    await click(executeButton(screen.container));
-    expect(screen.container.textContent).toContain(
-      'Nenhum produto elegivel encontrado',
-    );
+    expect(screen.container.textContent).toContain('API indisponivel');
     const retry = Array.from(screen.container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Tentar novamente',
-    ) as HTMLButtonElement;
-    await click(retry);
-    expect(runMock).toHaveBeenCalledTimes(2);
-    expect(screen.container.textContent).toContain(
-      'Produto ficticio selecionado',
     );
-    await screen.unmount();
-  });
-
-  it('mostra bloqueio por multiplos grupos sem acao de envio', async () => {
-    runMock.mockRejectedValueOnce(
-      new Error('Mais de um grupo autorizado esta disponivel'),
-    );
-    const screen = await render(<CommercialPipelinePage />);
-    await click(executeButton(screen.container));
-    expect(screen.container.textContent).toContain(
-      'Mais de um grupo autorizado esta disponivel',
-    );
-    expect(screen.container.textContent).not.toContain('Enviar mensagem');
-    await screen.unmount();
-  });
-
-  it('mantem layouts explicitos para mobile e desktop', async () => {
-    const screen = await render(<CommercialPipelinePage />);
-    expect(
-      screen.container.querySelector('[class*="sm:grid-cols-2"]'),
-    ).not.toBeNull();
-    expect(
-      screen.container.querySelector('[class*="lg:grid-cols-4"]'),
-    ).not.toBeNull();
-    expect(screen.container.textContent).toContain(
-      'Cupons nao fazem parte deste fluxo',
-    );
-    await screen.unmount();
-  });
-
-  it('exige token no modal e remove confirmacao depois da tentativa', async () => {
-    const confirmed = {
-      ...history,
-      mode: 'confirmed',
-      status: 'started',
-      confirmedAt: '2026-07-25T12:01:00.000Z',
-      finalStatus: 'pending',
-      dispatchStatus: 'pending',
-      dispatchWasCreated: true,
-      jobWasCreated: true,
-      confirmationAvailable: false,
-    };
-    listMock
-      .mockReset()
-      .mockResolvedValueOnce({
-        items: [history],
-        page: 1,
-        limit: 10,
-        total: 1,
-        totalPages: 1,
-      })
-      .mockResolvedValueOnce({
-        items: [confirmed],
-        page: 1,
-        limit: 10,
-        total: 1,
-        totalPages: 1,
-      });
-    const screen = await render(<CommercialPipelinePage />);
-    const open = Array.from(screen.container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Confirmar envio real'),
-    ) as HTMLButtonElement;
-    await click(open);
-    expect(screen.container.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(screen.container.textContent).toContain('grp_123456789abc');
-    expect(screen.container.textContent).toContain(result.copyPreview);
-    const send = Array.from(screen.container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Enviar uma mensagem real'),
-    ) as HTMLButtonElement;
-    expect(send.disabled).toBe(true);
-    const input = screen.container.querySelector(
-      '[role="dialog"] input',
-    ) as HTMLInputElement;
-    await change(input, 'CONFIRMAR_ENVIO_COMERCIAL');
-    expect(send.disabled).toBe(false);
-    await click(send);
-    expect(confirmMock).toHaveBeenCalledWith(
-      'run-safe',
-      'CONFIRMAR_ENVIO_COMERCIAL',
-    );
-    expect(screen.container.querySelector('[role="dialog"]')).toBeNull();
-    expect(screen.container.textContent).toContain('Status do dispatch');
-    expect(screen.container.textContent).not.toContain('Confirmar envio real');
-    await screen.unmount();
-  });
-
-  it('nao oferece retry depois de resultado ambiguo', async () => {
-    listMock.mockReset().mockResolvedValue({
-      items: [
-        {
-          ...history,
-          mode: 'confirmed',
-          status: 'failed',
-          finalStatus: 'ambiguous',
-          dispatchStatus: 'failed',
-          attemptCount: 1,
-          investigationRequired: true,
-          dispatchWasCreated: true,
-          jobWasCreated: true,
-          confirmationAvailable: false,
-        },
-      ],
-      page: 1,
-      limit: 10,
-      total: 1,
-      totalPages: 1,
-    });
-    const screen = await render(<CommercialPipelinePage />);
-    expect(screen.container.textContent).toContain('investigacao manual');
-    expect(screen.container.textContent).not.toContain('Confirmar envio real');
-    expect(screen.container.textContent).not.toContain('Reenviar');
+    expect(retry).not.toBeUndefined();
+    await click(retry as HTMLButtonElement);
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(screen.container.textContent).toContain('Nenhuma execucao registrada');
     await screen.unmount();
   });
 });

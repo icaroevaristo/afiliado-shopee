@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GET, PATCH } from './route';
+import { DELETE, GET, PATCH, POST, PUT } from './route';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -9,12 +9,20 @@ afterEach(() => {
 describe('dashboard API proxy', () => {
   it('encaminha leitura para o servidor privado sem expor credencial ao browser', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ status: 'ok' }), {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
-      }),
-    );
+        }),
+      );
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
@@ -35,12 +43,20 @@ describe('dashboard API proxy', () => {
 
   it('preserva PATCH oficial para pause/resume sem executar o controle', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ paused: false }), {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ paused: false }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
-      }),
-    );
+        }),
+      );
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await PATCH(
@@ -56,6 +72,119 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:3334/commercial-automation/settings',
       expect.objectContaining({ method: 'PATCH', body: expect.any(ArrayBuffer) }),
+    );
+  });
+
+  it('bloqueia POST sem chamar o upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await POST(
+      new Request('http://dashboard.local/api/pipeline/run', { method: 'POST' }),
+      { params: Promise.resolve({ path: ['pipeline', 'run'] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia PUT sem chamar o upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await PUT(
+      new Request('http://dashboard.local/api/analytics', { method: 'PUT' }),
+      { params: Promise.resolve({ path: ['analytics'] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia DELETE sem chamar o upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await DELETE(
+      new Request('http://dashboard.local/api/coupons/coupon-1', {
+        method: 'DELETE',
+      }),
+      { params: Promise.resolve({ path: ['coupons', 'coupon-1'] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia GET desconhecido sem chamar o upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/not-allowed'),
+      { params: Promise.resolve({ path: ['not-allowed'] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia PATCH fora de settings sem chamar o upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await PATCH(
+      new Request('http://dashboard.local/api/whatsapp/groups/group-1', {
+        method: 'PATCH',
+        body: JSON.stringify({ active: true }),
+      }),
+      { params: Promise.resolve({ path: ['whatsapp', 'groups', 'group-1'] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falha de forma clara quando o destino configurado nao e local', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'https://api.example.invalid');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/analytics'),
+      { params: Promise.resolve({ path: ['analytics'] }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: 'DASHBOARD_API_TARGET_INVALID',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falha de forma segura quando um servico local nao e a API operacional', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3333');
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('<html>DevBridge</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/analytics'),
+      { params: Promise.resolve({ path: ['analytics'] }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: 'DASHBOARD_API_TARGET_INCOMPATIBLE',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:3333/health',
+      expect.objectContaining({ cache: 'no-store' }),
     );
   });
 });
