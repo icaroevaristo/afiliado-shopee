@@ -6,6 +6,7 @@ import {
   type CommercialAutomationPolicyConfig,
 } from '../src/commercial-automation-policy-service';
 import type {
+  CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
@@ -35,6 +36,16 @@ const group = (id = 'group-1'): WhatsAppGroupRecord => ({
   sourceInstanceName: 'affiliate-bot',
   discoveredAt: NOW,
   lastSyncedAt: NOW,
+});
+
+const target = (id = 'group-1'): CommercialAutomationTarget => ({
+  groupId: id,
+  groupName: `Grupo ${id}`,
+  logicalGroupFingerprint: id.endsWith('2')
+    ? 'grp_bbbbbbbbbbbb'
+    : 'grp_aaaaaaaaaaaa',
+  campaignId: `campaign-${id}`,
+  nicheId: `niche-${id}`,
 });
 
 class MemorySettings implements CommercialAutomationSettingsRepository {
@@ -72,7 +83,9 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
 class MemoryHistory implements CommercialAutomationHistoryRepository {
   globalSentToday = 0;
   groupSentToday = 0;
+  groupSentTodayById = new Map<string, number>();
   lastSentAt: Date | null = null;
+  groupLastSentAtById = new Map<string, Date>();
   ambiguous = false;
   active = false;
   stale = false;
@@ -86,8 +99,14 @@ class MemoryHistory implements CommercialAutomationHistoryRepository {
     this.lastRange = input;
     return {
       globalSentToday: this.globalSentToday,
-      groupSentToday: this.groupSentToday,
+      groupSentToday: input.groupId
+        ? (this.groupSentTodayById.get(input.groupId) ?? this.groupSentToday)
+        : this.groupSentToday,
       lastSentAt: this.lastSentAt,
+      globalLastSentAt: this.lastSentAt,
+      groupLastSentAt: input.groupId
+        ? (this.groupLastSentAtById.get(input.groupId) ?? null)
+        : null,
     };
   }
 
@@ -179,7 +198,7 @@ describe('CommercialAutomationPolicyService', () => {
     expect(result.allowed).toBe(true);
     expect(result.reasons).toEqual([]);
     expect(history.lastRange).toMatchObject({
-      groupId: 'group-1',
+      groupId: undefined,
       dayStartsAt: new Date('2026-07-25T03:00:00.000Z'),
       dayEndsAt: new Date('2026-07-26T03:00:00.000Z'),
     });
@@ -285,7 +304,9 @@ describe('CommercialAutomationPolicyService', () => {
     });
     history.groupSentToday = 1;
 
-    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+    await expect(
+      service.evaluateAutomationReadiness({ target: target() }),
+    ).resolves.toMatchObject({
       reasons: ['GROUP_DAILY_LIMIT_REACHED'],
       groupRemainingToday: 0,
     });
@@ -293,12 +314,33 @@ describe('CommercialAutomationPolicyService', () => {
 
   it('calcula o intervalo minimo desde o ultimo SENT', async () => {
     const { service, history } = createSubject();
-    history.lastSentAt = new Date('2026-07-25T14:30:00.000Z');
+    const lastSentAt = new Date('2026-07-25T14:30:00.000Z');
+    history.lastSentAt = lastSentAt;
+    history.groupLastSentAtById.set('group-1', lastSentAt);
 
-    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+    await expect(
+      service.evaluateAutomationReadiness({ target: target() }),
+    ).resolves.toMatchObject({
       reasons: ['MINIMUM_INTERVAL_NOT_REACHED'],
       lastSentAt: '2026-07-25T14:30:00.000Z',
+      groupLastSentAt: '2026-07-25T14:30:00.000Z',
       nextAllowedAt: '2026-07-25T15:30:00.000Z',
+    });
+  });
+
+  it('nao aplica o ultimo envio global a um alvo nunca enviado', async () => {
+    const { service, history } = createSubject({
+      groups: [group('1'), group('2')],
+    });
+    history.lastSentAt = new Date('2026-07-25T14:59:00.000Z');
+
+    await expect(
+      service.evaluateAutomationReadiness({ target: target('2') }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      reasons: [],
+      groupLastSentAt: null,
+      lastSentAt: '2026-07-25T14:59:00.000Z',
     });
   });
 
@@ -322,12 +364,51 @@ describe('CommercialAutomationPolicyService', () => {
     });
   });
 
-  it('bloqueia quando existem multiplos grupos autorizados', async () => {
+  it('permite status global quando existem multiplos grupos distintos', async () => {
     const { service } = createSubject({ groups: [group('1'), group('2')] });
 
     await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
-      reasons: ['MULTIPLE_AUTHORIZED_GROUPS'],
+      reasons: [],
+      allowed: true,
       authorizedGroupCount: 2,
+    });
+  });
+
+  it('nao aplica cooldown de um grupo ao proximo alvo permitido', async () => {
+    const { service, history } = createSubject({
+      groups: [group('1'), group('2')],
+    });
+    history.groupLastSentAtById.set(
+      '1',
+      new Date('2026-07-25T14:30:00.000Z'),
+    );
+
+    await expect(
+      service.evaluateAutomationReadiness({ target: target('2') }),
+    ).resolves.toMatchObject({ allowed: true, reasons: [] });
+  });
+
+  it('nao aplica limite diario de um grupo ao proximo alvo permitido', async () => {
+    const { service, history } = createSubject({
+      config: { dailyGlobalLimit: 5 },
+      groups: [group('1'), group('2')],
+    });
+    history.groupSentTodayById.set('1', 1);
+    history.groupSentTodayById.set('2', 0);
+
+    await expect(
+      service.evaluateAutomationReadiness({ target: target('2') }),
+    ).resolves.toMatchObject({ allowed: true, reasons: [] });
+  });
+
+  it('bloqueia destinos fisicos com a mesma fingerprint logica', async () => {
+    const { service } = createSubject({
+      groups: [group('1'), { ...group('2'), fingerprint: group('1').fingerprint }],
+    });
+
+    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP'],
     });
   });
 

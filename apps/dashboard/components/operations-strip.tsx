@@ -50,7 +50,10 @@ export function OperationsStrip({
       value: sent,
       icon: Timer,
       tone: 'neutral',
-      subtext: status ? `grupo ${status.groupSentToday} / ${status.dailyGroupLimit}` : 'sem endpoint',
+      subtext:
+        status?.groupSentToday === null || status?.groupSentToday === undefined
+          ? 'grupo —'
+          : `grupo ${status.groupSentToday} / ${status.dailyGroupLimit}`,
       priority: undefined,
     },
     {

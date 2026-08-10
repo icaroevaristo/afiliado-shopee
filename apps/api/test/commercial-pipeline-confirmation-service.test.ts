@@ -256,7 +256,10 @@ const build = ({
     offers: { findOfferById: async () => currentOffer } as never,
     groups: { list: async () => groups } as never,
     outboxes,
-    deliveryHistory: { wasProductSentToGroup: async () => alreadySent },
+    deliveryHistory: {
+      wasProductSentToGroup: async () => alreadySent,
+      findLastSentAtByGroup: async () => null,
+    },
     copy: { generate },
     publisher,
     instanceName: 'affiliate-bot',
@@ -434,5 +437,39 @@ describe('CommercialPipelineConfirmationService', () => {
     expect(state.generate).not.toHaveBeenCalled();
     expect(state.outboxes.copies).toHaveLength(0);
     expect(state.outboxes.dispatches[0].generatedCopyId).toBe('ai-copy-1');
+  });
+
+  it('revalida o grupo persistido mesmo quando ha outros grupos elegiveis', async () => {
+    const state = build({
+      groups: [
+        group(),
+        group({
+          id: 'other-group',
+          name: 'Outro grupo',
+          fingerprint: 'grp_abcdef123456',
+        }),
+      ],
+    });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).resolves.toMatchObject({ selectedGroup: { name: 'Grupo ficticio autorizado' } });
+    expect(state.outboxes.dispatches[0]?.destinationId).toBe('group-id');
+  });
+
+  it('falha fechado na confirmacao quando a fingerprint logica esta duplicada', async () => {
+    const state = build({
+      groups: [
+        group(),
+        group({ id: 'duplicate-group' }),
+      ],
+    });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
+    });
+    expect(state.outboxes.records).toHaveLength(0);
   });
 });

@@ -224,6 +224,7 @@ export interface CommercialPipelineRunRepository {
 
 export interface CommercialDeliveryHistoryRepository {
   wasProductSentToGroup(productId: string, groupId: string): Promise<boolean>;
+  findLastSentAtByGroup(groupId: string): Promise<Date | null>;
 }
 
 export type CommercialDispatchOutboxStatus =
@@ -321,6 +322,16 @@ export type CommercialAutomationHistorySnapshot = {
   globalSentToday: number;
   groupSentToday: number;
   lastSentAt: Date | null;
+  globalLastSentAt?: Date | null;
+  groupLastSentAt?: Date | null;
+};
+
+export type CommercialAutomationTarget = {
+  groupId: string;
+  groupName: string;
+  logicalGroupFingerprint: string;
+  campaignId: string;
+  nicheId: string;
 };
 
 export interface CommercialAutomationHistoryRepository {

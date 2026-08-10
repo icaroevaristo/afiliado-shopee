@@ -39,7 +39,9 @@ export type CommercialAutomationReason =
   | 'MINIMUM_INTERVAL_NOT_REACHED'
   | 'NO_AUTHORIZED_GROUP'
   | 'MULTIPLE_AUTHORIZED_GROUPS'
-  | 'AMBIGUOUS_COMMERCIAL_RUN_EXISTS';
+  | 'AMBIGUOUS_COMMERCIAL_RUN_EXISTS'
+  | 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP'
+  | 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE';
 
 export type CommercialAutomationStatus = {
   enabled: boolean;
@@ -48,8 +50,8 @@ export type CommercialAutomationStatus = {
   nextAllowedAt: string | null;
   globalSentToday: number;
   globalRemainingToday: number;
-  groupSentToday: number;
-  groupRemainingToday: number;
+  groupSentToday: number | null;
+  groupRemainingToday: number | null;
   lastSentAt: string | null;
   paused: boolean;
   pausedAt: string | null;

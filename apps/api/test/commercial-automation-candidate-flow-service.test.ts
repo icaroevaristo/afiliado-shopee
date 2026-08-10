@@ -302,6 +302,12 @@ const createSubject = (input: {
   mining.mine.mockResolvedValue({ rejectionSummary: {} });
   const deliveryHistory = {
     wasProductSentToGroup: vi.fn(async () => false),
+    findLastSentAtByGroup: vi.fn<
+      (groupId: string) => Promise<Date | null>
+    >(async (groupId) => {
+      void groupId;
+      return null;
+    }),
   };
   const pipeline = {
     dryRunFromPromotionCandidate: vi.fn(async () => pipelineResult()),
@@ -319,8 +325,16 @@ const createSubject = (input: {
     instanceName: 'affiliate-bot',
     clock: () => NOW,
   });
+  const target = {
+    groupId: currentGroup.id,
+    groupName: currentGroup.name,
+    logicalGroupFingerprint: currentGroup.fingerprint,
+    campaignId: currentCampaign.id,
+    nicheId: currentCampaign.nicheId,
+  };
   return {
     service,
+    target,
     groups,
     campaigns,
     candidates,
@@ -339,7 +353,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
   it('reutiliza COPY_READY e preserva o ranking da fila', async () => {
     const subject = createSubject();
 
-    const result = await subject.service.prepare();
+    const result = await subject.service.prepare(subject.target);
 
     expect(result).toMatchObject({
       runId: 'run-1',
@@ -360,7 +374,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       candidate: { status: 'QUEUED', generatedCopyId: null },
     });
 
-    const result = await subject.service.prepare();
+    const result = await subject.service.prepare(subject.target);
 
     expect(result.generatedCopyId).toBe('copy-1');
     expect(subject.copyGeneration.preview).toHaveBeenCalledOnce();
@@ -371,7 +385,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
     const subject = createSubject();
     subject.deliveryHistory.wasProductSentToGroup.mockResolvedValue(true);
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
@@ -382,7 +396,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
   it('bloqueia fallback TEXT antes de criar o run candidato', async () => {
     const subject = createSubject({ product: { urlImagem: '' } });
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -394,7 +408,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       null,
     );
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -405,21 +419,128 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group: { active: false, available: false },
     });
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'NO_AUTHORIZED_GROUP',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
-  it('bloqueia mais de um grupo autorizado', async () => {
+  it('seleciona o alvo menos recentemente enviado com desempate deterministico', async () => {
+    const subject = createSubject();
+    const groupTwo = group({
+      id: 'group-2',
+      fingerprint: 'grp_abcdef123456',
+    });
+    subject.groups.list.mockResolvedValue([
+      group(),
+      groupTwo,
+    ]);
+    subject.campaigns.findByLogicalGroupFingerprint.mockImplementation(
+      async (fingerprint: string) =>
+        fingerprint === GROUP_FINGERPRINT
+          ? campaign()
+          : campaign({
+              id: 'campaign-2',
+              logicalGroupFingerprint: 'grp_abcdef123456',
+              anchorDestinationId: 'group-2',
+              nicheId: 'niche-2',
+              niche: {
+                id: 'niche-2',
+                name: 'Eletronicos',
+                slug: 'eletronicos',
+                active: true,
+              },
+              anchorDestination: {
+                id: 'group-2',
+                name: 'Grupo dois',
+                fingerprint: 'grp_abcdef123456',
+                active: true,
+                available: true,
+              },
+            }),
+    );
+    subject.deliveryHistory.findLastSentAtByGroup.mockImplementation(
+      async (groupId: string) =>
+        groupId === 'group-1' ? new Date('2026-08-08T11:00:00.000Z') : null,
+    );
+
+    const targets = await subject.service.listTargets();
+
+    expect(targets.map(({ groupId }) => groupId)).toEqual([
+      'group-2',
+      'group-1',
+    ]);
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('ignora grupo de outra instancia', async () => {
+    const subject = createSubject({
+      group: { sourceInstanceName: 'other-instance' },
+    });
+
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+      code: 'NO_AUTHORIZED_GROUP',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('mantem rotacao justa A-B-C sem cursor ou aleatoriedade', async () => {
+    const targets = [
+      group({ id: 'group-a', fingerprint: 'grp_aaaaaaaaaaaa' }),
+      group({ id: 'group-b', fingerprint: 'grp_bbbbbbbbbbbb' }),
+      group({ id: 'group-c', fingerprint: 'grp_cccccccccccc' }),
+    ];
+    const subject = createSubject();
+    const lastSentAt = new Map<string, Date>();
+    subject.groups.list.mockResolvedValue(targets);
+    subject.campaigns.findByLogicalGroupFingerprint.mockImplementation(
+      async (fingerprint: string) =>
+        campaign({
+          id: `campaign-${fingerprint}`,
+          logicalGroupFingerprint: fingerprint,
+          nicheId: `niche-${fingerprint}`,
+          niche: {
+            id: `niche-${fingerprint}`,
+            name: 'Nicho',
+            slug: 'nicho',
+            active: true,
+          },
+        }),
+    );
+    subject.deliveryHistory.findLastSentAtByGroup.mockImplementation(
+      async (groupId: string) => lastSentAt.get(groupId) ?? null,
+    );
+
+    const first = await subject.service.listTargets();
+    expect(first[0]?.groupId).toBe('group-a');
+
+    const sentAt = new Date('2026-08-08T12:01:00.000Z');
+    lastSentAt.set('group-a', sentAt);
+    const second = await subject.service.listTargets();
+    expect(second[0]?.groupId).toBe('group-b');
+
+    lastSentAt.set('group-b', sentAt);
+    const third = await subject.service.listTargets();
+    expect(third[0]?.groupId).toBe('group-c');
+
+    lastSentAt.set('group-c', sentAt);
+    const fourth = await subject.service.listTargets();
+    expect(fourth.map(({ groupId }) => groupId)).toEqual([
+      'group-a',
+      'group-b',
+      'group-c',
+    ]);
+  });
+
+  it('bloqueia destinos fisicos que repetem a mesma fingerprint logica', async () => {
     const subject = createSubject();
     subject.groups.list.mockResolvedValue([
       group(),
-      group({ id: 'group-2', fingerprint: 'grp_abcdef123456' }),
+      group({ id: 'group-2', fingerprint: GROUP_FINGERPRINT }),
     ]);
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
-      code: 'MULTIPLE_AUTHORIZED_GROUPS',
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
     });
     expect(subject.campaigns.findByLogicalGroupFingerprint).not.toHaveBeenCalled();
   });
@@ -430,8 +551,26 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ active: false }),
     );
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'CAMPAIGN_INACTIVE',
+    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia nicho inativo antes da mineracao', async () => {
+    const subject = createSubject({
+      campaign: {
+        niche: {
+          id: 'niche-1',
+          name: 'Casa',
+          slug: 'casa',
+          active: false,
+        },
+      },
+    });
+
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+      code: 'NICHE_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
@@ -441,7 +580,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       product: { urlImagem: 'ftp://example.invalid/image.jpg' },
     });
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -454,7 +593,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       },
     });
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'COMMERCIAL_MESSAGE_INVALID_LINK_OCCURRENCES',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -462,7 +601,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
   it('revalida copy, campanha, grupo e IMAGE antes da confirmacao', async () => {
     const subject = createSubject();
-    const prepared = await subject.service.prepare();
+    const prepared = await subject.service.prepare(subject.target);
 
     await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledTimes(2);
@@ -476,7 +615,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       new AppError('Candidato expirado', 'COMMERCIAL_AI_COPY_OFFER_EXPIRED'),
     );
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -490,7 +629,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ logicalGroupFingerprint: 'grp_abcdef123456' }),
     );
 
-    await expect(subject.service.prepare()).rejects.toMatchObject({
+    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();

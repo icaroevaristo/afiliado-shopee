@@ -2481,6 +2481,19 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
     ]);
     return Boolean(sentDispatch || confirmedRun);
   }
+
+  async findLastSentAtByGroup(groupId: string): Promise<Date | null> {
+    const dispatch = await this.prisma.whatsAppDispatch.findFirst({
+      where: {
+        destinationId: groupId,
+        status: 'SENT',
+        sentAt: { not: null },
+      },
+      orderBy: { sentAt: 'desc' },
+      select: { sentAt: true },
+    });
+    return dispatch?.sentAt ?? null;
+  }
 }
 
 const mapCommercialDispatchOutbox = (
@@ -2862,7 +2875,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       sentAt: { gte: dayStartsAt, lt: dayEndsAt },
       destination: { type: 'GROUP' as const },
     };
-    const [countsByGroup, lastSent] = await Promise.all([
+    const [countsByGroup, lastSent, groupLastSent] = await Promise.all([
       this.prisma.whatsAppDispatch.groupBy({
         by: ['destinationId'],
         where: sentDuringDay,
@@ -2877,6 +2890,18 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
         orderBy: { sentAt: 'desc' },
         select: { sentAt: true },
       }),
+      groupId
+        ? this.prisma.whatsAppDispatch.findFirst({
+            where: {
+              status: 'SENT',
+              sentAt: { not: null },
+              destination: { type: 'GROUP' },
+              destinationId: groupId,
+            },
+            orderBy: { sentAt: 'desc' },
+            select: { sentAt: true },
+          })
+        : Promise.resolve(null),
     ]);
     const globalSentToday = countsByGroup.reduce(
       (total, row) => total + row._count._all,
@@ -2890,6 +2915,8 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       globalSentToday,
       groupSentToday,
       lastSentAt: lastSent?.sentAt ?? null,
+      globalLastSentAt: lastSent?.sentAt ?? null,
+      groupLastSentAt: groupLastSent?.sentAt ?? null,
     };
   }
 

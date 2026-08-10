@@ -134,6 +134,7 @@ export const createCommercialPipelineService = ({
     ApplicationRepositories,
     | 'shopeeOffers'
     | 'whatsappGroups'
+    | 'commercialGroupCampaigns'
     | 'whatsappDispatches'
     | 'commercialRuns'
     | 'commercialDeliveryHistory'
@@ -147,6 +148,7 @@ export const createCommercialPipelineService = ({
   new CommercialPipelineService({
     offers: repositories.shopeeOffers,
     groups: repositories.whatsappGroups,
+    campaigns: repositories.commercialGroupCampaigns,
     score,
     copy: new CommercialCopyService(maximumCopyLength),
     runs: repositories.commercialRuns,

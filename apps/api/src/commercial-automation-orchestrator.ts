@@ -23,6 +23,7 @@ import {
 } from './commercial-automation-execution-domain';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
 import type {
+  CommercialAutomationTarget,
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRepository,
@@ -137,18 +138,23 @@ export class CommercialAutomationOrchestrator {
       syncOffers: { run(): Promise<unknown> };
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
       candidateFlow?: {
-        prepare(): Promise<{
+        listTargets(): Promise<CommercialAutomationTarget[]>;
+        prepare(target: CommercialAutomationTarget): Promise<{
           runId: string;
           generatedCopyId: string;
           candidateId: string;
           campaignId: string;
           groupId: string;
+          logicalGroupFingerprint?: string;
+          nicheId?: string;
         }>;
         revalidate(input: {
           candidateId: string;
           generatedCopyId: string;
           campaignId: string;
           groupId: string;
+          logicalGroupFingerprint?: string;
+          nicheId?: string;
         }): Promise<void>;
       };
       confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
@@ -241,8 +247,11 @@ export class CommercialAutomationOrchestrator {
           generatedCopyId: string;
           campaignId: string;
           groupId: string;
+          logicalGroupFingerprint?: string;
+          nicheId?: string;
         }
       | undefined;
+    let selectedTarget: CommercialAutomationTarget | undefined;
     let confirmationAttempted = false;
     try {
       const readiness =
@@ -280,10 +289,63 @@ export class CommercialAutomationOrchestrator {
           }),
         );
       }
+
+      if (this.dependencies.candidateFlow) {
+        let targets: CommercialAutomationTarget[];
+        try {
+          targets = await this.dependencies.candidateFlow.listTargets();
+        } catch (error) {
+          const failureCode = safeFailureCode(error);
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [failureCode],
+              failureCode,
+              completedAt: this.clock(),
+            }),
+          );
+        }
+        const targetReasons = new Set<string>();
+        for (const target of targets) {
+          const targetReadiness =
+            await this.dependencies.policy.evaluateAutomationReadiness({
+              excludedExecutionId: execution.id,
+              target,
+            });
+          if (targetReadiness.allowed) {
+            selectedTarget = target;
+            break;
+          }
+          for (const reason of targetReadiness.reasons) {
+            targetReasons.add(reason);
+          }
+        }
+        if (!selectedTarget) {
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [...targetReasons],
+              completedAt: this.clock(),
+            }),
+          );
+        }
+      }
       await this.dependencies.syncOffers.run();
       await heartbeat.checkpoint();
       if (input.mode === 'send') {
-        const prepared = await this.dependencies.candidateFlow!.prepare();
+        if (!selectedTarget) {
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: ['COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'],
+              failureCode: 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
+              completedAt: this.clock(),
+            }),
+          );
+        }
+        const prepared = await this.dependencies.candidateFlow!.prepare(
+          selectedTarget,
+        );
         commercialRunId = prepared.runId;
         existingGeneratedCopyId = prepared.generatedCopyId;
         candidatePreparation = prepared;
@@ -291,6 +353,7 @@ export class CommercialAutomationOrchestrator {
         const dryRun = await this.dependencies.pipeline.dryRun({
           source: toCommercialAutomationProviderSource(input.provider),
           campaign: 'commercial-automation',
+          ...(selectedTarget ? { target: selectedTarget } : {}),
         });
         commercialRunId = dryRun.runId;
       }
@@ -307,6 +370,7 @@ export class CommercialAutomationOrchestrator {
       const confirmationReadiness =
         await this.dependencies.policy.evaluateAutomationReadiness({
           excludedExecutionId: execution.id,
+          target: selectedTarget,
         });
       if (!confirmationReadiness.allowed) {
         return publicResult(

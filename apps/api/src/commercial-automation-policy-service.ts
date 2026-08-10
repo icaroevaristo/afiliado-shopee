@@ -1,7 +1,11 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
-import { isCommercialAuthorizedGroup } from './commercial-group-selection';
+import {
+  duplicateLogicalGroupFingerprints,
+  isCommercialAuthorizedGroup,
+} from './commercial-group-selection';
 import type {
+  CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
@@ -25,6 +29,8 @@ export const COMMERCIAL_AUTOMATION_REASONS = [
   'MINIMUM_INTERVAL_NOT_REACHED',
   'NO_AUTHORIZED_GROUP',
   'MULTIPLE_AUTHORIZED_GROUPS',
+  'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
+  'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
   'AMBIGUOUS_COMMERCIAL_RUN_EXISTS',
   COMMERCIAL_EXECUTION_IN_PROGRESS,
   STALE_COMMERCIAL_EXECUTION_EXISTS,
@@ -50,9 +56,11 @@ export type CommercialAutomationStatus = {
   nextAllowedAt: string | null;
   globalSentToday: number;
   globalRemainingToday: number;
-  groupSentToday: number;
-  groupRemainingToday: number;
+  groupSentToday: number | null;
+  groupRemainingToday: number | null;
   lastSentAt: string | null;
+  globalLastSentAt?: string | null;
+  groupLastSentAt?: string | null;
   paused: boolean;
   pausedAt: string | null;
   resumedAt: string | null;
@@ -187,7 +195,8 @@ const HARD_BLOCKING_REASONS = new Set<CommercialAutomationReason>([
   'AUTOMATION_DISABLED',
   'AUTOMATION_PAUSED',
   'NO_AUTHORIZED_GROUP',
-  'MULTIPLE_AUTHORIZED_GROUPS',
+  'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
+  'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
   'AMBIGUOUS_COMMERCIAL_RUN_EXISTS',
   COMMERCIAL_EXECUTION_IN_PROGRESS,
   STALE_COMMERCIAL_EXECUTION_EXISTS,
@@ -207,11 +216,16 @@ export class CommercialAutomationPolicyService {
 
   async evaluateAutomationReadiness(input?: {
     excludedExecutionId?: string;
+    target?: CommercialAutomationTarget;
   }): Promise<CommercialAutomationStatus> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
     const [settings, context] = await Promise.all([
       this.dependencies.settings.getOrCreate(now),
-      this.loadOperationalContext(now, input?.excludedExecutionId),
+      this.loadOperationalContext(
+        now,
+        input?.excludedExecutionId,
+        input?.target,
+      ),
     ]);
 
     return this.buildStatus({ now, settings, ...context });
@@ -220,6 +234,7 @@ export class CommercialAutomationPolicyService {
   private async loadOperationalContext(
     now: Date,
     excludedExecutionId?: string,
+    target?: CommercialAutomationTarget,
   ) {
     const dayRange = getLocalDayRange(now, this.dependencies.config.timezone);
     const [groups, ambiguousExecution, activeExecution, staleExecution] =
@@ -238,14 +253,25 @@ export class CommercialAutomationPolicyService {
     const authorizedGroups = groups.filter((group) =>
       isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
     );
-    const selectedGroup =
-      authorizedGroups.length === 1 ? authorizedGroups[0] : undefined;
+    const duplicateFingerprints = duplicateLogicalGroupFingerprints(
+      authorizedGroups,
+    );
+    const selectedGroup = target
+      ? authorizedGroups.find(
+          (group) =>
+            group.id === target.groupId &&
+            group.fingerprint === target.logicalGroupFingerprint,
+        )
+      : undefined;
     const history = await this.dependencies.history.getSnapshot({
       groupId: selectedGroup?.id,
       ...dayRange,
     });
     return {
       authorizedGroupCount: authorizedGroups.length,
+      target,
+      targetEligible: !target || Boolean(selectedGroup),
+      duplicateLogicalGroup: duplicateFingerprints.length > 0,
       ambiguousExecution,
       activeExecution,
       staleExecution,
@@ -280,6 +306,9 @@ export class CommercialAutomationPolicyService {
     now,
     settings,
     authorizedGroupCount,
+    target,
+    targetEligible,
+    duplicateLogicalGroup,
     ambiguousExecution,
     activeExecution,
     staleExecution,
@@ -289,6 +318,9 @@ export class CommercialAutomationPolicyService {
     now: Date;
     settings: CommercialAutomationSettingsRecord;
     authorizedGroupCount: number;
+    target?: CommercialAutomationTarget;
+    targetEligible: boolean;
+    duplicateLogicalGroup: boolean;
     ambiguousExecution: boolean;
     activeExecution: boolean;
     staleExecution: boolean;
@@ -296,6 +328,8 @@ export class CommercialAutomationPolicyService {
       globalSentToday: number;
       groupSentToday: number;
       lastSentAt: Date | null;
+      globalLastSentAt?: Date | null;
+      groupLastSentAt?: Date | null;
     };
     dayEndsAt: Date;
   }): CommercialAutomationStatus {
@@ -309,10 +343,13 @@ export class CommercialAutomationPolicyService {
     );
     const globalLimitReached =
       history.globalSentToday >= config.dailyGlobalLimit;
-    const groupLimitReached = history.groupSentToday >= config.dailyGroupLimit;
-    const intervalEndsAt = history.lastSentAt
+    const globalLastSentAt = history.globalLastSentAt ?? history.lastSentAt;
+    const groupLastSentAt = target ? (history.groupLastSentAt ?? null) : null;
+    const groupLimitReached =
+      Boolean(target) && history.groupSentToday >= config.dailyGroupLimit;
+    const intervalEndsAt = groupLastSentAt
       ? new Date(
-          history.lastSentAt.getTime() + config.minimumIntervalMinutes * 60_000,
+          groupLastSentAt.getTime() + config.minimumIntervalMinutes * 60_000,
         )
       : null;
     const minimumIntervalNotReached = Boolean(
@@ -323,10 +360,17 @@ export class CommercialAutomationPolicyService {
     if (settings.paused) reasons.push('AUTOMATION_PAUSED');
     if (outsideWindow) reasons.push('OUTSIDE_ALLOWED_WINDOW');
     if (globalLimitReached) reasons.push('GLOBAL_DAILY_LIMIT_REACHED');
-    if (groupLimitReached) reasons.push('GROUP_DAILY_LIMIT_REACHED');
-    if (minimumIntervalNotReached) reasons.push('MINIMUM_INTERVAL_NOT_REACHED');
+    if (target && !targetEligible) {
+      reasons.push('COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE');
+    }
+    if (target && groupLimitReached) reasons.push('GROUP_DAILY_LIMIT_REACHED');
+    if (target && minimumIntervalNotReached) {
+      reasons.push('MINIMUM_INTERVAL_NOT_REACHED');
+    }
     if (authorizedGroupCount === 0) reasons.push('NO_AUTHORIZED_GROUP');
-    if (authorizedGroupCount > 1) reasons.push('MULTIPLE_AUTHORIZED_GROUPS');
+    if (duplicateLogicalGroup) {
+      reasons.push('COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP');
+    }
     if (ambiguousExecution) reasons.push('AMBIGUOUS_COMMERCIAL_RUN_EXISTS');
     if (activeExecution) reasons.push('COMMERCIAL_EXECUTION_IN_PROGRESS');
     if (staleExecution) reasons.push(STALE_COMMERCIAL_EXECUTION_EXISTS);
@@ -347,8 +391,9 @@ export class CommercialAutomationPolicyService {
           ),
         );
       }
-      if (globalLimitReached || groupLimitReached) candidates.push(dayEndsAt);
-      if (minimumIntervalNotReached && intervalEndsAt)
+      if (globalLimitReached || (target && groupLimitReached))
+        candidates.push(dayEndsAt);
+      if (target && minimumIntervalNotReached && intervalEndsAt)
         candidates.push(intervalEndsAt);
       const latest = new Date(
         Math.max(...candidates.map((candidate) => candidate.getTime())),
@@ -371,12 +416,13 @@ export class CommercialAutomationPolicyService {
         0,
         config.dailyGlobalLimit - history.globalSentToday,
       ),
-      groupSentToday: history.groupSentToday,
-      groupRemainingToday: Math.max(
-        0,
-        config.dailyGroupLimit - history.groupSentToday,
-      ),
-      lastSentAt: isoOrNull(history.lastSentAt),
+      groupSentToday: target ? history.groupSentToday : null,
+      groupRemainingToday: target
+        ? Math.max(0, config.dailyGroupLimit - history.groupSentToday)
+        : null,
+      lastSentAt: isoOrNull(globalLastSentAt),
+      globalLastSentAt: isoOrNull(globalLastSentAt),
+      groupLastSentAt: target ? isoOrNull(groupLastSentAt) : null,
       paused: settings.paused,
       pausedAt: isoOrNull(settings.pausedAt),
       resumedAt: isoOrNull(settings.resumedAt),
