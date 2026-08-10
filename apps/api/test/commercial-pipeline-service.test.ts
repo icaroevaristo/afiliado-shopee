@@ -408,16 +408,28 @@ describe('CommercialPipelineService', () => {
     );
   });
 
-  it('seleciona deterministicamente o primeiro grupo logico no preview legado', async () => {
-    const first = group('one', { fingerprint: 'grp_zzzzzzzzzzzz' });
-    const second = group('two', { fingerprint: 'grp_aaaaaaaaaaaa' });
+  it('preserva o preview legado quando existe um unico grupo', async () => {
+    const { service } = build({ groups: [group('one')] });
 
-    const result = await build({ groups: [first, second] }).service.dryRun();
+    const result = await service.dryRun();
 
     expect(result.selectedGroup).toMatchObject({
-      id: 'two',
-      fingerprint: 'grp_aaaaaaaaaaaa',
+      id: 'one',
+      fingerprint: 'grp_123456789abc',
     });
+  });
+
+  it('bloqueia preview legado sem alvo quando existem varios grupos logicos', async () => {
+    const first = group('one', { fingerprint: 'grp_eeeeeeeeeeee' });
+    const second = group('two', { fingerprint: 'grp_aaaaaaaaaaaa' });
+    const { service, runs } = build({ groups: [first, second] });
+
+    await expectCode(service.dryRun(), 'MULTIPLE_AUTHORIZED_GROUPS');
+    expect(runs.records[0]).toMatchObject({
+      status: 'BLOCKED',
+      failureCode: 'MULTIPLE_AUTHORIZED_GROUPS',
+    });
+    expect(runs.records[0]).not.toHaveProperty('groupDestinationId');
   });
 
   it('usa o alvo explicito quando existem grupos logicos distintos', async () => {
@@ -452,6 +464,24 @@ describe('CommercialPipelineService', () => {
           logicalGroupFingerprint: secondGroup.fingerprint,
           campaignId: 'campaign-mismatch',
           nicheId: 'niche-mismatch',
+        } satisfies CommercialAutomationTarget,
+      }),
+      'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
+    );
+  });
+
+  it('bloqueia alvo explicito inexistente', async () => {
+    const secondGroup = group('two', { fingerprint: 'grp_abcdef123456' });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    await expectCode(
+      service.dryRun({
+        target: {
+          groupId: 'missing',
+          groupName: 'Grupo ausente',
+          logicalGroupFingerprint: 'grp_missing0000',
+          campaignId: 'campaign-missing',
+          nicheId: 'niche-missing',
         } satisfies CommercialAutomationTarget,
       }),
       'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',

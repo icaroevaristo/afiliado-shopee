@@ -427,14 +427,21 @@ export class CommercialPipelineService {
               candidate.name === target.groupName &&
               candidate.fingerprint === target.logicalGroupFingerprint,
           )
-        : orderedGroups[0];
+        : orderedGroups.length === 1
+          ? orderedGroups[0]
+          : undefined;
       if (!group) {
-        return await block('COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE', {
-          candidateCount: candidates.length,
-          eligibleCount: ranked.length,
-          rejectedCount: initialRejectedCount,
-          rejectionSummary,
-        });
+        return await block(
+          target
+            ? 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'
+            : 'MULTIPLE_AUTHORIZED_GROUPS',
+          {
+            candidateCount: candidates.length,
+            eligibleCount: ranked.length,
+            rejectedCount: initialRejectedCount,
+            rejectionSummary,
+          },
+        );
       }
       if (target) {
         const campaign = await this.options.campaigns.findById(
