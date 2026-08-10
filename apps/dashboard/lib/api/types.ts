@@ -64,6 +64,62 @@ export type CommercialAutomationStatus = {
   authorizedGroupCount: number;
 };
 
+export type CommercialAutomationSchedulerStatus = {
+  enabled: boolean;
+  status: 'disabled' | 'registered' | 'not-registered';
+  jobId: string;
+  queue: string;
+  jobName: string;
+  cron: string;
+  timezone: string;
+  nextRunAt: string | null;
+  mode: 'preview' | 'send';
+};
+
+export type CommercialAutomationExecution = {
+  id: string;
+  schedulerJobId: string;
+  bullMqJobId: string | null;
+  mode: 'preview' | 'send';
+  status: string;
+  reasons: string[];
+  commercialRunId: string | null;
+  failureCode: string | null;
+  stale: boolean;
+  heartbeatAt: string | null;
+  leaseExpiresAt: string | null;
+  startedAt: string;
+  completedAt: string | null;
+};
+
+export type CommercialAutomationExecutionPage = {
+  items: CommercialAutomationExecution[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
+export type CommercialDispatchOutbox = {
+  id: string;
+  runId?: string | null;
+  dispatchId?: string | null;
+  jobId?: string | null;
+  status: string;
+  attempts?: number;
+  investigationRequired?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type CommercialDispatchOutboxPage = {
+  items: CommercialDispatchOutbox[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
 export type ApiErrorPayload = {
   error?: string;
   message?: string;
@@ -74,6 +130,10 @@ export type CopyResponse = {
   mensagem: string;
   cta: string;
   hashtags: string;
+  id?: string;
+  productId?: string;
+  snapshotId?: string | null;
+  createdFromCandidateId?: string | null;
 };
 
 export type PipelineRunResponse = {
@@ -361,6 +421,87 @@ export type CommercialPipelineRunPage = {
   totalPages: number;
 };
 
+export type CommercialCampaign = {
+  id: string;
+  name: string;
+  logicalGroupFingerprint: string;
+  anchorDestinationId: string | null;
+  nicheId: string;
+  active: boolean;
+  cadenceMinutes: number;
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  dailyLimit: number;
+  queueTargetSize: number;
+  dedupeDays: number;
+  niche?: {
+    id: string;
+    name: string;
+    slug: string;
+    active: boolean;
+  };
+  anchorDestination?: {
+    id: string;
+    name: string;
+    fingerprint: string | null;
+    active: boolean;
+    available: boolean;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CommercialCampaignPage = {
+  items: CommercialCampaign[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
+export type CommercialCandidateStatus =
+  | 'QUEUED'
+  | 'COPY_READY'
+  | 'RESERVED'
+  | 'DISPATCHED'
+  | 'EXPIRED'
+  | 'BLOCKED';
+
+export type CommercialQueueItem = {
+  id: string;
+  campaignId: string;
+  productId: string;
+  snapshotId: string;
+  generatedCopyId: string | null;
+  status: CommercialCandidateStatus;
+  rankPosition: number | null;
+  commercialScore: number;
+  scorePolicyVersion: string;
+  minimumScoreUsed: number;
+  promotionSignals: string[];
+  priceDropPercent: string | null;
+  queuedAt: string;
+  lastEvaluatedAt: string;
+  expiresAt: string | null;
+  dedupeUntil: string | null;
+  blockedReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  productName: string;
+  price: string;
+  discountRate: number;
+  snapshotRevision: number;
+};
+
+export type CommercialQueuePage = {
+  items: CommercialQueueItem[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
 export type WhatsAppDispatch = {
   id: string;
   productId: string;
@@ -369,6 +510,8 @@ export type WhatsAppDispatch = {
   externalMessageId?: string | null;
   status: WhatsAppDispatchStatus;
   attemptCount: number;
+  deliveryMode?: 'TEXT' | 'IMAGE' | null;
+  provider?: string | null;
   errorMessage?: string | null;
   sentAt?: string | null;
   createdAt?: string;

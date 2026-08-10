@@ -1,135 +1,194 @@
 'use client';
 
 import {
+  Activity,
+  Boxes,
   ClipboardList,
-  Copy,
-  Home,
+  Gauge,
+  LayoutDashboard,
   Menu,
   PackageSearch,
-  PlayCircle,
-  ScanSearch,
-  Settings,
-  TicketPercent,
+  RadioTower,
+  Settings2,
+  Tags,
   X,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
-import { ApiStatus } from './api-status';
-import { StatusBadge } from './status-badge';
+import { useEffect, useState, type ReactNode } from 'react';
+import { getHealth } from '../lib/api';
 
 const navigation = [
-  { href: '/', label: 'Visao geral', icon: Home },
+  { href: '/', label: 'Visao geral', icon: LayoutDashboard },
+  { href: '/envios', label: 'Envios', icon: RadioTower },
+  { href: '/fila', label: 'Fila', icon: Boxes },
   { href: '/produtos', label: 'Produtos', icon: PackageSearch },
-  { href: '/pipeline', label: 'Pipeline', icon: PlayCircle },
-  {
-    href: '/pipeline-comercial',
-    label: 'Pipeline comercial',
-    icon: ScanSearch,
-  },
-  { href: '/copies', label: 'Copies', icon: Copy },
-  { href: '/cupons', label: 'Cupons', icon: TicketPercent },
-  { href: '/whatsapp', label: 'WhatsApp', icon: ClipboardList },
-  { href: '/configuracoes', label: 'Configuracoes', icon: Settings },
+  { href: '/campanhas', label: 'Campanhas', icon: Tags },
+  { href: '/automacao', label: 'Automacao', icon: Gauge },
+];
+
+const secondaryNavigation = [
+  { href: '/configuracoes', label: 'Sistema', icon: Settings2 },
 ];
 
 function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
 
   return (
-    <nav className="grid gap-1" aria-label="Navegacao principal">
-      {navigation.map((item) => {
-        const active = pathname === item.href;
-        const Icon = item.icon;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={onNavigate}
-            className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-orange-500 ${
-              active
-                ? 'bg-orange-50 text-orange-700'
-                : 'text-slate-700 hover:bg-slate-100 hover:text-slate-950'
-            }`}
-          >
-            <Icon className="h-4 w-4" aria-hidden="true" />
-            {item.label}
-          </Link>
-        );
-      })}
-    </nav>
+    <>
+      <p className="ops-nav-label">Operacao</p>
+      <nav className="ops-nav" aria-label="Navegacao principal">
+        {navigation.map((item) => {
+          const active = pathname === item.href;
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onNavigate}
+              className="ops-nav-link"
+              data-active={active}
+            >
+              <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+      <div className="ops-sidebar-separator" />
+      <p className="ops-nav-label">Sistema</p>
+      <nav className="ops-nav" aria-label="Navegacao do sistema">
+        {secondaryNavigation.map((item) => {
+          const active = pathname === item.href;
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onNavigate}
+              className="ops-nav-link"
+              data-active={active}
+            >
+              <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+    </>
   );
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
+function ApiPulse() {
+  const [online, setOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const check = async () => {
+      if (document.visibilityState === 'hidden') return;
+      try {
+        await getHealth();
+        if (active) setOnline(true);
+      } catch {
+        if (active) setOnline(false);
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-950">
-      <aside className="fixed inset-y-0 left-0 hidden w-72 border-r border-slate-200 bg-white px-4 py-5 lg:block">
-        <div className="mb-6">
-          <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
-            Shopee Affiliate
-          </p>
-          <h2 className="mt-1 text-lg font-semibold text-slate-950">
-            Operacao MVP
-          </h2>
-        </div>
-        <NavigationLinks />
-        <div className="absolute bottom-5 left-4 right-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs font-medium text-slate-600">WhatsApp</p>
-          <div className="mt-2">
-            <StatusBadge tone="neutral">mock por padrao</StatusBadge>
-          </div>
-        </div>
-      </aside>
+    <span className="ops-header-chip" aria-live="polite">
+      <span
+        className="ops-status-dot"
+        data-tone={online === true ? 'success' : online === false ? 'danger' : undefined}
+        aria-hidden="true"
+      />
+      API {online === true ? 'online' : online === false ? 'offline' : 'verificando'}
+    </span>
+  );
+}
 
-      <div className="lg:pl-72">
-        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
-          <div className="flex items-center justify-between gap-3">
+function Sidebar({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
+  return (
+    <aside className={mobile ? 'ops-sidebar ops-sidebar-mobile' : 'ops-sidebar'}>
+      <Link href="/" className="ops-brand" onClick={onNavigate}>
+        <span className="ops-brand-mark" aria-hidden="true">SA</span>
+        <span className="ops-brand-copy">
+          <strong>Shopee Affiliate</strong>
+          <span>Operations console</span>
+        </span>
+      </Link>
+      <NavigationLinks onNavigate={onNavigate} />
+      <div className="ops-sidebar-footer">
+        <div className="ops-footer-status">
+          <span className="ops-status-dot" data-tone="success" aria-hidden="true" />
+          <span>LIVE · control local</span>
+        </div>
+        <span className="ops-mono">read-only / v1</span>
+      </div>
+    </aside>
+  );
+}
+
+export function AppShell({ children }: { children: ReactNode }) {
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  return (
+    <div className="ops-app">
+      <a className="ops-skip-link" href="#main-content">
+        Pular para o conteudo
+      </a>
+      <Sidebar />
+      <div className="ops-layout">
+        <header className="ops-header">
+          <div className="ops-header-context">
             <button
               type="button"
-              onClick={() => setOpen(true)}
-              className="rounded-md border border-slate-300 bg-white p-2 text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 lg:hidden"
-              aria-label="Abrir menu"
+              className="ops-menu-button"
+              onClick={() => setMobileOpen(true)}
+              aria-label="Abrir menu de operacao"
             >
-              <Menu className="h-5 w-5" aria-hidden="true" />
+              <Menu size={17} aria-hidden="true" />
             </button>
-            <ApiStatus />
-            <StatusBadge tone="neutral">Provider seguro no worker</StatusBadge>
+            <Activity size={15} aria-hidden="true" />
+            <strong>Centro de operacoes</strong>
+            <span>/</span>
+            <span>automacao comercial</span>
+          </div>
+          <div className="ops-header-actions">
+            <ApiPulse />
+            <span className="ops-header-chip">
+              <ClipboardList size={13} aria-hidden="true" />
+              leitura operacional
+            </span>
           </div>
         </header>
-        <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">{children}</main>
+        <main id="main-content" className="ops-main" tabIndex={-1}>{children}</main>
       </div>
 
-      {open ? (
-        <div className="fixed inset-0 z-30 lg:hidden">
+      {mobileOpen ? (
+        <div className="ops-drawer-backdrop" role="presentation">
           <button
             type="button"
-            className="absolute inset-0 bg-slate-950/40"
+            className="absolute inset-0 h-full w-full cursor-default border-0 bg-transparent"
             aria-label="Fechar menu"
-            onClick={() => setOpen(false)}
+            onClick={() => setMobileOpen(false)}
           />
-          <div className="absolute inset-y-0 left-0 w-80 max-w-[85vw] bg-white p-4 shadow-xl">
-            <div className="mb-5 flex items-center justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
-                  Shopee Affiliate
-                </p>
-                <h2 className="text-lg font-semibold text-slate-950">
-                  Operacao MVP
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded-md p-2 text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500"
-                aria-label="Fechar menu"
-              >
-                <X className="h-5 w-5" aria-hidden="true" />
-              </button>
-            </div>
-            <NavigationLinks onNavigate={() => setOpen(false)} />
+          <div className="relative h-full w-[min(280px,88vw)]">
+            <Sidebar mobile onNavigate={() => setMobileOpen(false)} />
+            <button
+              type="button"
+              className="ops-icon-button absolute right-3 top-4 z-40"
+              onClick={() => setMobileOpen(false)}
+              aria-label="Fechar menu de operacao"
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
           </div>
         </div>
       ) : null}

@@ -14,11 +14,14 @@ export class DashboardApiError extends Error {
   }
 }
 
-export const getApiBaseUrl = () =>
-  (process.env.NEXT_PUBLIC_API_URL?.trim() || DEFAULT_API_URL).replace(
+export const getApiBaseUrl = () => {
+  if (typeof window !== 'undefined') return '/api';
+
+  return (process.env.NEXT_PUBLIC_API_URL?.trim() || DEFAULT_API_URL).replace(
     /\/$/,
     '',
   );
+};
 
 type RequestOptions = Omit<RequestInit, 'body'> & {
   body?: unknown;

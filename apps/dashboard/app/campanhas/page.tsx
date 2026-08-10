@@ -1,0 +1,49 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import { listCommercialCampaigns, listWhatsAppGroups, type CommercialCampaign, type WhatsAppGroup } from '../../lib/api';
+import { formatDateTime } from '../../lib/format';
+import { OpsBadge, OpsEmpty, OpsLoading, OpsPageHeading, OpsSection, OpsState } from '../../components/ops-components';
+
+const maskFingerprint = (value: string | null | undefined) => value ? `${value.slice(0, 10)}...${value.slice(-6)}` : '—';
+
+export default function CampaignsPage() {
+  const [campaigns, setCampaigns] = useState<CommercialCampaign[]>([]);
+  const [groups, setGroups] = useState<WhatsAppGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void Promise.all([listCommercialCampaigns(1, 50), listWhatsAppGroups()]).then(([campaignResponse, groupResponse]) => {
+      if (!active) return;
+      setCampaigns(campaignResponse.items);
+      setGroups(groupResponse);
+    }).catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'Nao foi possivel carregar campanhas e grupos.'); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const groupById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+
+  return (
+    <>
+      <OpsPageHeading eyebrow="Campaign routing" title="Campanhas" description="A associacao entre campanha, nicho e grupo autorizado. Esta tela e somente leitura nesta versao." />
+      {loading ? <OpsLoading label="Carregando campanhas e grupos" /> : null}
+      {error ? <OpsState title="Configuracao comercial indisponivel" message={error} tone="danger" /> : null}
+      {!loading && !error ? <div className="grid gap-4">{campaigns.length === 0 ? <OpsSection title="Campanhas ativas"><OpsEmpty title="Nenhuma campanha retornada" message="A API nao possui campanha disponivel para exibicao." /></OpsSection> : null}{campaigns.map((campaign) => {
+        const group = campaign.anchorDestinationId ? groupById.get(campaign.anchorDestinationId) : null;
+        return <OpsSection key={campaign.id} title={campaign.name} meta={`${campaign.niche?.name ?? `nicho ${campaign.nicheId}`} · atualizado ${formatDateTime(campaign.updatedAt)}`} actions={<OpsBadge tone={campaign.active ? 'success' : 'neutral'}>{campaign.active ? 'ATIVA' : 'INATIVA'}</OpsBadge>}>
+          <div className="grid gap-4 md:grid-cols-4">
+            <div className="ops-control"><div className="ops-control-label">Grupo</div><div className="ops-control-value text-sm">{group?.name ?? campaign.anchorDestination?.name ?? 'Nao associado'}</div><div className="ops-control-sub">{group?.active && group.available ? 'autorizado e disponivel' : 'estado nao confirmado'}</div></div>
+            <div className="ops-control"><div className="ops-control-label">Fingerprint</div><div className="ops-control-value ops-mono">{maskFingerprint(group?.fingerprint ?? campaign.logicalGroupFingerprint)}</div><div className="ops-control-sub">identidade logica</div></div>
+            <div className="ops-control"><div className="ops-control-label">Cadencia</div><div className="ops-control-value">{campaign.cadenceMinutes} min</div><div className="ops-control-sub">janela {campaign.allowedStartTime}–{campaign.allowedEndTime}</div></div>
+            <div className="ops-control"><div className="ops-control-label">Fila alvo</div><div className="ops-control-value">{campaign.queueTargetSize}</div><div className="ops-control-sub">limite diario {campaign.dailyLimit}</div></div>
+          </div>
+        </OpsSection>;
+      })}</div> : null}
+      <OpsSection title="Diretorio de grupos" meta={`${groups.length} grupos retornados · nenhuma autorizacao e alterada aqui`}>
+        {groups.length === 0 ? <OpsEmpty title="Nenhum grupo retornado" message="A API nao expôs grupos disponiveis nesta consulta." /> : <div className="ops-table-wrap -mx-[18px]"><table className="ops-table"><thead><tr><th>Nome</th><th>Fingerprint</th><th>Estado</th><th>Membros</th><th>Sincronizado</th></tr></thead><tbody>{groups.map((group) => <tr key={group.id}><td><strong>{group.name}</strong><div className="ops-row-product-meta ops-mono">{group.id}</div></td><td className="ops-mono">{maskFingerprint(group.fingerprint)}</td><td><div className="flex gap-2"><OpsBadge tone={group.active ? 'success' : 'neutral'}>{group.active ? 'ATIVO' : 'INATIVO'}</OpsBadge><OpsBadge tone={group.available ? 'success' : 'warning'}>{group.available ? 'ONLINE' : 'INDISPONIVEL'}</OpsBadge></div></td><td className="ops-mono">{group.memberCount ?? '—'}</td><td>{formatDateTime(group.lastSyncedAt)}</td></tr>)}</tbody></table></div>}
+      </OpsSection>
+    </>
+  );
+}

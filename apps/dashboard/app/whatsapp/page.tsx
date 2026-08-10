@@ -1,14 +1,6 @@
 'use client';
 
-import {
-  Eye,
-  Plus,
-  RefreshCw,
-  Save,
-  ShieldCheck,
-  ShieldOff,
-  Users,
-} from 'lucide-react';
+import { Eye, RefreshCw, Users } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { EmptyState } from '../../components/empty-state';
 import { ErrorState } from '../../components/error-state';
@@ -16,14 +8,10 @@ import { LoadingState } from '../../components/loading-state';
 import { PageHeader } from '../../components/page-header';
 import { StatusBadge } from '../../components/status-badge';
 import {
-  createDestination,
   getDispatch,
   listDestinations,
   listDispatches,
   listWhatsAppGroups,
-  syncWhatsAppGroups,
-  updateDestination,
-  updateWhatsAppGroupAuthorization,
   type DispatchFilters,
   type WhatsAppDestination,
   type WhatsAppDispatch,
@@ -31,18 +19,6 @@ import {
   type WhatsAppGroup,
 } from '../../lib/api';
 import { formatDateTime, maskDestination } from '../../lib/format';
-
-type DestinationDraft = {
-  name: string;
-  destination: string;
-  active: boolean;
-};
-
-const emptyDestination: DestinationDraft = {
-  name: '',
-  destination: '',
-  active: true,
-};
 
 export default function WhatsAppPage() {
   const [destinations, setDestinations] = useState<WhatsAppDestination[]>([]);
@@ -53,25 +29,13 @@ export default function WhatsAppPage() {
     destinationId: '',
     productId: '',
   });
-  const [destinationDraft, setDestinationDraft] =
-    useState<DestinationDraft>(emptyDestination);
-  const [editing, setEditing] = useState<Record<string, DestinationDraft>>({});
   const [selectedDispatch, setSelectedDispatch] =
     useState<WhatsAppDispatch | null>(null);
   const [loading, setLoading] = useState(true);
-  const [submittingDestination, setSubmittingDestination] = useState(false);
-  const [savingId, setSavingId] = useState<string | null>(null);
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [groupsLoading, setGroupsLoading] = useState(true);
-  const [groupsSyncing, setGroupsSyncing] = useState(false);
-  const [groupActionId, setGroupActionId] = useState<string | null>(null);
-  const [confirmingGroupId, setConfirmingGroupId] = useState<string | null>(
-    null,
-  );
   const [groupsError, setGroupsError] = useState<string | null>(null);
-  const [groupsSuccess, setGroupsSuccess] = useState<string | null>(null);
 
   const loadGroups = async () => {
     setGroupsLoading(true);
@@ -86,20 +50,7 @@ export default function WhatsAppPage() {
   };
 
   const loadDestinations = async () => {
-    const response = await listDestinations();
-    setDestinations(response);
-    setEditing(
-      Object.fromEntries(
-        response.map((destination) => [
-          destination.id,
-          {
-            name: destination.name,
-            destination: destination.destination,
-            active: destination.active,
-          },
-        ]),
-      ),
-    );
+    setDestinations(await listDestinations());
   };
 
   const loadDispatches = async () => {
@@ -123,98 +74,7 @@ export default function WhatsAppPage() {
     void loadGroups();
   }, []);
 
-  const syncGroups = async () => {
-    if (groupsSyncing) return;
-    setGroupsSyncing(true);
-    setGroupsError(null);
-    setGroupsSuccess(null);
-    try {
-      const report = await syncWhatsAppGroups();
-      await loadGroups();
-      setGroupsSuccess(
-        `Sincronização concluída: ${report.discovered} disponível(is), ${report.created} novo(s) e ${report.unavailable} indisponível(is).`,
-      );
-    } catch (err) {
-      setGroupsError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setGroupsSyncing(false);
-    }
-  };
-
-  const setGroupAuthorization = async (
-    group: WhatsAppGroup,
-    active: boolean,
-  ) => {
-    if (groupActionId || (active && !group.available)) return;
-    setGroupActionId(group.id);
-    setGroupsError(null);
-    setGroupsSuccess(null);
-    try {
-      await updateWhatsAppGroupAuthorization(group.id, active);
-      setConfirmingGroupId(null);
-      await loadGroups();
-      setGroupsSuccess(
-        active
-          ? 'Grupo autorizado no diretório. O master switch do worker continua obrigatório para qualquer envio futuro.'
-          : 'Autorização do grupo removida.',
-      );
-    } catch (err) {
-      setGroupsError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setGroupActionId(null);
-    }
-  };
-
   const filteredDispatches = useMemo(() => dispatches, [dispatches]);
-
-  const createNewDestination = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (
-      submittingDestination ||
-      !destinationDraft.name.trim() ||
-      !destinationDraft.destination.trim()
-    ) {
-      return;
-    }
-    setSubmittingDestination(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      await createDestination({
-        name: destinationDraft.name.trim(),
-        destination: destinationDraft.destination.trim(),
-        active: destinationDraft.active,
-      });
-      setDestinationDraft(emptyDestination);
-      await loadDestinations();
-      setSuccess('Destino criado com sucesso.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setSubmittingDestination(false);
-    }
-  };
-
-  const saveDestination = async (id: string) => {
-    const draft = editing[id];
-    if (!draft || savingId) return;
-    setSavingId(id);
-    setError(null);
-    setSuccess(null);
-    try {
-      await updateDestination(id, {
-        name: draft.name.trim(),
-        destination: draft.destination.trim(),
-        active: draft.active,
-      });
-      await loadDestinations();
-      setSuccess('Destino atualizado com sucesso.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setSavingId(null);
-    }
-  };
 
   const openDispatch = async (id: string) => {
     setLoadingDetailId(id);
@@ -245,51 +105,26 @@ export default function WhatsAppPage() {
     <div className="grid gap-6">
       <PageHeader
         title="WhatsApp"
-        description="Gerencie destinos e acompanhe dispatches existentes. Nao ha envio manual nesta tela."
+        description="Diretório e dispatches em modo somente leitura. Não há mutações nem envio manual nesta tela."
       />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        O provider mock e o padrao. Evolution API so envia mensagens quando
-        configurada explicitamente no ambiente do worker.
+        O dashboard consulta o estado persistido. Autorizações de grupos,
+        destinos e operações de envio permanecem fora do Operations Console.
       </div>
 
       {error ? <ErrorState message={error} onRetry={load} /> : null}
-      {success ? (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-800">
-          {success}
-        </div>
-      ) : null}
 
       <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          <Users className="h-5 w-5 text-orange-600" aria-hidden="true" />
           <div>
-            <div className="flex items-center gap-2">
-              <Users className="h-5 w-5 text-orange-600" aria-hidden="true" />
-              <h2 className="font-semibold text-slate-950">Grupos</h2>
-            </div>
+            <h2 className="font-semibold text-slate-950">Grupos</h2>
             <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-              Descubra os grupos da conta conectada e autorize cada destino
-              conscientemente. Sincronizar apenas consulta a Evolution API; não
-              envia mensagens nem altera participantes.
+              Metadados dos grupos descobertos pela instância conectada. Esta
+              tela não sincroniza, autoriza ou desautoriza destinos.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void syncGroups()}
-            disabled={groupsSyncing || groupActionId !== null}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${groupsSyncing ? 'animate-spin' : ''}`}
-              aria-hidden="true"
-            />
-            {groupsSyncing ? 'Sincronizando...' : 'Sincronizar grupos'}
-          </button>
-        </div>
-
-        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
-          Autorizar no diretório não habilita envios por si só. O master switch
-          permanece desativado por padrão e não pode ser alterado no dashboard.
         </div>
 
         {groupsError ? (
@@ -299,14 +134,6 @@ export default function WhatsAppPage() {
               message={groupsError}
               onRetry={loadGroups}
             />
-          </div>
-        ) : null}
-        {groupsSuccess ? (
-          <div
-            role="status"
-            className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-800"
-          >
-            {groupsSuccess}
           </div>
         ) : null}
         {groupsLoading ? (
@@ -334,7 +161,6 @@ export default function WhatsAppPage() {
                     <th className="px-4 py-3">Disponibilidade</th>
                     <th className="px-4 py-3">Autorização</th>
                     <th className="px-4 py-3">Última sincronização</th>
-                    <th className="px-4 py-3 text-right">Ação</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -363,38 +189,6 @@ export default function WhatsAppPage() {
                       </td>
                       <td className="px-4 py-3 text-slate-700">
                         {formatDateTime(group.lastSyncedAt)}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {group.active ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void setGroupAuthorization(group, false)
-                            }
-                            disabled={groupActionId !== null}
-                            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            <ShieldOff className="h-4 w-4" aria-hidden="true" />
-                            {groupActionId === group.id
-                              ? 'Salvando...'
-                              : 'Desautorizar'}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmingGroupId(group.id)}
-                            disabled={
-                              !group.available || groupActionId !== null
-                            }
-                            className="inline-flex items-center gap-2 rounded-md border border-orange-300 bg-orange-50 px-3 py-2 text-sm font-medium text-orange-800 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            <ShieldCheck
-                              className="h-4 w-4"
-                              aria-hidden="true"
-                            />
-                            Autorizar
-                          </button>
-                        )}
                       </td>
                     </tr>
                   ))}
@@ -441,150 +235,23 @@ export default function WhatsAppPage() {
                       </dd>
                     </div>
                   </dl>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      group.active
-                        ? void setGroupAuthorization(group, false)
-                        : setConfirmingGroupId(group.id)
-                    }
-                    disabled={
-                      groupActionId !== null ||
-                      (!group.active && !group.available)
-                    }
-                    className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {group.active ? (
-                      <ShieldOff className="h-4 w-4" aria-hidden="true" />
-                    ) : (
-                      <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                    )}
-                    {groupActionId === group.id
-                      ? 'Salvando...'
-                      : group.active
-                        ? 'Desautorizar'
-                        : 'Autorizar'}
-                  </button>
                 </article>
               ))}
             </div>
           </>
         ) : null}
+      </section>
 
-        {confirmingGroupId ? (
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="authorize-group-title"
-            className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4"
-          >
-            <section className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl">
-              <h3
-                id="authorize-group-title"
-                className="font-semibold text-slate-950"
-              >
-                Autorizar este grupo?
-              </h3>
-              <p className="mt-2 text-sm leading-6 text-slate-600">
-                Esta ação registra uma autorização explícita no diretório. Ela
-                não envia mensagem e não altera o master switch do worker.
-              </p>
-              <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <button
-                  type="button"
-                  onClick={() => setConfirmingGroupId(null)}
-                  className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-orange-500"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const group = groups.find(
-                      (item) => item.id === confirmingGroupId,
-                    );
-                    if (group) void setGroupAuthorization(group, true);
-                  }}
-                  disabled={groupActionId !== null}
-                  className="rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {groupActionId ? 'Autorizando...' : 'Confirmar autorização'}
-                </button>
-              </div>
-            </section>
+      <section className="rounded-lg border border-slate-200 bg-white p-5">
+        <div className="flex items-start gap-3">
+          <Users className="h-5 w-5 text-slate-500" aria-hidden="true" />
+          <div>
+            <h2 className="font-semibold text-slate-950">Destinos</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Destinos persistidos e mascarados para consulta operacional.
+            </p>
           </div>
-        ) : null}
-      </section>
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h2 className="font-semibold text-slate-950">
-          Novo destino individual
-        </h2>
-        <form
-          onSubmit={createNewDestination}
-          className="mt-4 grid gap-4 lg:grid-cols-[1fr_1fr_auto_auto] lg:items-end"
-        >
-          <label>
-            <span className="text-sm font-medium text-slate-700">Nome</span>
-            <input
-              value={destinationDraft.name}
-              onChange={(event) =>
-                setDestinationDraft((current) => ({
-                  ...current,
-                  name: event.target.value,
-                }))
-              }
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-              placeholder="Grupo de ofertas"
-            />
-          </label>
-          <label>
-            <span className="text-sm font-medium text-slate-700">
-              Identificador
-            </span>
-            <input
-              value={destinationDraft.destination}
-              onChange={(event) =>
-                setDestinationDraft((current) => ({
-                  ...current,
-                  destination: event.target.value,
-                }))
-              }
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-              placeholder="mock-group-01"
-            />
-          </label>
-          <label className="flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2">
-            <input
-              type="checkbox"
-              checked={destinationDraft.active}
-              onChange={(event) =>
-                setDestinationDraft((current) => ({
-                  ...current,
-                  active: event.target.checked,
-                }))
-              }
-              className="h-4 w-4 rounded border-slate-300 text-orange-600 focus:ring-orange-500"
-            />
-            <span className="text-sm font-medium text-slate-700">Ativo</span>
-          </label>
-          <button
-            type="submit"
-            disabled={
-              submittingDestination ||
-              !destinationDraft.name.trim() ||
-              !destinationDraft.destination.trim()
-            }
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            {submittingDestination ? 'Criando...' : 'Criar'}
-          </button>
-        </form>
-      </section>
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h2 className="font-semibold text-slate-950">Destinos</h2>
+        </div>
         {loading ? (
           <div className="mt-4">
             <LoadingState label="Carregando destinos" />
@@ -594,109 +261,57 @@ export default function WhatsAppPage() {
           <div className="mt-4">
             <EmptyState
               title="Nenhum destino cadastrado"
-              description="Cadastre um destino ativo para que o pipeline possa criar dispatches."
+              description="Nenhum destino persistido está disponível para consulta."
             />
           </div>
         ) : null}
-        <div className="mt-4 grid gap-3">
-          {destinations.map((destination) => {
-            const draft = editing[destination.id] ?? {
-              name: destination.name,
-              destination: destination.destination,
-              active: destination.active,
-            };
-            return (
+        {destinations.length > 0 ? (
+          <div className="mt-4 grid gap-3">
+            {destinations.map((destination) => (
               <article
                 key={destination.id}
-                className="grid gap-3 rounded-md border border-slate-200 p-4 lg:grid-cols-[1fr_1fr_auto_auto] lg:items-end"
+                className="grid gap-2 rounded-md border border-slate-200 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-center"
               >
-                <label>
-                  <span className="text-sm font-medium text-slate-700">
+                <div>
+                  <span className="text-xs uppercase tracking-wide text-slate-500">
                     Nome
                   </span>
-                  <input
-                    value={draft.name}
-                    onChange={(event) =>
-                      setEditing((current) => ({
-                        ...current,
-                        [destination.id]: {
-                          ...draft,
-                          name: event.target.value,
-                        },
-                      }))
-                    }
-                    className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-                  />
-                </label>
-                <label>
-                  <span className="text-sm font-medium text-slate-700">
+                  <p className="font-medium text-slate-950">
+                    {destination.name}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-xs uppercase tracking-wide text-slate-500">
                     Identificador
                   </span>
-                  <input
-                    value={draft.destination}
-                    onChange={(event) =>
-                      setEditing((current) => ({
-                        ...current,
-                        [destination.id]: {
-                          ...draft,
-                          destination: event.target.value,
-                        },
-                      }))
-                    }
-                    className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-                  />
-                  <span className="mt-1 block text-xs text-slate-500">
-                    Visualizacao: {maskDestination(draft.destination)}
-                  </span>
-                </label>
-                <label className="flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={draft.active}
-                    onChange={(event) =>
-                      setEditing((current) => ({
-                        ...current,
-                        [destination.id]: {
-                          ...draft,
-                          active: event.target.checked,
-                        },
-                      }))
-                    }
-                    className="h-4 w-4 rounded border-slate-300 text-orange-600 focus:ring-orange-500"
-                  />
-                  <span className="text-sm font-medium text-slate-700">
-                    {draft.active ? 'Ativo' : 'Inativo'}
-                  </span>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void saveDestination(destination.id)}
-                  disabled={
-                    savingId !== null ||
-                    !draft.name.trim() ||
-                    !draft.destination.trim()
-                  }
-                  className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <Save className="h-4 w-4" aria-hidden="true" />
-                  {savingId === destination.id ? 'Salvando...' : 'Salvar'}
-                </button>
+                  <p className="font-mono text-sm text-slate-700">
+                    {maskDestination(destination.destination)}
+                  </p>
+                </div>
+                <StatusBadge tone={destination.active ? 'ok' : 'neutral'}>
+                  {destination.active ? 'Ativo' : 'Inativo'}
+                </StatusBadge>
               </article>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-lg border border-slate-200 bg-white p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="font-semibold text-slate-950">Dispatches</h2>
+          <div>
+            <h2 className="font-semibold text-slate-950">Dispatches</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Histórico de entregas; nenhuma ação de reprocessamento é oferecida.
+            </p>
+          </div>
           <button
             type="button"
             onClick={() => void load()}
             className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
-            Atualizar
+            Atualizar leituras
           </button>
         </div>
 
@@ -770,7 +385,7 @@ export default function WhatsAppPage() {
           <div className="mt-4">
             <EmptyState
               title="Nenhum dispatch encontrado"
-              description="Ajuste os filtros ou execute o pipeline com destinos ativos."
+              description="Nenhum registro corresponde aos filtros atuais."
             />
           </div>
         ) : null}
@@ -841,10 +456,7 @@ export default function WhatsAppPage() {
           >
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2
-                  id="dispatch-title"
-                  className="font-semibold text-slate-950"
-                >
+                <h2 id="dispatch-title" className="font-semibold text-slate-950">
                   Detalhes do dispatch
                 </h2>
                 <p className="mt-1 break-all text-sm text-slate-500">

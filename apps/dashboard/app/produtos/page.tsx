@@ -2,27 +2,18 @@
 
 import {
   ExternalLink,
-  FileCheck2,
   Link2,
-  RefreshCw,
   Search,
-  Sparkles,
-  Upload,
 } from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
 import { EmptyState } from '../../components/empty-state';
 import { ErrorState } from '../../components/error-state';
 import { LoadingState } from '../../components/loading-state';
 import { PageHeader } from '../../components/page-header';
+import { SafeProductImage } from '../../components/safe-product-image';
 import { StatusBadge } from '../../components/status-badge';
 import {
-  importManualShopeeOffers,
   listShopeeOffers,
-  previewShopeeOfferCopy,
-  syncShopeeOffers,
-  validateManualShopeeOffers,
-  type CopyPreview,
-  type ManualOfferValidation,
   type ShopeeOffer,
   type ShopeeOfferFilters,
   type ShopeeOfferPage,
@@ -39,6 +30,7 @@ const initialFilters: ShopeeOfferFilters = {
 };
 
 const sourceLabel = { MOCK: 'Mock', MANUAL: 'Manual', OFFICIAL: 'Oficial' };
+const providerLabel = { mock: 'Mock', manual: 'Manual', official: 'Oficial' };
 const statusLabel = {
   ACTIVE: 'Ativa',
   EXPIRED: 'Expirada',
@@ -49,18 +41,7 @@ export default function ProductsPage() {
   const [result, setResult] = useState<ShopeeOfferPage | null>(null);
   const [filters, setFilters] = useState<ShopeeOfferFilters>(initialFilters);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-  const [manualJson, setManualJson] = useState('');
-  const [manualRecords, setManualRecords] = useState<unknown[] | null>(null);
-  const [validation, setValidation] = useState<ManualOfferValidation | null>(
-    null,
-  );
-  const [validating, setValidating] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [preview, setPreview] = useState<CopyPreview | null>(null);
-  const [previewingId, setPreviewingId] = useState<string | null>(null);
 
   const load = async (nextFilters = filters) => {
     setLoading(true);
@@ -91,125 +72,25 @@ export default function ProductsPage() {
     void load(next);
   };
 
-  const sync = async () => {
-    if (syncing) return;
-    setSyncing(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      const report = await syncShopeeOffers();
-      setSuccess(
-        `Sincronizacao segura: ${report.created} criada(s), ${report.updated} atualizada(s), ${report.expired} expirada(s) ignorada(s).`,
-      );
-      await load({ ...filters, page: 1 });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  const validateImport = async () => {
-    setValidating(true);
-    setError(null);
-    setSuccess(null);
-    setValidation(null);
-    setManualRecords(null);
-    try {
-      const parsed = JSON.parse(manualJson) as unknown;
-      const records = Array.isArray(parsed) ? parsed : [parsed];
-      const response = await validateManualShopeeOffers(records);
-      setManualRecords(records);
-      setValidation(response);
-    } catch (err) {
-      setError(
-        err instanceof SyntaxError
-          ? 'JSON invalido. Revise o formato antes de validar.'
-          : err instanceof Error
-            ? err.message
-            : 'Erro inesperado.',
-      );
-    } finally {
-      setValidating(false);
-    }
-  };
-
-  const confirmImport = async () => {
-    if (!manualRecords || !validation?.valid || importing) return;
-    setImporting(true);
-    setError(null);
-    try {
-      const report = await importManualShopeeOffers(manualRecords);
-      setSuccess(
-        `Importacao confirmada: ${report.created} criada(s) e ${report.updated} atualizada(s).`,
-      );
-      setManualJson('');
-      setManualRecords(null);
-      setValidation(null);
-      await load({ ...filters, page: 1 });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  const openPreview = async (offer: ShopeeOffer) => {
-    setPreviewingId(offer.id);
-    setError(null);
-    try {
-      setPreview(await previewShopeeOfferCopy(offer.id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setPreviewingId(null);
-    }
-  };
-
   return (
     <div className="grid gap-6">
       <PageHeader
         title="Produtos e ofertas"
-        description="Catalogo local da Shopee Affiliate, sem scraping e sem envio automatico ao WhatsApp."
-        actions={
-          <button
-            type="button"
-            onClick={sync}
-            disabled={syncing}
-            className="inline-flex items-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
-            {syncing ? 'Sincronizando' : 'Sincronizar ofertas'}
-          </button>
-        }
+        description="Catalogo local da Shopee Affiliate em modo somente leitura."
       />
 
       <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-4">
         <span className="text-sm text-slate-600">Provider atual</span>
         <StatusBadge tone={result?.provider === 'official' ? 'warning' : 'ok'}>
-          {result?.provider ?? 'carregando'}
+          {result?.provider ? providerLabel[result.provider] : 'carregando'}
         </StatusBadge>
         <p className="text-sm text-slate-600">
-          A sincronizacao somente persiste ofertas; nao gera copy, dispatch ou
-          job.
+          A atualizacao do catalogo acontece pelo fluxo operacional oficial; o
+          console nao inicia sincronizacao, importacao ou geracao de copy.
         </p>
       </div>
 
-      {result?.provider === 'official' ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-          <strong>Aguardando credenciais da Shopee.</strong> Autenticacao e
-          transporte real aguardam credenciais e documentacao liberada para a
-          conta.
-        </div>
-      ) : null}
-
       {error ? <ErrorState message={error} onRetry={() => load()} /> : null}
-      {success ? (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-800">
-          {success}
-        </div>
-      ) : null}
-
       <section className="rounded-lg border border-slate-200 bg-white p-4">
         <form onSubmit={submitFilters} className="grid gap-3 md:grid-cols-5">
           <label className="md:col-span-2">
@@ -288,7 +169,7 @@ export default function ProductsPage() {
       {!loading && !error && result?.items.length === 0 ? (
         <EmptyState
           title="Nenhuma oferta encontrada"
-          description="Sincronize o provider mock ou valide uma importacao manual ficticia."
+          description="Nenhuma oferta persistida corresponde aos filtros atuais."
         />
       ) : null}
 
@@ -315,9 +196,8 @@ export default function ProductsPage() {
                   <tr key={offer.id} className="align-top">
                     <td className="max-w-sm px-4 py-3">
                       <div className="flex gap-3">
-                        <img
+                        <SafeProductImage
                           src={offer.imageUrl}
-                          alt=""
                           className="h-12 w-12 rounded-md border border-slate-200 object-cover"
                         />
                         <div>
@@ -353,11 +233,7 @@ export default function ProductsPage() {
                       {formatDateTime(offer.lastSeenAt)}
                     </td>
                     <td className="px-4 py-3">
-                      <OfferActions
-                        offer={offer}
-                        previewing={previewingId === offer.id}
-                        onPreview={() => void openPreview(offer)}
-                      />
+                      <OfferActions offer={offer} />
                     </td>
                   </tr>
                 ))}
@@ -372,9 +248,8 @@ export default function ProductsPage() {
                 className="rounded-lg border border-slate-200 bg-white p-4"
               >
                 <div className="flex gap-3">
-                  <img
+                  <SafeProductImage
                     src={offer.imageUrl}
-                    alt=""
                     className="h-16 w-16 rounded-md border object-cover"
                   />
                   <div>
@@ -398,11 +273,7 @@ export default function ProductsPage() {
                   <Metric label="Origem" value={sourceLabel[offer.source]} />
                 </dl>
                 <div className="mt-4">
-                  <OfferActions
-                    offer={offer}
-                    previewing={previewingId === offer.id}
-                    onPreview={() => void openPreview(offer)}
-                  />
+                  <OfferActions offer={offer} />
                 </div>
               </article>
             ))}
@@ -431,101 +302,6 @@ export default function ProductsPage() {
         </>
       ) : null}
 
-      {preview ? (
-        <section className="rounded-lg border-2 border-dashed border-orange-300 bg-orange-50 p-5">
-          <div className="flex items-center gap-2 text-sm font-bold text-orange-800">
-            <Sparkles className="h-4 w-4" /> {preview.label}
-          </div>
-          <h2 className="mt-3 text-lg font-semibold text-slate-950">
-            {preview.titulo}
-          </h2>
-          <p className="mt-2 text-sm leading-6 text-slate-700">
-            {preview.mensagem}
-          </p>
-          <p className="mt-2 text-sm font-medium text-slate-900">
-            {preview.cta}
-          </p>
-          <a
-            href={preview.affiliateLink}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-orange-700 hover:underline"
-          >
-            Abrir link afiliado <ExternalLink className="h-4 w-4" />
-          </a>
-        </section>
-      ) : null}
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex items-start gap-3">
-          <Upload className="mt-0.5 h-5 w-5 text-orange-600" />
-          <div>
-            <h2 className="font-semibold text-slate-950">
-              Importacao manual temporaria
-            </h2>
-            <p className="mt-1 text-sm leading-6 text-slate-600">
-              Cole JSON exportado ou preenchido localmente. A validacao nao
-              grava e nunca consulta a pagina do produto.
-            </p>
-          </div>
-        </div>
-        <label className="mt-4 block">
-          <span className="text-sm font-medium text-slate-700">
-            Ofertas em JSON
-          </span>
-          <textarea
-            value={manualJson}
-            onChange={(event) => {
-              setManualJson(event.target.value);
-              setValidation(null);
-              setManualRecords(null);
-            }}
-            rows={8}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-orange-500"
-            placeholder='[{"providerProductId":"manual-001", ...}]'
-          />
-        </label>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => void validateImport()}
-            disabled={!manualJson.trim() || validating}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
-          >
-            <FileCheck2 className="h-4 w-4" />{' '}
-            {validating ? 'Validando' : 'Validar e visualizar'}
-          </button>
-          <button
-            type="button"
-            onClick={() => void confirmImport()}
-            disabled={!validation?.valid || importing}
-            className="rounded-md bg-slate-950 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {importing ? 'Importando' : 'Confirmar importacao'}
-          </button>
-        </div>
-        {validation ? (
-          <div
-            className={`mt-4 rounded-md border p-4 text-sm ${validation.valid ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}
-          >
-            <p className="font-semibold">
-              {validation.valid
-                ? `${validation.count} oferta(s) valida(s). Revise o preview antes de confirmar.`
-                : 'A importacao possui erros.'}
-            </p>
-            {validation.errors.map((item) => (
-              <p key={`${item.index}-${item.message}`} className="mt-1">
-                Registro {item.index + 1}: {item.message}
-              </p>
-            ))}
-            {validation.valid ? (
-              <pre className="mt-3 max-h-64 overflow-auto rounded bg-white/70 p-3 text-xs text-slate-700">
-                {JSON.stringify(validation.preview, null, 2)}
-              </pre>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
     </div>
   );
 }
@@ -562,12 +338,8 @@ function FilterSelect({
 
 function OfferActions({
   offer,
-  previewing,
-  onPreview,
 }: {
   offer: ShopeeOffer;
-  previewing: boolean;
-  onPreview(): void;
 }) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -590,16 +362,6 @@ function OfferActions({
       >
         <Link2 className="h-4 w-4" />
       </span>
-      <button
-        type="button"
-        onClick={onPreview}
-        disabled={
-          previewing || offer.status !== 'ACTIVE' || !offer.affiliateLink
-        }
-        className="rounded-md border border-orange-200 px-3 py-2 text-xs font-semibold text-orange-700 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {previewing ? 'Gerando' : 'Preview'}
-      </button>
     </div>
   );
 }

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Shopee Affiliate Operations Console</title>
+  <rect width="64" height="64" rx="10" fill="#0B0D10" />
+  <path d="M18 18h28v28H18z" fill="none" stroke="#EE4D2D" stroke-width="4" />
+  <path d="M26 38V26h5.5c4.5 0 6.5 2.2 6.5 5.5S36 37 31.5 37H26m0-6h5" fill="none" stroke="#F4F6F8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

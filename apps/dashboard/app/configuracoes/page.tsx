@@ -46,6 +46,7 @@ export default function SettingsPage() {
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [schedulerLoading, setSchedulerLoading] = useState(true);
   const [schedulerError, setSchedulerError] = useState<string | null>(null);
+  const [apiBaseUrl, setApiBaseUrl] = useState('/api');
   const schedulerRequestInFlight = useRef(false);
 
   const check = async () => {
@@ -80,6 +81,7 @@ export default function SettingsPage() {
   };
 
   useEffect(() => {
+    setApiBaseUrl(getApiBaseUrl());
     void check();
     void loadScheduler();
   }, []);
@@ -99,7 +101,7 @@ export default function SettingsPage() {
           <div>
             <h2 className="font-semibold text-slate-950">API usada</h2>
             <p className="mt-1 break-all text-sm text-slate-600">
-              {getApiBaseUrl()}
+              {apiBaseUrl}
             </p>
           </div>
           <StatusBadge tone={online ? 'ok' : 'error'}>
