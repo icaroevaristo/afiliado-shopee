@@ -6,8 +6,18 @@ import {
   COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED,
   CommercialAutomationOrchestrator,
 } from '../src/commercial-automation-orchestrator';
+import {
+  CommercialAutomationCandidateFlowService,
+  type CommercialAutomationCandidateSelection,
+  type CommercialAutomationCandidatePreflight,
+} from '../src/commercial-automation-candidate-flow-service';
+import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import { COMMERCIAL_EXECUTION_OWNERSHIP_LOST } from '../src/commercial-automation-execution-domain';
-import { COMMERCIAL_EXECUTION_IN_PROGRESS } from '../src/commercial-automation-policy-service';
+import {
+  COMMERCIAL_EXECUTION_IN_PROGRESS,
+  CommercialAutomationPolicyService,
+} from '../src/commercial-automation-policy-service';
+import type { CommercialPromotionMiningReport } from '../src/commercial-promotion-mining-service';
 import type {
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRepository,
@@ -170,9 +180,18 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
 const createSubject = ({
   withCandidateFlow = true,
   targets,
+  candidateFlowOverride,
+  policyOverride,
 }: {
   withCandidateFlow?: boolean;
   targets?: CommercialAutomationTarget[];
+  candidateFlowOverride?: ConstructorParameters<
+    typeof CommercialAutomationOrchestrator
+  >[0]['candidateFlow'];
+  policyOverride?: Pick<
+    CommercialAutomationPolicyService,
+    'evaluateAutomationReadiness'
+  >;
 } = {}) => {
   const resolvedTargets: CommercialAutomationTarget[] = targets ?? [
     {
@@ -196,15 +215,38 @@ const createSubject = ({
   };
   const candidateFlow = {
     listTargets: vi.fn(async () => resolvedTargets),
-    prepare: vi.fn(async (target?: CommercialAutomationTarget) => ({
+    preflight: vi.fn<
+      (target: CommercialAutomationTarget) => Promise<CommercialAutomationCandidatePreflight>
+    >(async () => ({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      candidateStatus: 'COPY_READY',
+    })),
+    replenish: vi.fn<
+      (
+        target: CommercialAutomationTarget,
+      ) => Promise<Pick<CommercialPromotionMiningReport, 'rejectionSummary'>>
+    >(async () => ({ rejectionSummary: {} })),
+    prepare: vi.fn<
+      (
+        selection: CommercialAutomationCandidateSelection,
+        ) => Promise<{
+        runId: string;
+        generatedCopyId: string;
+        candidateId: string;
+        campaignId: string;
+        groupId: string;
+        logicalGroupFingerprint: string;
+        nicheId: string;
+      }>
+    >(async ({ target, candidateId }) => ({
       runId: 'run-1',
       generatedCopyId: 'ai-copy-1',
-      candidateId: 'candidate-1',
-      campaignId: target?.campaignId ?? 'campaign-1',
-      groupId: target?.groupId ?? 'group-1',
-      logicalGroupFingerprint:
-        target?.logicalGroupFingerprint ?? 'grp_aaaaaaaaaaaa',
-      nicheId: target?.nicheId ?? 'niche-1',
+      candidateId,
+      campaignId: target.campaignId,
+      groupId: target.groupId,
+      logicalGroupFingerprint: target.logicalGroupFingerprint,
+      nicheId: target.nicheId,
     })),
     revalidate: vi.fn(async () => undefined),
   };
@@ -222,10 +264,12 @@ const createSubject = ({
   };
   const logger = { info: vi.fn(), error: vi.fn() };
   const orchestrator = new CommercialAutomationOrchestrator({
-    policy: policy as never,
+    policy: policyOverride ?? (policy as never),
     syncOffers,
     pipeline: pipeline as never,
-    ...(withCandidateFlow ? { candidateFlow } : {}),
+    ...(withCandidateFlow
+      ? { candidateFlow: candidateFlowOverride ?? candidateFlow }
+      : {}),
     confirmation: confirmation as never,
     commercialRuns: commercialRuns as never,
     executions,
@@ -244,6 +288,419 @@ const createSubject = ({
     candidateFlow,
     confirmation,
     commercialRuns,
+  };
+};
+
+const createRealCandidateFlowForIntegration = () => {
+  const groupA = {
+    id: 'group-a',
+    name: 'Grupo A',
+    fingerprint: 'grp_aaaaaaaaaaaa',
+    type: 'GROUP',
+    active: true,
+    available: true,
+    sourceInstanceName: 'affiliate-bot',
+  };
+  const groupB = {
+    id: 'group-b',
+    name: 'Grupo B',
+    fingerprint: 'grp_bbbbbbbbbbbb',
+    type: 'GROUP',
+    active: true,
+    available: true,
+    sourceInstanceName: 'affiliate-bot',
+  };
+  const campaignFor = (group: typeof groupA) => ({
+    id: `campaign-${group.id.slice(-1)}`,
+    logicalGroupFingerprint: group.fingerprint,
+    nicheId: `niche-${group.id.slice(-1)}`,
+    active: true,
+    queueTargetSize: 40,
+    niche: { active: true },
+  });
+  const contextFor = (group: typeof groupA, imageUrl: string) => {
+    const suffix = group.id.slice(-1);
+    const candidateId = `candidate-${suffix}`;
+    const productId = `product-${suffix}`;
+    const snapshotId = `snapshot-${suffix}`;
+    const generatedCopyId = `copy-${suffix}`;
+    const affiliateLink = `https://example.invalid/affiliate/${suffix}`;
+    return {
+      candidate: {
+        id: candidateId,
+        campaignId: `campaign-${suffix}`,
+        productId,
+        snapshotId,
+        generatedCopyId,
+        status: 'COPY_READY',
+        expiresAt: new Date('2026-07-27T15:00:00.000Z'),
+        commercialScore: 88,
+        scorePolicyVersion: 'official-v2',
+        minimumScoreUsed: 60,
+        rankPosition: 1,
+        scoreBreakdown: { policyVersion: 'official-v2' },
+      },
+      campaign: campaignFor(group),
+      product: {
+        id: productId,
+        productName: `Produto ${suffix.toUpperCase()}`,
+        price: '99.90',
+        affiliateLink,
+        urlImagem: imageUrl,
+        unavailableAt: null,
+        commercialSnapshotRevision: 1,
+      },
+      snapshot: {
+        id: snapshotId,
+        productId,
+        revision: 1,
+        unavailableAt: null,
+        offerEndsAt: new Date('2026-07-27T15:00:00.000Z'),
+      },
+    };
+  };
+  const contexts = {
+    'candidate-a': contextFor(groupA, ''),
+    'candidate-b': contextFor(
+      groupB,
+      'https://example.invalid/images/product-b.jpg',
+    ),
+  };
+  const copies = Object.fromEntries(
+    Object.values(contexts).map((context) => [
+      context.candidate.id,
+      {
+        id: context.candidate.generatedCopyId,
+        productId: context.product.id,
+        snapshotId: context.snapshot.id,
+        createdFromCandidateId: context.candidate.id,
+        source: 'AI',
+        titulo: 'Oferta selecionada',
+        mensagem: context.product.affiliateLink,
+        cta: '',
+        hashtags: '',
+      },
+    ]),
+  );
+  const mining = { mine: vi.fn(async () => ({ rejectionSummary: {} })) };
+  const copyGeneration = {
+    findCopy: vi.fn(async (candidateId: keyof typeof contexts) => ({
+      status: 'COPY_READY' as const,
+      generatedCopyId: contexts[candidateId].candidate.generatedCopyId,
+    })),
+    preview: vi.fn(),
+    generate: vi.fn(),
+  };
+  const flowPipeline = {
+    dryRunFromPromotionCandidate: vi.fn(async ({ candidate }: { candidate: { id: string } }) => ({
+      runId: `run-${candidate.id}`,
+    })),
+  };
+  const service = new CommercialAutomationCandidateFlowService({
+    groups: { list: vi.fn(async () => [groupA, groupB]) } as never,
+    campaigns: {
+      list: vi.fn(),
+      findByLogicalGroupFingerprint: vi.fn(async (fingerprint: string) =>
+        [groupA, groupB]
+          .filter((group) => group.fingerprint === fingerprint)
+          .map(campaignFor)[0] ?? null,
+      ),
+    } as never,
+    candidates: {
+      listQueue: vi.fn(async ({ campaignId }: { campaignId: string }) => {
+        const suffix = campaignId.slice(-1);
+        const candidateId = `candidate-${suffix}` as keyof typeof contexts;
+        const context = contexts[candidateId];
+        return {
+          items: [
+            {
+              id: candidateId,
+              productId: context.candidate.productId,
+              status: 'COPY_READY',
+              rankPosition: 1,
+              queuedAt: NOW,
+            },
+          ],
+          total: 1,
+        };
+      }),
+    } as never,
+    deliveryHistory: {
+      wasProductSentToGroup: vi.fn(async () => false),
+      findLastSentAtByGroup: vi.fn(async () => null),
+    } as never,
+    copies: {
+      loadContext: vi.fn(async (candidateId: keyof typeof contexts) =>
+        contexts[candidateId],
+      ),
+      findCopyForCandidate: vi.fn(async (candidateId: keyof typeof contexts) => ({
+        candidate: contexts[candidateId].candidate,
+        copy: copies[candidateId],
+      })),
+    } as never,
+    mining: mining as never,
+    copyGeneration: copyGeneration as never,
+    draft: new CommercialMessageDraftService(),
+    pipeline: flowPipeline as never,
+    instanceName: 'affiliate-bot',
+    clock: () => NOW,
+  });
+
+  return { service, mining, copyGeneration, flowPipeline };
+};
+
+const createStatefulCrossTickCandidateFlow = () => {
+  const groups = ['a', 'b', 'c'].map((suffix) => ({
+    id: `group-${suffix}`,
+    name: `Grupo ${suffix.toUpperCase()}`,
+    fingerprint: `grp_${suffix.repeat(12)}`,
+    type: 'GROUP',
+    active: true,
+    available: true,
+    sourceInstanceName: 'affiliate-bot',
+  }));
+  type CandidateState = {
+    id: string;
+    group: (typeof groups)[number];
+    status: 'QUEUED' | 'COPY_READY' | 'DISPATCHED';
+    available: boolean;
+    generatedCopyId: string | null;
+  };
+  const candidates = new Map<string, CandidateState>([
+    [
+      'candidate-b',
+      {
+        id: 'candidate-b',
+        group: groups[1],
+        status: 'QUEUED',
+        available: false,
+        generatedCopyId: null,
+      },
+    ],
+    [
+      'candidate-c',
+      {
+        id: 'candidate-c',
+        group: groups[2],
+        status: 'COPY_READY',
+        available: true,
+        generatedCopyId: 'copy-c',
+      },
+    ],
+  ]);
+  const sentAtByGroup = new Map<string, Date>();
+  const campaignFor = (group: (typeof groups)[number]) => ({
+    id: `campaign-${group.id.slice(-1)}`,
+    logicalGroupFingerprint: group.fingerprint,
+    nicheId: `niche-${group.id.slice(-1)}`,
+    active: true,
+    queueTargetSize: 40,
+    niche: { active: true },
+  });
+  const contextFor = (candidateId: string) => {
+    const state = candidates.get(candidateId);
+    if (!state) return null;
+    const suffix = state.group.id.slice(-1);
+    const productId = `product-${suffix}`;
+    const snapshotId = `snapshot-${suffix}`;
+    return {
+      candidate: {
+        id: state.id,
+        campaignId: `campaign-${suffix}`,
+        productId,
+        snapshotId,
+        generatedCopyId: state.generatedCopyId,
+        status: state.status,
+        expiresAt: new Date('2026-07-27T15:00:00.000Z'),
+        commercialScore: 88,
+        scorePolicyVersion: 'official-v2',
+        minimumScoreUsed: 60,
+        rankPosition: 1,
+        scoreBreakdown: { policyVersion: 'official-v2' },
+      },
+      campaign: campaignFor(state.group),
+      product: {
+        id: productId,
+        productName: `Produto ${suffix.toUpperCase()}`,
+        price: '99.90',
+        affiliateLink: `https://example.invalid/affiliate/${suffix}`,
+        urlImagem: `https://example.invalid/images/product-${suffix}.jpg`,
+        unavailableAt: null,
+        commercialSnapshotRevision: 1,
+      },
+      snapshot: {
+        id: snapshotId,
+        productId,
+        revision: 1,
+        unavailableAt: null,
+        offerEndsAt: new Date('2026-07-27T15:00:00.000Z'),
+      },
+    };
+  };
+  const copyFor = (candidateId: string) => {
+    const context = contextFor(candidateId);
+    if (!context?.candidate.generatedCopyId) return null;
+    return {
+      id: context.candidate.generatedCopyId,
+      productId: context.product.id,
+      snapshotId: context.snapshot.id,
+      createdFromCandidateId: candidateId,
+      source: 'AI',
+      titulo: 'Oferta selecionada',
+      mensagem: context.product.affiliateLink,
+      cta: '',
+      hashtags: '',
+    };
+  };
+  const deliveryHistory = {
+    wasProductSentToGroup: vi.fn(async (productId: string, groupId: string) =>
+      sentAtByGroup.has(groupId) && productId === `product-${groupId.slice(-1)}`,
+    ),
+    findLastSentAtByGroup: vi.fn(async (groupId: string) =>
+      sentAtByGroup.get(groupId) ?? null,
+    ),
+  };
+  const mining = {
+    mine: vi.fn(async (campaignId: string) => {
+      if (campaignId === 'campaign-b') {
+        const candidate = candidates.get('candidate-b')!;
+        candidate.available = true;
+        candidate.status = 'QUEUED';
+      }
+      return { rejectionSummary: {} };
+    }),
+  };
+  const copyGeneration = {
+    findCopy: vi.fn(async (candidateId: string) => {
+      const candidate = candidates.get(candidateId)!;
+      return {
+        candidateId,
+        status: candidate.status,
+        generatedCopyId: candidate.generatedCopyId,
+      };
+    }),
+    preview: vi.fn(async () => ({ eligible: true, blockers: [] })),
+    generate: vi.fn(async (candidateId: string) => {
+      const candidate = candidates.get(candidateId)!;
+      candidate.status = 'COPY_READY';
+      candidate.generatedCopyId = `copy-${candidate.group.id.slice(-1)}`;
+    }),
+  };
+  const flowPipeline = {
+    dryRunFromPromotionCandidate: vi.fn(
+      async ({ candidate }: { candidate: { id: string } }) => ({
+        runId: `run-${candidate.id}`,
+      }),
+    ),
+  };
+  const groupRepository = { list: vi.fn(async () => groups) };
+  const service = new CommercialAutomationCandidateFlowService({
+    groups: groupRepository as never,
+    campaigns: {
+      list: vi.fn(),
+      findByLogicalGroupFingerprint: vi.fn(async (fingerprint: string) =>
+        groups
+          .filter((group) => group.fingerprint === fingerprint)
+          .map(campaignFor)[0] ?? null,
+      ),
+    } as never,
+    candidates: {
+      listQueue: vi.fn(async ({ campaignId }: { campaignId: string }) => {
+        const items = [...candidates.values()]
+          .filter(
+            (candidate) =>
+              candidate.available &&
+              campaignId === `campaign-${candidate.group.id.slice(-1)}`,
+          )
+          .map((candidate) => {
+            const context = contextFor(candidate.id)!;
+            return {
+              ...context.candidate,
+              productName: context.product.productName,
+              price: context.product.price,
+              discountRate: 20,
+              snapshotRevision: 1,
+              queuedAt: NOW,
+            };
+          });
+        return { items, total: items.length };
+      }),
+    } as never,
+    deliveryHistory: deliveryHistory as never,
+    copies: {
+      loadContext: vi.fn(async (candidateId: string) => contextFor(candidateId)),
+      findCopyForCandidate: vi.fn(async (candidateId: string) => {
+        const context = contextFor(candidateId);
+        const copy = copyFor(candidateId);
+        return context && copy ? { candidate: context.candidate, copy } : null;
+      }),
+    } as never,
+    mining: mining as never,
+    copyGeneration: copyGeneration as never,
+    draft: new CommercialMessageDraftService(),
+    pipeline: flowPipeline as never,
+    instanceName: 'affiliate-bot',
+    clock: () => NOW,
+  });
+  const history = {
+    async getSnapshot({ groupId }: { groupId?: string }) {
+      const sentAt = [...sentAtByGroup.values()].sort(
+        (left, right) => right.getTime() - left.getTime(),
+      )[0] ?? null;
+      return {
+        globalSentToday: sentAtByGroup.size,
+        groupSentToday: groupId && sentAtByGroup.has(groupId) ? 1 : 0,
+        lastSentAt: sentAt,
+        globalLastSentAt: sentAt,
+        groupLastSentAt: groupId ? sentAtByGroup.get(groupId) ?? null : null,
+      };
+    },
+    async hasAmbiguousCommercialExecution() {
+      return false;
+    },
+    async hasActiveCommercialExecution() {
+      return false;
+    },
+    async hasStaleCommercialExecution() {
+      return false;
+    },
+  };
+  const policy = new CommercialAutomationPolicyService({
+    settings: {
+      getOrCreate: async () => ({
+        paused: false,
+        pausedAt: null,
+        resumedAt: NOW,
+        updatedAt: NOW,
+      }),
+    } as never,
+    history: history as never,
+    groups: groupRepository as never,
+    instanceName: 'affiliate-bot',
+    config: {
+      enabled: true,
+      timezone: 'America/Sao_Paulo',
+      allowedStartTime: '08:00',
+      allowedEndTime: '20:00',
+      dailyGlobalLimit: 2,
+      dailyGroupLimit: 1,
+      minimumIntervalMinutes: 60,
+    },
+    clock: () => NOW,
+  });
+  return {
+    service,
+    policy,
+    mining,
+    copyGeneration,
+    flowPipeline,
+    candidates,
+    deliveryHistory,
+    finalizeSent(candidateId: string, sentAt: Date) {
+      const candidate = candidates.get(candidateId)!;
+      candidate.status = 'DISPATCHED';
+      sentAtByGroup.set(candidate.group.id, sentAt);
+    },
   };
 };
 
@@ -398,6 +855,7 @@ describe('CommercialAutomationOrchestrator', () => {
       messageSent: false,
     });
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.revalidate).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).toHaveBeenCalledWith(
@@ -565,7 +1023,11 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.revalidate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -574,6 +1036,630 @@ describe('CommercialAutomationOrchestrator', () => {
       }),
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('avanca de A sem candidato para B com COPY_READY sem criar artefatos em A', async () => {
+    const targets: CommercialAutomationTarget[] = [
+      {
+        groupId: 'group-a',
+        groupName: 'Grupo A',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        campaignId: 'campaign-a',
+        nicheId: 'niche-a',
+      },
+      {
+        groupId: 'group-b',
+        groupName: 'Grupo B',
+        logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+        campaignId: 'campaign-b',
+        nicheId: 'niche-b',
+      },
+    ];
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValue({
+        outcome: 'READY',
+        candidateId: 'candidate-b',
+        candidateStatus: 'COPY_READY',
+      });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(1, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(3, targets[1]);
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
+    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('integra flow real: imagem inelegivel em A alcanca B com maxMiningCallsPerTick e writesForSkippedTargets', async () => {
+    const realFlow = createRealCandidateFlowForIntegration();
+    const subject = createSubject({
+      candidateFlowOverride: realFlow.service,
+    });
+    const dispatches: string[] = [];
+    const outbox: string[] = [];
+    const jobs: string[] = [];
+    subject.confirmation.confirm.mockImplementation(async (runId?: string) => {
+      const confirmedRunId = runId ?? '';
+      dispatches.push(confirmedRunId);
+      outbox.push(confirmedRunId);
+      jobs.push(confirmedRunId);
+      return { status: 'queued' };
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'queued',
+      commercialRunId: 'run-candidate-b',
+    });
+
+    const maxMiningCallsPerTick = 1;
+    const writesForSkippedTargets = {
+      copies: realFlow.copyGeneration.generate.mock.calls.filter(
+        ([candidateId]) => candidateId === 'candidate-a',
+      ).length,
+      runs: realFlow.flowPipeline.dryRunFromPromotionCandidate.mock.calls.filter(
+        ([input]) => input.candidate.id === 'candidate-a',
+      ).length,
+      dispatches: dispatches.filter((runId) => runId === 'run-candidate-a')
+        .length,
+      outbox: outbox.filter((runId) => runId === 'run-candidate-a').length,
+      jobs: jobs.filter((runId) => runId === 'run-candidate-a').length,
+    };
+
+    expect(realFlow.mining.mine).toHaveBeenCalledTimes(maxMiningCallsPerTick);
+    expect(realFlow.mining.mine).toHaveBeenCalledWith('campaign-a', {
+      confirm: 'MINERAR_PROMOCOES',
+    });
+    expect(realFlow.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(realFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate: expect.objectContaining({ id: 'candidate-b' }),
+      }),
+    );
+    expect(writesForSkippedTargets).toEqual({
+      copies: 0,
+      runs: 0,
+      dispatches: 0,
+      outbox: 0,
+      jobs: 0,
+    });
+  });
+
+  it('avanca de A sem candidato para B QUEUED com no maximo uma geracao de IA', async () => {
+    const targets: CommercialAutomationTarget[] = [
+      {
+        groupId: 'group-a',
+        groupName: 'Grupo A',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        campaignId: 'campaign-a',
+        nicheId: 'niche-a',
+      },
+      {
+        groupId: 'group-b',
+        groupName: 'Grupo B',
+        logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+        campaignId: 'campaign-b',
+        nicheId: 'niche-b',
+      },
+    ];
+    const subject = createSubject({ targets });
+    const generateAiCopy = vi.fn();
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValue({
+        outcome: 'READY',
+        candidateId: 'candidate-b',
+        candidateStatus: 'QUEUED',
+      });
+    subject.candidateFlow.prepare.mockImplementation(async ({ target }) => {
+      generateAiCopy();
+      return {
+        runId: 'run-1',
+        generatedCopyId: 'ai-copy-1',
+        candidateId: 'candidate-b',
+        campaignId: target.campaignId,
+        groupId: target.groupId,
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        nicheId: target.nicheId,
+      };
+    });
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(generateAiCopy).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
+  });
+
+  it('reabastece B uma vez e o seleciona quando a reposicao cria candidato', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    const replenished = new Set<string>();
+    subject.candidateFlow.preflight.mockImplementation(async (target) => {
+      if (target.groupId === 'group-a') return { outcome: 'NO_CANDIDATE' };
+      return replenished.has(target.groupId)
+        ? {
+            outcome: 'READY',
+            candidateId: 'candidate-b',
+            candidateStatus: 'QUEUED',
+          }
+        : { outcome: 'NO_CANDIDATE' };
+    });
+    subject.candidateFlow.replenish.mockImplementation(async (target) => {
+      replenished.add(target.groupId);
+      return { rejectionSummary: {} };
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(1, targets[0]);
+    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+      { rejectionSummary: {} },
+    );
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('avanca de A e B sem candidato para C pronto, sem fan-out de preparacao', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b', 'c'].map(
+      (suffix) => ({
+        groupId: `group-${suffix}`,
+        groupName: `Grupo ${suffix.toUpperCase()}`,
+        logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+        campaignId: `campaign-${suffix}`,
+        nicheId: `niche-${suffix}`,
+      }),
+    );
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockImplementation(
+      async (target: CommercialAutomationTarget) =>
+        target.groupId === 'group-c'
+          ? {
+              outcome: 'READY' as const,
+              candidateId: 'candidate-c',
+              candidateStatus: 'COPY_READY' as const,
+            }
+          : { outcome: 'NO_CANDIDATE' as const },
+    );
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(5);
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(1, targets[0]);
+    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[2] }),
+    );
+  });
+
+  it('reabastece cada target vazio uma vez e bloqueia sem preparar artefatos', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'NO_CANDIDATE',
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
+    });
+
+    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('mantem single-group vazio bloqueado sem copy, run ou confirmacao', async () => {
+    const subject = createSubject({
+      targets: [
+        {
+          groupId: 'group-a',
+          groupName: 'Grupo A',
+          logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+          campaignId: 'campaign-a',
+          nicheId: 'niche-a',
+        },
+      ],
+    });
+    subject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'NO_CANDIDATE',
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
+    });
+
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('nao tenta B quando a IA de A falha depois do preflight', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.prepare.mockRejectedValue(
+      new AppError('Falha na IA', 'COMMERCIAL_AI_COPY_FAILED'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+  });
+
+  it('nao tenta B quando a revalidacao de A falha', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.revalidate.mockRejectedValue(
+      new AppError('Grupo mudou', 'COMMERCIAL_GROUP_CHANGED'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('nao tenta B quando A possui blocker estrutural ou source invalid', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockRejectedValue(
+      new AppError('Source invalido', 'COMMERCIAL_AI_COPY_SOURCE_INVALID'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+    'COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED',
+    'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+  ])('nao tenta B quando A possui %s', async (failureCode) => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockRejectedValue(
+      new AppError('Invariante comercial divergente', failureCode),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it('mantem A/B READY na ordenacao original e compromete somente A', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[0] }),
+    );
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('permite B quando o bloqueio diario e especifico de A', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.policy.evaluateAutomationReadiness.mockImplementation(
+      async (input?: { target?: CommercialAutomationTarget }) =>
+        input?.target?.groupId === 'group-a'
+          ? { allowed: false, reasons: ['GROUP_DAILY_LIMIT_REACHED'] }
+          : { allowed: true, reasons: [] },
+    );
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
+  });
+
+  it('mantem o isolamento quando o mesmo produto aparece em grupos distintos', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockImplementation(
+      async (target: CommercialAutomationTarget) =>
+        target.groupId === 'group-a'
+          ? { outcome: 'NO_CANDIDATE' as const }
+          : {
+              outcome: 'READY' as const,
+              candidateId: 'same-product-candidate-b',
+              candidateStatus: 'COPY_READY' as const,
+            },
+    );
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(
+      targets[0],
+    );
+  });
+
+  it('falha sem fallback quando o preflight encontra erro inesperado de repositorio', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+    }));
+    const subject = createSubject({ targets });
+    subject.candidateFlow.preflight.mockRejectedValue(new Error('database down'));
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it('recalcula ordem e lifecycle entre ticks sem A vazio bloquear B ou C', async () => {
+    const statefulFlow = createStatefulCrossTickCandidateFlow();
+    const subject = createSubject({
+      candidateFlowOverride: statefulFlow.service,
+      policyOverride: statefulFlow.policy,
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        bullMqJobId: 'bull-job-cross-tick-1',
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'queued',
+      commercialRunId: 'run-candidate-b',
+    });
+
+    expect(statefulFlow.mining.mine).toHaveBeenNthCalledWith(
+      1,
+      'campaign-a',
+      { confirm: 'MINERAR_PROMOCOES' },
+    );
+    expect(statefulFlow.mining.mine).toHaveBeenNthCalledWith(
+      2,
+      'campaign-b',
+      { confirm: 'MINERAR_PROMOCOES' },
+    );
+    expect(statefulFlow.copyGeneration.generate).toHaveBeenCalledOnce();
+    expect(statefulFlow.copyGeneration.generate).toHaveBeenCalledWith(
+      'candidate-b',
+      'GERAR_COPY_COM_IA',
+    );
+
+    // Mirrors the dispatch finalizer: only a terminal SENT updates history and lifecycle.
+    statefulFlow.finalizeSent('candidate-b', NOW);
+    expect(statefulFlow.candidates.get('candidate-b')?.status).toBe('DISPATCHED');
+    await expect(
+      statefulFlow.policy.evaluateAutomationReadiness({
+        target: {
+          groupId: 'group-b',
+          groupName: 'Grupo B',
+          logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+          campaignId: 'campaign-b',
+          nicheId: 'niche-b',
+        },
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reasons: expect.arrayContaining([
+        'GROUP_DAILY_LIMIT_REACHED',
+        'MINIMUM_INTERVAL_NOT_REACHED',
+      ]),
+    });
+    await expect(statefulFlow.service.listTargets()).resolves.toMatchObject([
+      { groupId: 'group-a' },
+      { groupId: 'group-c' },
+      { groupId: 'group-b' },
+    ]);
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        bullMqJobId: 'bull-job-cross-tick-2',
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'queued',
+      commercialRunId: 'run-candidate-c',
+    });
+
+    expect(statefulFlow.mining.mine).toHaveBeenCalledTimes(3);
+    expect(statefulFlow.mining.mine).toHaveBeenLastCalledWith('campaign-a', {
+      confirm: 'MINERAR_PROMOCOES',
+    });
+    expect(statefulFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        candidate: expect.objectContaining({ id: 'candidate-b' }),
+      }),
+    );
+    expect(statefulFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        candidate: expect.objectContaining({ id: 'candidate-c' }),
+      }),
+    );
+    expect(statefulFlow.copyGeneration.generate).toHaveBeenCalledOnce();
+    expect(statefulFlow.candidates.get('candidate-c')?.status).toBe('COPY_READY');
+    expect(subject.confirmation.confirm).toHaveBeenCalledTimes(2);
   });
 
   it('nao tenta o proximo target depois que a preparacao inicia e falha', async () => {
@@ -606,8 +1692,16 @@ describe('CommercialAutomationOrchestrator', () => {
       }),
     ).resolves.toMatchObject({ status: 'failed' });
 
-    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: targets[0],
+        candidateId: 'candidate-1',
+        candidateStatus: 'COPY_READY',
+      }),
+    );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
   });
 
