@@ -340,9 +340,9 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
       ? { id: 'candidate-id', generatedCopyId: 'copy-id', status }
       : null;
     const findMany = vi.fn(async () => (current ? [current] : []));
-    const updateMany = vi.fn(async () => {
+    const updateMany = vi.fn(async ({ data }: { data: { status: string } }) => {
       if (!current || current.status !== 'RESERVED') return { count: 0 };
-      current = { ...current, status: 'DISPATCHED' };
+      current = { ...current, status: data.status };
       return { count: 1 };
     });
     const findUnique = vi.fn(async () => current);
@@ -387,6 +387,41 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
     expect(state.updateMany).not.toHaveBeenCalled();
   });
 
+  it('transiciona RESERVED para BLOCKED em falha segura', async () => {
+    const state = createRepository('RESERVED');
+
+    await expect(
+      state.repository.markBlockedByGeneratedCopyId('copy-id'),
+    ).resolves.toEqual({
+      kind: 'BLOCKED',
+      candidateId: 'candidate-id',
+      transitioned: true,
+    });
+    expect(state.read()?.status).toBe('BLOCKED');
+  });
+
+  it('trata BLOCKED novamente como sucesso idempotente', async () => {
+    const state = createRepository('BLOCKED');
+
+    await expect(
+      state.repository.markBlockedByGeneratedCopyId('copy-id'),
+    ).resolves.toEqual({
+      kind: 'BLOCKED',
+      candidateId: 'candidate-id',
+      transitioned: false,
+    });
+    expect(state.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('faz no-op seguro para GeneratedCopy legacy em falha', async () => {
+    const state = createRepository();
+
+    await expect(
+      state.repository.markBlockedByGeneratedCopyId('copy-id'),
+    ).resolves.toEqual({ kind: 'LEGACY' });
+    expect(state.updateMany).not.toHaveBeenCalled();
+  });
+
   it.each(['COPY_READY', 'QUEUED', 'EXPIRED', 'BLOCKED'] as const)(
     'bloqueia candidato candidate-scoped em %s',
     async (status) => {
@@ -394,6 +429,20 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
 
       await expect(
         state.repository.markDispatchedByGeneratedCopyId('copy-id'),
+      ).rejects.toMatchObject({
+        code: 'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      });
+      expect(state.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['COPY_READY', 'QUEUED', 'EXPIRED', 'DISPATCHED'] as const)(
+    'recusa bloqueio seguro quando o candidato esta em %s',
+    async (status) => {
+      const state = createRepository(status);
+
+      await expect(
+        state.repository.markBlockedByGeneratedCopyId('copy-id'),
       ).rejects.toMatchObject({
         code: 'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
       });

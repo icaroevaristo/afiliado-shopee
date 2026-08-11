@@ -31,7 +31,7 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
 > & {
   commercialPromotions?: Pick<
     ApplicationRepositories['commercialPromotions'],
-    'markDispatchedByGeneratedCopyId'
+    'markDispatchedByGeneratedCopyId' | 'markBlockedByGeneratedCopyId'
   >;
 };
 
@@ -76,6 +76,27 @@ const consoleLogger: WhatsAppDispatchWorkerLogger = {
   error: (obj, msg) => console.error(msg, obj),
 };
 
+const errorType = (error: unknown) =>
+  error instanceof Error ? error.name : 'UnknownError';
+
+const errorCode = (error: unknown) =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  typeof error.code === 'string'
+    ? error.code
+    : 'UNKNOWN';
+
+const preserveCause = (error: unknown, cause: unknown) => {
+  if (error instanceof Error && !('cause' in error)) {
+    Object.defineProperty(error, 'cause', {
+      value: cause,
+      configurable: true,
+    });
+  }
+  return error;
+};
+
 export const processWhatsAppDispatchJob = async (
   job: Pick<Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
   options: WhatsAppDispatchProcessorOptions,
@@ -93,43 +114,48 @@ export const processWhatsAppDispatchJob = async (
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService ?? new CommercialMessageDraftService(),
   });
+  let dispatch;
   try {
-    const dispatch = await sender.sendDispatch(job.data.dispatchId);
-    await finalizeCommercialPipelineRun({
-      runs: repositories.commercialRuns,
-      promotionCandidates: repositories.commercialPromotions,
-      dispatch,
-      failed: false,
-      logger: options.logger,
-    });
-    return dispatch;
+    dispatch = await sender.sendDispatch(job.data.dispatchId);
   } catch (error) {
-    const dispatch = await repositories.whatsappDispatches.findByIdWithDetails(
-      job.data.dispatchId,
-    );
-    if (dispatch) {
-      await finalizeCommercialPipelineRun({
-        runs: repositories.commercialRuns,
-        promotionCandidates: repositories.commercialPromotions,
-        dispatch,
-        failed: true,
-        logger: options.logger,
-      }).catch((finalizationError) => {
+    const failedDispatch =
+      await repositories.whatsappDispatches.findByIdWithDetails(
+        job.data.dispatchId,
+      );
+    if (failedDispatch) {
+      try {
+        await finalizeCommercialPipelineRun({
+          runs: repositories.commercialRuns,
+          promotionCandidates: repositories.commercialPromotions,
+          dispatch: failedDispatch,
+          failed: true,
+          logger: options.logger,
+        });
+      } catch (finalizationError) {
         options.logger.error(
           {
             event: 'commercial-pipeline.finalization.error',
             dispatchId: job.data.dispatchId,
-            errorType:
-              finalizationError instanceof Error
-                ? finalizationError.name
-                : 'UnknownError',
+            senderErrorType: errorType(error),
+            senderErrorCode: errorCode(error),
+            finalizationErrorType: errorType(finalizationError),
+            finalizationErrorCode: errorCode(finalizationError),
           },
           'Commercial pipeline finalization failed',
         );
-      });
+        throw preserveCause(finalizationError, error);
+      }
     }
     throw error;
   }
+  await finalizeCommercialPipelineRun({
+    runs: repositories.commercialRuns,
+    promotionCandidates: repositories.commercialPromotions,
+    dispatch,
+    failed: false,
+    logger: options.logger,
+  });
+  return dispatch;
 };
 
 export const createWhatsAppDispatchWorker = (

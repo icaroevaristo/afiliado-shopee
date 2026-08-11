@@ -16,6 +16,7 @@ import type { WhatsAppDispatchProcessorRepositories } from '../src/whatsapp-disp
 import type {
   CommercialDispatchOutboxRecord,
   CommercialDispatchOutboxRepository,
+  CommercialPipelineRunFinalizationRepository,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
   ShopeeOfferRecord,
@@ -158,7 +159,8 @@ describe('commercial candidate dispatch integration', () => {
       generatedCopy: generatedCopy(),
     });
 
-    const runs: CommercialPipelineRunRepository = {
+    const runs: CommercialPipelineRunRepository &
+      CommercialPipelineRunFinalizationRepository = {
       create: vi.fn(),
       update: vi.fn(async (_id, data) => {
         run = { ...run, ...data };
@@ -169,6 +171,20 @@ describe('commercial candidate dispatch integration', () => {
       findByDispatchId: vi.fn(async (id) =>
         id === dispatch?.id ? run : null,
       ),
+      finalizeByDispatchId: vi.fn(async (_dispatchId, completedAt) => {
+        if (!dispatch || dispatch.status !== 'SENT') {
+          return { kind: 'AMBIGUOUS' as const, transitioned: false };
+        }
+        run = {
+          ...run,
+          status: 'COMPLETED',
+          finalStatus: 'SENT',
+          investigationRequired: false,
+          failureCode: null,
+          completedAt,
+        };
+        return { kind: 'SENT' as const, transitioned: true };
+      }),
     };
 
     const outboxes: CommercialDispatchOutboxRepository = {
@@ -315,6 +331,9 @@ describe('commercial candidate dispatch integration', () => {
         transitioned: true,
       };
     });
+    const markBlockedByGeneratedCopyId = vi.fn(async () => {
+      throw new Error('unexpected safe failure finalization');
+    });
     const whatsappDispatches = {
       findByIdForSending: vi.fn(async () => dispatchDetails()),
       findByIdWithDetails: vi.fn(async () => dispatchDetails()),
@@ -327,7 +346,10 @@ describe('commercial candidate dispatch integration', () => {
     const repositories: WhatsAppDispatchProcessorRepositories = {
       whatsappDispatches,
       commercialRuns: runs,
-      commercialPromotions: { markDispatchedByGeneratedCopyId },
+      commercialPromotions: {
+        markDispatchedByGeneratedCopyId,
+        markBlockedByGeneratedCopyId,
+      },
     };
     const provider = new MockWhatsAppProvider();
     const groupSendPolicy = new WhatsAppGroupSendPolicy({

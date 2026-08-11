@@ -37,6 +37,7 @@ import type {
   CommercialPipelineRunFilters,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
+  CommercialPipelineRunFinalizationRepository,
   CouponData,
   CouponRecord,
   CouponRepository,
@@ -1858,6 +1859,72 @@ export class PrismaCommercialPromotionRepository
     );
   }
 
+  async markBlockedByGeneratedCopyId(generatedCopyId: string) {
+    const candidates =
+      await this.prisma.commercialPromotionCandidate.findMany({
+        where: { generatedCopyId },
+        select: { id: true, status: true },
+      });
+    if (candidates.length === 0) return { kind: 'LEGACY' as const };
+    if (candidates.length !== 1) {
+      throw new AppError(
+        'Copy candidate-scoped possui mais de um candidato',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+
+    const [candidate] = candidates;
+    if (candidate.status === 'BLOCKED') {
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: candidate.id,
+        transitioned: false,
+      };
+    }
+    if (candidate.status !== 'RESERVED') {
+      throw new AppError(
+        'Candidato promocional nao esta reservado para bloqueio seguro',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+
+    const result = await this.prisma.commercialPromotionCandidate.updateMany({
+      where: {
+        id: candidate.id,
+        generatedCopyId,
+        status: 'RESERVED',
+      },
+      data: { status: 'BLOCKED' },
+    });
+    if (result.count === 1) {
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: candidate.id,
+        transitioned: true,
+      };
+    }
+
+    const current =
+      await this.prisma.commercialPromotionCandidate.findUnique({
+        where: { id: candidate.id },
+        select: { generatedCopyId: true, status: true },
+      });
+    if (
+      current?.generatedCopyId === generatedCopyId &&
+      current.status === 'BLOCKED'
+    ) {
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: candidate.id,
+        transitioned: false,
+      };
+    }
+    throw new AppError(
+      'Candidato promocional mudou durante o bloqueio seguro',
+      'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+    );
+  }
+
 }
 
 type CommercialCopyPrismaClient = Pick<
@@ -2374,7 +2441,11 @@ const toPrismaCommercialPipelineRun = (
     : { productPrice: data.productPrice }),
 });
 
-export class PrismaCommercialPipelineRunRepository implements CommercialPipelineRunRepository {
+export class PrismaCommercialPipelineRunRepository
+  implements
+    CommercialPipelineRunRepository,
+    CommercialPipelineRunFinalizationRepository
+{
   constructor(
     private readonly prisma: Pick<DatabaseClient, 'commercialPipelineRun'>,
   ) {}
@@ -2445,6 +2516,139 @@ export class PrismaCommercialPipelineRunRepository implements CommercialPipeline
     return record
       ? mapCommercialPipelineRun(record as unknown as Record<string, unknown>)
       : null;
+  }
+
+  async finalizeByDispatchId(
+    dispatchId: string,
+    completedAt: Date,
+  ) {
+    if (!this.prisma.commercialPipelineRun) return null;
+
+    const readCurrent = async () =>
+      this.prisma.commercialPipelineRun.findUnique({
+        where: { dispatchId } as never,
+        select: {
+          id: true,
+          mode: true,
+          status: true,
+          finalStatus: true,
+          investigationRequired: true,
+          dispatch: { select: { status: true } },
+        },
+      });
+
+    // A CAS loser gets one bounded re-read to converge on a terminal winner.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = await readCurrent();
+      if (!current || current.mode !== 'CONFIRMED') return null;
+
+      const kind = this.resolveFinalizationKind(current);
+      if (this.isFinalizationPersisted(current, kind)) {
+        return { kind, transitioned: false };
+      }
+
+      const data =
+        kind === 'SENT'
+          ? {
+              status: 'COMPLETED' as const,
+              finalStatus: 'SENT' as const,
+              failureCode: null,
+              investigationRequired: false,
+              completedAt,
+            }
+          : kind === 'FAILED'
+            ? {
+                status: 'FAILED' as const,
+                finalStatus: 'FAILED' as const,
+                failureCode: 'COMMERCIAL_DISPATCH_FAILED',
+                investigationRequired: false,
+                completedAt,
+              }
+            : {
+                status: 'FAILED' as const,
+                finalStatus: 'AMBIGUOUS' as const,
+                failureCode: 'COMMERCIAL_DISPATCH_FAILED',
+                investigationRequired: true,
+                completedAt,
+              };
+
+      const changed = await this.prisma.commercialPipelineRun.updateMany({
+        where: {
+          id: current.id,
+          dispatchId,
+          mode: 'CONFIRMED',
+          ...(kind === 'SENT'
+            ? {}
+            : kind === 'FAILED'
+              ? {
+                  OR: [
+                    { status: 'STARTED' },
+                    {
+                      status: 'FAILED',
+                      finalStatus: 'AMBIGUOUS',
+                      investigationRequired: true,
+                    },
+                    {
+                      status: 'FAILED',
+                      finalStatus: 'FAILED',
+                      investigationRequired: true,
+                    },
+                  ],
+                }
+              : { status: 'STARTED' }),
+        } as never,
+        data: data as never,
+      });
+      if (changed.count === 1) return { kind, transitioned: true };
+    }
+
+    throw new AppError(
+      'Finalizacao comercial nao convergiu para um estado terminal',
+      'COMMERCIAL_PIPELINE_RUN_FINALIZATION_CONFLICT',
+    );
+  }
+
+  private resolveFinalizationKind(current: {
+    status: string;
+    finalStatus: string | null;
+    investigationRequired: boolean;
+    dispatch: { status: string } | null;
+  }) {
+    if (current.finalStatus === 'SENT' || current.dispatch?.status === 'SENT') {
+      return 'SENT' as const;
+    }
+    if (
+      (current.finalStatus === 'FAILED' &&
+        !current.investigationRequired) ||
+      current.dispatch?.status === 'FAILED'
+    ) {
+      return 'FAILED' as const;
+    }
+    return 'AMBIGUOUS' as const;
+  }
+
+  private isFinalizationPersisted(
+    current: {
+      status: string;
+      finalStatus: string | null;
+      investigationRequired: boolean;
+    },
+    kind: 'SENT' | 'FAILED' | 'AMBIGUOUS',
+  ) {
+    return (
+      (kind === 'SENT' &&
+        current.status === 'COMPLETED' &&
+        current.finalStatus === 'SENT' &&
+        !current.investigationRequired) ||
+      (kind === 'FAILED' &&
+        current.status === 'FAILED' &&
+        current.finalStatus === 'FAILED' &&
+        !current.investigationRequired) ||
+      (kind === 'AMBIGUOUS' &&
+        current.status === 'FAILED' &&
+        current.finalStatus === 'AMBIGUOUS' &&
+        current.investigationRequired)
+    );
   }
 }
 

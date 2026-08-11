@@ -134,6 +134,7 @@ describe('processWhatsAppDispatchJob', () => {
         list: vi.fn(),
         findById: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
+        finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
     });
     const events: string[] = [];
@@ -224,6 +225,7 @@ describe('processWhatsAppDispatchJob', () => {
         list: vi.fn(),
         findById: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
+        finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
     };
     const draftService: Pick<CommercialMessageDraftService, 'createDraft'> = {
@@ -276,6 +278,7 @@ describe('processWhatsAppDispatchJob', () => {
         list: vi.fn(),
         findById: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
+        finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
     };
 
@@ -344,6 +347,7 @@ describe('processWhatsAppDispatchJob', () => {
         list: vi.fn(),
         findById: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
+        finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
     };
 
@@ -377,5 +381,71 @@ describe('processWhatsAppDispatchJob', () => {
     expect(draftService.createDraft).toHaveBeenCalledOnce();
     expect(whatsAppProvider.sendMessage).not.toHaveBeenCalled();
     expect(markAttemptPending).not.toHaveBeenCalled();
+  });
+
+  it('propaga conflito da finalizacao comercial sem mascarar o erro do Sender', async () => {
+    const senderError = new AppError(
+      'Dispatch requer revisao manual',
+      'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+    );
+    const finalizationError = new AppError(
+      'Finalizacao comercial em conflito',
+      'COMMERCIAL_PIPELINE_RUN_FINALIZATION_CONFLICT',
+    );
+    const dispatch = {
+      ...fakeDispatch,
+      status: 'PROCESSING' as const,
+      attemptCount: 1,
+    };
+    const findByIdForSending = vi.fn().mockRejectedValue(senderError);
+    const findByIdWithDetails = vi.fn().mockResolvedValue(dispatch);
+    const markAttemptPending = vi.fn();
+    const repositories: WhatsAppDispatchProcessorRepositories = {
+      whatsappDispatches: {
+        findByIdWithDetails,
+        markAttemptPending,
+        markSent: vi.fn(),
+        createPending: vi.fn(),
+        findByIdForSending,
+        list: vi.fn(),
+        markFailed: vi.fn(),
+      },
+      commercialRuns: {
+        create: vi.fn(),
+        update: vi.fn(),
+        list: vi.fn(),
+        findById: vi.fn(),
+        findByDispatchId: vi.fn().mockResolvedValue(null),
+        finalizeByDispatchId: vi.fn().mockRejectedValue(finalizationError),
+      },
+    };
+    const whatsAppProvider: WhatsAppProvider = { sendMessage: vi.fn() };
+    const logger = { info: vi.fn(), error: vi.fn() };
+
+    const result = await processWhatsAppDispatchJob(
+      {
+        id: 'job-123',
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: 'dispatch-123' },
+      },
+      { repositories, whatsAppProvider, logger },
+    ).catch((error: unknown) => error);
+
+    expect(result).toBe(finalizationError);
+    expect(result).toMatchObject({
+      code: 'COMMERCIAL_PIPELINE_RUN_FINALIZATION_CONFLICT',
+    });
+    expect((result as Error & { cause?: unknown }).cause).toBe(senderError);
+    expect(whatsAppProvider.sendMessage).not.toHaveBeenCalled();
+    expect(markAttemptPending).not.toHaveBeenCalled();
+    expect(dispatch.attemptCount).toBe(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dispatchId: 'dispatch-123',
+        senderErrorCode: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+        finalizationErrorCode: 'COMMERCIAL_PIPELINE_RUN_FINALIZATION_CONFLICT',
+      }),
+      'Commercial pipeline finalization failed',
+    );
   });
 });

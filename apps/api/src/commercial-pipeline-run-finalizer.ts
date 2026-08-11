@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type {
   CommercialPromotionCandidateRepository,
   CommercialPipelineRunRepository,
+  CommercialPipelineRunFinalizationRepository,
   WhatsAppDispatchRecord,
 } from './repositories';
 
@@ -14,56 +15,51 @@ export const finalizeCommercialPipelineRun = async ({
   logger,
   clock = () => new Date(),
 }: {
-  runs: CommercialPipelineRunRepository;
+  runs: CommercialPipelineRunRepository &
+    CommercialPipelineRunFinalizationRepository;
   promotionCandidates?: Pick<
     CommercialPromotionCandidateRepository,
-    'markDispatchedByGeneratedCopyId'
+    'markDispatchedByGeneratedCopyId' | 'markBlockedByGeneratedCopyId'
   >;
   dispatch: WhatsAppDispatchRecord;
   failed: boolean;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
   clock?: () => Date;
 }) => {
-  const run = await runs.findByDispatchId(dispatch.id);
-  if (!run || run.mode !== 'CONFIRMED') return;
+  const finalization = await runs.finalizeByDispatchId(
+    dispatch.id,
+    clock(),
+  );
+  if (!finalization) return;
 
-  if (run.investigationRequired) {
-    logger.error(
-      {
-        event: 'commercial-pipeline.finalization.preserved-investigation',
-        runId: run.id,
-      },
-      'Commercial pipeline investigation state preserved',
-    );
-    return;
-  }
+  const sent = finalization.kind === 'SENT';
+  const failedSafely = finalization.kind === 'FAILED';
 
-  const sent = !failed && dispatch.status === 'SENT';
-  const failedSafely = dispatch.status === 'FAILED';
   if (sent && promotionCandidates) {
     await promotionCandidates.markDispatchedByGeneratedCopyId(
       dispatch.generatedCopyId,
     );
   }
-  await runs.update(run.id, {
-    status: sent ? 'COMPLETED' : 'FAILED',
-    finalStatus: sent ? 'SENT' : failedSafely ? 'FAILED' : 'AMBIGUOUS',
-    failureCode: sent ? null : 'COMMERCIAL_DISPATCH_FAILED',
-    investigationRequired: !sent,
-    completedAt: clock(),
-  });
+  if (failedSafely && promotionCandidates) {
+    await promotionCandidates.markBlockedByGeneratedCopyId(
+      dispatch.generatedCopyId,
+    );
+  }
   (sent ? logger.info : logger.error)(
     {
       event: sent
         ? 'commercial-pipeline.finalization.sent'
         : 'commercial-pipeline.finalization.failed',
-      runId: run.id,
+      dispatchId: dispatch.id,
       dispatchStatus: dispatch.status,
       attemptCount: dispatch.attemptCount,
-      investigationRequired: !sent,
+      failureObserved: failed,
+      investigationRequired: finalization.kind === 'AMBIGUOUS',
     },
     sent
       ? 'Commercial pipeline dispatch sent'
-      : 'Commercial pipeline dispatch requires investigation',
+      : failedSafely
+        ? 'Commercial pipeline dispatch failed safely'
+        : 'Commercial pipeline dispatch requires investigation',
   );
 };
