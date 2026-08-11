@@ -58,6 +58,7 @@ import type {
   CommercialGroupCampaignRepository,
   CommercialNicheRepository,
   CommercialPipelineRunRepository,
+  CommercialPipelineRunFinalizationRepository,
   CommercialPromotionCandidateRepository,
   CommercialPromotionCatalogRepository,
   CommercialPromotionCopyRepository,
@@ -97,7 +98,8 @@ export type ApplicationRepositories = {
   whatsappGroups: WhatsAppGroupDirectoryRepository;
   shopeeOffers: ShopeeOfferRepository;
   coupons: CouponRepository;
-  commercialRuns: CommercialPipelineRunRepository;
+  commercialRuns: CommercialPipelineRunRepository &
+    CommercialPipelineRunFinalizationRepository;
   commercialDeliveryHistory: CommercialDeliveryHistoryRepository;
   commercialDispatchOutboxes: CommercialDispatchOutboxRepository;
   commercialNiches: CommercialNicheRepository;

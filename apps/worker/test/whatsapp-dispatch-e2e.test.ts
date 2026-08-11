@@ -23,6 +23,7 @@ import { processWhatsAppDispatchJob } from '../src/whatsapp-dispatch-worker';
 
 const DESTINATION = '0000000000000';
 const API_KEY = 'unit-test-api-key-never-real';
+const LOCAL_API_AUTH_TOKEN = 'unit-test-local-api-auth-token';
 const baseEnv: NodeJS.ProcessEnv = {
   NODE_ENV: 'test',
   DATABASE_URL: 'postgresql://localhost:5432/test',
@@ -617,6 +618,7 @@ describe('dispatch API lookup', () => {
     };
     const app = await buildApp({
       logger: false,
+      localApiAuthToken: LOCAL_API_AUTH_TOKEN,
       prisma: {
         $disconnect: vi.fn(),
         productLead: {},
@@ -632,6 +634,7 @@ describe('dispatch API lookup', () => {
     const response = await app.inject({
       method: 'GET',
       url: `/whatsapp/dispatches/${WHATSAPP_DISPATCH_E2E_IDS.dispatchId}`,
+      headers: { authorization: `Bearer ${LOCAL_API_AUTH_TOKEN}` },
     });
     await app.close();
 

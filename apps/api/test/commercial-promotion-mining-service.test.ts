@@ -201,6 +201,9 @@ const setup = ({
     markDispatchedByGeneratedCopyId: vi.fn(async () => ({
       kind: 'LEGACY' as const,
     })),
+    markBlockedByGeneratedCopyId: vi.fn(async () => ({
+      kind: 'LEGACY' as const,
+    })),
   };
   const scorePolicies = new CommercialOfferScorePolicyResolver({
     calculate: () => 0,

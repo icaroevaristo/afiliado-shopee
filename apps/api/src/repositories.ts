@@ -222,6 +222,23 @@ export interface CommercialPipelineRunRepository {
   ): Promise<CommercialPipelineRunRecord | null>;
 }
 
+export type CommercialPipelineRunFinalizationKind =
+  | 'SENT'
+  | 'FAILED'
+  | 'AMBIGUOUS';
+
+export type CommercialPipelineRunFinalization = {
+  kind: CommercialPipelineRunFinalizationKind;
+  transitioned: boolean;
+};
+
+export interface CommercialPipelineRunFinalizationRepository {
+  finalizeByDispatchId(
+    dispatchId: string,
+    completedAt: Date,
+  ): Promise<CommercialPipelineRunFinalization | null>;
+}
+
 export interface CommercialDeliveryHistoryRepository {
   wasProductSentToGroup(productId: string, groupId: string): Promise<boolean>;
   findLastSentAtByGroup(groupId: string): Promise<Date | null>;
@@ -590,6 +607,10 @@ export type CommercialPromotionDispatchFinalization =
   | { kind: 'LEGACY' }
   | { kind: 'DISPATCHED'; candidateId: string; transitioned: boolean };
 
+export type CommercialPromotionFailureFinalization =
+  | { kind: 'LEGACY' }
+  | { kind: 'BLOCKED'; candidateId: string; transitioned: boolean };
+
 export type CommercialPromotionSignal =
   'PRICE_DROP' | 'DISCOUNT_INCREASE' | 'NEWLY_OBSERVED' | 'CURRENT_DISCOUNT';
 
@@ -746,6 +767,9 @@ export interface CommercialPromotionCandidateRepository {
   markDispatchedByGeneratedCopyId(
     generatedCopyId: string,
   ): Promise<CommercialPromotionDispatchFinalization>;
+  markBlockedByGeneratedCopyId(
+    generatedCopyId: string,
+  ): Promise<CommercialPromotionFailureFinalization>;
 }
 
 export type CommercialCopyGenerationAttemptStatus =
