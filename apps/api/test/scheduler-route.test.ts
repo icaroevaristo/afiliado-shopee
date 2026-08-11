@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PIPELINE_SCHEDULER_JOB_ID } from '@shopee-auto-affiliate-ai/queue';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
 const publicStatus = {
   enabled: true,
@@ -23,7 +23,7 @@ const createPipelineQueueMock = () => ({
 describe('GET /scheduler', () => {
   it('retorna HTTP 200 com o contrato publico exato', async () => {
     const getStatus = vi.fn(async () => publicStatus);
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       schedulerStatusServiceFactory: () => ({ getStatus }),
@@ -45,7 +45,7 @@ describe('GET /scheduler', () => {
       error.stack = `STACK_WITH_SECRET ${secret}`;
       throw error;
     });
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       schedulerStatusServiceFactory: () => ({ getStatus }),
@@ -67,7 +67,7 @@ describe('GET /scheduler', () => {
   it('cria a facade uma vez, mesmo em multiplas requests', async () => {
     const getStatus = vi.fn(async () => publicStatus);
     const schedulerStatusServiceFactory = vi.fn(() => ({ getStatus }));
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       schedulerStatusServiceFactory,
@@ -85,7 +85,7 @@ describe('GET /scheduler', () => {
   it('fecha recursos e nao adiciona jobs nem executa o pipeline', async () => {
     const pipelineQueue = createPipelineQueueMock();
     const getStatus = vi.fn(async () => publicStatus);
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       pipelineQueue,

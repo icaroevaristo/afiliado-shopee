@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 const niche = {
   id: 'niche-1',
   name: 'Audio',
@@ -61,7 +61,7 @@ const setup = async () => {
     totalPages: 1,
   }));
   const dispatchAdd = vi.fn();
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     commercialNicheService: {

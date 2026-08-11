@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import { COPY_TEMPLATES, CopyService, TemplateEngine, type CopyProduct } from '../src/copy-service';
 import {
   PrismaGeneratedCopyRepository,
@@ -92,7 +92,7 @@ describe('CopyService', () => {
 
   it('expõe POST /copy/generate e retorna a copy persistida', async () => {
     const prisma = createPrismaMock();
-    const app = await buildApp({ logger: false, prisma: prisma as never });
+    const app = await buildAuthenticatedTestApp({ logger: false, prisma: prisma as never });
 
     const response = await app.inject({
       method: 'POST',
@@ -114,7 +114,7 @@ describe('CopyService', () => {
   });
 
   it('retorna 400 quando productId não é enviado ao endpoint', async () => {
-    const app = await buildApp({ logger: false, prisma: createPrismaMock() as never });
+    const app = await buildAuthenticatedTestApp({ logger: false, prisma: createPrismaMock() as never });
     const response = await app.inject({ method: 'POST', url: '/copy/generate', payload: {} });
     expect(response.statusCode).toBe(400);
     await app.close();

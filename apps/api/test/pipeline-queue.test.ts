@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { JOB_NAMES } from '@shopee-auto-affiliate-ai/queue';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
 const createPrismaMock = () => ({ $disconnect: vi.fn() });
 
@@ -24,7 +24,7 @@ const createQueueMock = (jobFound = true) => ({
 describe('Pipeline BullMQ API', () => {
   it('cria o job pipeline-product sem executar o pipeline no endpoint', async () => {
     const pipelineQueue = createQueueMock();
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       pipelineQueue,
@@ -48,7 +48,7 @@ describe('Pipeline BullMQ API', () => {
 
   it('consulta status do job com relatório completo no result', async () => {
     const pipelineQueue = createQueueMock();
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       pipelineQueue,
@@ -74,7 +74,7 @@ describe('Pipeline BullMQ API', () => {
 
   it('retorna 404 quando o job não existe', async () => {
     const pipelineQueue = createQueueMock(false);
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: createPrismaMock() as never,
       pipelineQueue,

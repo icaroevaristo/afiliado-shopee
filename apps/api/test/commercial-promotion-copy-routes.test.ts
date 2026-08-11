@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 afterEach(async () => Promise.all(apps.splice(0).map((app) => app.close())));
 
 const setup = async () => {
@@ -24,7 +24,7 @@ const setup = async () => {
     source: 'AI',
     sanitizedCopy: { cta: '[LINK_AFILIADO]' },
   }));
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     commercialPromotionCopyService: {

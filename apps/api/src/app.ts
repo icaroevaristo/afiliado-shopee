@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import {
@@ -78,8 +79,9 @@ import type {
   CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
 
-type BuildAppOptions = {
+export type BuildAppOptions = {
   logger?: boolean;
+  localApiAuthToken?: string;
   hunterProvider?: HunterProvider;
   prisma?: DatabaseClient;
   analyticsService?: Pick<AnalyticsService, 'getSnapshot'>;
@@ -508,6 +510,7 @@ export const sanitizeDispatchDestination = (destination: {
 
 export const buildApp = async (options: BuildAppOptions = {}) => {
   const app = Fastify({ logger: options.logger ?? true });
+  const localApiAuthToken = options.localApiAuthToken?.trim();
   const prisma = options.prisma ?? createPrismaClient();
   const hunterProvider = options.hunterProvider ?? new MockShopeeProvider();
   const shopeeOfferProvider =
@@ -702,7 +705,61 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     return commercialAutomationPolicyService;
   };
 
-  await app.register(cors, { origin: true });
+  const allowedDashboardOrigin = 'http://127.0.0.1:3000';
+  await app.register(cors, {
+    origin: (origin, callback) =>
+      callback(null, origin === allowedDashboardOrigin),
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['authorization', 'content-type'],
+    optionsSuccessStatus: 204,
+    preflightContinue: true,
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && origin !== allowedDashboardOrigin) {
+      return reply.code(403).send({
+        error: 'CORS_ORIGIN_FORBIDDEN',
+        message: 'Origem nao permitida',
+      });
+    }
+
+    if (request.method === 'OPTIONS' && origin === allowedDashboardOrigin) {
+      return reply.code(204).send();
+    }
+
+    if (request.method === 'GET' && request.url.split('?')[0] === '/health') {
+      return;
+    }
+
+    if (!localApiAuthToken) {
+      return reply.code(503).send({
+        error: 'LOCAL_API_AUTH_NOT_CONFIGURED',
+        message: 'Autenticacao local indisponivel',
+      });
+    }
+
+    const authorization = request.headers.authorization;
+    const bearerMatch = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
+    if (!bearerMatch) {
+      return reply.code(401).send({
+        error: 'LOCAL_API_AUTH_REQUIRED',
+        message: 'Autenticacao local obrigatoria',
+      });
+    }
+
+    const expected = Buffer.from(localApiAuthToken);
+    const received = Buffer.from(bearerMatch[1]);
+    if (
+      expected.length !== received.length ||
+      !timingSafeEqual(expected, received)
+    ) {
+      return reply.code(401).send({
+        error: 'LOCAL_API_AUTH_REQUIRED',
+        message: 'Autenticacao local obrigatoria',
+      });
+    }
+  });
 
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
 

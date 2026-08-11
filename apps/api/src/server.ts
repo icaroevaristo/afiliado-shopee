@@ -30,6 +30,7 @@ const start = async () => {
         ? new ManualShopeeAffiliateOfferProvider()
         : new MockShopeeAffiliateOfferProvider();
   const app = await buildApp({
+    localApiAuthToken: config.LOCAL_API_AUTH_TOKEN,
     redisUrl: config.REDIS_URL,
     schedulerEnabled: config.SCHEDULER_ENABLED,
     groupDirectoryProvider,

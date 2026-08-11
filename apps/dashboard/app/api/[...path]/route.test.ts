@@ -9,6 +9,7 @@ afterEach(() => {
 describe('dashboard API proxy', () => {
   it('encaminha leitura para o servidor privado sem expor credencial ao browser', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -31,7 +32,7 @@ describe('dashboard API proxy', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok' });
+    expect(await response.clone().json()).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:3334/analytics?limit=1',
       expect.objectContaining({ method: 'GET', cache: 'no-store' }),
@@ -39,10 +40,15 @@ describe('dashboard API proxy', () => {
     expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty(
       'authorization',
     );
+    expect(fetchMock.mock.calls[1][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
+    );
+    expect(await response.text()).not.toContain('proxy-test-token');
   });
 
   it('preserva PATCH oficial para pause/resume sem executar o controle', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -72,6 +78,9 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:3334/commercial-automation/settings',
       expect.objectContaining({ method: 'PATCH', body: expect.any(ArrayBuffer) }),
+    );
+    expect(fetchMock.mock.calls[1][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
     );
   });
 
@@ -145,6 +154,23 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('falha fechada sem token local e nao chama o upstream', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/analytics'),
+      { params: Promise.resolve({ path: ['analytics'] }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: 'DASHBOARD_API_AUTH_NOT_CONFIGURED',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('falha de forma clara quando o destino configurado nao e local', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'https://api.example.invalid');
     const fetchMock = vi.fn();
@@ -164,6 +190,7 @@ describe('dashboard API proxy', () => {
 
   it('falha de forma segura quando um servico local nao e a API operacional', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3333');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
     const fetchMock = vi.fn().mockResolvedValue(
       new Response('<html>DevBridge</html>', {
         status: 200,

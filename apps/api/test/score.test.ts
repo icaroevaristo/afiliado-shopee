@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ScoreService, type ScorableProduct } from '../src/score-service';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import { PrismaProductRepository } from '../src/prisma-repositories';
 
 const baseProduct = (
@@ -156,7 +156,7 @@ describe('ScoreService', () => {
         desconto: 0,
       }),
     ]);
-    const app = await buildApp({ logger: false, prisma: prisma as never });
+    const app = await buildAuthenticatedTestApp({ logger: false, prisma: prisma as never });
 
     const response = await app.inject({ method: 'POST', url: '/score/run' });
 

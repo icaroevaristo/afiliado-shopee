@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
 const result = {
   runId: 'run-safe-1',
@@ -66,7 +66,7 @@ const runHistory = {
   messageWasSent: false,
 };
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 
 const setup = async (
   dryRun = vi.fn().mockResolvedValue(result),
@@ -91,7 +91,7 @@ const setup = async (
     }),
     findRun: vi.fn().mockResolvedValue(runHistory),
   };
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     pipelineQueue: { add: pipelineAdd },

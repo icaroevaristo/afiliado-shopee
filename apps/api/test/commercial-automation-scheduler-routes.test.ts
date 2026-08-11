@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import { sanitizeCommercialAutomationExecution } from '../src/commercial-automation-execution-service';
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 
 const schedulerStatus = {
   enabled: false,
@@ -43,7 +43,7 @@ const createApp = async () => {
     totalPages: 1,
   }));
   const find = vi.fn(async () => execution);
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: { $disconnect: vi.fn() } as never,
     commercialAutomationSchedulerStatusServiceFactory: () => ({ getStatus }),
@@ -131,7 +131,7 @@ describe('commercial automation scheduler read-only routes', () => {
 
   it('retorna 503 sem detalhes internos quando o Scheduler falha', async () => {
     const secret = 'redis://user:secret@private-host:6379';
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: { $disconnect: vi.fn() } as never,
       commercialAutomationSchedulerStatusServiceFactory: () => ({

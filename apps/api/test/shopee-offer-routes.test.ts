@@ -3,7 +3,7 @@ import {
   MockShopeeAffiliateOfferProvider,
   OfficialShopeeAffiliateOfferProvider,
 } from '@shopee-auto-affiliate-ai/providers';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
 const createPrismaMock = () => {
   const store = new Map<string, Record<string, unknown>>();
@@ -87,7 +87,7 @@ const manualRecord = {
 describe('Shopee offer API', () => {
   it('sincroniza mock, lista, detalha e gera apenas preview', async () => {
     const { store, prisma } = createPrismaMock();
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: prisma as never,
       shopeeOfferProvider: new MockShopeeAffiliateOfferProvider(),
@@ -133,7 +133,7 @@ describe('Shopee offer API', () => {
 
   it('valida importacao sem gravar e exige confirmacao para persistir', async () => {
     const { store, prisma } = createPrismaMock();
-    const app = await buildApp({ logger: false, prisma: prisma as never });
+    const app = await buildAuthenticatedTestApp({ logger: false, prisma: prisma as never });
 
     const validation = await app.inject({
       method: 'POST',
@@ -167,7 +167,7 @@ describe('Shopee offer API', () => {
     const transport = { execute: vi.fn() };
     const signer = { sign: vi.fn() };
     const { prisma } = createPrismaMock();
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: prisma as never,
       shopeeOfferProvider: new OfficialShopeeAffiliateOfferProvider({
