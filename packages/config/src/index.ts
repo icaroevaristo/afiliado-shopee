@@ -171,6 +171,7 @@ export const envSchema = z
     PORT: z.coerce.number().default(3333),
     DATABASE_URL: z.string().url(),
     REDIS_URL: z.string().url(),
+    LOCAL_API_AUTH_TOKEN: optionalTrimmedString,
     OPENAI_API_KEY: z.string().optional(),
     COMMERCIAL_AI_COPY_ENABLED: booleanFromEnv.default(false),
     COMMERCIAL_AI_COPY_PROVIDER: z.enum(['openai']).default('openai'),

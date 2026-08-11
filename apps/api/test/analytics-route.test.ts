@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import type { AnalyticsSnapshot } from '../src/repositories';
 
 const snapshot: AnalyticsSnapshot = {
@@ -26,7 +26,7 @@ const zeroSnapshot: AnalyticsSnapshot = {
 describe('GET /analytics', () => {
   it('retorna o snapshot exato e chama o servico uma vez', async () => {
     const getSnapshot = vi.fn(async () => snapshot);
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: {} as never,
       analyticsService: { getSnapshot },
@@ -42,7 +42,7 @@ describe('GET /analytics', () => {
   });
 
   it('preserva o snapshot zerado', async () => {
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: {} as never,
       analyticsService: { getSnapshot: vi.fn(async () => zeroSnapshot) },
@@ -59,7 +59,7 @@ describe('GET /analytics', () => {
     const getSnapshot = vi.fn(async (): Promise<AnalyticsSnapshot> => {
       throw new Error('Prisma connection failed at secret-host');
     });
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: {} as never,
       analyticsService: { getSnapshot },
@@ -88,7 +88,7 @@ describe('GET /analytics', () => {
       whatsAppDispatch: { count },
       whatsAppDestination: { count },
     };
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: prisma as never,
       analyticsService: { getSnapshot: vi.fn(async () => snapshot) },

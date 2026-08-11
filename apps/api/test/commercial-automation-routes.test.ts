@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import type { CommercialAutomationStatus } from '../src/commercial-automation-policy-service';
 
 const status: CommercialAutomationStatus = {
@@ -27,14 +27,14 @@ const status: CommercialAutomationStatus = {
   authorizedGroupCount: 0,
 };
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 
 const createApp = async () => {
   const evaluateAutomationReadiness = vi.fn().mockResolvedValue(status);
   const setPaused = vi.fn().mockResolvedValue(status);
   const pipelineAdd = vi.fn();
   const dispatchAdd = vi.fn();
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     commercialAutomationPolicyService: {

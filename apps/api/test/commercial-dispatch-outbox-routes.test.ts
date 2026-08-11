@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import type { CommercialDispatchOutboxService } from '../src/commercial-dispatch-outbox-service';
 
-const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
+const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 
 const createApp = async () => {
   const list = vi.fn(async (input) => ({
@@ -34,7 +34,7 @@ const createApp = async () => {
     publishedAt: '2026-07-28T12:00:01.000Z',
   }));
   const dispatchAdd = vi.fn();
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     commercialDispatchOutboxService: {

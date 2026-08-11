@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DatabaseClient } from '@shopee-auto-affiliate-ai/database';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 
 const publicGroup = {
   id: 'group-1',
@@ -33,7 +33,7 @@ const buildHarness = async () => {
       active,
     })),
   };
-  const app = await buildApp({
+  const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as DatabaseClient,
     groupDirectoryService: service,

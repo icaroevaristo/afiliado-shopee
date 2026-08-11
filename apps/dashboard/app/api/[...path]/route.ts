@@ -70,6 +70,12 @@ const getApiServerUrl = () => {
   return rawUrl.replace(/\/$/, '');
 };
 
+const getApiAuthorization = () => {
+  const token = process.env.LOCAL_API_AUTH_TOKEN?.trim();
+  if (!token) throw new Error('DASHBOARD_API_AUTH_NOT_CONFIGURED');
+  return `Bearer ${token}`;
+};
+
 const isApiHealth = (
   value: unknown,
 ): value is { status: 'ok'; service: 'api' } =>
@@ -112,8 +118,10 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
   if (!isAllowedPath(request.method, path)) return blockedResponse();
 
   let apiServerUrl: string;
+  let authorization: string;
   try {
     apiServerUrl = getApiServerUrl();
+    authorization = getApiAuthorization();
     await assertApiServer(apiServerUrl);
   } catch (error) {
     const errorCode =
@@ -124,6 +132,8 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
         message:
           errorCode === 'DASHBOARD_API_TARGET_NOT_CONFIGURED'
             ? 'DASHBOARD_API_URL precisa ser configurada no processo do servidor.'
+            : errorCode === 'DASHBOARD_API_AUTH_NOT_CONFIGURED'
+              ? 'A autenticacao local da API precisa ser configurada no processo do servidor.'
             : errorCode === 'DASHBOARD_API_TARGET_INCOMPATIBLE'
               ? 'O destino local nao respondeu como a API operacional.'
               : errorCode === 'DASHBOARD_API_TARGET_UNAVAILABLE'
@@ -143,6 +153,7 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
   const contentType = request.headers.get('content-type');
   if (accept) headers.set('accept', accept);
   if (contentType) headers.set('content-type', contentType);
+  headers.set('authorization', authorization);
 
   const body = request.method === 'GET' ? undefined : await request.arrayBuffer();
 

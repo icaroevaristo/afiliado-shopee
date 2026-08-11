@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MockShopeeProvider } from '@shopee-auto-affiliate-ai/providers';
 import { HunterService } from '../src/hunter-service';
-import { buildApp } from '../src/app';
+import { buildAuthenticatedTestApp } from './authenticated-test-app';
 import { PrismaProductRepository } from '../src/prisma-repositories';
 
 const createPrismaMock = () => {
@@ -94,7 +94,7 @@ describe('Hunter Agent', () => {
 
   it('expõe POST /hunter/run', async () => {
     const prisma = createPrismaMock();
-    const app = await buildApp({
+    const app = await buildAuthenticatedTestApp({
       logger: false,
       prisma: prisma as never,
       hunterProvider: new MockShopeeProvider(),

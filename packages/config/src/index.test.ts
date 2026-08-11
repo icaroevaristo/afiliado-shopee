@@ -15,6 +15,18 @@ describe('parseDotEnv', () => {
   });
 });
 
+describe('envSchema local API authentication', () => {
+  it('keeps the token unavailable by default and trims an explicit server token', () => {
+    expect(envSchema.parse(baseEnv).LOCAL_API_AUTH_TOKEN).toBeUndefined();
+    expect(
+      envSchema.parse({
+        ...baseEnv,
+        LOCAL_API_AUTH_TOKEN: ' local-api-test-token ',
+      }).LOCAL_API_AUTH_TOKEN,
+    ).toBe('local-api-test-token');
+  });
+});
+
 describe('envSchema copy comercial por IA', () => {
   it('permanece desabilitada com defaults seguros', () => {
     const config = envSchema.parse(baseEnv);
