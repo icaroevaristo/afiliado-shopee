@@ -3,7 +3,6 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
   CommercialAutomationCandidateFlowService,
-  COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-service';
@@ -258,7 +257,9 @@ const createSubject = (input: {
     listQueue: vi.fn(async () => ({ items: [queue], total: 1 })),
   };
   const copies = {
-    loadContext: vi.fn(async () => currentContext()),
+    loadContext: vi.fn<
+      (candidateId: string) => Promise<CommercialPromotionCopyContext | null>
+    >(async () => currentContext()),
     findCopyForCandidate: vi.fn(async () => ({
       candidate: candidateRecord({ status: 'COPY_READY' }),
       copy: copyRecord,
@@ -288,7 +289,7 @@ const createSubject = (input: {
     },
     createdAt: NOW,
   });
-  copyGeneration.preview.mockResolvedValue({ eligible: true });
+  copyGeneration.preview.mockResolvedValue({ eligible: true, blockers: [] });
   copyGeneration.generate.mockImplementation(async () => {
       currentCandidate = candidateRecord({
         status: 'COPY_READY',
@@ -349,11 +350,22 @@ const createSubject = (input: {
   };
 };
 
+const selection = (
+  target: ReturnType<typeof createSubject>['target'],
+  candidateStatus: 'COPY_READY' | 'QUEUED' = 'COPY_READY',
+  candidateId = 'candidate-1',
+) => ({
+  target,
+  candidateId,
+  candidateStatus,
+  queue: { candidateCount: 1, eligibleCount: 1, rejectedCount: 0 },
+});
+
 describe('CommercialAutomationCandidateFlowService', () => {
   it('reutiliza COPY_READY e preserva o ranking da fila', async () => {
     const subject = createSubject();
 
-    const result = await subject.service.prepare(subject.target);
+    const result = await subject.service.prepare(selection(subject.target));
 
     expect(result).toMatchObject({
       runId: 'run-1',
@@ -362,9 +374,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       groupId: 'group-1',
       deliveryMode: 'IMAGE',
     });
-    expect(subject.mining.mine).toHaveBeenCalledWith('campaign-1', {
-      confirm: 'MINERAR_PROMOCOES',
-    });
+    expect(subject.mining.mine).not.toHaveBeenCalled();
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRunFromPromotionCandidate).toHaveBeenCalledOnce();
   });
@@ -374,18 +384,131 @@ describe('CommercialAutomationCandidateFlowService', () => {
       candidate: { status: 'QUEUED', generatedCopyId: null },
     });
 
-    const result = await subject.service.prepare(subject.target);
+    const result = await subject.service.prepare(
+      selection(subject.target, 'QUEUED'),
+    );
 
     expect(result.generatedCopyId).toBe('copy-1');
-    expect(subject.copyGeneration.preview).toHaveBeenCalledOnce();
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
     expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+  });
+
+  it('faz preflight de QUEUED somente com leituras antes de minerar ou chamar IA', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      candidateStatus: 'QUEUED',
+    });
+
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('fixa C1 do preflight e falha sem selecionar C2 quando C1 fica invalido', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    let includeBetterC2 = false;
+    let c1 = context({ status: 'QUEUED', generatedCopyId: null });
+    const c2 = context({
+      id: 'candidate-2',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 1,
+    });
+    subject.candidates.listQueue.mockImplementation(async () => ({
+      items: includeBetterC2
+        ? [
+            queueItem({
+              id: 'candidate-2',
+              status: 'QUEUED',
+              generatedCopyId: null,
+              rankPosition: 1,
+            }),
+            queueItem({
+              id: 'candidate-1',
+              status: 'QUEUED',
+              generatedCopyId: null,
+              rankPosition: 2,
+            }),
+          ]
+        : [
+            queueItem({
+              id: 'candidate-1',
+              status: 'QUEUED',
+              generatedCopyId: null,
+              rankPosition: 2,
+            }),
+          ],
+      total: includeBetterC2 ? 2 : 1,
+    }));
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      candidateId === 'candidate-1' ? c1 : c2,
+    );
+
+    const preflight = await subject.service.preflight(subject.target);
+    expect(preflight).toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      candidateStatus: 'QUEUED',
+    });
+
+    includeBetterC2 = true;
+    c1 = context(
+      { status: 'QUEUED', generatedCopyId: null, rankPosition: 2 },
+      { affiliateLink: '' },
+    );
+    subject.candidates.listQueue.mockClear();
+    subject.copies.loadContext.mockClear();
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED', 'candidate-1')),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+    });
+
+    expect(subject.candidates.listQueue).not.toHaveBeenCalled();
+    expect(subject.copies.loadContext).toHaveBeenCalledWith('candidate-1');
+    expect(subject.copies.loadContext).not.toHaveBeenCalledWith('candidate-2');
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('reabastece somente a campanha do target sem chamar IA ou criar run', async () => {
+    const subject = createSubject();
+
+    await subject.service.replenish(subject.target);
+
+    expect(subject.mining.mine).toHaveBeenCalledWith('campaign-1', {
+      confirm: 'MINERAR_PROMOCOES',
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('encerra preflight sem candidato sem mineracao, IA ou run', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({ items: [], total: 0 });
+
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
+    });
+
+    expect(subject.mining.mine).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
   it('ignora copy pronta ja entregue e procura o proximo candidato sem duplicar', async () => {
     const subject = createSubject();
     subject.deliveryHistory.wasProductSentToGroup.mockResolvedValue(true);
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
@@ -393,12 +516,13 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
-  it('bloqueia fallback TEXT antes de criar o run candidato', async () => {
+  it('classifica imagem ausente em COPY_READY como ausencia de candidato', async () => {
     const subject = createSubject({ product: { urlImagem: '' } });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
-      code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
     });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
@@ -408,7 +532,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       null,
     );
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -419,7 +543,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group: { active: false, available: false },
     });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'NO_AUTHORIZED_GROUP',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -478,7 +602,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group: { sourceInstanceName: 'other-instance' },
     });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'NO_AUTHORIZED_GROUP',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -539,7 +663,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group({ id: 'group-2', fingerprint: GROUP_FINGERPRINT }),
     ]);
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
     });
     expect(subject.campaigns.findByLogicalGroupFingerprint).not.toHaveBeenCalled();
@@ -551,7 +675,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ active: false }),
     );
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'CAMPAIGN_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -569,20 +693,55 @@ describe('CommercialAutomationCandidateFlowService', () => {
       },
     });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'NICHE_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
-  it('bloqueia imagem com URL invalida', async () => {
+  it('classifica link afiliado ausente em QUEUED como ausencia de candidato', async () => {
     const subject = createSubject({
-      product: { urlImagem: 'ftp://example.invalid/image.jpg' },
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+      product: { affiliateLink: '' },
     });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
-      code: COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
     });
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('aceita somente blockers benignos no preflight de copy enfileirada', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    subject.copyGeneration.preview.mockResolvedValue({
+      eligible: false,
+      blockers: ['COMMERCIAL_AI_COPY_OFFER_EXPIRED'],
+    });
+
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('falha fechado para source invalid em vez de converter eligible=false em fallback', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    subject.copyGeneration.preview.mockResolvedValue({
+      eligible: false,
+      blockers: ['COMMERCIAL_AI_COPY_SOURCE_INVALID'],
+    });
+
+    await expect(subject.service.preflight(subject.target)).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_SOURCE_INVALID',
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
@@ -593,7 +752,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       },
     });
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_MESSAGE_INVALID_LINK_OCCURRENCES',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -601,10 +760,10 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
   it('revalida copy, campanha, grupo e IMAGE antes da confirmacao', async () => {
     const subject = createSubject();
-    const prepared = await subject.service.prepare(subject.target);
+    const prepared = await subject.service.prepare(selection(subject.target));
 
     await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
-    expect(subject.copyGeneration.findCopy).toHaveBeenCalledTimes(2);
+    expect(subject.copyGeneration.findCopy).toHaveBeenCalledOnce();
   });
 
   it('nao segue com candidato expirado ou copy invalida', async () => {
@@ -615,7 +774,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       new AppError('Candidato expirado', 'COMMERCIAL_AI_COPY_OFFER_EXPIRED'),
     );
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -629,7 +788,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ logicalGroupFingerprint: 'grp_abcdef123456' }),
     );
 
-    await expect(subject.service.prepare(subject.target)).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();

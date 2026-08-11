@@ -64,6 +64,45 @@ export type CommercialAutomationCandidateRevalidation = Pick<
   nicheId?: string;
 };
 
+export type CommercialAutomationCandidatePreflight =
+  | {
+      outcome: 'READY';
+      candidateId: string;
+      candidateStatus: 'COPY_READY' | 'QUEUED';
+      queue?: {
+        candidateCount: number;
+        eligibleCount: number;
+        rejectedCount: number;
+      };
+    }
+  | { outcome: 'NO_CANDIDATE' };
+
+export type CommercialAutomationCandidateSelection = {
+  target: CommercialAutomationTarget;
+  candidateId: string;
+  candidateStatus: 'COPY_READY' | 'QUEUED';
+  queue: {
+    candidateCount: number;
+    eligibleCount: number;
+    rejectedCount: number;
+  };
+};
+
+export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
+  'COMMERCIAL_AI_COPY_OFFER_EXPIRED',
+  'COMMERCIAL_AI_COPY_OFFER_UNAVAILABLE',
+  'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+  'COMMERCIAL_AI_COPY_SCORE_BELOW_MINIMUM',
+  'COMMERCIAL_MESSAGE_CANDIDATE_EXPIRED',
+  'COMMERCIAL_MESSAGE_PRODUCT_UNAVAILABLE',
+  'COMMERCIAL_MESSAGE_SNAPSHOT_EXPIRED',
+  'COMMERCIAL_MESSAGE_SNAPSHOT_UNAVAILABLE',
+  COMMERCIAL_IMAGE_REQUIRED,
+] as const;
+
+export type CommercialAutomationBenignNoCandidateCode =
+  (typeof COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES)[number];
+
 type CandidateFlowOptions = {
   groups: Pick<WhatsAppGroupDirectoryRepository, 'list'>;
   campaigns: Pick<
@@ -141,6 +180,16 @@ const safeMessageCode = (error: unknown) => {
   }
   return 'COMMERCIAL_AUTOMATION_CANDIDATE_INVALID';
 };
+
+const isBenignNoCandidateCode = (
+  code: string,
+): code is CommercialAutomationBenignNoCandidateCode =>
+  (COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES as readonly string[]).includes(
+    code,
+  );
+
+const isExpectedNoCandidate = (error: unknown) =>
+  error instanceof AppError && isBenignNoCandidateCode(error.code);
 
 export class CommercialAutomationCandidateFlowService {
   private readonly clock: () => Date;
@@ -410,18 +459,36 @@ export class CommercialAutomationCandidateFlowService {
       }
       try {
         const copyResult = await this.options.copyGeneration.findCopy(item.id);
-        if (copyResult.status !== 'COPY_READY') continue;
+        if (copyResult.status !== 'COPY_READY') {
+          throw appError(
+            'Copy pronta possui status inconsistente',
+            'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+          );
+        }
         const loaded = await this.loadCandidate(item.id);
+        if (!loaded) {
+          throw appError(
+            'Copy pronta nao corresponde ao candidato',
+            'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+          );
+        }
         if (
-          loaded &&
-          loaded.context.campaign.id === campaign.id &&
-          loaded.context.campaign.logicalGroupFingerprint ===
+          loaded.context.campaign.id !== campaign.id ||
+          loaded.context.campaign.logicalGroupFingerprint !==
             campaign.logicalGroupFingerprint
         ) {
-          return loaded;
+          throw appError(
+            'Copy pronta pertence a uma campanha divergente',
+            'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+          );
         }
-      } catch {
-        continue;
+        this.assertAffiliateLinkEligible(loaded.context);
+        this.assertImageEligible(loaded.context);
+        this.draft(loaded);
+        return loaded;
+      } catch (error) {
+        if (isExpectedNoCandidate(error)) continue;
+        throw error;
       }
     }
     return null;
@@ -443,48 +510,274 @@ export class CommercialAutomationCandidateFlowService {
       ) {
         continue;
       }
-      const preview = await this.options.copyGeneration.preview(item.id);
-      if (!preview.eligible) continue;
-      await this.options.copyGeneration.generate(
-        item.id,
-        COMMERCIAL_AI_COPY_CONFIRMATION,
-      );
-      const loaded = await this.loadCandidate(item.id);
-      if (
-        !loaded ||
-        loaded.context.campaign.id !== campaign.id ||
-        loaded.context.campaign.logicalGroupFingerprint !==
-          campaign.logicalGroupFingerprint
-      ) {
-        throw appError(
-          'Copy gerada para campanha divergente',
-          'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
-        );
+      try {
+        const context = await this.options.copies.loadContext(item.id);
+        if (!context) {
+          throw appError(
+            'Candidato enfileirado nao possui contexto',
+            'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+          );
+        }
+        if (
+          context.candidate.status !== 'QUEUED' ||
+          context.candidate.generatedCopyId ||
+          context.campaign.id !== campaign.id ||
+          context.campaign.logicalGroupFingerprint !==
+            campaign.logicalGroupFingerprint
+        ) {
+          throw appError(
+            'Candidato enfileirado pertence a uma campanha divergente',
+            'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+          );
+        }
+        this.assertAffiliateLinkEligible(context);
+        this.assertImageEligible(context);
+        const preview = await this.options.copyGeneration.preview(item.id);
+        if (!preview.eligible) {
+          const unexpectedBlocker = preview.blockers.find(
+            (blocker) => !isBenignNoCandidateCode(blocker),
+          );
+          if (unexpectedBlocker) {
+            throw appError(
+              'Preflight da copy encontrou bloqueio inesperado',
+              unexpectedBlocker,
+            );
+          }
+          if (preview.blockers.length === 0) {
+            throw appError(
+              'Preflight da copy inelegivel sem motivo conhecido',
+              'COMMERCIAL_AI_COPY_PREVIEW_INVALID',
+            );
+          }
+          continue;
+        }
+        return context;
+      } catch (error) {
+        if (isExpectedNoCandidate(error)) continue;
+        throw error;
       }
-      return loaded;
     }
     return null;
   }
 
-  async prepare(
+  private async loadSelectedQueuedCandidate(
+    selection: CommercialAutomationCandidateSelection,
+    campaign: CommercialGroupCampaignRecord,
+    group: WhatsAppGroupRecord,
+  ) {
+    const context = await this.options.copies.loadContext(selection.candidateId);
+    if (
+      !context ||
+      context.candidate.id !== selection.candidateId ||
+      context.candidate.status !== 'QUEUED' ||
+      context.candidate.generatedCopyId ||
+      context.campaign.id !== campaign.id ||
+      context.campaign.logicalGroupFingerprint !== campaign.logicalGroupFingerprint
+    ) {
+      throw appError(
+        'Candidato selecionado mudou desde o preflight',
+        'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
+      );
+    }
+    if (
+      await this.options.deliveryHistory.wasProductSentToGroup(
+        context.product.id,
+        group.id,
+      )
+    ) {
+      throw appError(
+        'Candidato selecionado ja foi entregue ao grupo',
+        'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+      );
+    }
+    try {
+      this.assertAffiliateLinkEligible(context);
+      this.assertImageEligible(context);
+    } catch (error) {
+      if (isExpectedNoCandidate(error)) {
+        throw appError(
+          'Candidato selecionado ficou inelegivel desde o preflight',
+          'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+        );
+      }
+      throw error;
+    }
+    return context;
+  }
+
+  private async loadSelectedReadyCandidate(
+    selection: CommercialAutomationCandidateSelection,
+    campaign: CommercialGroupCampaignRecord,
+    group: WhatsAppGroupRecord,
+  ) {
+    const loaded = await this.loadCandidate(selection.candidateId);
+    if (
+      !loaded ||
+      loaded.context.candidate.id !== selection.candidateId ||
+      loaded.context.campaign.id !== campaign.id ||
+      loaded.context.campaign.logicalGroupFingerprint !==
+        campaign.logicalGroupFingerprint
+    ) {
+      throw appError(
+        'Candidato selecionado mudou desde o preflight',
+        'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
+      );
+    }
+    if (
+      await this.options.deliveryHistory.wasProductSentToGroup(
+        loaded.context.product.id,
+        group.id,
+      )
+    ) {
+      throw appError(
+        'Candidato selecionado ja foi entregue ao grupo',
+        'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+      );
+    }
+    try {
+      this.assertAffiliateLinkEligible(loaded.context);
+      this.assertImageEligible(loaded.context);
+      this.draft(loaded);
+    } catch (error) {
+      if (isExpectedNoCandidate(error)) {
+        throw appError(
+          'Candidato selecionado ficou inelegivel desde o preflight',
+          'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+        );
+      }
+      throw error;
+    }
+    return loaded;
+  }
+
+  private assertImageEligible(context: CommercialPromotionCopyContext) {
+    const imageUrl = context.product.urlImagem?.trim();
+    if (!imageUrl || imageUrl === context.product.affiliateLink) {
+      throw appError(
+        'Automacao comercial exige imagem valida',
+        COMMERCIAL_IMAGE_REQUIRED,
+      );
+    }
+    try {
+      const url = new URL(imageUrl);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error('invalid image protocol');
+      }
+    } catch {
+      throw appError(
+        'Automacao comercial exige imagem valida',
+        COMMERCIAL_IMAGE_REQUIRED,
+      );
+    }
+  }
+
+  private assertAffiliateLinkEligible(context: CommercialPromotionCopyContext) {
+    const affiliateLink = context.product.affiliateLink?.trim();
+    if (!affiliateLink) {
+      throw appError(
+        'Automacao comercial exige link de afiliado valido',
+        'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+      );
+    }
+    try {
+      const url = new URL(affiliateLink);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error('invalid affiliate link protocol');
+      }
+    } catch {
+      throw appError(
+        'Automacao comercial exige link de afiliado valido',
+        'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+      );
+    }
+  }
+
+  async preflight(
     target: CommercialAutomationTarget,
-  ): Promise<CommercialAutomationCandidateFlowResult> {
+  ): Promise<CommercialAutomationCandidatePreflight> {
     const { group, campaign } = await this.resolveTarget(target);
-    const miningReport = await this.options.mining.mine(campaign.id, {
-      confirm: COMMERCIAL_PROMOTION_MINING_CONFIRMATION,
-    });
     const queue = await this.options.candidates.listQueue({
       campaignId: campaign.id,
       page: 1,
       limit: campaign.queueTargetSize,
     });
-    const loaded =
-      (await this.findReadyCandidate(queue.items, campaign, group.id)) ??
-      (await this.findQueuedCandidate(queue.items, campaign, group.id));
+    const eligibleCount = queue.items.filter(
+      ({ status }) => status === 'QUEUED' || status === 'COPY_READY',
+    ).length;
+    const queueSummary = {
+      candidateCount: queue.total,
+      eligibleCount,
+      rejectedCount: Math.max(queue.total - eligibleCount, 0),
+    };
+    const ready = await this.findReadyCandidate(
+      queue.items,
+      campaign,
+      group.id,
+    );
+    if (ready) {
+      return {
+        outcome: 'READY',
+        candidateId: ready.context.candidate.id,
+        candidateStatus: 'COPY_READY',
+        queue: queueSummary,
+      };
+    }
+    const queued = await this.findQueuedCandidate(
+      queue.items,
+      campaign,
+      group.id,
+    );
+    if (queued) {
+      return {
+        outcome: 'READY',
+        candidateId: queued.candidate.id,
+        candidateStatus: 'QUEUED',
+        queue: queueSummary,
+      };
+    }
+    return { outcome: 'NO_CANDIDATE' };
+  }
+
+  async replenish(
+    target: CommercialAutomationTarget,
+  ): Promise<CommercialPromotionMiningReport> {
+    const { campaign } = await this.resolveTarget(target);
+    return this.options.mining.mine(campaign.id, {
+      confirm: COMMERCIAL_PROMOTION_MINING_CONFIRMATION,
+    });
+  }
+
+  async prepare(
+    selection: CommercialAutomationCandidateSelection,
+    miningReport?: Pick<CommercialPromotionMiningReport, 'rejectionSummary'>,
+  ): Promise<CommercialAutomationCandidateFlowResult> {
+    const { group, campaign } = await this.resolveTarget(selection.target);
+    if (selection.candidateStatus === 'QUEUED') {
+      await this.loadSelectedQueuedCandidate(selection, campaign, group);
+      await this.options.copyGeneration.generate(
+        selection.candidateId,
+        COMMERCIAL_AI_COPY_CONFIRMATION,
+      );
+    }
+    const loaded = await this.loadSelectedReadyCandidate(
+      selection,
+      campaign,
+      group,
+    );
     if (!loaded) {
       throw appError(
-        'Nenhum candidato promocional elegivel',
-        'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+        'Copy preparada nao corresponde ao candidato',
+        'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+      );
+    }
+    if (
+      loaded.context.campaign.id !== campaign.id ||
+      loaded.context.campaign.logicalGroupFingerprint !==
+        campaign.logicalGroupFingerprint
+    ) {
+      throw appError(
+        'Copy preparada para campanha divergente',
+        'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
       );
     }
     const draft = this.draft(loaded);
@@ -503,19 +796,11 @@ export class CommercialAutomationCandidateFlowService {
       group,
       campaign: 'commercial-automation',
       copyPreview: draft.caption,
-      candidateCount: queue.total,
-      eligibleCount: queue.items.filter(
-        ({ status }) => status === 'QUEUED' || status === 'COPY_READY',
-      ).length,
-      rejectedCount: Math.max(
-        queue.total -
-          queue.items.filter(
-            ({ status }) => status === 'QUEUED' || status === 'COPY_READY',
-          ).length,
-        0,
-      ),
+      candidateCount: selection.queue.candidateCount,
+      eligibleCount: selection.queue.eligibleCount,
+      rejectedCount: selection.queue.rejectedCount,
       rejectionSummary: toPipelineRejectionSummary(
-        miningReport.rejectionSummary,
+        miningReport?.rejectionSummary ?? {},
       ),
     });
     this.options.logger?.info(

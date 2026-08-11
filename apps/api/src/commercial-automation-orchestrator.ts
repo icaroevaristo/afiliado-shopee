@@ -21,6 +21,11 @@ import {
   type CommercialAutomationProvider,
   type CommercialAutomationPublicStatus,
 } from './commercial-automation-execution-domain';
+import type {
+  CommercialAutomationCandidateSelection,
+  CommercialAutomationCandidatePreflight,
+} from './commercial-automation-candidate-flow-service';
+import type { CommercialPromotionMiningReport } from './commercial-promotion-mining-service';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
 import type {
   CommercialAutomationTarget,
@@ -34,6 +39,8 @@ export const COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED =
   'COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED';
 export const COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED =
   'COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED';
+export const COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE =
+  'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE';
 
 export type { CommercialAutomationMode, CommercialAutomationProvider };
 
@@ -139,7 +146,21 @@ export class CommercialAutomationOrchestrator {
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
       candidateFlow?: {
         listTargets(): Promise<CommercialAutomationTarget[]>;
-        prepare(target: CommercialAutomationTarget): Promise<{
+        preflight(
+          target: CommercialAutomationTarget,
+        ): Promise<CommercialAutomationCandidatePreflight>;
+        replenish(
+          target: CommercialAutomationTarget,
+        ): Promise<
+          Pick<CommercialPromotionMiningReport, 'rejectionSummary'>
+        >;
+        prepare(
+          selection: CommercialAutomationCandidateSelection,
+          miningReport?: Pick<
+            CommercialPromotionMiningReport,
+            'rejectionSummary'
+          >,
+        ): Promise<{
           runId: string;
           generatedCopyId: string;
           candidateId: string;
@@ -252,6 +273,12 @@ export class CommercialAutomationOrchestrator {
         }
       | undefined;
     let selectedTarget: CommercialAutomationTarget | undefined;
+    let selectedCandidateSelection:
+      | CommercialAutomationCandidateSelection
+      | undefined;
+    let selectedMiningReport:
+      | Pick<CommercialPromotionMiningReport, 'rejectionSummary'>
+      | undefined;
     let confirmationAttempted = false;
     try {
       const readiness =
@@ -306,6 +333,13 @@ export class CommercialAutomationOrchestrator {
           );
         }
         const targetReasons = new Set<string>();
+        let synced = false;
+        const syncOffers = async () => {
+          if (synced) return;
+          await this.dependencies.syncOffers.run();
+          synced = true;
+          await heartbeat.checkpoint();
+        };
         for (const target of targets) {
           const targetReadiness =
             await this.dependencies.policy.evaluateAutomationReadiness({
@@ -313,6 +347,45 @@ export class CommercialAutomationOrchestrator {
               target,
             });
           if (targetReadiness.allowed) {
+            if (input.mode === 'send') {
+              const preflight = await this.dependencies.candidateFlow.preflight(
+                target,
+              );
+              if (preflight.outcome === 'NO_CANDIDATE') {
+                await syncOffers();
+                const replenishmentReport =
+                  await this.dependencies.candidateFlow.replenish(target);
+                await heartbeat.checkpoint();
+                const replenishedPreflight =
+                  await this.dependencies.candidateFlow.preflight(target);
+                if (replenishedPreflight.outcome === 'NO_CANDIDATE') {
+                  targetReasons.add(COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE);
+                  continue;
+                }
+                selectedMiningReport = replenishmentReport;
+                selectedCandidateSelection = {
+                  target,
+                  candidateId: replenishedPreflight.candidateId,
+                  candidateStatus: replenishedPreflight.candidateStatus,
+                  queue: replenishedPreflight.queue ?? {
+                    candidateCount: 1,
+                    eligibleCount: 1,
+                    rejectedCount: 0,
+                  },
+                };
+              } else {
+                selectedCandidateSelection = {
+                  target,
+                  candidateId: preflight.candidateId,
+                  candidateStatus: preflight.candidateStatus,
+                  queue: preflight.queue ?? {
+                    candidateCount: 1,
+                    eligibleCount: 1,
+                    rejectedCount: 0,
+                  },
+                };
+              }
+            }
             selectedTarget = target;
             break;
           }
@@ -329,11 +402,14 @@ export class CommercialAutomationOrchestrator {
             }),
           );
         }
+        await syncOffers();
       }
-      await this.dependencies.syncOffers.run();
-      await heartbeat.checkpoint();
+      if (!this.dependencies.candidateFlow) {
+        await this.dependencies.syncOffers.run();
+        await heartbeat.checkpoint();
+      }
       if (input.mode === 'send') {
-        if (!selectedTarget) {
+        if (!selectedTarget || !selectedCandidateSelection) {
           return publicResult(
             await finish({
               status: 'BLOCKED',
@@ -343,9 +419,33 @@ export class CommercialAutomationOrchestrator {
             }),
           );
         }
-        const prepared = await this.dependencies.candidateFlow!.prepare(
-          selectedTarget,
-        );
+        const candidateSelection = selectedCandidateSelection;
+        let prepared;
+        try {
+          prepared = selectedMiningReport
+            ? await this.dependencies.candidateFlow!.prepare(
+                candidateSelection,
+                selectedMiningReport,
+              )
+            : await this.dependencies.candidateFlow!.prepare(
+                candidateSelection,
+              );
+        } catch (error) {
+          if (
+            safeFailureCode(error) ===
+            COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE
+          ) {
+            return publicResult(
+              await finish({
+                status: 'BLOCKED',
+                reasons: [COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE],
+                failureCode: COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE,
+                completedAt: this.clock(),
+              }),
+            );
+          }
+          throw error;
+        }
         commercialRunId = prepared.runId;
         existingGeneratedCopyId = prepared.generatedCopyId;
         candidatePreparation = prepared;
