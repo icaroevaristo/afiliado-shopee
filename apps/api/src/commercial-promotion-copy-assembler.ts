@@ -85,8 +85,9 @@ const ADDITIONAL_URL = new RegExp(ANY_URL_SOURCE, 'iu');
 const ANY_URL = new RegExp(ANY_URL_SOURCE, 'giu');
 const TRUSTED_FACT_URL_SOURCE = String.raw`(?:[a-z][a-z0-9+.-]*://|www\.)\S+|\b(?:[\p{L}0-9-]+\.)+[\p{L}]{2,63}(?::\d{1,5})?(?:[/?#])\S*`;
 const TRUSTED_FACT_URL = new RegExp(TRUSTED_FACT_URL_SOURCE, 'iu');
-const TRUSTED_FACT_URLS = new RegExp(TRUSTED_FACT_URL_SOURCE, 'giu');
 const ASCII_CONTROL_OR_DEL = /[\u0000-\u001F\u007F]/u;
+const COMMERCIAL_COPY_FOOTER =
+  '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.';
 
 export const hasAsciiControlOrDel = (value: string) =>
   ASCII_CONTROL_OR_DEL.test(value);
@@ -102,16 +103,13 @@ const trustedFactsContainNavigableUrl = (
   TRUSTED_FACT_URL.test(facts.productName) ||
   TRUSTED_FACT_URL.test(facts.shopName);
 
-const trustedFactsSuffix = (facts: CommercialPromotionCopyTrustedFacts) => {
-  const signalLine = extraSignalLine(facts);
+const trustedOfferBlock = (facts: CommercialPromotionCopyTrustedFacts) => {
+  extraSignalLine(facts);
   return [
-    `📦 Produto: ${facts.productName}`,
-    `🏪 Loja: ${facts.shopName}`,
-    `💰 Preço: ${formatCurrency(facts.price)}`,
+    `🔥 POR ${formatCurrency(facts.price)}`,
     ...(facts.discountRate > 0
-      ? [`💸 Desconto: ${formatPercent(facts.discountRate)}%`]
+      ? [`💸 ${formatPercent(facts.discountRate)}% OFF`]
       : []),
-    ...(signalLine ? [signalLine] : []),
   ].join('\n');
 };
 
@@ -128,19 +126,20 @@ const cachedAiOutputMessage = (
   affiliateLink: string,
   trustedFacts: CommercialPromotionCopyTrustedFacts,
 ) => {
-  const trustedSuffix = `\n${trustedFactsSuffix(trustedFacts)}`;
+  const offerSuffix = `\n${trustedOfferBlock(trustedFacts)}`;
   const affiliateSuffix = `\n${affiliateLink}`;
   if (
-    !copy.mensagem.endsWith(trustedSuffix) ||
-    !copy.cta.endsWith(affiliateSuffix)
+    !copy.mensagem.endsWith(offerSuffix) ||
+    !copy.cta.endsWith(affiliateSuffix) ||
+    copy.hashtags !== COMMERCIAL_COPY_FOOTER
   ) {
     return null;
   }
   return publicMessage({
     titulo: copy.titulo,
-    mensagem: copy.mensagem.slice(0, -trustedSuffix.length),
+    mensagem: copy.mensagem.slice(0, -offerSuffix.length),
     cta: copy.cta.slice(0, -affiliateSuffix.length),
-    hashtags: copy.hashtags,
+    hashtags: '',
   });
 };
 
@@ -208,12 +207,12 @@ export class CommercialPromotionCopyAssembler {
         'COMMERCIAL_AI_COPY_URL_INVALID',
       );
     }
-    const lines = [input.output.body, trustedFactsSuffix(input)];
+    const lines = [input.output.body, trustedOfferBlock(input)];
     const copy = {
       titulo: input.output.headline,
       mensagem: lines.join('\n'),
       cta: `${input.output.cta}\n${input.affiliateLink}`,
-      hashtags: input.output.hashtags.join(' '),
+      hashtags: COMMERCIAL_COPY_FOOTER,
     };
     const finalMessage = publicMessage(copy);
     const linkOccurrences = finalMessage.split(input.affiliateLink).length - 1;
@@ -234,23 +233,14 @@ export const sanitizeCommercialPromotionCopy = (
   copy: AssembledCommercialPromotionCopy,
   affiliateLink: string,
 ) => {
-  const sanitizeAi = (value: string) =>
+  const sanitize = (value: string) =>
     value
       .replaceAll(affiliateLink, '[LINK_AFILIADO]')
       .replace(ANY_URL, '[LINK_REMOVIDO]');
-  const sanitizeTrustedFacts = (value: string) =>
-    value.replace(TRUSTED_FACT_URLS, '[LINK_REMOVIDO]');
-  const trustedFactsStart = copy.mensagem.lastIndexOf('\n📦 Produto: ');
-  const sanitizedMessage =
-    trustedFactsStart === -1
-      ? sanitizeAi(copy.mensagem)
-      : `${sanitizeAi(copy.mensagem.slice(0, trustedFactsStart))}${sanitizeTrustedFacts(
-          copy.mensagem.slice(trustedFactsStart),
-        )}`;
   return {
-    titulo: sanitizeAi(copy.titulo),
-    mensagem: sanitizedMessage,
-    cta: sanitizeAi(copy.cta),
-    hashtags: sanitizeAi(copy.hashtags),
+    titulo: sanitize(copy.titulo),
+    mensagem: sanitize(copy.mensagem),
+    cta: sanitize(copy.cta),
+    hashtags: sanitize(copy.hashtags),
   };
 };

@@ -49,14 +49,20 @@ describe('CommercialPromotionCopyAssembler', () => {
       promotionSignals: [...base.promotionSignals],
     });
     expect(copy.titulo).toBe(output.headline);
-    expect(copy.mensagem).toContain('📦 Produto: Produto Exato');
-    expect(copy.mensagem).toContain('🏪 Loja: Loja Exata');
-    expect(copy.mensagem).toContain('💰 Preço: R$ 123,45');
-    expect(copy.mensagem).toContain('💸 Desconto: 15%');
-    expect(copy.mensagem).toContain('Queda de 12,34%');
-    expect(copy.mensagem).not.toContain('O desconto informado aumentou');
+    expect(copy.mensagem).toBe(
+      `${output.body}\n🔥 POR R$ 123,45\n💸 15% OFF`,
+    );
+    expect(copy.mensagem).not.toContain('Produto Exato');
+    expect(copy.mensagem).not.toContain('Loja Exata');
+    expect(copy.mensagem).not.toContain('Queda de');
+    expect(copy.mensagem).not.toContain('medição anterior');
+    expect(copy.mensagem).not.toContain('DE R$');
+    expect(copy.cta).toBe(`${output.cta}\n${base.affiliateLink}`);
     expect(copy.cta.split(base.affiliateLink)).toHaveLength(2);
-    expect(copy.hashtags).toBe('#Oferta #Casa');
+    expect(copy.hashtags).toBe(
+      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
+    );
+    expect(copy.hashtags).not.toContain(base.affiliateLink);
     expect(
       sanitizeCommercialPromotionCopy(copy, base.affiliateLink).cta,
     ).toContain('[LINK_AFILIADO]');
@@ -73,7 +79,7 @@ describe('CommercialPromotionCopyAssembler', () => {
   });
 
   it.each(['HOKON.br', 'Loja HOKON.br', 'Produto oficial HOKON.br'])(
-    'preserva %s em cada fato confiável sem sanitizá-lo como link',
+    'aceita %s como texto confiável sem expô-lo na ficha pública',
     (value) => {
       for (const field of ['productName', 'shopName'] as const) {
         const facts = trustedFacts({ [field]: value, promotionSignals: [] });
@@ -86,8 +92,8 @@ describe('CommercialPromotionCopyAssembler', () => {
           '\n',
         );
 
-        expect(copy.mensagem).toContain(value);
-        expect(sanitized.mensagem).toContain(value);
+        expect(copy.mensagem).not.toContain(value);
+        expect(sanitized.mensagem).not.toContain(value);
         expect(sanitized.mensagem).not.toContain('[LINK_REMOVIDO]');
         expect(message.split(base.affiliateLink)).toHaveLength(2);
         expect(
@@ -128,22 +134,34 @@ describe('CommercialPromotionCopyAssembler', () => {
   });
 
   it.each([
-    [['DISCOUNT_INCREASE'], 'O desconto informado aumentou'],
-    [['NEWLY_OBSERVED'], 'recém-observada pelo nosso sistema'],
-    [['CURRENT_DISCOUNT'], null],
-  ] as const)(
-    'monta sinal %s sem afirmação extra indevida',
-    (signals, phrase) => {
+    ['DISCOUNT_INCREASE'],
+    ['NEWLY_OBSERVED'],
+    ['CURRENT_DISCOUNT'],
+  ] as const)('não expõe o sinal %s no texto público', (signal) => {
       const copy = assembler.assemble({
         ...base,
-        promotionSignals: [...signals],
+        promotionSignals: [signal],
         priceDropPercent: null,
-        discountRate: signals[0] === 'CURRENT_DISCOUNT' ? 5 : 0,
+        discountRate: signal === 'CURRENT_DISCOUNT' ? 5 : 0,
       });
-      if (phrase) expect(copy.mensagem).toContain(phrase);
-      else expect(copy.mensagem).not.toContain('medição anterior');
-    },
-  );
+      expect(copy.mensagem).not.toContain('medição anterior');
+      expect(copy.mensagem).not.toContain('recém-observada');
+      expect(copy.mensagem).not.toContain('aumentou');
+    });
+
+  it('usa somente o preço atual e o desconto oficial quando não há preço original', () => {
+    const copy = assembler.assemble({
+      ...base,
+      price: '49.90',
+      discountRate: 0,
+      promotionSignals: [],
+      priceDropPercent: null,
+    });
+
+    expect(copy.mensagem).toBe(`${output.body}\n🔥 POR R$ 49,90`);
+    expect(copy.mensagem).not.toContain('DE R$');
+    expect(copy.mensagem).not.toContain('OFF');
+  });
 
   it.each([
     'custom://evil.example',
@@ -387,7 +405,7 @@ describe('commercialAiCopyInputFingerprint', () => {
       ...changed,
       promotionSignals: [],
     });
-    expect(rawCopy.mensagem).not.toBe(changedCopy.mensagem);
+    expect(rawCopy.mensagem).toBe(changedCopy.mensagem);
     expect(
       commercialAiCopyInputFingerprint({
         ...input,
@@ -471,27 +489,27 @@ describe('commercialAiCopyInputFingerprint', () => {
     ).toBe(v2);
   });
 
-  it('separa fingerprints de prompt v1 e v2 mantendo a mesma validationVersion', () => {
-    const promptV1 = commercialAiCopyInputFingerprint({
-      ...input,
-      promptVersion: 'commercial-promotion-copy-v1',
-      validationVersion: 'commercial-promotion-copy-validation-v2',
-      promotionSignals: [...input.promotionSignals],
-    });
+  it('separa fingerprints de prompt v2 e v3 mantendo a mesma validationVersion', () => {
     const promptV2 = commercialAiCopyInputFingerprint({
       ...input,
       promptVersion: 'commercial-promotion-copy-v2',
       validationVersion: 'commercial-promotion-copy-validation-v2',
       promotionSignals: [...input.promotionSignals],
     });
-    expect(promptV2).not.toBe(promptV1);
+    const promptV3 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v3',
+      validationVersion: 'commercial-promotion-copy-validation-v2',
+      promotionSignals: [...input.promotionSignals],
+    });
+    expect(promptV3).not.toBe(promptV2);
     expect(
       commercialAiCopyInputFingerprint({
         ...input,
-        promptVersion: 'commercial-promotion-copy-v2',
+        promptVersion: 'commercial-promotion-copy-v3',
         validationVersion: 'commercial-promotion-copy-validation-v2',
         promotionSignals: [...input.promotionSignals],
       }),
-    ).toBe(promptV2);
+    ).toBe(promptV3);
   });
 });

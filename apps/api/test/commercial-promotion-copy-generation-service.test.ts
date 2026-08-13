@@ -255,7 +255,7 @@ const validProvider = (): CommercialAiCopyProvider => ({
       headline: 'Oferta confiável',
       body: 'Uma escolha prática para sua rotina.',
       cta: 'Confira os detalhes',
-      hashtags: ['#Oferta'],
+      hashtags: [],
     },
     provider: 'openai',
     model: 'selected-model',
@@ -278,7 +278,7 @@ const legacyAttempt = (
   inputFingerprint,
   provider: 'openai',
   model: 'selected-model',
-  promptVersion: 'commercial-promotion-copy-v2',
+  promptVersion: 'commercial-promotion-copy-v3',
   validationVersion: 'commercial-promotion-copy-validation-v2',
   status,
   generatedCopyId: status === 'SUCCEEDED' ? 'copy-legacy' : null,
@@ -407,6 +407,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
   it('gera uma copy AI, vincula snapshot e reutiliza COPY_READY sem nova chamada', async () => {
     const repository = new MemoryCopyRepository();
+    repository.context!.snapshot.priceMax = '199.90';
     const provider = validProvider();
     const copyService = service(repository, provider);
     const first = await copyService.generate(
@@ -419,10 +420,22 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
     expect(first).toMatchObject({ status: 'COPY_READY', cacheHit: false });
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
+    expect(first.promptVersion).toBe('commercial-promotion-copy-v3');
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
+    expect(first.sanitizedCopy).toEqual({
+      titulo: 'Oferta confiável',
+      mensagem: 'Uma escolha prática para sua rotina.\n🔥 POR R$ 99,90\n💸 20% OFF',
+      cta: 'Confira os detalhes\n[LINK_AFILIADO]',
+      hashtags:
+        '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
+    });
+    expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
+      'Produto verificado',
+    );
+    expect(JSON.stringify(first.sanitizedCopy)).not.toContain('Loja verificada');
   });
 
   it('reutiliza cache válido com HOKON.br em fato confiável', async () => {
@@ -446,9 +459,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.context?.candidate.generatedCopyId).toBe('copy-internal');
-    expect([...repository.copies.values()][0]?.mensagem).toContain(
-      '🏪 Loja: HOKON.br',
-    );
+    expect([...repository.copies.values()][0]?.mensagem).not.toContain('HOKON.br');
   });
 
   it('reutiliza cache quando o preço muda somente na forma canônica do assembler', async () => {
@@ -492,7 +503,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(first.cacheHit).toBe(false);
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
-    expect([...repository.copies.values()][0]?.mensagem).toContain(
+    expect([...repository.copies.values()][0]?.mensagem).not.toContain(
       `Produto ${'x'.repeat(250)} A`,
     );
   });
@@ -704,7 +715,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(attempts.find(a => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
 
     const newAttempt = attempts.find(a => a.id !== 'attempt-v1-failed')!;
-    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v2');
+    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v3');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
   });
@@ -848,7 +859,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
           headline: 'Oferta confiável',
           body: 'Uma escolha prática para sua rotina.',
           cta: 'Confira os detalhes',
-          hashtags: ['#Oferta'],
+          hashtags: [],
         },
         provider: 'openai',
         model: 'selected-model',
