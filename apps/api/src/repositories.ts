@@ -896,6 +896,15 @@ export interface CommercialPromotionCopyRepository {
   findAttemptByInputFingerprint(
     inputFingerprint: string,
   ): Promise<CommercialCopyGenerationAttemptRecord | null>;
+  findAttemptByGenerationContract(input: {
+    candidateId: string;
+    snapshotId: string;
+    inputFingerprint: string;
+    provider: string;
+    model: string;
+    promptVersion: string;
+    validationVersion: string;
+  }): Promise<CommercialCopyGenerationAttemptRecord | null>;
   listAttemptsByCandidateId(
     candidateId: string,
   ): Promise<CommercialCopyGenerationAttemptStatusRecord[]>;

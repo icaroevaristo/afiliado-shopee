@@ -143,7 +143,6 @@ describe('commercialAiCopyInputFingerprint', () => {
     nicheUpdatedAt: new Date('2026-08-01T12:00:00Z'),
     candidateId: 'candidate-internal',
     productId: 'product-internal',
-    productUpdatedAt: new Date('2026-08-01T12:00:00Z'),
     snapshotId: 'snapshot-internal',
     snapshotRevision: 2,
     snapshotFingerprint: 'snapshot-fingerprint',
@@ -160,14 +159,14 @@ describe('commercialAiCopyInputFingerprint', () => {
     maximumLength: 1000,
   };
 
-  it('é determinístico, canonicaliza sinais e não contém o link bruto', () => {
+  it('é determinístico, canonicaliza sinais e preço equivalente do assembler sem conter o link bruto', () => {
     const first = commercialAiCopyInputFingerprint({
       ...input,
       promotionSignals: [...input.promotionSignals],
     });
     const second = commercialAiCopyInputFingerprint({
       ...input,
-      price: '123.45',
+      price: ' 000123.4500 ',
       priceDropPercent: '12.34',
       promotionSignals: [...input.promotionSignals].reverse(),
     });
@@ -176,24 +175,139 @@ describe('commercialAiCopyInputFingerprint', () => {
     expect(first).not.toContain(input.affiliateLink);
   });
 
+  it('ignora productUpdatedAt operacional', () => {
+    const atFirstSync = {
+      ...input,
+      productUpdatedAt: new Date('2026-08-01T12:00:00Z'),
+      promotionSignals: [...input.promotionSignals],
+    };
+    const atSecondSync = {
+      ...input,
+      productUpdatedAt: new Date('2026-08-01T12:00:01Z'),
+      promotionSignals: [...input.promotionSignals],
+    };
+    expect(commercialAiCopyInputFingerprint(atSecondSync)).toBe(
+      commercialAiCopyInputFingerprint(atFirstSync),
+    );
+  });
+
+  it('mantém o fingerprint em sync idêntico com lastSeenAt operacional diferente', () => {
+    const firstSync = {
+      ...input,
+      lastSeenAt: new Date('2026-08-01T12:00:00Z'),
+      promotionSignals: [...input.promotionSignals],
+    };
+    const secondSync = {
+      ...input,
+      lastSeenAt: new Date('2026-08-01T12:00:01Z'),
+      promotionSignals: [...input.promotionSignals],
+    };
+    expect(commercialAiCopyInputFingerprint(secondSync)).toBe(
+      commercialAiCopyInputFingerprint(firstSync),
+    );
+  });
+
   it.each([
-    'model',
-    'promptVersion',
-    'snapshotId',
-    'price',
-    'affiliateLink',
-  ] as const)('muda quando %s muda', (field) => {
+    [
+      'productName',
+      'Produto ' + 'x'.repeat(250) + ' A',
+      'Produto ' + 'x'.repeat(250) + ' B',
+    ],
+    [
+      'shopName',
+      'Loja ' + 'x'.repeat(120) + ' A',
+      'Loja ' + 'x'.repeat(120) + ' B',
+    ],
+  ] as const)('muda quando %s muda após o limite antigo', (field, firstValue, secondValue) => {
     const first = commercialAiCopyInputFingerprint({
       ...input,
+      [field]: firstValue,
       promotionSignals: [...input.promotionSignals],
     });
-    const changed = commercialAiCopyInputFingerprint({
+    const second = commercialAiCopyInputFingerprint({
       ...input,
-      [field]: `${input[field]}-changed`,
+      [field]: secondValue,
       promotionSignals: [...input.promotionSignals],
     });
-    expect(changed).not.toBe(first);
+    expect(second).not.toBe(first);
   });
+
+  it('muda quando whitespace ou controle altera o artefato cru do assembler', () => {
+    const raw = { productName: 'Produto\u0000  exato', shopName: 'Loja\tExata' };
+    const changed = { productName: 'Produto  exato', shopName: 'Loja Exata' };
+    const assembler = new CommercialPromotionCopyAssembler();
+    const rawCopy = assembler.assemble({
+      ...base,
+      ...raw,
+      promotionSignals: [],
+    });
+    const changedCopy = assembler.assemble({
+      ...base,
+      ...changed,
+      promotionSignals: [],
+    });
+    expect(rawCopy.mensagem).not.toBe(changedCopy.mensagem);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        ...raw,
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).not.toBe(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        ...changed,
+        promotionSignals: [...input.promotionSignals],
+      }),
+    );
+  });
+
+  it.each([
+    ['promptVersion', { promptVersion: 'commercial-promotion-copy-v2' }],
+    [
+      'validationVersion',
+      { validationVersion: 'commercial-promotion-copy-validation-v2' },
+    ],
+    ['provider', { provider: 'other-provider' }],
+    ['model', { model: 'other-model' }],
+    ['campaignId', { campaignId: 'campaign-changed' }],
+    ['campaignUpdatedAt', { campaignUpdatedAt: new Date('2026-08-01T12:00:01Z') }],
+    ['nicheId', { nicheId: 'niche-changed' }],
+    ['nicheUpdatedAt', { nicheUpdatedAt: new Date('2026-08-01T12:00:01Z') }],
+    ['candidateId', { candidateId: 'candidate-changed' }],
+    ['productId', { productId: 'product-changed' }],
+    ['snapshotId', { snapshotId: 'snapshot-changed' }],
+    ['snapshotRevision', { snapshotRevision: 3 }],
+    ['snapshotFingerprint', { snapshotFingerprint: 'snapshot-fingerprint-changed' }],
+    ['commercialScore', { commercialScore: 81 }],
+    ['promotionSignals', { promotionSignals: ['NEWLY_OBSERVED'] }],
+    ['priceDropPercent', { priceDropPercent: '13' }],
+    ['productName', { productName: 'Produto alterado' }],
+    ['shopName', { shopName: 'Loja alterada' }],
+    ['price', { price: '124.45' }],
+    ['discountRate', { discountRate: 16 }],
+    ['rating', { rating: 4.7 }],
+    ['sales', { sales: 501 }],
+    ['affiliateLink', { affiliateLink: 'https://example.invalid/affiliate/changed' }],
+    ['maximumLength', { maximumLength: 999 }],
+  ] as const)(
+    'muda quando o input semântico %s muda',
+    (_field, change) => {
+      const first = commercialAiCopyInputFingerprint({
+        ...input,
+        promotionSignals: [...input.promotionSignals],
+      });
+      const changed = commercialAiCopyInputFingerprint({
+        ...input,
+        ...change,
+        promotionSignals:
+          'promotionSignals' in change
+            ? [...change.promotionSignals]
+            : [...input.promotionSignals],
+      });
+      expect(changed).not.toBe(first);
+    },
+  );
 
   it('separa fingerprints de validação v1 e v2 sem alterar o histórico', () => {
     const v1 = commercialAiCopyInputFingerprint({

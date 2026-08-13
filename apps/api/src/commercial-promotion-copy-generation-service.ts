@@ -32,6 +32,7 @@ import type {
   CommercialPromotionCopyContext,
   CommercialPromotionCopyRepository,
   CommercialAiCopyCompletionResult,
+  CommercialCopyGenerationAttemptRecord,
   GeneratedCopyRecord,
 } from './repositories';
 
@@ -186,7 +187,6 @@ export class CommercialPromotionCopyGenerationService {
       nicheUpdatedAt: context.niche.updatedAt,
       candidateId: context.candidate.id,
       productId: context.product.id,
-      productUpdatedAt: context.product.updatedAt,
       snapshotId: context.snapshot.id,
       snapshotRevision: context.snapshot.revision,
       snapshotFingerprint: context.snapshot.fingerprint,
@@ -456,6 +456,30 @@ export class CommercialPromotionCopyGenerationService {
     return this.useCache(context, fingerprint, copy as GeneratedCopyRecord);
   }
 
+  private classifyHistoricalAttempt(
+    attempt: CommercialCopyGenerationAttemptRecord,
+  ): never {
+    if (attempt.status === 'STARTED') {
+      fail(
+        'Geracao historica ainda esta em andamento',
+        'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
+      );
+    }
+    if (attempt.status === 'FAILED') {
+      fail('Tentativa historica falhou', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED');
+    }
+    if (attempt.status === 'AMBIGUOUS') {
+      fail(
+        'Resultado historico e ambiguo',
+        'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+      );
+    }
+    return fail(
+      'Copy historica nao pode ser reutilizada com fingerprint diferente',
+      'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+    );
+  }
+
   private async terminalFailure(
     fingerprint: string,
     status: 'FAILED' | 'AMBIGUOUS',
@@ -526,6 +550,19 @@ export class CommercialPromotionCopyGenerationService {
       await this.options.repository.findCopyByInputFingerprint(fingerprint);
     if (this.validCache(cached, context, fingerprint)) {
       return this.useCache(context, fingerprint, cached as GeneratedCopyRecord);
+    }
+    if (!cached) {
+      const historicalAttempt =
+        await this.options.repository.findAttemptByGenerationContract({
+          candidateId: context.candidate.id,
+          snapshotId: context.snapshot.id,
+          inputFingerprint: fingerprint,
+          provider: this.options.config.provider,
+          model: this.options.config.model as string,
+          promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+          validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        });
+      if (historicalAttempt) this.classifyHistoricalAttempt(historicalAttempt);
     }
     const provider = this.assertProvider();
     const claimed = await this.options.repository.claim({

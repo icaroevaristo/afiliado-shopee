@@ -136,6 +136,24 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
   async findAttemptByInputFingerprint(fingerprint: string) {
     return this.attempts.get(fingerprint) ?? null;
   }
+  async findAttemptByGenerationContract(
+    input: Parameters<
+      CommercialPromotionCopyRepository['findAttemptByGenerationContract']
+    >[0],
+  ) {
+    return (
+      [...this.attempts.values()].find(
+        (attempt) =>
+          attempt.candidateId === input.candidateId &&
+          attempt.snapshotId === input.snapshotId &&
+          attempt.inputFingerprint !== input.inputFingerprint &&
+          attempt.provider === input.provider &&
+          attempt.model === input.model &&
+          attempt.promptVersion === input.promptVersion &&
+          attempt.validationVersion === input.validationVersion,
+      ) ?? null
+    );
+  }
   async listAttemptsByCandidateId(candidateId: string) {
     return [...this.attempts.values()].filter(
       (attempt) => attempt.candidateId === candidateId,
@@ -250,6 +268,57 @@ const validProvider = (): CommercialAiCopyProvider => ({
   }),
 });
 
+const legacyAttempt = (
+  status: CommercialCopyGenerationAttemptRecord['status'],
+  inputFingerprint = `legacy-fingerprint-${status.toLowerCase()}`,
+): CommercialCopyGenerationAttemptRecord => ({
+  id: `attempt-${status.toLowerCase()}`,
+  candidateId: 'candidate-internal',
+  snapshotId: 'snapshot-internal',
+  inputFingerprint,
+  provider: 'openai',
+  model: 'selected-model',
+  promptVersion: 'commercial-promotion-copy-v2',
+  validationVersion: 'commercial-promotion-copy-validation-v2',
+  status,
+  generatedCopyId: status === 'SUCCEEDED' ? 'copy-legacy' : null,
+  failureCode: status === 'FAILED' ? 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' : null,
+  requestMayHaveStarted: status !== 'STARTED',
+  providerHttpStatus: null,
+  providerErrorCode: null,
+  providerErrorType: null,
+  providerErrorParam: null,
+  inputTokens: null,
+  outputTokens: null,
+  totalTokens: null,
+  validationFailureCodes: [],
+  startedAt: now,
+  completedAt: status === 'STARTED' ? null : now,
+  createdAt: now,
+  updatedAt: now,
+});
+
+const legacyCopy = (inputFingerprint: string): GeneratedCopyRecord => ({
+  id: 'copy-legacy',
+  productId: 'product-internal',
+  titulo: 'Oferta anterior',
+  mensagem: 'Produto anterior que nao pode ser reaproveitado.',
+  cta: `Confira os detalhes\n${affiliateLink}`,
+  hashtags: '#Oferta',
+  source: 'AI',
+  provider: 'openai',
+  model: 'selected-model',
+  promptVersion: 'commercial-promotion-copy-v2',
+  validationVersion: 'commercial-promotion-copy-validation-v2',
+  inputFingerprint,
+  snapshotId: 'snapshot-internal',
+  createdFromCandidateId: 'candidate-internal',
+  usageInputTokens: null,
+  usageOutputTokens: null,
+  usageTotalTokens: null,
+  createdAt: now,
+});
+
 const service = (
   repository: MemoryCopyRepository,
   provider: CommercialAiCopyProvider = validProvider(),
@@ -324,6 +393,52 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
+  });
+
+  it('reutiliza cache quando o preço muda somente na forma canônica do assembler', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+    await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+    repository.context!.candidate.status = 'QUEUED';
+    repository.context!.candidate.generatedCopyId = null;
+    repository.context!.product.price = ' 00099.9000 ';
+
+    const cached = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(cached).toMatchObject({ status: 'COPY_READY', cacheHit: true });
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(repository.copies.size).toBe(1);
+  });
+
+  it('falha fechado quando copy concluída deixa de corresponder ao fingerprint atual', async () => {
+    const repository = new MemoryCopyRepository();
+    repository.context!.product.productName = `Produto ${'x'.repeat(250)} A`;
+    repository.context!.product.shopName = `Loja ${'y'.repeat(120)} A`;
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+    const first = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+    repository.context!.candidate.status = 'QUEUED';
+    repository.context!.candidate.generatedCopyId = null;
+    repository.context!.product.productName = `Produto ${'x'.repeat(250)} B`;
+    repository.context!.product.shopName = `Loja ${'y'.repeat(120)} B`;
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT' });
+
+    expect(first.cacheHit).toBe(false);
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(repository.copies.size).toBe(1);
+    expect([...repository.copies.values()][0]?.mensagem).toContain(
+      `Produto ${'x'.repeat(250)} A`,
+    );
   });
 
   it('mantem copy candidate-scoped separada para o mesmo produto em grupos diferentes', async () => {
@@ -406,7 +521,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT' });
   });
 
-  it('mantém QUEUED e marca falha confirmada sem copy', async () => {
+  it('deduplica falha terminal quando somente product.updatedAt muda', async () => {
     const repository = new MemoryCopyRepository();
     const provider: CommercialAiCopyProvider = {
       generate: vi
@@ -422,10 +537,13 @@ describe('CommercialPromotionCopyGenerationService', () => {
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
     ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' });
+    const [fingerprint] = repository.attempts.keys();
+    repository.context!.product.updatedAt = new Date('2026-08-01T12:00:01Z');
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
     ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED' });
     expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect([...repository.attempts.keys()]).toEqual([fingerprint]);
     expect(repository.context?.candidate.status).toBe('QUEUED');
     expect([...repository.attempts.values()][0]).toMatchObject({
       status: 'FAILED',
@@ -433,6 +551,55 @@ describe('CommercialPromotionCopyGenerationService', () => {
       requestMayHaveStarted: false,
     });
     expect(repository.copies.size).toBe(0);
+  });
+
+  it.each([
+    ['FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
+    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+    ['STARTED', 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
+  ] as const)(
+    'bloqueia attempt legado %s do mesmo contrato sem nova chamada ao provider',
+    async (status, code) => {
+      const repository = new MemoryCopyRepository();
+      const fingerprint = `legacy-hash-${status.toLowerCase()}`;
+      repository.attempts.set(fingerprint, legacyAttempt(status, fingerprint));
+      const provider = validProvider();
+
+      await expect(
+        service(repository, provider).generate(
+          'candidate-internal',
+          'GERAR_COPY_COM_IA',
+        ),
+      ).rejects.toMatchObject({ code });
+
+      expect(provider.generate).not.toHaveBeenCalled();
+      expect(repository.attempts.size).toBe(1);
+      expect(repository.context?.candidate.status).toBe('QUEUED');
+    },
+  );
+
+  it('não reutiliza copy legada com fingerprint diferente e falha fechado', async () => {
+    const repository = new MemoryCopyRepository();
+    const fingerprint = 'legacy-hash-succeeded';
+    repository.attempts.set(
+      fingerprint,
+      legacyAttempt('SUCCEEDED', fingerprint),
+    );
+    repository.copies.set(fingerprint, legacyCopy(fingerprint));
+    const provider = validProvider();
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT' });
+
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.generatedCopyId).toBeNull();
+    expect(repository.copies.get(fingerprint)?.mensagem).toContain(
+      'Produto anterior',
+    );
   });
 
   it('não permite que um attempt FAILED v1 bloqueie a geração v2, gerando um fingerprint diferente e não o apagando', async () => {
@@ -484,6 +651,25 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v2');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
+  });
+
+  it('não permite que um attempt FAILED com validationVersion anterior bloqueie a geração atual', async () => {
+    const repository = new MemoryCopyRepository();
+    const fingerprint = 'legacy-validation-v1-fingerprint';
+    repository.attempts.set(fingerprint, {
+      ...legacyAttempt('FAILED', fingerprint),
+      validationVersion: 'commercial-promotion-copy-validation-v1',
+    });
+    const provider = validProvider();
+
+    const result = await service(repository, provider).generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(result.status).toBe('COPY_READY');
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(repository.attempts.size).toBe(2);
   });
 
   it('registra somente diagnóstico sanitizado para falha do provider', async () => {
