@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 
-import { normalizeUntrustedCommercialText } from './commercial-ai-copy-prompt';
 import type { CommercialPromotionSignal } from './repositories';
 
 export type CommercialAiCopyFingerprintInput = {
@@ -14,7 +13,6 @@ export type CommercialAiCopyFingerprintInput = {
   nicheUpdatedAt: Date;
   candidateId: string;
   productId: string;
-  productUpdatedAt: Date;
   snapshotId: string;
   snapshotRevision: number;
   snapshotFingerprint: string;
@@ -58,7 +56,6 @@ export const commercialAiCopyInputFingerprint = (
       input.nicheUpdatedAt.toISOString(),
       input.candidateId,
       input.productId,
-      input.productUpdatedAt.toISOString(),
       input.snapshotId,
       input.snapshotRevision,
       input.snapshotFingerprint,
@@ -67,8 +64,8 @@ export const commercialAiCopyInputFingerprint = (
       input.priceDropPercent === null
         ? null
         : canonicalDecimal(input.priceDropPercent),
-      normalizeUntrustedCommercialText(input.productName, 250),
-      normalizeUntrustedCommercialText(input.shopName, 120),
+      input.productName,
+      input.shopName,
       canonicalDecimal(input.price),
       input.discountRate,
       input.rating,

@@ -1998,6 +1998,28 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
       : null;
   }
 
+  async findAttemptByGenerationContract(
+    input: Parameters<
+      CommercialPromotionCopyRepository['findAttemptByGenerationContract']
+    >[0],
+  ) {
+    const record = await this.prisma.commercialCopyGenerationAttempt.findFirst({
+      where: {
+        candidateId: input.candidateId,
+        snapshotId: input.snapshotId,
+        inputFingerprint: { not: input.inputFingerprint },
+        provider: input.provider,
+        model: input.model,
+        promptVersion: input.promptVersion,
+        validationVersion: input.validationVersion,
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    return record
+      ? mapCommercialAiCopyAttempt(record as unknown as Record<string, unknown>)
+      : null;
+  }
+
   async listAttemptsByCandidateId(candidateId: string) {
     const records = await this.prisma.commercialCopyGenerationAttempt.findMany({
       where: { candidateId },
