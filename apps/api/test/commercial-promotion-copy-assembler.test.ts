@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { commercialAiCopyInputFingerprint } from '../src/commercial-ai-copy-fingerprint';
 import {
   CommercialPromotionCopyAssembler,
+  isSafeAssembledCommercialPromotionCopy,
   sanitizeCommercialPromotionCopy,
 } from '../src/commercial-promotion-copy-assembler';
 
@@ -32,6 +33,16 @@ const base = {
 describe('CommercialPromotionCopyAssembler', () => {
   const assembler = new CommercialPromotionCopyAssembler();
 
+  const trustedFacts = (overrides = {}) => ({
+    productName: base.productName,
+    shopName: base.shopName,
+    price: base.price,
+    discountRate: base.discountRate,
+    promotionSignals: [...base.promotionSignals],
+    priceDropPercent: base.priceDropPercent,
+    ...overrides,
+  });
+
   it('insere fatos e link deterministicamente com prioridade do sinal', () => {
     const copy = assembler.assemble({
       ...base,
@@ -60,6 +71,36 @@ describe('CommercialPromotionCopyAssembler', () => {
     });
     expect(copy.cta).toBe(`${output.cta}\n${affiliateLink}`);
   });
+
+  it.each(['HOKON.br', 'Loja HOKON.br', 'Produto oficial HOKON.br'])(
+    'preserva %s em cada fato confiável sem sanitizá-lo como link',
+    (value) => {
+      for (const field of ['productName', 'shopName'] as const) {
+        const facts = trustedFacts({ [field]: value, promotionSignals: [] });
+        const copy = assembler.assemble({ ...base, ...facts });
+        const sanitized = sanitizeCommercialPromotionCopy(
+          copy,
+          base.affiliateLink,
+        );
+        const message = [copy.titulo, copy.mensagem, copy.cta, copy.hashtags].join(
+          '\n',
+        );
+
+        expect(copy.mensagem).toContain(value);
+        expect(sanitized.mensagem).toContain(value);
+        expect(sanitized.mensagem).not.toContain('[LINK_REMOVIDO]');
+        expect(message.split(base.affiliateLink)).toHaveLength(2);
+        expect(
+          isSafeAssembledCommercialPromotionCopy(
+            copy,
+            base.affiliateLink,
+            facts,
+            base.maximumLength,
+          ),
+        ).toBe(true);
+      }
+    },
+  );
 
   it('sanitiza por allowlist e remove links antigos defensivamente', () => {
     const copy = assembler.assemble({
@@ -104,20 +145,53 @@ describe('CommercialPromotionCopyAssembler', () => {
     },
   );
 
-  it('rejeita URL adicional e tamanho sem truncar', () => {
+  it.each([
+    'custom://evil.example',
+    'https://evil.example',
+    'http://evil.example',
+    'www.evil.example',
+    'https://evil.example/path',
+    'https://evil.example/path?x=1',
+    'https://evil.example/#fragment',
+    'evil.example/path',
+    'evil.example?x=1',
+    'evil.example#fragment',
+    'example.com:8080/path',
+  ])('rejeita URL navegável em cada fato confiável: %s', (url) => {
+    for (const field of ['productName', 'shopName'] as const) {
+      expect(() =>
+        assembler.assemble({
+          ...base,
+          [field]: `${field} ${url}`,
+          promotionSignals: [],
+        }),
+      ).toThrowError(
+        expect.objectContaining({ code: 'COMMERCIAL_AI_COPY_URL_INVALID' }),
+      );
+    }
+  });
+
+  it.each([
+    'https://evil.example',
+    'www.evil.example',
+    'example.com',
+  ])('rejeita URL na saída da IA: %s', (url) => {
     expect(() =>
       assembler.assemble({
         ...base,
-        output: { ...output, body: 'Veja https://example.invalid/extra' },
+        output: { ...output, body: `Veja ${url}` },
         promotionSignals: [],
       }),
     ).toThrowError(
       expect.objectContaining({ code: 'COMMERCIAL_AI_COPY_URL_INVALID' }),
     );
+  });
+
+  it('rejeita link afiliado duplicado e tamanho sem truncar', () => {
     expect(() =>
       assembler.assemble({
         ...base,
-        productName: 'Produto www.example.com',
+        output: { ...output, cta: `${output.cta}\n${base.affiliateLink}` },
         promotionSignals: [],
       }),
     ).toThrowError(
@@ -128,6 +202,73 @@ describe('CommercialPromotionCopyAssembler', () => {
     ).toThrowError(
       expect.objectContaining({ code: 'COMMERCIAL_AI_COPY_TOO_LONG' }),
     );
+  });
+
+  it.each([
+    ['LF', '\n'],
+    ['CR', '\r'],
+    ['tab', '\t'],
+    ['NUL', '\u0000'],
+    ['DEL', '\u007F'],
+  ])('rejeita link afiliado com controle ASCII %s antes de montar a copy', (_name, control) => {
+    const affiliateLink = `https://example.invalid/affiliate${control}https://evil.example/second`;
+
+    expect(() =>
+      assembler.assemble({
+        ...base,
+        affiliateLink,
+        promotionSignals: [],
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+      }),
+    );
+  });
+
+  it('valida cache com HOKON.br e falha fechado para URL navegável em fato confiável', () => {
+    const facts = trustedFacts({ shopName: 'HOKON.br', promotionSignals: [] });
+    const copy = assembler.assemble({ ...base, ...facts });
+
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        copy,
+        base.affiliateLink,
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(true);
+
+    const unsafeFacts = trustedFacts({
+      shopName: 'https://evil.example',
+      promotionSignals: [],
+    });
+    const unsafeCopy = {
+      ...copy,
+      mensagem: copy.mensagem.replace('HOKON.br', 'https://evil.example'),
+    };
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        unsafeCopy,
+        base.affiliateLink,
+        unsafeFacts,
+        base.maximumLength,
+      ),
+    ).toBe(false);
+  });
+
+  it('falha fechado no cache para link afiliado com segunda URL após LF', () => {
+    const facts = trustedFacts({ promotionSignals: [] });
+    const copy = assembler.assemble({ ...base, ...facts });
+
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        copy,
+        `${base.affiliateLink}\nhttps://evil.example/second`,
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(false);
   });
 });
 

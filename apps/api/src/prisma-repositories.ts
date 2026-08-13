@@ -2152,6 +2152,14 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
             !isSafeAssembledCommercialPromotionCopy(
               copy,
               current.product.affiliateLink,
+              {
+                productName: current.product.productName,
+                shopName: current.product.shopName,
+                price: current.product.price,
+                discountRate: current.product.discountRate,
+                promotionSignals: current.candidate.promotionSignals,
+                priceDropPercent: current.candidate.priceDropPercent,
+              },
               input.maximumLength,
             )
           ) {

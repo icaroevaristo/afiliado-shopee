@@ -375,6 +375,36 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.attempts.size).toBe(0);
   });
 
+  it.each([
+    ['LF', '\n'],
+    ['CR', '\r'],
+    ['TAB', '\t'],
+    ['NUL', '\u0000'],
+    ['DEL', '\u007F'],
+  ])(
+    'bloqueia link afiliado com %s no preflight de candidato, preview e geração',
+    async (_name, control) => {
+      const repository = new MemoryCopyRepository();
+      repository.context!.product.affiliateLink = `https://example.invalid/affiliate${control}https://evil.example/second`;
+      const provider = validProvider();
+      const copyService = service(repository, provider);
+
+      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+        eligible: false,
+        blockers: ['COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED'],
+        sanitizedPreview: null,
+      });
+      await expect(
+        copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+      ).rejects.toMatchObject({
+        code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+      });
+
+      expect(provider.generate).not.toHaveBeenCalled();
+      expect(repository.attempts.size).toBe(0);
+    },
+  );
+
   it('gera uma copy AI, vincula snapshot e reutiliza COPY_READY sem nova chamada', async () => {
     const repository = new MemoryCopyRepository();
     const provider = validProvider();
@@ -393,6 +423,32 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
+  });
+
+  it('reutiliza cache válido com HOKON.br em fato confiável', async () => {
+    const repository = new MemoryCopyRepository();
+    repository.context!.product.shopName = 'HOKON.br';
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+
+    const first = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+    repository.context!.candidate.status = 'QUEUED';
+    repository.context!.candidate.generatedCopyId = null;
+    const second = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(first).toMatchObject({ status: 'COPY_READY', cacheHit: false });
+    expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+    expect(repository.context?.candidate.generatedCopyId).toBe('copy-internal');
+    expect([...repository.copies.values()][0]?.mensagem).toContain(
+      '🏪 Loja: HOKON.br',
+    );
   });
 
   it('reutiliza cache quando o preço muda somente na forma canônica do assembler', async () => {
