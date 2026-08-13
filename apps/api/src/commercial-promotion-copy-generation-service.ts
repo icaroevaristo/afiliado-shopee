@@ -24,6 +24,7 @@ import {
 } from './commercial-ai-copy-validator';
 import {
   CommercialPromotionCopyAssembler,
+  hasAsciiControlOrDel,
   isSafeAssembledCommercialPromotionCopy,
   sanitizeCommercialPromotionCopy,
   type AssembledCommercialPromotionCopy,
@@ -64,7 +65,7 @@ const fail = (message: string, code: string): never => {
 };
 
 const validAffiliateLink = (value: string | null) => {
-  if (!value) return false;
+  if (!value || hasAsciiControlOrDel(value)) return false;
   try {
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol);
@@ -223,6 +224,14 @@ export class CommercialPromotionCopyGenerationService {
       isSafeAssembledCommercialPromotionCopy(
         copy,
         context.product.affiliateLink as string,
+        {
+          productName: context.product.productName,
+          shopName: context.product.shopName,
+          price: context.product.price,
+          discountRate: context.product.discountRate,
+          promotionSignals: context.candidate.promotionSignals,
+          priceDropPercent: context.candidate.priceDropPercent,
+        },
         this.options.config.maximumCopyLength,
       ),
     );
@@ -255,6 +264,14 @@ export class CommercialPromotionCopyGenerationService {
       isSafeAssembledCommercialPromotionCopy(
         copy,
         context.product.affiliateLink,
+        {
+          productName: context.product.productName,
+          shopName: context.product.shopName,
+          price: context.product.price,
+          discountRate: context.product.discountRate,
+          promotionSignals: context.candidate.promotionSignals,
+          priceDropPercent: context.candidate.priceDropPercent,
+        },
         this.options.config.maximumCopyLength,
       ),
     );
