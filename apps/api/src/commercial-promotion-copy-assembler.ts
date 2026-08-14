@@ -88,9 +88,24 @@ const TRUSTED_FACT_URL = new RegExp(TRUSTED_FACT_URL_SOURCE, 'iu');
 const ASCII_CONTROL_OR_DEL = /[\u0000-\u001F\u007F]/u;
 const COMMERCIAL_COPY_FOOTER =
   '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.';
+const COMMERCIAL_COPY_CTA_PREFIX = '🛒 Ver oferta:';
+const FOOTWEAR_OR_APPAREL_CONTEXT =
+  /\b(?:t[eê]nis|cal[cç]ado|sapato(?:s)?|bota(?:s)?|sand[aá]lia(?:s)?|chinelo(?:s)?|vestu[aá]rio|roupa(?:s)?|camiseta(?:s)?|camisa(?:s)?|cal[cç]a(?:s)?|bermuda(?:s)?|saia(?:s)?|vestido(?:s)?|blusa(?:s)?|jaqueta(?:s)?|moletom|short(?:s)?|meia(?:s)?|tamanho(?:s)?)\b/iu;
+const PURCHASE_SIZE_RANGE = /(?:\s*\(\s*)?\b\d{2}\s*-\s*\d{2}\b(?:\s*\))?/gu;
 
 export const hasAsciiControlOrDel = (value: string) =>
   ASCII_CONTROL_OR_DEL.test(value);
+
+export const cleanCommercialPromotionBody = (body: string) => {
+  if (!FOOTWEAR_OR_APPAREL_CONTEXT.test(body)) return body;
+
+  return body
+    .replace(PURCHASE_SIZE_RANGE, '')
+    .replace(/[ \t]{2,}/gu, ' ')
+    .replace(/[ \t]+([,.;:!?])/gu, '$1')
+    .replace(/[ \t]+\n/gu, '\n')
+    .trim();
+};
 
 const publicMessage = (copy: AssembledCommercialPromotionCopy) =>
   [copy.titulo, copy.mensagem, copy.cta, copy.hashtags]
@@ -114,12 +129,7 @@ const trustedOfferBlock = (facts: CommercialPromotionCopyTrustedFacts) => {
 };
 
 const aiOutputMessage = (output: CommercialAiCopyOutput) =>
-  publicMessage({
-    titulo: output.headline,
-    mensagem: output.body,
-    cta: output.cta,
-    hashtags: output.hashtags.join(' '),
-  });
+  [output.headline, output.body].filter(Boolean).join('\n\n');
 
 const cachedAiOutputMessage = (
   copy: AssembledCommercialPromotionCopy,
@@ -207,11 +217,14 @@ export class CommercialPromotionCopyAssembler {
         'COMMERCIAL_AI_COPY_URL_INVALID',
       );
     }
-    const lines = [input.output.body, trustedOfferBlock(input)];
+    const lines = [
+      cleanCommercialPromotionBody(input.output.body),
+      trustedOfferBlock(input),
+    ];
     const copy = {
       titulo: input.output.headline,
       mensagem: lines.join('\n'),
-      cta: `${input.output.cta}\n${input.affiliateLink}`,
+      cta: `${COMMERCIAL_COPY_CTA_PREFIX}\n${input.affiliateLink}`,
       hashtags: COMMERCIAL_COPY_FOOTER,
     };
     const finalMessage = publicMessage(copy);
@@ -239,7 +252,7 @@ export const sanitizeCommercialPromotionCopy = (
       .replace(ANY_URL, '[LINK_REMOVIDO]');
   return {
     titulo: sanitize(copy.titulo),
-    mensagem: sanitize(copy.mensagem),
+    mensagem: cleanCommercialPromotionBody(sanitize(copy.mensagem)),
     cta: sanitize(copy.cta),
     hashtags: sanitize(copy.hashtags),
   };

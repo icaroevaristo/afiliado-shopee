@@ -3,28 +3,26 @@ import { createHash } from 'node:crypto';
 import type { CommercialPromotionSignal } from './repositories';
 
 export type CommercialAiCopyFingerprintInput = {
+  // Version/provider and stable identity fields protect request and cache
+  // isolation. Operational timestamps are intentionally excluded.
   promptVersion: string;
   validationVersion: string;
   provider: string;
   model: string;
   campaignId: string;
-  campaignUpdatedAt: Date;
   nicheId: string;
-  nicheUpdatedAt: Date;
   candidateId: string;
   productId: string;
   snapshotId: string;
   snapshotRevision: number;
   snapshotFingerprint: string;
-  commercialScore: number;
+  // These fields affect the trusted assembled message or cache acceptance.
   promotionSignals: CommercialPromotionSignal[];
   priceDropPercent: string | null;
   productName: string;
   shopName: string;
   price: string;
   discountRate: number;
-  rating: number;
-  sales: number;
   affiliateLink: string;
   maximumLength: number;
 };
@@ -51,15 +49,13 @@ export const commercialAiCopyInputFingerprint = (
       input.provider,
       input.model,
       input.campaignId,
-      input.campaignUpdatedAt.toISOString(),
       input.nicheId,
-      input.nicheUpdatedAt.toISOString(),
       input.candidateId,
       input.productId,
       input.snapshotId,
       input.snapshotRevision,
       input.snapshotFingerprint,
-      input.commercialScore,
+      // Keep deterministic assembly and cache-acceptance inputs in the key.
       [...input.promotionSignals].sort(),
       input.priceDropPercent === null
         ? null
@@ -68,8 +64,6 @@ export const commercialAiCopyInputFingerprint = (
       input.shopName,
       canonicalDecimal(input.price),
       input.discountRate,
-      input.rating,
-      input.sales,
       sha256(input.affiliateLink),
       input.maximumLength,
     ]),

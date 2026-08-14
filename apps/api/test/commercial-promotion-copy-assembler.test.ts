@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { commercialAiCopyInputFingerprint } from '../src/commercial-ai-copy-fingerprint';
 import {
   CommercialPromotionCopyAssembler,
+  cleanCommercialPromotionBody,
   isSafeAssembledCommercialPromotionCopy,
   sanitizeCommercialPromotionCopy,
 } from '../src/commercial-promotion-copy-assembler';
@@ -10,8 +11,6 @@ import {
 const output = {
   headline: 'Oferta confiável',
   body: 'Uma escolha prática para sua rotina.',
-  cta: 'Confira os detalhes',
-  hashtags: ['#Oferta', '#Casa'],
 };
 
 const base = {
@@ -43,7 +42,7 @@ describe('CommercialPromotionCopyAssembler', () => {
     ...overrides,
   });
 
-  it('insere fatos e link deterministicamente com prioridade do sinal', () => {
+  it('ignora CTA criativo da IA e insere fatos e link deterministicamente', () => {
     const copy = assembler.assemble({
       ...base,
       promotionSignals: [...base.promotionSignals],
@@ -57,7 +56,8 @@ describe('CommercialPromotionCopyAssembler', () => {
     expect(copy.mensagem).not.toContain('Queda de');
     expect(copy.mensagem).not.toContain('medição anterior');
     expect(copy.mensagem).not.toContain('DE R$');
-    expect(copy.cta).toBe(`${output.cta}\n${base.affiliateLink}`);
+    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
+    expect(copy.cta).not.toContain('Confira os detalhes');
     expect(copy.cta.split(base.affiliateLink)).toHaveLength(2);
     expect(copy.hashtags).toBe(
       '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
@@ -75,7 +75,7 @@ describe('CommercialPromotionCopyAssembler', () => {
       affiliateLink,
       promotionSignals: [],
     });
-    expect(copy.cta).toBe(`${output.cta}\n${affiliateLink}`);
+    expect(copy.cta).toBe(`🛒 Ver oferta:\n${affiliateLink}`);
   });
 
   it.each(['HOKON.br', 'Loja HOKON.br', 'Produto oficial HOKON.br'])(
@@ -164,6 +164,49 @@ describe('CommercialPromotionCopyAssembler', () => {
   });
 
   it.each([
+    [
+      'Tênis de Corrida com Placa de Carbono Profissional 33-44',
+      'Tênis de Corrida com Placa de Carbono Profissional',
+    ],
+    ['Sapato Social 34-39', 'Sapato Social'],
+    ['Roupa Esportiva 36-42', 'Roupa Esportiva'],
+    ['Air Fryer 6,5L 1700W 127V', 'Air Fryer 6,5L 1700W 127V'],
+    ['Dove Sérum 380ml', 'Dove Sérum 380ml'],
+    ['Intelbras FR 102', 'Intelbras FR 102'],
+    ['Kit Ferramentas 46 Peças', 'Kit Ferramentas 46 Peças'],
+    ['Produto Modelo 33-44', 'Produto Modelo 33-44'],
+  ])('limpa somente faixas de tamanho com contexto inequívoco: %s', (body, expected) => {
+    expect(cleanCommercialPromotionBody(body)).toBe(expected);
+  });
+
+  it('aplica cleanup idempotente antes de persistir e ao sanitizar uma copy cacheada', () => {
+    const body = 'Tênis de Corrida com Placa de Carbono Profissional 33-44';
+    const cleaned = cleanCommercialPromotionBody(body);
+    const copy = assembler.assemble({
+      ...base,
+      output: { headline: 'SOLA QUE PARECE JET!', body },
+      promotionSignals: [],
+    });
+    const cached = sanitizeCommercialPromotionCopy(
+      {
+        ...copy,
+        mensagem: `${body}\n🔥 POR R$ 123,45\n💸 15% OFF`,
+      },
+      base.affiliateLink,
+    );
+
+    expect(cleanCommercialPromotionBody(cleaned)).toBe(cleaned);
+    expect(copy.titulo).toBe('SOLA QUE PARECE JET!');
+    expect(copy.mensagem).toBe(`${cleaned}\n🔥 POR R$ 123,45\n💸 15% OFF`);
+    expect(cached.mensagem).toBe(`${cleaned}\n🔥 POR R$ 123,45\n💸 15% OFF`);
+    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
+    expect(copy.hashtags).toBe(
+      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
+    );
+    expect([copy.titulo, copy.mensagem, copy.cta, copy.hashtags].join('\n').split(base.affiliateLink)).toHaveLength(2);
+  });
+
+  it.each([
     'custom://evil.example',
     'https://evil.example',
     'http://evil.example',
@@ -205,16 +248,17 @@ describe('CommercialPromotionCopyAssembler', () => {
     );
   });
 
-  it('rejeita link afiliado duplicado e tamanho sem truncar', () => {
-    expect(() =>
-      assembler.assemble({
-        ...base,
-        output: { ...output, cta: `${output.cta}\n${base.affiliateLink}` },
-        promotionSignals: [],
-      }),
-    ).toThrowError(
-      expect.objectContaining({ code: 'COMMERCIAL_AI_COPY_URL_INVALID' }),
-    );
+  it('ignora CTA legado da IA, mantém CTA determinístico e rejeita tamanho sem truncar', () => {
+    const copy = assembler.assemble({
+      ...base,
+      output: {
+        ...output,
+        cta: `CTA legado\n${base.affiliateLink}`,
+      } as unknown as typeof output,
+      promotionSignals: [],
+    });
+    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
+    expect([copy.titulo, copy.mensagem, copy.cta, copy.hashtags].join('\n').split(base.affiliateLink)).toHaveLength(2);
     expect(() =>
       assembler.assemble({ ...base, promotionSignals: [], maximumLength: 20 }),
     ).toThrowError(
@@ -297,23 +341,18 @@ describe('commercialAiCopyInputFingerprint', () => {
     provider: 'openai',
     model: 'selected-model',
     campaignId: 'campaign-internal',
-    campaignUpdatedAt: new Date('2026-08-01T12:00:00Z'),
     nicheId: 'niche-internal',
-    nicheUpdatedAt: new Date('2026-08-01T12:00:00Z'),
     candidateId: 'candidate-internal',
     productId: 'product-internal',
     snapshotId: 'snapshot-internal',
     snapshotRevision: 2,
     snapshotFingerprint: 'snapshot-fingerprint',
-    commercialScore: 80,
     promotionSignals: ['PRICE_DROP', 'CURRENT_DISCOUNT'] as const,
     priceDropPercent: '12.3400',
     productName: 'Produto',
     shopName: 'Loja',
     price: '123.4500',
     discountRate: 15,
-    rating: 4.8,
-    sales: 500,
     affiliateLink: 'https://example.invalid/affiliate/exact',
     maximumLength: 1000,
   };
@@ -363,6 +402,30 @@ describe('commercialAiCopyInputFingerprint', () => {
     };
     expect(commercialAiCopyInputFingerprint(secondSync)).toBe(
       commercialAiCopyInputFingerprint(firstSync),
+    );
+  });
+
+  it('ignora score, rating, sales e timestamps voláteis removidos do contrato', () => {
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        commercialScore: 80,
+        rating: 4.8,
+        sales: 500,
+        campaignUpdatedAt: new Date('2026-08-01T12:00:00Z'),
+        nicheUpdatedAt: new Date('2026-08-01T12:00:00Z'),
+        promotionSignals: [...input.promotionSignals],
+      } as Parameters<typeof commercialAiCopyInputFingerprint>[0]),
+    ).toBe(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        commercialScore: 99,
+        rating: 1.1,
+        sales: 99999,
+        campaignUpdatedAt: new Date('2030-01-01T00:00:00Z'),
+        nicheUpdatedAt: new Date('2030-01-01T00:00:00Z'),
+        promotionSignals: [...input.promotionSignals],
+      } as Parameters<typeof commercialAiCopyInputFingerprint>[0]),
     );
   });
 
@@ -430,23 +493,18 @@ describe('commercialAiCopyInputFingerprint', () => {
     ['provider', { provider: 'other-provider' }],
     ['model', { model: 'other-model' }],
     ['campaignId', { campaignId: 'campaign-changed' }],
-    ['campaignUpdatedAt', { campaignUpdatedAt: new Date('2026-08-01T12:00:01Z') }],
     ['nicheId', { nicheId: 'niche-changed' }],
-    ['nicheUpdatedAt', { nicheUpdatedAt: new Date('2026-08-01T12:00:01Z') }],
     ['candidateId', { candidateId: 'candidate-changed' }],
     ['productId', { productId: 'product-changed' }],
     ['snapshotId', { snapshotId: 'snapshot-changed' }],
     ['snapshotRevision', { snapshotRevision: 3 }],
     ['snapshotFingerprint', { snapshotFingerprint: 'snapshot-fingerprint-changed' }],
-    ['commercialScore', { commercialScore: 81 }],
     ['promotionSignals', { promotionSignals: ['NEWLY_OBSERVED'] }],
     ['priceDropPercent', { priceDropPercent: '13' }],
     ['productName', { productName: 'Produto alterado' }],
     ['shopName', { shopName: 'Loja alterada' }],
     ['price', { price: '124.45' }],
     ['discountRate', { discountRate: 16 }],
-    ['rating', { rating: 4.7 }],
-    ['sales', { sales: 501 }],
     ['affiliateLink', { affiliateLink: 'https://example.invalid/affiliate/changed' }],
     ['maximumLength', { maximumLength: 999 }],
   ] as const)(
@@ -468,7 +526,7 @@ describe('commercialAiCopyInputFingerprint', () => {
     },
   );
 
-  it('separa fingerprints de validação v1 e v2 sem alterar o histórico', () => {
+  it('separa fingerprints de validação v1, v2 e v3 sem alterar o histórico', () => {
     const v1 = commercialAiCopyInputFingerprint({
       ...input,
       validationVersion: 'commercial-promotion-copy-validation-v1',
@@ -479,7 +537,13 @@ describe('commercialAiCopyInputFingerprint', () => {
       validationVersion: 'commercial-promotion-copy-validation-v2',
       promotionSignals: [...input.promotionSignals],
     });
+    const v3 = commercialAiCopyInputFingerprint({
+      ...input,
+      validationVersion: 'commercial-promotion-copy-validation-v3',
+      promotionSignals: [...input.promotionSignals],
+    });
     expect(v2).not.toBe(v1);
+    expect(v3).not.toBe(v2);
     expect(
       commercialAiCopyInputFingerprint({
         ...input,
@@ -487,29 +551,81 @@ describe('commercialAiCopyInputFingerprint', () => {
         promotionSignals: [...input.promotionSignals],
       }),
     ).toBe(v2);
-  });
-
-  it('separa fingerprints de prompt v2 e v3 mantendo a mesma validationVersion', () => {
-    const promptV2 = commercialAiCopyInputFingerprint({
-      ...input,
-      promptVersion: 'commercial-promotion-copy-v2',
-      validationVersion: 'commercial-promotion-copy-validation-v2',
-      promotionSignals: [...input.promotionSignals],
-    });
-    const promptV3 = commercialAiCopyInputFingerprint({
-      ...input,
-      promptVersion: 'commercial-promotion-copy-v3',
-      validationVersion: 'commercial-promotion-copy-validation-v2',
-      promotionSignals: [...input.promotionSignals],
-    });
-    expect(promptV3).not.toBe(promptV2);
     expect(
       commercialAiCopyInputFingerprint({
         ...input,
-        promptVersion: 'commercial-promotion-copy-v3',
+        validationVersion: 'commercial-promotion-copy-validation-v3',
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).toBe(v3);
+  });
+
+  it('separa fingerprints de prompt v4, v5, v6, v7 e v8 mantendo as versões históricas', () => {
+    const promptV4 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v4',
+      validationVersion: 'commercial-promotion-copy-validation-v2',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const promptV5 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v5',
+      validationVersion: 'commercial-promotion-copy-validation-v2',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const promptV6 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v6',
+      validationVersion: 'commercial-promotion-copy-validation-v3',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const promptV7 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v7',
+      validationVersion: 'commercial-promotion-copy-validation-v3',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const promptV8 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v8',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promotionSignals: [...input.promotionSignals],
+    });
+    expect(promptV5).not.toBe(promptV4);
+    expect(promptV6).not.toBe(promptV5);
+    expect(promptV7).not.toBe(promptV6);
+    expect(promptV8).not.toBe(promptV7);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        promptVersion: 'commercial-promotion-copy-v5',
         validationVersion: 'commercial-promotion-copy-validation-v2',
         promotionSignals: [...input.promotionSignals],
       }),
-    ).toBe(promptV3);
+    ).toBe(promptV5);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        promptVersion: 'commercial-promotion-copy-v6',
+        validationVersion: 'commercial-promotion-copy-validation-v3',
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).toBe(promptV6);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        promptVersion: 'commercial-promotion-copy-v7',
+        validationVersion: 'commercial-promotion-copy-validation-v3',
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).toBe(promptV7);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        promptVersion: 'commercial-promotion-copy-v8',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).toBe(promptV8);
   });
 });
