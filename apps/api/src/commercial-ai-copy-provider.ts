@@ -16,8 +16,6 @@ import {
 export type CommercialAiCopyOutput = {
   headline: string;
   body: string;
-  cta: string;
-  hashtags: string[];
 };
 
 export type CommercialAiCopyProviderResult = {

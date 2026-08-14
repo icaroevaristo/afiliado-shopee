@@ -183,23 +183,18 @@ export class CommercialPromotionCopyGenerationService {
       provider: configuration.provider,
       model,
       campaignId: context.campaign.id,
-      campaignUpdatedAt: context.campaign.updatedAt,
       nicheId: context.niche.id,
-      nicheUpdatedAt: context.niche.updatedAt,
       candidateId: context.candidate.id,
       productId: context.product.id,
       snapshotId: context.snapshot.id,
       snapshotRevision: context.snapshot.revision,
       snapshotFingerprint: context.snapshot.fingerprint,
-      commercialScore: context.candidate.commercialScore,
       promotionSignals: context.candidate.promotionSignals,
       priceDropPercent: context.candidate.priceDropPercent,
       productName: context.product.productName,
       shopName: context.product.shopName,
       price: context.product.price,
       discountRate: context.product.discountRate,
-      rating: context.product.rating,
-      sales: context.product.sales,
       affiliateLink: context.product.affiliateLink,
       maximumLength: this.options.config.maximumCopyLength,
     });
@@ -280,7 +275,7 @@ export class CommercialPromotionCopyGenerationService {
   private assemblePreview(
     context: CommercialPromotionCopyContext,
     facts: ReturnType<
-      CommercialPromotionCopyGenerationService['providerFacts']
+      CommercialPromotionCopyGenerationService['validationFacts']
     >,
   ) {
     if (!context.product.affiliateLink) return null;
@@ -288,8 +283,6 @@ export class CommercialPromotionCopyGenerationService {
       output: {
         headline: 'Oferta selecionada',
         body: 'Uma escolha com informações comerciais verificadas.',
-        cta: 'Confira os detalhes',
-        hashtags: [],
       },
       productName: facts.productName,
       shopName: facts.shopName,
@@ -305,7 +298,7 @@ export class CommercialPromotionCopyGenerationService {
 
   async preview(candidateId: string) {
     const context = await this.context(candidateId);
-    const facts = this.providerFacts(context);
+    const validationFacts = this.validationFacts(context);
     const blockers = candidateBlockers(context, this.clock());
     const fingerprint = this.fingerprint(context);
     const cache = fingerprint
@@ -326,7 +319,7 @@ export class CommercialPromotionCopyGenerationService {
       snapshotRevision: context.snapshot.revision,
       blockers,
       sanitizedPreview: validAffiliateLink(context.product.affiliateLink)
-        ? this.assemblePreview(context, facts)
+        ? this.assemblePreview(context, validationFacts)
         : null,
     };
   }
@@ -358,21 +351,26 @@ export class CommercialPromotionCopyGenerationService {
           context.product.productName,
           250,
         ),
+      };
+    } catch {
+      throw new AppError(
+        'Fatos comerciais invalidos',
+        'COMMERCIAL_AI_COPY_FACTS_INVALID',
+      );
+    }
+  }
+
+  private validationFacts(context: CommercialPromotionCopyContext) {
+    try {
+      return {
+        productName: normalizeUntrustedCommercialText(
+          context.product.productName,
+          250,
+        ),
         shopName: normalizeUntrustedCommercialText(
           context.product.shopName,
           120,
         ),
-        nicheName: normalizeUntrustedCommercialText(context.niche.name, 80),
-        promotionSignals: context.candidate.promotionSignals,
-        commercialScore: context.candidate.commercialScore,
-        discountRate: context.product.discountRate,
-        rating: context.product.rating,
-        sales: context.product.sales,
-        priceDropPercent: context.candidate.priceDropPercent,
-        maximumHeadlineLength: 90,
-        maximumBodyLength: 260,
-        maximumCtaLength: 70,
-        maximumHashtags: 3,
       };
     } catch {
       throw new AppError(
@@ -555,6 +553,7 @@ export class CommercialPromotionCopyGenerationService {
     }
     assertNoBlockers(candidateBlockers(context, this.clock()));
     const providerFacts = this.providerFacts(context);
+    const validationFacts = this.validationFacts(context);
     const fingerprint = this.fingerprint(context);
     if (!fingerprint) {
       this.assertProvider();
@@ -651,10 +650,11 @@ export class CommercialPromotionCopyGenerationService {
       );
     }
 
-    const validation = this.validator.validate(providerResult.output, [
-      providerFacts.productName,
-      providerFacts.shopName,
-    ]);
+    const validation = this.validator.validate(
+      providerResult.output,
+      validationFacts.productName,
+      [validationFacts.shopName],
+    );
     if (!validation.valid || !validation.sanitizedOutput) {
       const validationFailureCodes =
         sanitizeCommercialAiCopyValidationFailureCodes(

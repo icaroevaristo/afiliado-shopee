@@ -7,27 +7,26 @@ import {
 } from '../src/commercial-ai-copy-validator';
 
 const valid = {
-  headline: 'Oferta para escolher bem ✨',
-  body: 'Uma opção prática e confiável para o seu dia.',
-  cta: 'Confira os detalhes',
-  hashtags: ['#Oferta', '#Escolha'],
+  headline: 'ACHADO PARA O DIA',
+  body: 'Produto seguro para o seu dia.',
 };
 
-describe('CommercialAiCopyValidator', () => {
+describe('CommercialAiCopyValidator V4', () => {
   const validator = new CommercialAiCopyValidator();
 
-  it('normaliza e aceita output válido', () => {
+  it('normaliza e aceita output válido somente com headline e body', () => {
     expect(
-      validator.validate({
-        ...valid,
-        body: '  Uma   opção prática e confiável para o seu dia.  ',
-      }),
+      validator.validate(
+        {
+          ...valid,
+          body: '  Produto   seguro para o seu dia.  ',
+        },
+        'Produto seguro para o seu dia',
+        ['Loja Exata'],
+      ),
     ).toEqual({
       valid: true,
-      sanitizedOutput: {
-        ...valid,
-        body: 'Uma opção prática e confiável para o seu dia.',
-      },
+      sanitizedOutput: valid,
       publicFailureCodes: [],
     });
   });
@@ -36,11 +35,10 @@ describe('CommercialAiCopyValidator', () => {
     [{ ...valid, extra: true }, 'AI_OUTPUT_EXTRA_PROPERTY'],
     [{ ...valid, headline: '' }, 'AI_HEADLINE_LENGTH'],
     [{ ...valid, headline: 'x'.repeat(91) }, 'AI_HEADLINE_LENGTH'],
+    [{ ...valid, headline: 'Achado para o dia' }, 'AI_HEADLINE_UPPERCASE'],
+    [{ ...valid, headline: 'ACHADO 2 O DIA' }, 'AI_DIGIT_FORBIDDEN'],
     [{ ...valid, body: '' }, 'AI_BODY_LENGTH'],
     [{ ...valid, body: 'x'.repeat(261) }, 'AI_BODY_LENGTH'],
-    [{ ...valid, cta: '' }, 'AI_CTA_LENGTH'],
-    [{ ...valid, cta: 'x'.repeat(71) }, 'AI_CTA_LENGTH'],
-    [{ ...valid, hashtags: ['#a', '#b', '#c', '#d'] }, 'AI_HASHTAGS_INVALID'],
     [
       { ...valid, body: 'Veja https://example.invalid agora' },
       'AI_URL_OR_CONTACT_FORBIDDEN',
@@ -62,8 +60,6 @@ describe('CommercialAiCopyValidator', () => {
       'AI_PROHIBITED_CLAIM',
     ],
     [{ ...valid, body: 'O mais vendido com cashback' }, 'AI_PROHIBITED_CLAIM'],
-    [{ ...valid, hashtags: ['#Oferta', '#oferta'] }, 'AI_HASHTAGS_DUPLICATED'],
-    [{ ...valid, hashtags: ['#Oferta2'] }, 'AI_HASHTAGS_INVALID'],
     [
       { ...valid, body: '✨✨✨✨✨✨✨ Texto confiável e natural' },
       'AI_EMOJI_LIMIT',
@@ -81,10 +77,7 @@ describe('CommercialAiCopyValidator', () => {
       'AI_URL_OR_CONTACT_FORBIDDEN',
     ],
     [{ ...valid, body: 'Uma **oferta** confiável' }, 'AI_MARKDOWN_FORBIDDEN'],
-    [
-      { ...valid, body: 'Oferta com dígito de largura total １' },
-      'AI_DIGIT_FORBIDDEN',
-    ],
+    [{ ...valid, body: 'Oferta com dígito de largura total １' }, 'AI_DIGIT_FORBIDDEN'],
   ])('rejeita conteúdo inseguro %#', (output, code) => {
     const result = validator.validate(output);
     expect(result.valid).toBe(false);
@@ -92,40 +85,54 @@ describe('CommercialAiCopyValidator', () => {
     expect(result).not.toHaveProperty('invalidOutput');
   });
 
-  it('rejeita repetição contextual do produto ou da loja', () => {
+  it.each([
+    ['Tênis 33-44', 'Tênis 33-44'],
+    ['Garrafa 380ml', 'Garrafa 380 ml'],
+    ['Aquecedor 1700W', 'Aquecedor 1700 W'],
+    ['Fonte 127V', 'Fonte 127 V'],
+    ['Kit 46 Peças', 'Kit com 46 peças'],
+    ['Recipiente 6,5L', 'Recipiente 6,5 L'],
+    ['Modelo FR 102', 'Modelo FR 102'],
+  ] as const)('aceita especificação numérica sustentada: %s', (productName, body) => {
     const result = validator.validate(
-      { ...valid, body: 'Produto Exato é uma escolha prática e confiável.' },
-      ['Produto Exato', 'Loja Exata'],
+      { headline: 'NOME LIMPO', body },
+      productName,
+    );
+    expect(result).toEqual({
+      valid: true,
+      sanitizedOutput: { headline: 'NOME LIMPO', body },
+      publicFailureCodes: [],
+    });
+  });
+
+  it('rejeita número inventado mesmo quando a unidade parece válida', () => {
+    const result = validator.validate(
+      { headline: 'NOME LIMPO', body: 'Garrafa 381ml' },
+      'Garrafa 380ml',
+    );
+    expect(result.valid).toBe(false);
+    expect(result.publicFailureCodes).toContain('AI_DIGIT_FORBIDDEN');
+  });
+
+  it('rejeita repetição contextual de fato confiável da loja', () => {
+    const result = validator.validate(
+      { ...valid, body: 'Loja Exata em destaque no catálogo.' },
+      'Produto seguro para o seu dia',
+      ['Loja Exata'],
     );
     expect(result.valid).toBe(false);
     expect(result.publicFailureCodes).toContain('AI_CATALOG_FACT_REPEATED');
   });
 
-  it('aceita output válido V2 estrito (sem hashtags e tamanhos controlados)', () => {
-    const validV2 = {
-      headline: 'Oferta incrível e confiável para você', // 37 chars (between 10 and 60)
-      body: 'Uma escolha maravilhosa e segura para o seu dia a dia e rotina.', // 63 chars (between 40 and 180)
-      cta: 'Confira os detalhes', // 19 chars (between 5 and 40)
-      hashtags: [],
-    };
-    const result = validator.validate(validV2);
-    expect(result.valid).toBe(true);
-    expect(result.publicFailureCodes).toEqual([]);
-    expect(result.sanitizedOutput).toEqual(validV2);
-  });
-
-  it('comprova regressão da falha real simultânea', () => {
+  it('comprova regressão da falha real simultânea sem campos legados', () => {
     const regression = {
-      headline: 'Oferta confiável',
-      body: 'Uma escolha prática para sua rotina 2. ' + 'x'.repeat(250), // Acima de 260, com algarismo
-      cta: 'Confira os detalhes hoje',
-      hashtags: ['#Invalido123'], // Hashtag com algarismo e formato invalido
+      headline: 'OFERTA CONFIÁVEL',
+      body: 'Uma escolha prática para sua rotina 2. ' + 'x'.repeat(250),
     };
     const result = validator.validate(regression);
     expect(result.valid).toBe(false);
     expect(result.publicFailureCodes).toContain('AI_BODY_LENGTH');
     expect(result.publicFailureCodes).toContain('AI_DIGIT_FORBIDDEN');
-    expect(result.publicFailureCodes).toContain('AI_HASHTAGS_INVALID');
   });
 });
 
@@ -137,9 +144,11 @@ describe('sanitizeCommercialAiCopyValidationFailureCodes', () => {
     expect(sanitizeCommercialAiCopyValidationFailureCodes(123)).toEqual([]);
     expect(sanitizeCommercialAiCopyValidationFailureCodes({})).toEqual([]);
   });
+
   it('handles empty array', () => {
     expect(sanitizeCommercialAiCopyValidationFailureCodes([])).toEqual([]);
   });
+
   it('keeps valid codes and removes duplicates and sorts', () => {
     expect(
       sanitizeCommercialAiCopyValidationFailureCodes([
@@ -149,6 +158,7 @@ describe('sanitizeCommercialAiCopyValidationFailureCodes', () => {
       ]),
     ).toEqual(['AI_HEADLINE_LENGTH', 'AI_OUTPUT_EXTRA_PROPERTY']);
   });
+
   it('removes invalid types or empty or long strings', () => {
     expect(
       sanitizeCommercialAiCopyValidationFailureCodes([
@@ -160,6 +170,7 @@ describe('sanitizeCommercialAiCopyValidationFailureCodes', () => {
       ]),
     ).toEqual(['AI_HEADLINE_LENGTH']);
   });
+
   it('removes unknown codes', () => {
     expect(
       sanitizeCommercialAiCopyValidationFailureCodes([
@@ -168,18 +179,30 @@ describe('sanitizeCommercialAiCopyValidationFailureCodes', () => {
       ]),
     ).toEqual(['AI_HEADLINE_LENGTH']);
   });
+
   it('limits to 20 codes', () => {
     const all = [...COMMERCIAL_AI_COPY_VALIDATION_FAILURE_CODES];
     const limited = sanitizeCommercialAiCopyValidationFailureCodes(all);
     expect(limited.length).toBeLessThanOrEqual(20);
     expect(limited).toEqual(all.sort().slice(0, 20));
   });
+
   it('does not throw on malformed mixed input', () => {
     expect(() =>
-      sanitizeCommercialAiCopyValidationFailureCodes(['AI_HEADLINE_LENGTH', { foo: 'bar' }, undefined, 'UNKNOWN']),
+      sanitizeCommercialAiCopyValidationFailureCodes([
+        'AI_HEADLINE_LENGTH',
+        { foo: 'bar' },
+        undefined,
+        'UNKNOWN',
+      ]),
     ).not.toThrow();
     expect(
-      sanitizeCommercialAiCopyValidationFailureCodes(['AI_HEADLINE_LENGTH', { foo: 'bar' }, undefined, 'UNKNOWN']),
+      sanitizeCommercialAiCopyValidationFailureCodes([
+        'AI_HEADLINE_LENGTH',
+        { foo: 'bar' },
+        undefined,
+        'UNKNOWN',
+      ]),
     ).toEqual(['AI_HEADLINE_LENGTH']);
   });
 });

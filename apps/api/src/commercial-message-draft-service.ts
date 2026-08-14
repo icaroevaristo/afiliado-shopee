@@ -1,3 +1,5 @@
+import { cleanCommercialPromotionBody } from './commercial-promotion-copy-assembler';
+
 export type CommercialMessageDraftCandidate = {
   id: string;
   productId: string;
@@ -94,7 +96,12 @@ export class CommercialMessageDraftService {
 
     const affiliateLink = product.affiliateLink.trim();
 
-    const parts = [copy.titulo, copy.mensagem, copy.cta, copy.hashtags]
+    const parts = [
+      copy.titulo,
+      cleanCommercialPromotionBody(copy.mensagem),
+      copy.cta,
+      copy.hashtags,
+    ]
       .map((s) => s.trim())
       .filter(Boolean);
 
