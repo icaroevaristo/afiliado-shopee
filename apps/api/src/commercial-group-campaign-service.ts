@@ -13,7 +13,11 @@ import type {
 
 export type CommercialGroupCampaignPublic = Omit<
   CommercialGroupCampaignRecord,
-  'createdAt' | 'updatedAt'
+  | 'attemptExecutionId'
+  | 'attemptReservedAt'
+  | 'attemptLeaseExpiresAt'
+  | 'createdAt'
+  | 'updatedAt'
 > & { createdAt: string; updatedAt: string };
 
 const notFound = (): never => {
@@ -55,11 +59,57 @@ const parseEmptyBody = (input: unknown) => {
 
 export const toCommercialGroupCampaignPublic = (
   campaign: CommercialGroupCampaignRecord,
-): CommercialGroupCampaignPublic => ({
-  ...campaign,
-  createdAt: campaign.createdAt.toISOString(),
-  updatedAt: campaign.updatedAt.toISOString(),
-});
+): CommercialGroupCampaignPublic => {
+  const {
+    attemptExecutionId: _attemptExecutionId,
+    attemptReservedAt: _attemptReservedAt,
+    attemptLeaseExpiresAt: _attemptLeaseExpiresAt,
+    createdAt,
+    updatedAt,
+    id,
+    name,
+    logicalGroupFingerprint,
+    anchorDestinationId,
+    nicheId,
+    active,
+    cadenceMinutes,
+    timezone,
+    allowedStartTime,
+    allowedEndTime,
+    dailyLimit,
+    failureCount,
+    nextEligibleAt,
+    queueTargetSize,
+    dedupeDays,
+    niche,
+    anchorDestination,
+  } = campaign;
+  void _attemptExecutionId;
+  void _attemptReservedAt;
+  void _attemptLeaseExpiresAt;
+
+  return {
+    id,
+    name,
+    logicalGroupFingerprint,
+    anchorDestinationId,
+    nicheId,
+    active,
+    cadenceMinutes,
+    timezone,
+    allowedStartTime,
+    allowedEndTime,
+    dailyLimit,
+    failureCount,
+    nextEligibleAt,
+    queueTargetSize,
+    dedupeDays,
+    niche,
+    anchorDestination,
+    createdAt: createdAt.toISOString(),
+    updatedAt: updatedAt.toISOString(),
+  };
+};
 
 export class CommercialGroupCampaignService {
   constructor(

@@ -23,6 +23,8 @@ describe('PrismaCommercialGroupCampaignRepository', () => {
     const create = vi.fn(async ({ data }) => ({
       id: 'campaign-1',
       ...data,
+      failureCount: 0,
+      nextEligibleAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
       niche: { id: 'niche-1', name: 'Nicho', slug: 'nicho', active: true },
@@ -54,6 +56,8 @@ describe('PrismaCommercialGroupCampaignRepository', () => {
     );
     const result = await repository.createForGroup(createData);
     expect(result.logicalGroupFingerprint).toBe(fingerprint);
+    expect(result.failureCount).toBe(0);
+    expect(result.nextEligibleAt).toBeNull();
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

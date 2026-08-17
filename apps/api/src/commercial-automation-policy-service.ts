@@ -191,6 +191,9 @@ const getLocalDayRange = (now: Date, timezone: string) => {
 
 const isoOrNull = (date: Date | null) => date?.toISOString() ?? null;
 
+const isValidDailyQuota = (value: number) =>
+  Number.isSafeInteger(value) && value > 0;
+
 const HARD_BLOCKING_REASONS = new Set<CommercialAutomationReason>([
   'AUTOMATION_DISABLED',
   'AUTOMATION_PAUSED',
@@ -341,12 +344,21 @@ export class CommercialAutomationPolicyService {
       config.allowedStartTime,
       config.allowedEndTime,
     );
+    const globalQuotaValid = isValidDailyQuota(config.dailyGlobalLimit);
     const globalLimitReached =
+      !globalQuotaValid ||
       history.globalSentToday >= config.dailyGlobalLimit;
     const globalLastSentAt = history.globalLastSentAt ?? history.lastSentAt;
     const groupLastSentAt = target ? (history.groupLastSentAt ?? null) : null;
+    const campaignQuotaValid = !target || isValidDailyQuota(target.dailyLimit);
+    const groupQuotaValid = isValidDailyQuota(config.dailyGroupLimit);
+    const effectiveGroupLimit =
+      target && campaignQuotaValid && groupQuotaValid
+        ? Math.min(target.dailyLimit, config.dailyGroupLimit)
+        : null;
     const groupLimitReached =
-      Boolean(target) && history.groupSentToday >= config.dailyGroupLimit;
+      effectiveGroupLimit !== null &&
+      history.groupSentToday >= effectiveGroupLimit;
     const intervalEndsAt = groupLastSentAt
       ? new Date(
           groupLastSentAt.getTime() + config.minimumIntervalMinutes * 60_000,
@@ -360,10 +372,12 @@ export class CommercialAutomationPolicyService {
     if (settings.paused) reasons.push('AUTOMATION_PAUSED');
     if (outsideWindow) reasons.push('OUTSIDE_ALLOWED_WINDOW');
     if (globalLimitReached) reasons.push('GLOBAL_DAILY_LIMIT_REACHED');
-    if (target && !targetEligible) {
+    if (target && (!targetEligible || !campaignQuotaValid)) {
       reasons.push('COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE');
     }
-    if (target && groupLimitReached) reasons.push('GROUP_DAILY_LIMIT_REACHED');
+    if (target && (!groupQuotaValid || groupLimitReached)) {
+      reasons.push('GROUP_DAILY_LIMIT_REACHED');
+    }
     if (target && minimumIntervalNotReached) {
       reasons.push('MINIMUM_INTERVAL_NOT_REACHED');
     }
@@ -391,7 +405,7 @@ export class CommercialAutomationPolicyService {
           ),
         );
       }
-      if (globalLimitReached || (target && groupLimitReached))
+      if (globalLimitReached || (target && (!groupQuotaValid || groupLimitReached)))
         candidates.push(dayEndsAt);
       if (target && minimumIntervalNotReached && intervalEndsAt)
         candidates.push(intervalEndsAt);
@@ -414,11 +428,16 @@ export class CommercialAutomationPolicyService {
       globalSentToday: history.globalSentToday,
       globalRemainingToday: Math.max(
         0,
-        config.dailyGlobalLimit - history.globalSentToday,
+        globalQuotaValid ? config.dailyGlobalLimit - history.globalSentToday : 0,
       ),
       groupSentToday: target ? history.groupSentToday : null,
       groupRemainingToday: target
-        ? Math.max(0, config.dailyGroupLimit - history.groupSentToday)
+        ? Math.max(
+            0,
+            effectiveGroupLimit !== null
+              ? effectiveGroupLimit - history.groupSentToday
+              : 0,
+          )
         : null,
       lastSentAt: isoOrNull(globalLastSentAt),
       globalLastSentAt: isoOrNull(globalLastSentAt),

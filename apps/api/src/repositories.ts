@@ -349,6 +349,9 @@ export type CommercialAutomationTarget = {
   logicalGroupFingerprint: string;
   campaignId: string;
   nicheId: string;
+  dailyLimit: number;
+  failureCount?: number;
+  nextEligibleAt?: Date | null;
 };
 
 export interface CommercialAutomationHistoryRepository {
@@ -534,6 +537,11 @@ export type CommercialGroupCampaignData = {
   allowedStartTime: string;
   allowedEndTime: string;
   dailyLimit: number;
+  failureCount: number;
+  nextEligibleAt: Date | null;
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
   queueTargetSize: number;
   dedupeDays: number;
 };
@@ -598,6 +606,50 @@ export interface CommercialGroupCampaignRepository {
   ): Promise<CommercialGroupCampaignRecord | null>;
   hasEligibleDestination(logicalGroupFingerprint: string): Promise<boolean>;
   activateIfEligible(id: string): Promise<CommercialGroupCampaignRecord | null>;
+  reserveAttempt?(
+    input: CommercialGroupCampaignAttemptReservationInput,
+  ): Promise<CommercialGroupCampaignAttemptReservation>;
+  releaseAttempt?(input: {
+    campaignId: string;
+    executionId: string;
+  }): Promise<CommercialGroupCampaignAttemptRelease>;
+}
+
+export type CommercialGroupCampaignAttemptReservationInput = {
+  campaignId: string;
+  executionId: string;
+  reservedAt: Date;
+  leaseExpiresAt: Date;
+};
+
+export type CommercialGroupCampaignAttemptReservation =
+  | {
+      kind: 'RESERVED';
+      campaignId: string;
+      executionId: string;
+      reservedAt: Date | null;
+      leaseExpiresAt: Date | null;
+      acquired: boolean;
+    }
+  | { kind: 'CONFLICT'; campaignId: string; executionId: string };
+
+export type CommercialGroupCampaignAttemptRelease =
+  | {
+      kind: 'RELEASED';
+      campaignId: string;
+      executionId: string;
+      released: boolean;
+    }
+  | { kind: 'CONFLICT'; campaignId: string; executionId: string };
+
+export interface CommercialGroupCampaignAttemptRepository {
+  reserve(
+    input: CommercialGroupCampaignAttemptReservationInput,
+  ): Promise<CommercialGroupCampaignAttemptReservation>;
+  release(input: {
+    campaignId: string;
+    executionId: string;
+  }): Promise<CommercialGroupCampaignAttemptRelease>;
 }
 
 export type CommercialPromotionCandidateStatus =
@@ -605,11 +657,25 @@ export type CommercialPromotionCandidateStatus =
 
 export type CommercialPromotionDispatchFinalization =
   | { kind: 'LEGACY' }
-  | { kind: 'DISPATCHED'; candidateId: string; transitioned: boolean };
+  | {
+      kind: 'DISPATCHED';
+      candidateId: string;
+      campaignId: string;
+      transitioned: boolean;
+    };
 
 export type CommercialPromotionFailureFinalization =
   | { kind: 'LEGACY' }
   | { kind: 'BLOCKED'; candidateId: string; transitioned: boolean };
+
+export type CommercialPromotionCampaignFailureReset =
+  | { kind: 'LEGACY' }
+  | { kind: 'RESET'; campaignId: string; transitioned: boolean };
+
+export type CommercialPromotionAttemptContext =
+  | { kind: 'NONE' }
+  | { kind: 'AMBIGUOUS' }
+  | { kind: 'FOUND'; candidateId: string; campaignId: string; attemptExecutionId: string | null };
 
 export type CommercialPromotionSignal =
   'PRICE_DROP' | 'DISCOUNT_INCREASE' | 'NEWLY_OBSERVED' | 'CURRENT_DISCOUNT';
@@ -770,6 +836,17 @@ export interface CommercialPromotionCandidateRepository {
   markBlockedByGeneratedCopyId(
     generatedCopyId: string,
   ): Promise<CommercialPromotionFailureFinalization>;
+  resetCampaignFailureStateByGeneratedCopyId(
+    generatedCopyId: string,
+    expectedAttempt?: { campaignId: string; executionId: string },
+  ): Promise<CommercialPromotionCampaignFailureReset>;
+  findAttemptContextByGeneratedCopyId?(
+    generatedCopyId: string,
+  ): Promise<CommercialPromotionAttemptContext>;
+  releaseAttempt?(input: {
+    campaignId: string;
+    executionId: string;
+  }): Promise<CommercialGroupCampaignAttemptRelease>;
 }
 
 export type CommercialCopyGenerationAttemptStatus =

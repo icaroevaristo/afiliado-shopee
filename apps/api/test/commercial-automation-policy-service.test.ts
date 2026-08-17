@@ -38,7 +38,10 @@ const group = (id = 'group-1'): WhatsAppGroupRecord => ({
   lastSyncedAt: NOW,
 });
 
-const target = (id = 'group-1'): CommercialAutomationTarget => ({
+const target = (
+  id = 'group-1',
+  dailyLimit = 60,
+): CommercialAutomationTarget => ({
   groupId: id,
   groupName: `Grupo ${id}`,
   logicalGroupFingerprint: id.endsWith('2')
@@ -46,6 +49,7 @@ const target = (id = 'group-1'): CommercialAutomationTarget => ({
     : 'grp_aaaaaaaaaaaa',
   campaignId: `campaign-${id}`,
   nicheId: `niche-${id}`,
+  dailyLimit,
 });
 
 class MemorySettings implements CommercialAutomationSettingsRepository {

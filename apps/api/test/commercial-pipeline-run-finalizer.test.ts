@@ -89,6 +89,7 @@ const build = (investigationRequired = false) => {
   const markDispatchedByGeneratedCopyId = vi.fn(async () => ({
     kind: 'DISPATCHED' as const,
     candidateId: 'candidate-id',
+    campaignId: 'campaign-id',
     transitioned: true,
   }));
   const markBlockedByGeneratedCopyId = vi.fn(async () => ({
@@ -188,11 +189,13 @@ describe('finalizeCommercialPipelineRun', () => {
       .mockResolvedValueOnce({
         kind: 'DISPATCHED',
         candidateId: 'candidate-id',
+        campaignId: 'campaign-id',
         transitioned: true,
       })
       .mockResolvedValueOnce({
         kind: 'DISPATCHED',
         candidateId: 'candidate-id',
+        campaignId: 'campaign-id',
         transitioned: false,
       });
 
@@ -321,6 +324,7 @@ describe('finalizeCommercialPipelineRun', () => {
       .mockResolvedValueOnce({
         kind: 'DISPATCHED',
         candidateId: 'candidate-id',
+        campaignId: 'campaign-id',
         transitioned: false,
       });
 

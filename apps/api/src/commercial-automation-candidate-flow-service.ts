@@ -20,6 +20,8 @@ import {
 } from './commercial-group-selection';
 import type {
   CommercialAutomationTarget,
+  CommercialGroupCampaignAttemptReservation,
+  CommercialGroupCampaignAttemptReservationInput,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
@@ -88,6 +90,10 @@ export type CommercialAutomationCandidateSelection = {
   };
 };
 
+export type CommercialAutomationCandidateAttemptReservationResult =
+  | CommercialGroupCampaignAttemptReservation
+  | { kind: 'INELIGIBLE'; campaignId: string };
+
 export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_AI_COPY_OFFER_EXPIRED',
   'COMMERCIAL_AI_COPY_OFFER_UNAVAILABLE',
@@ -108,7 +114,8 @@ type CandidateFlowOptions = {
   campaigns: Pick<
     CommercialGroupCampaignRepository,
     'list' | 'findByLogicalGroupFingerprint'
-  >;
+  > &
+    Partial<Pick<CommercialGroupCampaignRepository, 'reserveAttempt'>>;
   candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'>;
   deliveryHistory: Pick<
     CommercialDeliveryHistoryRepository,
@@ -245,7 +252,12 @@ export class CommercialAutomationCandidateFlowService {
     const campaign = await this.resolveCampaign(group.fingerprint);
     if (
       campaign.id !== target.campaignId ||
-      campaign.nicheId !== target.nicheId
+      campaign.nicheId !== target.nicheId ||
+      campaign.dailyLimit !== target.dailyLimit ||
+      (target.failureCount !== undefined &&
+        campaign.failureCount !== target.failureCount) ||
+      (target.nextEligibleAt !== undefined &&
+        campaign.nextEligibleAt?.getTime() !== target.nextEligibleAt?.getTime())
     ) {
       throw appError(
         'Campanha selecionada mudou desde a resolucao',
@@ -268,6 +280,9 @@ export class CommercialAutomationCandidateFlowService {
           logicalGroupFingerprint: group.fingerprint,
           campaignId: campaign.id,
           nicheId: campaign.nicheId,
+          dailyLimit: campaign.dailyLimit,
+          failureCount: campaign.failureCount,
+          nextEligibleAt: campaign.nextEligibleAt,
         });
       } catch (error) {
         if (
@@ -293,8 +308,22 @@ export class CommercialAutomationCandidateFlowService {
       );
     }
 
+    const now = this.clock();
+    const eligibleTargets = targets.filter(
+      (target) =>
+        target.nextEligibleAt === undefined ||
+        target.nextEligibleAt === null ||
+        target.nextEligibleAt.getTime() <= now.getTime(),
+    );
+    if (eligibleTargets.length === 0) {
+      throw appError(
+        'Nenhum alvo comercial esta elegivel neste instante',
+        'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_TARGET',
+      );
+    }
+
     const withLastSent = await Promise.all(
-      targets.map(async (target) => ({
+      eligibleTargets.map(async (target) => ({
         target,
         lastSentAt: await this.options.deliveryHistory.findLastSentAtByGroup(
           target.groupId,
@@ -313,6 +342,28 @@ export class CommercialAutomationCandidateFlowService {
         left.target.groupId.localeCompare(right.target.groupId),
     );
     return withLastSent.map(({ target }) => target);
+  }
+
+  async reserveAttempt(
+    target: CommercialAutomationTarget,
+    input: Omit<CommercialGroupCampaignAttemptReservationInput, 'campaignId'>,
+  ): Promise<CommercialAutomationCandidateAttemptReservationResult> {
+    const { campaign } = await this.resolveTarget(target);
+    const now = this.clock();
+    const nextEligibleAt = campaign.nextEligibleAt ?? target.nextEligibleAt;
+    if (nextEligibleAt && nextEligibleAt.getTime() > now.getTime()) {
+      return { kind: 'INELIGIBLE', campaignId: campaign.id };
+    }
+    if (!this.options.campaigns.reserveAttempt) {
+      throw appError(
+        'Reserva de tentativa comercial indisponivel',
+        'COMMERCIAL_AUTOMATION_ATTEMPT_RESERVATION_UNAVAILABLE',
+      );
+    }
+    return this.options.campaigns.reserveAttempt({
+      ...input,
+      campaignId: campaign.id,
+    });
   }
 
   private async resolveCampaign(
