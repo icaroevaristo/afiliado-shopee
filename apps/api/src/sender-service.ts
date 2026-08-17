@@ -18,7 +18,6 @@ import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliat
 
 import {
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
-  resolveCommercialImageDelivery,
   type CommercialMessageDraftService,
 } from './commercial-message-draft-service';
 
@@ -240,25 +239,8 @@ export class SenderService {
       message = this.options.messageBuilder
         ? this.options.messageBuilder(dispatch.generatedCopy)
         : buildWhatsAppPublicMessage(dispatch.generatedCopy);
-      const media = resolveCommercialImageDelivery({
-        imageUrl: dispatch.product?.urlImagem,
-        affiliateLink: dispatch.product?.affiliateLink,
-      });
-      if (media.deliveryMode === 'IMAGE' && media.imageUrl) {
-        imageUrl = media.imageUrl;
-        deliveryMode = 'IMAGE';
-      } else {
-        imageUrl = undefined;
-        deliveryMode = 'TEXT';
-        this.options.logger.info(
-          {
-            event: 'whatsapp.dispatch.image_fallback',
-            dispatchId,
-            warningCodes: media.warnings,
-          },
-          'Commercial message falling back to text',
-        );
-      }
+      imageUrl = undefined;
+      deliveryMode = 'TEXT';
     }
 
     if (dispatch.destination.type === 'GROUP') {
