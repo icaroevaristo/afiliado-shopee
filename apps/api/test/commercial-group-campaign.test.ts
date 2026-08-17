@@ -5,7 +5,10 @@ import {
   parseCommercialGroupCampaignCreate,
   parseCommercialGroupCampaignPatch,
 } from '../src/commercial-group-campaign-domain';
-import { CommercialGroupCampaignService } from '../src/commercial-group-campaign-service';
+import {
+  CommercialGroupCampaignService,
+  toCommercialGroupCampaignPublic,
+} from '../src/commercial-group-campaign-service';
 import type {
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
@@ -46,6 +49,11 @@ const campaign = (
   allowedStartTime: '07:00',
   allowedEndTime: '22:00',
   dailyLimit: 60,
+  failureCount: 0,
+  nextEligibleAt: null,
+  attemptExecutionId: 'execution-1',
+  attemptReservedAt: new Date('2026-07-29T11:55:00.000Z'),
+  attemptLeaseExpiresAt: new Date('2026-07-29T12:05:00.000Z'),
   queueTargetSize: 40,
   dedupeDays: 30,
   niche: {
@@ -65,6 +73,50 @@ const campaign = (
   updatedAt: now,
   ...overrides,
 });
+
+const expectPublicCampaign = (
+  value: ReturnType<typeof toCommercialGroupCampaignPublic>,
+  expected: Partial<ReturnType<typeof toCommercialGroupCampaignPublic>> = {},
+) => {
+  expect(value).toMatchObject({
+    id: 'campaign-1',
+    name: 'Grupo Audio',
+    logicalGroupFingerprint: 'grp_123456789abc',
+    anchorDestinationId: 'group-1',
+    nicheId: 'niche-1',
+    cadenceMinutes: 15,
+    timezone: 'America/Sao_Paulo',
+    allowedStartTime: '07:00',
+    allowedEndTime: '22:00',
+    dailyLimit: 60,
+    failureCount: 0,
+    nextEligibleAt: null,
+    queueTargetSize: 40,
+    dedupeDays: 30,
+    niche: {
+      id: 'niche-1',
+      name: 'Audio',
+      slug: 'audio',
+      active: true,
+    },
+    anchorDestination: {
+      id: 'group-1',
+      name: 'Grupo',
+      fingerprint: 'grp_123456789abc',
+      active: true,
+      available: true,
+    },
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    ...expected,
+  });
+  expect(Object.hasOwn(value, 'attemptExecutionId')).toBe(false);
+  expect(Object.hasOwn(value, 'attemptReservedAt')).toBe(false);
+  expect(Object.hasOwn(value, 'attemptLeaseExpiresAt')).toBe(false);
+  expect(JSON.stringify(value)).not.toContain('attemptExecutionId');
+  expect(JSON.stringify(value)).not.toContain('attemptReservedAt');
+  expect(JSON.stringify(value)).not.toContain('attemptLeaseExpiresAt');
+};
 
 const setup = (
   overrides: { niche?: CommercialNicheRecord; eligible?: number } = {},
@@ -107,6 +159,24 @@ const setup = (
 };
 
 describe('commercial group campaign', () => {
+  it('preserva o estado futuro de anti-starvation como contrato passivo', () => {
+    const nextEligibleAt = new Date('2026-08-14T12:30:00.000Z');
+    const firstCampaign = campaign({ failureCount: 3, nextEligibleAt });
+    const secondCampaign = campaign({
+      id: 'campaign-2',
+      logicalGroupFingerprint: 'grp_abcdef123456',
+      failureCount: 0,
+      nextEligibleAt: null,
+    });
+
+    expect(firstCampaign.failureCount).toBe(3);
+    expect(firstCampaign.nextEligibleAt).toBe(nextEligibleAt);
+    expect(secondCampaign.failureCount).toBe(0);
+    expect(secondCampaign.nextEligibleAt).toBeNull();
+    expect(firstCampaign.dailyLimit).toBe(60);
+    expect(secondCampaign.dailyLimit).toBe(60);
+  });
+
   it('nasce inativa com cadencia padrao e valida slots', async () => {
     const { service } = setup();
     const created = await service.create({
@@ -163,6 +233,96 @@ describe('commercial group campaign', () => {
         destination: 'jid@g.us',
       }),
     ).toThrow();
+  });
+
+  it('remove reservas internas de todos os DTOs publicos sem alterar o record', async () => {
+    const internal = campaign();
+    const { service, campaigns } = setup();
+
+    expect(internal.attemptExecutionId).toBe('execution-1');
+    expect(internal.attemptReservedAt).toEqual(
+      new Date('2026-07-29T11:55:00.000Z'),
+    );
+    expect(internal.attemptLeaseExpiresAt).toEqual(
+      new Date('2026-07-29T12:05:00.000Z'),
+    );
+    expectPublicCampaign(toCommercialGroupCampaignPublic(internal));
+    expectPublicCampaign(
+      await service.create({
+        name: 'Grupo Audio',
+        groupDestinationId: 'group-1',
+        nicheId: 'niche-1',
+      }),
+    );
+    const listed = await service.list({ page: 1, limit: 20 });
+    expect(listed.items).toHaveLength(1);
+    expectPublicCampaign(listed.items[0]);
+    expectPublicCampaign(await service.find('campaign-1'));
+    expectPublicCampaign(
+      await service.update('campaign-1', { name: 'Novo nome' }),
+      { name: 'Novo nome' },
+    );
+    expectPublicCampaign(
+      await service.activate('campaign-1', { confirm: 'ATIVAR_CAMPANHA' }),
+      { active: true, name: 'Novo nome' },
+    );
+    expectPublicCampaign(await service.deactivate('campaign-1', {}), {
+      name: 'Novo nome',
+    });
+
+    const current = await campaigns.findById('campaign-1');
+    expect(current?.attemptExecutionId).toBe('execution-1');
+    expect(current?.attemptReservedAt).toEqual(
+      new Date('2026-07-29T11:55:00.000Z'),
+    );
+    expect(current?.attemptLeaseExpiresAt).toEqual(
+      new Date('2026-07-29T12:05:00.000Z'),
+    );
+  });
+
+  it('remove reservas internas de todos os DTOs publicos sem alterar o record', async () => {
+    const internal = campaign();
+    const { service, campaigns } = setup();
+
+    expect(internal.attemptExecutionId).toBe('execution-1');
+    expect(internal.attemptReservedAt).toEqual(
+      new Date('2026-07-29T11:55:00.000Z'),
+    );
+    expect(internal.attemptLeaseExpiresAt).toEqual(
+      new Date('2026-07-29T12:05:00.000Z'),
+    );
+    expectPublicCampaign(toCommercialGroupCampaignPublic(internal));
+    expectPublicCampaign(
+      await service.create({
+        name: 'Grupo Audio',
+        groupDestinationId: 'group-1',
+        nicheId: 'niche-1',
+      }),
+    );
+    const listed = await service.list({ page: 1, limit: 20 });
+    expect(listed.items).toHaveLength(1);
+    expectPublicCampaign(listed.items[0]);
+    expectPublicCampaign(await service.find('campaign-1'));
+    expectPublicCampaign(
+      await service.update('campaign-1', { name: 'Novo nome' }),
+      { name: 'Novo nome' },
+    );
+    expectPublicCampaign(
+      await service.activate('campaign-1', { confirm: 'ATIVAR_CAMPANHA' }),
+      { active: true, name: 'Novo nome' },
+    );
+    expectPublicCampaign(await service.deactivate('campaign-1', {}), {
+      name: 'Novo nome',
+    });
+
+    const current = await campaigns.findById('campaign-1');
+    expect(current?.attemptExecutionId).toBe('execution-1');
+    expect(current?.attemptReservedAt).toEqual(
+      new Date('2026-07-29T11:55:00.000Z'),
+    );
+    expect(current?.attemptLeaseExpiresAt).toEqual(
+      new Date('2026-07-29T12:05:00.000Z'),
+    );
   });
 
   it('controla ativacao, aceita varios destinos logicos e desativa sem apagar', async () => {

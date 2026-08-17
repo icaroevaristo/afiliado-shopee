@@ -24,6 +24,7 @@ import {
 import type {
   CommercialAutomationCandidateSelection,
   CommercialAutomationCandidatePreflight,
+  CommercialAutomationCandidateAttemptReservationResult,
 } from './commercial-automation-candidate-flow-service';
 import type { CommercialPromotionMiningReport } from './commercial-promotion-mining-service';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
@@ -41,6 +42,12 @@ export const COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED =
   'COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED';
 export const COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE =
   'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE';
+export const COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED =
+  'COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED';
+export const COMMERCIAL_AUTOMATION_TARGET_BACKOFF =
+  'COMMERCIAL_AUTOMATION_TARGET_BACKOFF';
+export const COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID =
+  'COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID';
 
 export type { CommercialAutomationMode, CommercialAutomationProvider };
 
@@ -177,6 +184,14 @@ export class CommercialAutomationOrchestrator {
           logicalGroupFingerprint?: string;
           nicheId?: string;
         }): Promise<void>;
+        reserveAttempt(
+          target: CommercialAutomationTarget,
+          input: {
+            executionId: string;
+            reservedAt: Date;
+            leaseExpiresAt: Date;
+          },
+        ): Promise<CommercialAutomationCandidateAttemptReservationResult>;
       };
       confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
       commercialRuns: Pick<CommercialPipelineRunRepository, 'findById'>;
@@ -384,6 +399,38 @@ export class CommercialAutomationOrchestrator {
                     rejectedCount: 0,
                   },
                 };
+              }
+            }
+            if (input.mode === 'send') {
+              const reservedAt = this.clock();
+              const leaseExpiresAt = execution.leaseExpiresAt;
+              if (!leaseExpiresAt || leaseExpiresAt.getTime() <= reservedAt.getTime()) {
+                return publicResult(
+                  await finish({
+                    status: 'BLOCKED',
+                    reasons: [COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID],
+                    failureCode: COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID,
+                    completedAt: reservedAt,
+                  }),
+                );
+              }
+              const reservation =
+                await this.dependencies.candidateFlow.reserveAttempt(target, {
+                  executionId: execution.id,
+                  reservedAt,
+                  leaseExpiresAt,
+                });
+              if (reservation.kind === 'INELIGIBLE') {
+                selectedCandidateSelection = undefined;
+                selectedMiningReport = undefined;
+                targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_BACKOFF);
+                continue;
+              }
+              if (reservation.kind === 'CONFLICT') {
+                selectedCandidateSelection = undefined;
+                selectedMiningReport = undefined;
+                targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED);
+                continue;
               }
             }
             selectedTarget = target;

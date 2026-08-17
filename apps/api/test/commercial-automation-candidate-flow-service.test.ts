@@ -77,6 +77,11 @@ const campaign = (
   allowedStartTime: '07:00',
   allowedEndTime: '22:00',
   dailyLimit: 60,
+  failureCount: 0,
+  nextEligibleAt: null,
+  attemptExecutionId: null,
+  attemptReservedAt: null,
+  attemptLeaseExpiresAt: null,
   queueTargetSize: 40,
   dedupeDays: 30,
   createdAt: NOW,
@@ -251,6 +256,19 @@ const createSubject = (input: {
   const campaigns = {
     list: vi.fn(async () => ({ items: [currentCampaign], total: 1 })),
     findByLogicalGroupFingerprint: vi.fn(),
+    reserveAttempt: vi.fn(async (input: {
+      campaignId: string;
+      executionId: string;
+      reservedAt: Date;
+      leaseExpiresAt: Date;
+    }) => ({
+      kind: 'RESERVED' as const,
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+      reservedAt: input.reservedAt,
+      leaseExpiresAt: input.leaseExpiresAt,
+      acquired: true,
+    })),
   };
   campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
   const candidates = {
@@ -332,6 +350,9 @@ const createSubject = (input: {
     logicalGroupFingerprint: currentGroup.fingerprint,
     campaignId: currentCampaign.id,
     nicheId: currentCampaign.nicheId,
+    dailyLimit: currentCampaign.dailyLimit,
+    failureCount: currentCampaign.failureCount,
+    nextEligibleAt: currentCampaign.nextEligibleAt,
   };
   return {
     service,
@@ -344,6 +365,9 @@ const createSubject = (input: {
     mining,
     deliveryHistory,
     pipeline,
+    setCampaign: (value: Partial<CommercialGroupCampaignRecord>) => {
+      Object.assign(currentCampaign, value);
+    },
     setCandidate: (value: Partial<CommercialPromotionCandidateRecord>) => {
       currentCandidate = candidateRecord(value);
     },
@@ -362,10 +386,108 @@ const selection = (
 });
 
 describe('CommercialAutomationCandidateFlowService', () => {
+  it('transporta o dailyLimit obrigatorio da campanha para o target sem aplicar quota', async () => {
+    // dailyLimit e Int obrigatorio no schema; null nao e um estado valido.
+    const subject = createSubject({
+      campaign: { dailyLimit: 7, queueTargetSize: 2 },
+    });
+
+    await expect(subject.service.listTargets()).resolves.toEqual([
+      expect.objectContaining({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        dailyLimit: 7,
+      }),
+    ]);
+
+    await subject.service.preflight(subject.target);
+
+    expect(subject.candidates.listQueue).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      page: 1,
+      limit: 2,
+    });
+  });
+
+  it('ignora target em backoff e preserva targets vencidos, atuais e sem backoff', async () => {
+    const subject = createSubject({
+      campaign: {
+        nextEligibleAt: new Date('2026-08-08T12:00:01.000Z'),
+      },
+    });
+
+    await expect(subject.service.listTargets()).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_TARGET',
+    });
+    expect(subject.deliveryHistory.findLastSentAtByGroup).not.toHaveBeenCalled();
+
+    subject.setCampaign({ nextEligibleAt: NOW });
+    await expect(subject.service.listTargets()).resolves.toHaveLength(1);
+
+    subject.setCampaign({
+      nextEligibleAt: new Date('2026-08-08T11:59:59.999Z'),
+    });
+    await expect(subject.service.listTargets()).resolves.toHaveLength(1);
+
+    subject.setCampaign({ nextEligibleAt: null });
+    await expect(subject.service.listTargets()).resolves.toHaveLength(1);
+  });
+
+  it('trata alteracao do dailyLimit na revalidacao como target alterado', async () => {
+    const subject = createSubject({ campaign: { dailyLimit: 7 } });
+    const [target] = await subject.service.listTargets();
+
+    subject.setCampaign({ dailyLimit: 11 });
+
+    await expect(subject.service.preflight(target)).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_TARGET_CHANGED',
+    });
+    expect(subject.candidates.listQueue).not.toHaveBeenCalled();
+  });
+
+  it('mantem dailyLimit isolado entre campanhas e recarrega seu valor atual', async () => {
+    const subject = createSubject({ campaign: { dailyLimit: 7 } });
+    const secondCampaign = campaign({
+      id: 'campaign-2',
+      nicheId: 'niche-2',
+      logicalGroupFingerprint: 'grp_abcdef123456',
+      anchorDestinationId: 'group-2',
+      dailyLimit: 19,
+    });
+    const secondGroup = group({
+      id: 'group-2',
+      fingerprint: 'grp_abcdef123456',
+    });
+    subject.groups.list.mockResolvedValue([group(), secondGroup]);
+    subject.campaigns.findByLogicalGroupFingerprint.mockImplementation(
+      async (fingerprint: string) =>
+        fingerprint === GROUP_FINGERPRINT
+          ? campaign({ dailyLimit: 11 })
+          : secondCampaign,
+    );
+
+    const targets = await subject.service.listTargets();
+
+    expect(targets).toEqual([
+      expect.objectContaining({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        dailyLimit: 11,
+      }),
+      expect.objectContaining({
+        campaignId: 'campaign-2',
+        groupId: 'group-2',
+        dailyLimit: 19,
+      }),
+    ]);
+  });
+
   it('reutiliza COPY_READY e preserva o ranking da fila', async () => {
     const subject = createSubject();
 
-    const result = await subject.service.prepare(selection(subject.target));
+    const result = await subject.service.prepare(
+      selection(subject.target),
+    );
 
     expect(result).toMatchObject({
       runId: 'run-1',
@@ -788,9 +910,91 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ logicalGroupFingerprint: 'grp_abcdef123456' }),
     );
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target)),
+    ).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
+
+  it('reserva somente o alvo selecionado antes da preparacao', async () => {
+    const subject = createSubject();
+    const reservedAt = new Date('2026-08-08T12:01:00.000Z');
+    const leaseExpiresAt = new Date('2026-08-08T12:11:00.000Z');
+
+    await expect(
+      subject.service.reserveAttempt(subject.target, {
+        executionId: 'execution-1',
+        reservedAt,
+        leaseExpiresAt,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'RESERVED',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      reservedAt,
+      leaseExpiresAt,
+    });
+    expect(subject.campaigns.reserveAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      reservedAt,
+      leaseExpiresAt,
+    });
+  });
+
+  it('nao reserva alvo ainda em backoff', async () => {
+    const subject = createSubject({
+      campaign: {
+        nextEligibleAt: new Date('2026-08-08T12:01:00.000Z'),
+      },
+    });
+
+    await expect(
+      subject.service.reserveAttempt(subject.target, {
+        executionId: 'execution-1',
+        reservedAt: NOW,
+        leaseExpiresAt: new Date('2026-08-08T12:10:00.000Z'),
+      }),
+    ).resolves.toEqual({ kind: 'INELIGIBLE', campaignId: 'campaign-1' });
+    expect(subject.campaigns.reserveAttempt).not.toHaveBeenCalled();
+  });
+
+  it('preserva rankPosition entre QUEUED e COPY_READY sem priorizar status', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null, rankPosition: 1 },
+    });
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [
+        queueItem({
+          id: 'candidate-ready-rank-2',
+          productId: 'product-ready-rank-2',
+          snapshotId: 'snapshot-ready-rank-2',
+          generatedCopyId: 'copy-ready-rank-2',
+          status: 'COPY_READY',
+          rankPosition: 2,
+        }),
+        queueItem({
+          id: 'candidate-1',
+          status: 'QUEUED',
+          generatedCopyId: null,
+          rankPosition: 1,
+        }),
+      ],
+      total: 2,
+    });
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      candidateStatus: 'QUEUED',
+    });
+    expect(subject.copies.loadContext).toHaveBeenCalledWith('candidate-1');
+    expect(subject.copies.loadContext).not.toHaveBeenCalledWith(
+      'candidate-ready-rank-2',
+    );
+    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+  });
+
 });

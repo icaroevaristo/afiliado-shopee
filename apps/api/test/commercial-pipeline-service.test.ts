@@ -137,6 +137,11 @@ const build = ({
         allowedStartTime: '08:00',
         allowedEndTime: '23:00',
         dailyLimit: 60,
+        failureCount: 0,
+        nextEligibleAt: null,
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
         queueTargetSize: 20,
         dedupeDays: 7,
         niche: {
@@ -443,6 +448,7 @@ describe('CommercialPipelineService', () => {
         logicalGroupFingerprint: secondGroup.fingerprint,
         campaignId: 'campaign-two',
         nicheId: 'niche-two',
+        dailyLimit: 60,
       } satisfies CommercialAutomationTarget,
     });
 
@@ -464,6 +470,7 @@ describe('CommercialPipelineService', () => {
           logicalGroupFingerprint: secondGroup.fingerprint,
           campaignId: 'campaign-mismatch',
           nicheId: 'niche-mismatch',
+          dailyLimit: 60,
         } satisfies CommercialAutomationTarget,
       }),
       'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
@@ -482,6 +489,7 @@ describe('CommercialPipelineService', () => {
           logicalGroupFingerprint: 'grp_missing0000',
           campaignId: 'campaign-missing',
           nicheId: 'niche-missing',
+          dailyLimit: 60,
         } satisfies CommercialAutomationTarget,
       }),
       'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',

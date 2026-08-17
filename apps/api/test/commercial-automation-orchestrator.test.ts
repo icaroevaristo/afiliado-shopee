@@ -8,6 +8,7 @@ import {
 } from '../src/commercial-automation-orchestrator';
 import {
   CommercialAutomationCandidateFlowService,
+  type CommercialAutomationCandidateAttemptReservationResult,
   type CommercialAutomationCandidateSelection,
   type CommercialAutomationCandidatePreflight,
 } from '../src/commercial-automation-candidate-flow-service';
@@ -200,6 +201,7 @@ const createSubject = ({
       logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
       campaignId: 'campaign-1',
       nicheId: 'niche-1',
+      dailyLimit: 60,
     },
   ];
   const executions = new MemoryExecutions();
@@ -249,6 +251,32 @@ const createSubject = ({
       nicheId: target.nicheId,
     })),
     revalidate: vi.fn(async () => undefined),
+    reserveAttempt: vi.fn<
+      (
+        target: CommercialAutomationTarget,
+        input: {
+          executionId: string;
+          reservedAt: Date;
+          leaseExpiresAt: Date;
+        },
+      ) => Promise<CommercialAutomationCandidateAttemptReservationResult>
+    >(
+      async (
+        target: CommercialAutomationTarget,
+        input: {
+          executionId: string;
+          reservedAt: Date;
+          leaseExpiresAt: Date;
+        },
+      ) => ({
+        kind: 'RESERVED' as const,
+        campaignId: target.campaignId,
+        executionId: input.executionId,
+        reservedAt: input.reservedAt,
+        leaseExpiresAt: input.leaseExpiresAt,
+        acquired: true,
+      }),
+    ),
   };
   const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
   const commercialRuns = {
@@ -315,6 +343,7 @@ const createRealCandidateFlowForIntegration = () => {
     logicalGroupFingerprint: group.fingerprint,
     nicheId: `niche-${group.id.slice(-1)}`,
     active: true,
+    dailyLimit: 60,
     queueTargetSize: 40,
     niche: { active: true },
   });
@@ -405,6 +434,19 @@ const createRealCandidateFlowForIntegration = () => {
           .filter((group) => group.fingerprint === fingerprint)
           .map(campaignFor)[0] ?? null,
       ),
+      reserveAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+        reservedAt: Date;
+        leaseExpiresAt: Date;
+      }) => ({
+        kind: 'RESERVED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        reservedAt: input.reservedAt,
+        leaseExpiresAt: input.leaseExpiresAt,
+        acquired: true,
+      })),
     } as never,
     candidates: {
       listQueue: vi.fn(async ({ campaignId }: { campaignId: string }) => {
@@ -494,6 +536,7 @@ const createStatefulCrossTickCandidateFlow = () => {
     logicalGroupFingerprint: group.fingerprint,
     nicheId: `niche-${group.id.slice(-1)}`,
     active: true,
+    dailyLimit: 60,
     queueTargetSize: 40,
     niche: { active: true },
   });
@@ -603,6 +646,19 @@ const createStatefulCrossTickCandidateFlow = () => {
           .filter((group) => group.fingerprint === fingerprint)
           .map(campaignFor)[0] ?? null,
       ),
+      reserveAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+        reservedAt: Date;
+        leaseExpiresAt: Date;
+      }) => ({
+        kind: 'RESERVED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        reservedAt: input.reservedAt,
+        leaseExpiresAt: input.leaseExpiresAt,
+        acquired: true,
+      })),
     } as never,
     candidates: {
       listQueue: vi.fn(async ({ campaignId }: { campaignId: string }) => {
@@ -796,6 +852,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-1',
         nicheId: 'niche-1',
+      dailyLimit: 60,
       },
     });
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
@@ -997,6 +1054,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-a',
         nicheId: 'niche-a',
+        dailyLimit: 60,
       },
       {
         groupId: 'group-b',
@@ -1004,6 +1062,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
         campaignId: 'campaign-b',
         nicheId: 'niche-b',
+        dailyLimit: 60,
       },
     ];
     const subject = createSubject({ targets });
@@ -1046,6 +1105,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-a',
         nicheId: 'niche-a',
+        dailyLimit: 60,
       },
       {
         groupId: 'group-b',
@@ -1053,6 +1113,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
         campaignId: 'campaign-b',
         nicheId: 'niche-b',
+        dailyLimit: 60,
       },
     ];
     const subject = createSubject({ targets });
@@ -1153,6 +1214,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-a',
         nicheId: 'niche-a',
+        dailyLimit: 60,
       },
       {
         groupId: 'group-b',
@@ -1160,6 +1222,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
         campaignId: 'campaign-b',
         nicheId: 'niche-b',
+        dailyLimit: 60,
       },
     ];
     const subject = createSubject({ targets });
@@ -1205,6 +1268,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     const replenished = new Set<string>();
@@ -1249,6 +1313,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
         campaignId: `campaign-${suffix}`,
         nicheId: `niche-${suffix}`,
+        dailyLimit: 60,
       }),
     );
     const subject = createSubject({ targets });
@@ -1286,6 +1351,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight.mockResolvedValue({
@@ -1319,6 +1385,7 @@ describe('CommercialAutomationOrchestrator', () => {
           logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
           campaignId: 'campaign-a',
           nicheId: 'niche-a',
+          dailyLimit: 60,
         },
       ],
     });
@@ -1350,6 +1417,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.prepare.mockRejectedValue(
@@ -1376,6 +1444,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.revalidate.mockRejectedValue(
@@ -1402,6 +1471,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight.mockRejectedValue(
@@ -1433,6 +1503,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight.mockRejectedValue(
@@ -1460,6 +1531,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
 
@@ -1487,6 +1559,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.policy.evaluateAutomationReadiness.mockImplementation(
@@ -1516,6 +1589,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight.mockImplementation(
@@ -1550,6 +1624,7 @@ describe('CommercialAutomationOrchestrator', () => {
       logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
       campaignId: `campaign-${suffix}`,
       nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
     }));
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight.mockRejectedValue(new Error('database down'));
@@ -1614,6 +1689,7 @@ describe('CommercialAutomationOrchestrator', () => {
           logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
           campaignId: 'campaign-b',
           nicheId: 'niche-b',
+          dailyLimit: 60,
         },
       }),
     ).resolves.toMatchObject({
@@ -1670,6 +1746,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-a',
         nicheId: 'niche-a',
+        dailyLimit: 60,
       },
       {
         groupId: 'group-b',
@@ -1677,6 +1754,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
         campaignId: 'campaign-b',
         nicheId: 'niche-b',
+        dailyLimit: 60,
       },
     ];
     const subject = createSubject({ targets });
@@ -1713,6 +1791,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-a',
         nicheId: 'niche-a',
+        dailyLimit: 60,
       },
       {
         groupId: 'group-b',
@@ -1720,6 +1799,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
         campaignId: 'campaign-b',
         nicheId: 'niche-b',
+        dailyLimit: 60,
       },
     ];
     const subject = createSubject({ targets });
@@ -1734,5 +1814,140 @@ describe('CommercialAutomationOrchestrator', () => {
     });
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('ordena selecao, reserva e prepare sem abrir uma segunda selecao', async () => {
+    const subject = createSubject();
+    const order: string[] = [];
+    subject.candidateFlow.preflight.mockImplementation(async () => {
+      order.push('selection');
+      return {
+        outcome: 'READY',
+        candidateId: 'candidate-1',
+        candidateStatus: 'COPY_READY',
+      };
+    });
+    subject.candidateFlow.reserveAttempt.mockImplementation(async () => {
+      order.push('reserve');
+      return {
+        kind: 'RESERVED',
+        campaignId: 'campaign-1',
+        executionId: 'execution-1',
+        reservedAt: NOW,
+        leaseExpiresAt: new Date(NOW.getTime() + 120_000),
+        acquired: true,
+      };
+    });
+    subject.candidateFlow.prepare.mockImplementation(async () => {
+      order.push('prepare');
+      return {
+        runId: 'run-1',
+        generatedCopyId: 'copy-1',
+        candidateId: 'candidate-1',
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        nicheId: 'niche-1',
+      };
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(order).toEqual(['selection', 'reserve', 'prepare']);
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: 'campaign-1' }),
+      {
+        executionId: 'execution-1',
+        reservedAt: NOW,
+        leaseExpiresAt: new Date(NOW.getTime() + 120_000),
+      },
+    );
+  });
+
+  it('avanca para B quando A esta reservada por outro owner, sem compartilhar lock', async () => {
+    const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
+      groupId: `group-${suffix}`,
+      groupName: `Grupo ${suffix.toUpperCase()}`,
+      logicalGroupFingerprint: `grp_${suffix.repeat(12)}`,
+      campaignId: `campaign-${suffix}`,
+      nicheId: `niche-${suffix}`,
+      dailyLimit: 60,
+    }));
+    const subject = createSubject({ targets });
+    let aPreflightCount = 0;
+    subject.candidateFlow.preflight.mockImplementation(async (target) => {
+      if (target.campaignId === 'campaign-a' && aPreflightCount++ === 0) {
+        return { outcome: 'NO_CANDIDATE' };
+      }
+      return {
+        outcome: 'READY',
+        candidateId: `candidate-${target.campaignId}`,
+        candidateStatus: 'COPY_READY',
+      };
+    });
+    subject.candidateFlow.replenish.mockResolvedValue({ rejectionSummary: {} });
+    subject.candidateFlow.reserveAttempt.mockImplementation(async (target, input) =>
+      target.campaignId === 'campaign-a'
+        ? {
+            kind: 'CONFLICT',
+            campaignId: target.campaignId,
+            executionId: input.executionId,
+          }
+        : {
+            kind: 'RESERVED',
+            campaignId: target.campaignId,
+            executionId: input.executionId,
+            reservedAt: input.reservedAt,
+            leaseExpiresAt: input.leaseExpiresAt,
+            acquired: true,
+          },
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(3);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(1, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(3, targets[1]);
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+    );
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('prossegue quando a reserva ja pertence a mesma execution', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.reserveAttempt.mockResolvedValue({
+      kind: 'RESERVED',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      reservedAt: new Date('2026-08-08T11:59:00.000Z'),
+      leaseExpiresAt: new Date('2026-08-08T12:02:00.000Z'),
+      acquired: false,
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
   });
 });

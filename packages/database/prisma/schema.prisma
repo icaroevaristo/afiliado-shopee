@@ -170,6 +170,11 @@ model CommercialGroupCampaign {
   allowedStartTime        String               @default("07:00")
   allowedEndTime          String               @default("22:00")
   dailyLimit              Int                  @default(60)
+  failureCount            Int                  @default(0)
+  nextEligibleAt          DateTime?
+  attemptExecutionId      String?
+  attemptReservedAt       DateTime?
+  attemptLeaseExpiresAt   DateTime?
   queueTargetSize         Int                  @default(40)
   dedupeDays              Int                  @default(30)
   promotionCandidates     CommercialPromotionCandidate[]

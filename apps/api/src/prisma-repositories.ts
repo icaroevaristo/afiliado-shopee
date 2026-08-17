@@ -16,6 +16,10 @@ import type {
   CommercialDispatchOutboxRepository,
   CommercialGroupCampaignCreateData,
   CommercialGroupCampaignFilters,
+  CommercialGroupCampaignAttemptRelease,
+  CommercialGroupCampaignAttemptRepository,
+  CommercialGroupCampaignAttemptReservation,
+  CommercialGroupCampaignAttemptReservationInput,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialGroupCampaignUpdateData,
@@ -27,6 +31,7 @@ import type {
   CommercialOfferSnapshotBackfillRepository,
   CommercialPromotionCandidateRecord,
   CommercialPromotionCandidateRepository,
+  CommercialPromotionAttemptContext,
   CommercialPromotionCatalogRepository,
   CommercialPromotionCopyContext,
   CommercialPromotionCopyRepository,
@@ -870,6 +875,11 @@ const mapCommercialGroupCampaign = (
   const anchor = record.anchorDestination;
   return {
     ...record,
+    failureCount: record.failureCount,
+    nextEligibleAt: record.nextEligibleAt,
+    attemptExecutionId: record.attemptExecutionId,
+    attemptReservedAt: record.attemptReservedAt,
+    attemptLeaseExpiresAt: record.attemptLeaseExpiresAt,
     anchorDestination: anchor
       ? {
           id: anchor.id,
@@ -883,7 +893,13 @@ const mapCommercialGroupCampaign = (
 };
 
 export class PrismaCommercialGroupCampaignRepository implements CommercialGroupCampaignRepository {
-  constructor(private readonly prisma: DatabaseClient) {}
+  private readonly attemptRepository: PrismaCommercialGroupCampaignAttemptRepository;
+
+  constructor(private readonly prisma: DatabaseClient) {
+    this.attemptRepository = new PrismaCommercialGroupCampaignAttemptRepository(
+      prisma.commercialGroupCampaign,
+    );
+  }
 
   async createForGroup(data: CommercialGroupCampaignCreateData) {
     try {
@@ -1130,6 +1146,134 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
       throw error;
     }
   }
+
+  async reserveAttempt(input: CommercialGroupCampaignAttemptReservationInput) {
+    return this.attemptRepository.reserve(input);
+  }
+
+  async releaseAttempt(input: {
+    campaignId: string;
+    executionId: string;
+  }) {
+    return this.attemptRepository.release(input);
+  }
+}
+
+type CommercialGroupCampaignAttemptState = {
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
+};
+
+type CommercialGroupCampaignAttemptPrismaDelegate = {
+  updateMany(input: {
+    where: { id: string; attemptExecutionId: string | null };
+    data: CommercialGroupCampaignAttemptState;
+  }): Promise<{ count: number }>;
+  findUnique(input: {
+    where: { id: string };
+    select: {
+      attemptExecutionId: true;
+      attemptReservedAt: true;
+      attemptLeaseExpiresAt: true;
+    };
+  }): Promise<CommercialGroupCampaignAttemptState | null>;
+};
+
+export class PrismaCommercialGroupCampaignAttemptRepository
+  implements CommercialGroupCampaignAttemptRepository
+{
+  constructor(
+    private readonly campaigns: CommercialGroupCampaignAttemptPrismaDelegate,
+  ) {}
+
+  async reserve(
+    input: CommercialGroupCampaignAttemptReservationInput,
+  ): Promise<CommercialGroupCampaignAttemptReservation> {
+    const reserved = await this.campaigns.updateMany({
+      where: { id: input.campaignId, attemptExecutionId: null },
+      data: {
+        attemptExecutionId: input.executionId,
+        attemptReservedAt: input.reservedAt,
+        attemptLeaseExpiresAt: input.leaseExpiresAt,
+      },
+    });
+    if (reserved.count === 1) {
+      return {
+        kind: 'RESERVED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        reservedAt: input.reservedAt,
+        leaseExpiresAt: input.leaseExpiresAt,
+        acquired: true,
+      };
+    }
+
+    const current = await this.findAttempt(input.campaignId);
+    if (current?.attemptExecutionId === input.executionId) {
+      return {
+        kind: 'RESERVED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        reservedAt: current.attemptReservedAt,
+        leaseExpiresAt: current.attemptLeaseExpiresAt,
+        acquired: false,
+      };
+    }
+    return {
+      kind: 'CONFLICT',
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+    };
+  }
+
+  async release(input: {
+    campaignId: string;
+    executionId: string;
+  }): Promise<CommercialGroupCampaignAttemptRelease> {
+    const released = await this.campaigns.updateMany({
+      where: { id: input.campaignId, attemptExecutionId: input.executionId },
+      data: {
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+      },
+    });
+    if (released.count === 1) {
+      return {
+        kind: 'RELEASED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: true,
+      };
+    }
+
+    const current = await this.findAttempt(input.campaignId);
+    if (current?.attemptExecutionId === null) {
+      return {
+        kind: 'RELEASED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: false,
+      };
+    }
+    return {
+      kind: 'CONFLICT',
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+    };
+  }
+
+  private findAttempt(campaignId: string) {
+    return this.campaigns.findUnique({
+      where: { id: campaignId },
+      select: {
+        attemptExecutionId: true,
+        attemptReservedAt: true,
+        attemptLeaseExpiresAt: true,
+      },
+    });
+  }
 }
 
 const mapCommercialPromotionSnapshot = (
@@ -1371,7 +1515,13 @@ export class PrismaCommercialPromotionRepository
     CommercialPromotionCatalogRepository,
     CommercialPromotionCandidateRepository
 {
-  constructor(private readonly prisma: DatabaseClient) {}
+  private readonly attemptRepository: PrismaCommercialGroupCampaignAttemptRepository;
+
+  constructor(private readonly prisma: DatabaseClient) {
+    this.attemptRepository = new PrismaCommercialGroupCampaignAttemptRepository(
+      prisma.commercialGroupCampaign,
+    );
+  }
 
   async listOfficialCatalogPage(input: { afterId?: string; limit: number }) {
     const limit = Math.min(Math.max(input.limit, 1), 200);
@@ -1815,7 +1965,7 @@ export class PrismaCommercialPromotionRepository
     const candidates =
       await this.prisma.commercialPromotionCandidate.findMany({
         where: { generatedCopyId },
-        select: { id: true, status: true },
+        select: { id: true, campaignId: true, status: true },
       });
     if (candidates.length === 0) return { kind: 'LEGACY' as const };
     if (candidates.length !== 1) {
@@ -1830,6 +1980,7 @@ export class PrismaCommercialPromotionRepository
       return {
         kind: 'DISPATCHED' as const,
         candidateId: candidate.id,
+        campaignId: candidate.campaignId,
         transitioned: false,
       };
     }
@@ -1852,6 +2003,7 @@ export class PrismaCommercialPromotionRepository
       return {
         kind: 'DISPATCHED' as const,
         candidateId: candidate.id,
+        campaignId: candidate.campaignId,
         transitioned: true,
       };
     }
@@ -1868,6 +2020,7 @@ export class PrismaCommercialPromotionRepository
       return {
         kind: 'DISPATCHED' as const,
         candidateId: candidate.id,
+        campaignId: candidate.campaignId,
         transitioned: false,
       };
     }
@@ -1941,6 +2094,96 @@ export class PrismaCommercialPromotionRepository
       'Candidato promocional mudou durante o bloqueio seguro',
       'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
     );
+  }
+
+  async resetCampaignFailureStateByGeneratedCopyId(
+    generatedCopyId: string,
+    expectedAttempt?: { campaignId: string; executionId: string },
+  ) {
+    const candidates =
+      await this.prisma.commercialPromotionCandidate.findMany({
+        where: {
+          generatedCopyId,
+          ...(expectedAttempt
+            ? {
+                campaignId: expectedAttempt.campaignId,
+                campaign: { attemptExecutionId: expectedAttempt.executionId },
+              }
+            : {}),
+        },
+        select: {
+          campaignId: true,
+          campaign: { select: { failureCount: true, nextEligibleAt: true } },
+        },
+      });
+    if (candidates.length === 0) return { kind: 'LEGACY' as const };
+    if (candidates.length !== 1) {
+      throw new AppError(
+        'Copy candidate-scoped possui mais de um candidato',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+
+    const [candidate] = candidates;
+    if (
+      candidate.campaign.failureCount === 0 &&
+      candidate.campaign.nextEligibleAt === null
+    ) {
+      return {
+        kind: 'RESET' as const,
+        campaignId: candidate.campaignId,
+        transitioned: false,
+      };
+    }
+    const reset = await this.prisma.commercialGroupCampaign.updateMany({
+      where: {
+        id: candidate.campaignId,
+        ...(expectedAttempt
+          ? { attemptExecutionId: expectedAttempt.executionId }
+          : {}),
+      },
+      data: { failureCount: 0, nextEligibleAt: null },
+    });
+    if (reset.count !== 1) {
+      throw new AppError(
+        'Owner da reserva divergiu durante o reset da campanha',
+        'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+      );
+    }
+    return {
+      kind: 'RESET' as const,
+      campaignId: candidate.campaignId,
+      transitioned: true,
+    };
+  }
+
+  async findAttemptContextByGeneratedCopyId(
+    generatedCopyId: string,
+  ): Promise<CommercialPromotionAttemptContext> {
+    const candidates =
+      await this.prisma.commercialPromotionCandidate.findMany({
+        where: { generatedCopyId },
+        select: {
+          id: true,
+          campaignId: true,
+          campaign: { select: { attemptExecutionId: true } },
+        },
+      });
+    if (candidates.length === 0) return { kind: 'NONE' };
+    if (candidates.length !== 1) return { kind: 'AMBIGUOUS' };
+    return {
+      kind: 'FOUND',
+      candidateId: candidates[0].id,
+      campaignId: candidates[0].campaignId,
+      attemptExecutionId: candidates[0].campaign.attemptExecutionId,
+    };
+  }
+
+  async releaseAttempt(input: {
+    campaignId: string;
+    executionId: string;
+  }) {
+    return this.attemptRepository.release(input);
   }
 
 }
