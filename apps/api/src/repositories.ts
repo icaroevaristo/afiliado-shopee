@@ -166,6 +166,7 @@ export type CommercialPipelineScoreBreakdown = {
 export type CommercialPipelineRunData = {
   mode: CommercialPipelineRunMode;
   status: CommercialPipelineRunStatus;
+  executionId?: string | null;
   productId?: string | null;
   groupDestinationId?: string | null;
   productName?: string | null;
@@ -220,6 +221,10 @@ export interface CommercialPipelineRunRepository {
   findByDispatchId(
     dispatchId: string,
   ): Promise<CommercialPipelineRunRecord | null>;
+  findExecutionById?(id: string): Promise<{
+    id: string;
+    commercialRunId: string | null;
+  } | null>;
 }
 
 export type CommercialPipelineRunFinalizationKind =
@@ -371,6 +376,9 @@ export interface CommercialAutomationHistoryRepository {
 export type CommercialAutomationExecutionMode = 'PREVIEW' | 'SEND';
 export type CommercialAutomationExecutionStatus =
   'STARTED' | 'BLOCKED' | 'PREVIEW_READY' | 'QUEUED' | 'FAILED' | 'AMBIGUOUS';
+export type CommercialAutomationExecutionExternalStage =
+  | 'NOT_REACHED'
+  | 'EXTERNAL_MAY_HAVE_STARTED';
 
 export type CommercialAutomationExecutionRecord = {
   id: string;
@@ -382,6 +390,7 @@ export type CommercialAutomationExecutionRecord = {
   leaseExpiresAt: Date | null;
   mode: CommercialAutomationExecutionMode;
   status: CommercialAutomationExecutionStatus;
+  externalStage: CommercialAutomationExecutionExternalStage;
   reasons: string[];
   commercialRunId: string | null;
   failureCode: string | null;
@@ -415,6 +424,40 @@ export type CommercialAutomationExecutionRecoveryContext = {
     | null;
 };
 
+export type CommercialPreMarkerReservationRecoveryResult =
+  | {
+      outcome: 'RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+      campaignId: string;
+      failureCount: number;
+      nextEligibleAt: Date;
+    }
+  | {
+      outcome: 'ALREADY_RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'BLOCKED';
+      reason:
+        | 'INVALID_MINIMUM_INTERVAL'
+        | 'EXECUTION_NOT_FOUND'
+        | 'EXECUTION_NOT_STARTED'
+        | 'EXECUTION_OWNERSHIP_INCOMPLETE'
+        | 'EXECUTION_NOT_STALE'
+        | 'EXTERNAL_STAGE_REACHED'
+        | 'COMMERCIAL_RUN_LINKED'
+        | 'RESERVATION_NOT_UNIQUE'
+        | 'RESERVATION_INVALID'
+        | 'RESERVATION_LEASE_ACTIVE'
+        | 'RUN_EVIDENCE'
+        | 'DISPATCH_EVIDENCE'
+        | 'OUTBOX_EVIDENCE'
+        | 'JOB_EVIDENCE'
+        | 'COPY_ATTEMPT_EVIDENCE'
+        | 'FAILURE_COUNT_INVALID'
+        | 'CAS_CONFLICT'
+        | 'LOOKUP_FAILED';
+    };
 export type StartCommercialAutomationExecutionResult =
   | {
       outcome: 'created';
@@ -445,6 +488,10 @@ export interface CommercialAutomationExecutionRepository {
     ownership: CommercialAutomationExecutionOwnership,
     input: { heartbeatAt: Date; leaseExpiresAt: Date },
   ): Promise<void>;
+  markExternalMayHaveStarted(
+    ownership: CommercialAutomationExecutionOwnership,
+    input: { markedAt: Date },
+  ): Promise<CommercialAutomationExecutionRecord>;
   finish(
     ownership: CommercialAutomationExecutionOwnership,
     input: {
@@ -458,6 +505,14 @@ export interface CommercialAutomationExecutionRepository {
   findRecoveryContext(
     id: string,
   ): Promise<CommercialAutomationExecutionRecoveryContext | null>;
+  recoverStalePreMarkerReservation?(
+    id: string,
+    input: {
+      completedAt: Date;
+      minimumIntervalMinutes: number;
+      failureCode: string;
+    },
+  ): Promise<CommercialPreMarkerReservationRecoveryResult>;
   recoverStale(
     id: string,
     input: {
@@ -1048,6 +1103,7 @@ export type CouponData = {
   terms?: string | null;
   lastValidatedAt?: Date | null;
 };
+
 export type CouponRecord = CouponData & {
   id: string;
   createdAt: Date;
@@ -1169,6 +1225,24 @@ export type WhatsAppDispatchRecord = WhatsAppDispatchCreateData & {
   updatedAt?: Date;
 };
 
+export type CommercialDispatchCandidateDetails = Omit<
+  import('./commercial-message-draft-service').CommercialMessageDraftCandidate,
+  'generatedCopy' | 'product' | 'snapshot'
+> & {
+  campaignId: string;
+  campaign: Pick<CommercialGroupCampaignRecord, 'id' | 'logicalGroupFingerprint'>;
+  product: CommercialPromotionCopyContext['product'] & { urlImagem: string };
+  snapshot: Pick<
+    CommercialPromotionSnapshotRecord,
+    | 'id'
+    | 'productId'
+    | 'revision'
+    | 'fingerprint'
+    | 'unavailableAt'
+    | 'offerEndsAt'
+  >;
+};
+
 export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
   generatedCopy: Pick<
     GeneratedCopyRecord,
@@ -1180,8 +1254,11 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'cta'
     | 'hashtags'
     | 'createdFromCandidateId'
+    | 'source'
+    | 'promptVersion'
+    | 'validationVersion'
   > & {
-    promotionCandidates?: Omit<import('./commercial-message-draft-service').CommercialMessageDraftCandidate, 'generatedCopy'>[];
+    promotionCandidates?: CommercialDispatchCandidateDetails[];
   };
   destination: Pick<
     WhatsAppDestinationRecord,
@@ -1191,10 +1268,12 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'available'
     | 'fingerprint'
     | 'sourceInstanceName'
-  >;
-  product?: Pick<ProductLeadRecord, 'comissao'> | null;
+  > & { id?: string };
+  product?: Pick<
+    ProductLeadRecord,
+    'comissao' | 'urlImagem' | 'affiliateLink'
+  > | null;
 };
-
 export interface ProductRepository {
   findById(id: string): Promise<ProductLeadRecord | null>;
   findByProviderProductId(

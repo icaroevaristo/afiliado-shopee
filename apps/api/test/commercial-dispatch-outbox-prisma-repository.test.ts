@@ -337,7 +337,7 @@ describe('PrismaCommercialDispatchOutboxRepository transaction', () => {
 describe('PrismaCommercialPromotionRepository candidate finalization', () => {
   const createRepository = (status?: string) => {
     let current = status
-      ? { id: 'candidate-id', generatedCopyId: 'copy-id', status }
+      ? { id: 'candidate-id', campaignId: 'campaign-id', generatedCopyId: 'copy-id', status }
       : null;
     const findMany = vi.fn(async () => (current ? [current] : []));
     const updateMany = vi.fn(async ({ data }: { data: { status: string } }) => {
@@ -360,6 +360,7 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
     ).resolves.toEqual({
       kind: 'DISPATCHED',
       candidateId: 'candidate-id',
+      campaignId: 'campaign-id',
       transitioned: true,
     });
     expect(state.read()?.status).toBe('DISPATCHED');
@@ -373,6 +374,7 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
     ).resolves.toEqual({
       kind: 'DISPATCHED',
       candidateId: 'candidate-id',
+      campaignId: 'campaign-id',
       transitioned: false,
     });
     expect(state.updateMany).not.toHaveBeenCalled();
@@ -449,4 +451,73 @@ describe('PrismaCommercialPromotionRepository candidate finalization', () => {
       expect(state.updateMany).not.toHaveBeenCalled();
     },
   );
-});
+
+  it('condiciona o reset automatizado ao campaignId e owner validados', async () => {
+    const findMany = vi.fn(async () => [
+      {
+        campaignId: 'campaign-id',
+        campaign: {
+          failureCount: 3,
+          nextEligibleAt: new Date('2026-07-28T13:00:00.000Z'),
+        },
+      },
+    ]);
+    const updateMany = vi.fn(async () => ({ count: 1 }));
+    const repository = new PrismaCommercialPromotionRepository({
+      commercialPromotionCandidate: { findMany },
+      commercialGroupCampaign: { updateMany },
+    } as never);
+
+    await expect(
+      repository.resetCampaignFailureStateByGeneratedCopyId('copy-id', {
+        campaignId: 'campaign-id',
+        executionId: 'execution-1',
+      }),
+    ).resolves.toEqual({
+      kind: 'RESET',
+      campaignId: 'campaign-id',
+      transitioned: true,
+    });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        generatedCopyId: 'copy-id',
+        campaignId: 'campaign-id',
+        campaign: { attemptExecutionId: 'execution-1' },
+      },
+      select: {
+        campaignId: true,
+        campaign: { select: { failureCount: true, nextEligibleAt: true } },
+      },
+    });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'campaign-id', attemptExecutionId: 'execution-1' },
+      data: { failureCount: 0, nextEligibleAt: null },
+    });
+  });
+
+  it('falha fechado se o owner divergir durante o reset automatizado', async () => {
+    const findMany = vi.fn(async () => [
+      {
+        campaignId: 'campaign-id',
+        campaign: {
+          failureCount: 2,
+          nextEligibleAt: new Date('2026-07-28T13:00:00.000Z'),
+        },
+      },
+    ]);
+    const updateMany = vi.fn(async () => ({ count: 0 }));
+    const repository = new PrismaCommercialPromotionRepository({
+      commercialPromotionCandidate: { findMany },
+      commercialGroupCampaign: { updateMany },
+    } as never);
+
+    await expect(
+      repository.resetCampaignFailureStateByGeneratedCopyId('copy-id', {
+        campaignId: 'campaign-id',
+        executionId: 'execution-1',
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_PROMOTION_CANDIDATE_FINALIZATION_INVALID',
+    });
+  });});

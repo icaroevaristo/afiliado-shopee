@@ -85,14 +85,13 @@ import {
   fingerprintCommercialOffer,
   type CommercialOfferFingerprintInput,
 } from './commercial-offer-snapshot';
-import { sha256 } from './commercial-ai-copy-fingerprint';
-import { sanitizeCommercialAiCopyValidationFailureCodes } from './commercial-ai-copy-validator';
-import { isSafeAssembledCommercialPromotionCopy } from './commercial-promotion-copy-assembler';
-
 import {
   assertCompatibleShopeeProductIdentity,
   assertCompleteShopeeProductIdentity,
 } from './shopee-product-identity';
+import { sha256 } from './commercial-ai-copy-fingerprint';
+import { sanitizeCommercialAiCopyValidationFailureCodes } from './commercial-ai-copy-validator';
+import { isSafeAssembledCommercialPromotionCopy } from './commercial-promotion-copy-assembler';
 
 const prismaErrorCode = (error: unknown) =>
   typeof error === 'object' && error !== null && 'code' in error
@@ -2748,24 +2747,47 @@ export class PrismaCommercialPipelineRunRepository
     CommercialPipelineRunFinalizationRepository
 {
   constructor(
-    private readonly prisma: Pick<DatabaseClient, 'commercialPipelineRun'>,
+    private readonly prisma: Pick<DatabaseClient, 'commercialPipelineRun'> &
+      Partial<Pick<DatabaseClient, 'commercialAutomationExecution'>>,
   ) {}
 
   async create(
     data: CommercialPipelineRunData,
   ): Promise<CommercialPipelineRunRecord> {
-    const record = await this.prisma.commercialPipelineRun.create({
-      data: toPrismaCommercialPipelineRun(data) as never,
-    });
-    return mapCommercialPipelineRun(
-      record as unknown as Record<string, unknown>,
-    );
+    try {
+      const record = await this.prisma.commercialPipelineRun.create({
+        data: toPrismaCommercialPipelineRun(data) as never,
+      });
+      return mapCommercialPipelineRun(
+        record as unknown as Record<string, unknown>,
+      );
+    } catch (error) {
+      if (data.executionId && isUniqueConstraintError(error)) {
+        throw new AppError(
+          'A execucao ja esta associada a um run comercial',
+          'COMMERCIAL_PIPELINE_RUN_EXECUTION_CONFLICT',
+        );
+      }
+      throw error;
+    }
   }
 
   async update(
     id: string,
     data: Partial<CommercialPipelineRunData>,
   ): Promise<CommercialPipelineRunRecord> {
+    if (data.executionId !== undefined) {
+      const current = await this.prisma.commercialPipelineRun.findUnique({
+        where: { id },
+        select: { executionId: true },
+      });
+      if (current && current.executionId !== data.executionId) {
+        throw new AppError(
+          'O vinculo da execucao do run comercial e imutavel',
+          'COMMERCIAL_PIPELINE_RUN_EXECUTION_LINK_IMMUTABLE',
+        );
+      }
+    }
     const record = await this.prisma.commercialPipelineRun.update({
       where: { id },
       data: toPrismaCommercialPipelineRun(data) as never,
@@ -2817,6 +2839,15 @@ export class PrismaCommercialPipelineRunRepository
     return record
       ? mapCommercialPipelineRun(record as unknown as Record<string, unknown>)
       : null;
+  }
+
+  async findExecutionById(id: string) {
+    if (!this.prisma.commercialAutomationExecution) return null;
+    const record = await this.prisma.commercialAutomationExecution.findUnique({
+      where: { id },
+      select: { id: true, commercialRunId: true },
+    });
+    return record;
   }
 
   async finalizeByDispatchId(
@@ -3493,6 +3524,7 @@ const mapCommercialAutomationExecution = (
   leaseExpiresAt: (record.leaseExpiresAt as Date | null) ?? null,
   mode: record.mode as CommercialAutomationExecutionRecord['mode'],
   status: record.status as CommercialAutomationExecutionRecord['status'],
+  externalStage: record.externalStage as CommercialAutomationExecutionRecord['externalStage'],
   reasons: record.reasons as string[],
   commercialRunId: (record.commercialRunId as string | null) ?? null,
   failureCode: (record.failureCode as string | null) ?? null,
@@ -3500,11 +3532,72 @@ const mapCommercialAutomationExecution = (
   completedAt: (record.completedAt as Date | null) ?? null,
 });
 
+
+const COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES = 24 * 60;
+const COMMERCIAL_PREMARKER_MAX_FAILURE_COUNT = 2_147_483_647;
+
+class CommercialPreMarkerRecoveryCasConflictError extends Error {}
+class CommercialPreMarkerRecoveryLookupError extends Error {}
+
+const commercialPreMarkerRecoveryLookup = async <T>(lookup: () => Promise<T>) => {
+  try {
+    return await lookup();
+  } catch {
+    throw new CommercialPreMarkerRecoveryLookupError();
+  }
+};
+
+const calculateCommercialPreMarkerBackoff = (
+  failureCount: number,
+  minimumIntervalMinutes: number,
+  now: Date,
+) => {
+  if (
+    !Number.isSafeInteger(minimumIntervalMinutes) ||
+    minimumIntervalMinutes <= 0
+  ) {
+    return null;
+  }
+  if (
+    !Number.isSafeInteger(failureCount) ||
+    failureCount < 0 ||
+    failureCount >= COMMERCIAL_PREMARKER_MAX_FAILURE_COUNT
+  ) {
+    return null;
+  }
+
+  const newFailureCount = failureCount + 1;
+  const exponent = newFailureCount - 1;
+  let delayMinutes = COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES;
+  if (minimumIntervalMinutes < COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES) {
+    const doublingsToCap = Math.ceil(
+      Math.log2(
+        COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES / minimumIntervalMinutes,
+      ),
+    );
+    if (exponent < doublingsToCap) {
+      delayMinutes = Math.min(
+        minimumIntervalMinutes * 2 ** exponent,
+        COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES,
+      );
+    }
+  }
+
+  return {
+    newFailureCount,
+    nextEligibleAt: new Date(now.getTime() + delayMinutes * 60_000),
+  };
+};
 export class PrismaCommercialAutomationExecutionRepository implements CommercialAutomationExecutionRepository {
   constructor(
     private readonly prisma: Pick<
       DatabaseClient,
-      'commercialAutomationExecution' | 'commercialPipelineRun'
+      | '$transaction'
+      | 'commercialAutomationExecution'
+      | 'commercialPipelineRun'
+      | 'commercialGroupCampaign'
+      | 'commercialPromotionCandidate'
+      | 'commercialCopyGenerationAttempt'
     >,
   ) {}
 
@@ -3539,6 +3632,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           leaseExpiresAt: input.leaseExpiresAt,
           mode: input.mode,
           status: 'STARTED',
+          externalStage: 'NOT_REACHED',
           reasons: [],
           startedAt: input.startedAt,
         },
@@ -3593,6 +3687,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           bullMqJobId: input.bullMqJobId,
           mode: input.mode,
           status: 'BLOCKED',
+          externalStage: 'NOT_REACHED',
           reasons: input.reasons,
           startedAt: input.completedAt,
           completedAt: input.completedAt,
@@ -3623,6 +3718,20 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       },
     });
     if (updated.count !== 1) this.throwOwnershipLost();
+  }
+
+  async markExternalMayHaveStarted(
+    ownership: CommercialAutomationExecutionOwnership,
+    input: { markedAt: Date },
+  ) {
+    const updated = await this.prisma.commercialAutomationExecution.updateMany({
+      where: {
+        ...ownedCommercialExecutionWhere(ownership, input.markedAt),
+      },
+      data: { externalStage: 'EXTERNAL_MAY_HAVE_STARTED' },
+    });
+    if (updated.count !== 1) this.throwOwnershipLost();
+    return this.findExecutionAfterMutation(ownership.executionId);
   }
 
   async finish(
@@ -3686,6 +3795,299 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           : null,
       },
     };
+  }
+
+  async recoverStalePreMarkerReservation(
+    id: string,
+    input: {
+      completedAt: Date;
+      minimumIntervalMinutes: number;
+      failureCode: string;
+    },
+  ) {
+    if (
+      !Number.isSafeInteger(input.minimumIntervalMinutes) ||
+      input.minimumIntervalMinutes <= 0
+    ) {
+      return {
+        outcome: 'BLOCKED' as const,
+        reason: 'INVALID_MINIMUM_INTERVAL' as const,
+      };
+    }
+
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const execution = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialAutomationExecution.findUnique({
+              where: { id },
+            }),
+          );
+          if (!execution) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_FOUND' as const,
+            };
+          }
+          if (execution.status !== 'STARTED') {
+            if (
+              execution.status === 'FAILED' &&
+              execution.failureCode === input.failureCode
+            ) {
+              return {
+                outcome: 'ALREADY_RECOVERED' as const,
+                execution: mapCommercialAutomationExecution(
+                  execution as unknown as Record<string, unknown>,
+                ),
+              };
+            }
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_STARTED' as const,
+            };
+          }
+          if (
+            !execution.ownerId ||
+            !execution.activeKey ||
+            !execution.heartbeatAt ||
+            !execution.leaseExpiresAt
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_OWNERSHIP_INCOMPLETE' as const,
+            };
+          }
+          if (execution.leaseExpiresAt.getTime() > input.completedAt.getTime()) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_STALE' as const,
+            };
+          }
+          if (execution.externalStage !== 'NOT_REACHED') {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXTERNAL_STAGE_REACHED' as const,
+            };
+          }
+          if (execution.commercialRunId !== null) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'COMMERCIAL_RUN_LINKED' as const,
+            };
+          }
+
+          const linkedRun = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialPipelineRun.findUnique({
+            where: { executionId: id },
+            select: {
+              id: true,
+              dispatchId: true,
+              jobId: true,
+              dispatch: { select: { id: true } },
+              dispatchOutbox: { select: { id: true, status: true } },
+            },
+            }),
+          );
+          if (linkedRun) {
+            if (linkedRun.dispatchId || linkedRun.dispatch) {
+              return {
+                outcome: 'BLOCKED' as const,
+                reason: 'DISPATCH_EVIDENCE' as const,
+              };
+            }
+            if (linkedRun.dispatchOutbox) {
+              return {
+                outcome: 'BLOCKED' as const,
+                reason: 'OUTBOX_EVIDENCE' as const,
+              };
+            }
+            if (linkedRun.jobId) {
+              return {
+                outcome: 'BLOCKED' as const,
+                reason: 'JOB_EVIDENCE' as const,
+              };
+            }
+            return { outcome: 'BLOCKED' as const, reason: 'RUN_EVIDENCE' as const };
+          }
+
+          const reservations = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialGroupCampaign.findMany({
+              where: { attemptExecutionId: id },
+              take: 2,
+              select: {
+                id: true,
+                failureCount: true,
+                attemptExecutionId: true,
+                attemptReservedAt: true,
+                attemptLeaseExpiresAt: true,
+              },
+            }),
+          );
+          if (reservations.length !== 1) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_NOT_UNIQUE' as const,
+            };
+          }
+          const campaign = reservations[0];
+          if (
+            campaign.attemptExecutionId !== id ||
+            !campaign.attemptReservedAt ||
+            !campaign.attemptLeaseExpiresAt ||
+            campaign.attemptReservedAt.getTime() >
+              campaign.attemptLeaseExpiresAt.getTime()
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_INVALID' as const,
+            };
+          }
+          if (
+            campaign.attemptLeaseExpiresAt.getTime() > input.completedAt.getTime()
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_LEASE_ACTIVE' as const,
+            };
+          }
+
+          const candidates = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialPromotionCandidate.findMany({
+              where: { campaignId: campaign.id },
+              select: { id: true },
+            }),
+          );
+          if (candidates.length === 0) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_INVALID' as const,
+            };
+          }
+          const copyAttempt = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialCopyGenerationAttempt.findFirst({
+              where: {
+                candidateId: { in: candidates.map((candidate) => candidate.id) },
+                status: { in: ['STARTED', 'AMBIGUOUS'] },
+              },
+              select: { id: true },
+            }),
+          );
+          if (copyAttempt) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'COPY_ATTEMPT_EVIDENCE' as const,
+            };
+          }
+
+          const backoff = calculateCommercialPreMarkerBackoff(
+            campaign.failureCount,
+            input.minimumIntervalMinutes,
+            input.completedAt,
+          );
+          if (!backoff) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'FAILURE_COUNT_INVALID' as const,
+            };
+          }
+
+          const campaignUpdated =
+            await transaction.commercialGroupCampaign.updateMany({
+              where: {
+                id: campaign.id,
+                attemptExecutionId: id,
+                attemptReservedAt: campaign.attemptReservedAt,
+                attemptLeaseExpiresAt: campaign.attemptLeaseExpiresAt,
+                failureCount: campaign.failureCount,
+              },
+              data: {
+                failureCount: backoff.newFailureCount,
+                nextEligibleAt: backoff.nextEligibleAt,
+                attemptExecutionId: null,
+                attemptReservedAt: null,
+                attemptLeaseExpiresAt: null,
+              },
+            });
+          if (campaignUpdated.count !== 1) {
+            throw new CommercialPreMarkerRecoveryCasConflictError();
+          }
+
+          const executionUpdated =
+            await transaction.commercialAutomationExecution.updateMany({
+              where: {
+                id,
+                status: 'STARTED',
+                externalStage: 'NOT_REACHED',
+                commercialRunId: null,
+                ownerId: execution.ownerId,
+                activeKey: execution.activeKey,
+                heartbeatAt: execution.heartbeatAt,
+                leaseExpiresAt: execution.leaseExpiresAt,
+              },
+              data: {
+                activeKey: null,
+                status: 'FAILED',
+                failureCode: input.failureCode,
+                completedAt: input.completedAt,
+              },
+            });
+          if (executionUpdated.count !== 1) {
+            throw new CommercialPreMarkerRecoveryCasConflictError();
+          }
+
+          const recovered = await commercialPreMarkerRecoveryLookup(() =>
+            transaction.commercialAutomationExecution.findUnique({
+              where: { id },
+            }),
+          );
+          if (!recovered) {
+            throw new CommercialPreMarkerRecoveryCasConflictError();
+          }
+          return {
+            outcome: 'RECOVERED' as const,
+            execution: mapCommercialAutomationExecution(
+              recovered as unknown as Record<string, unknown>,
+            ),
+            campaignId: campaign.id,
+            failureCount: backoff.newFailureCount,
+            nextEligibleAt: backoff.nextEligibleAt,
+          };
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        error instanceof CommercialPreMarkerRecoveryCasConflictError ||
+        isTransactionConflictError(error)
+      ) {
+        try {
+          const current = await this.findById(id);
+          if (
+            current?.status === 'FAILED' &&
+            current.failureCode === input.failureCode
+          ) {
+            return {
+              outcome: 'ALREADY_RECOVERED' as const,
+              execution: current,
+            };
+          }
+        } catch {
+          // A transaction conflict remains authoritative even if the
+          // follow-up idempotency lookup cannot be completed.
+        }
+        return {
+          outcome: 'BLOCKED' as const,
+          reason: 'CAS_CONFLICT' as const,
+        };
+      }
+      if (error instanceof CommercialPreMarkerRecoveryLookupError) {
+        return {
+          outcome: 'BLOCKED' as const,
+          reason: 'LOOKUP_FAILED' as const,
+        };
+      }
+      throw error;
+    }
   }
 
   async recoverStale(
@@ -3989,6 +4391,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         updatedAt: true,
         destination: {
           select: {
+            id: true,
             destination: true,
             type: true,
             active: true,
@@ -4000,6 +4403,8 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         product: {
           select: {
             comissao: true,
+            urlImagem: true,
+            affiliateLink: true,
           },
         },
         generatedCopy: {
@@ -4012,21 +4417,47 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
             cta: true,
             hashtags: true,
             createdFromCandidateId: true,
+            source: true,
+            promptVersion: true,
+            validationVersion: true,
             promotionCandidates: {
               select: {
                 id: true,
+                campaignId: true,
                 productId: true,
                 snapshotId: true,
                 generatedCopyId: true,
                 status: true,
                 expiresAt: true,
+                campaign: {
+                  select: {
+                    id: true,
+                    logicalGroupFingerprint: true,
+                  },
+                },
                 product: {
                   select: {
                     id: true,
-                    unavailableAt: true,
+                    source: true,
+                    providerProductId: true,
+                    nome: true,
+                    loja: true,
+                    productLink: true,
                     affiliateLink: true,
+                    preco: true,
+                    precoMin: true,
+                    precoMax: true,
+                    desconto: true,
+                    comissao: true,
+                    nota: true,
+                    vendidos: true,
+                    offerStartsAt: true,
                     urlImagem: true,
+                    offerEndsAt: true,
+                    unavailableAt: true,
                     commercialSnapshotRevision: true,
+                    commercialSnapshotFingerprint: true,
+                    updatedAt: true,
                   },
                 },
                 snapshot: {
@@ -4034,6 +4465,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
                     id: true,
                     productId: true,
                     revision: true,
+                    fingerprint: true,
                     unavailableAt: true,
                     offerEndsAt: true,
                   },
@@ -4049,8 +4481,47 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       return null;
     }
 
-    return record as WhatsAppDispatchDetails;
-  }
+    return {
+      ...record,
+      generatedCopy: {
+        ...record.generatedCopy,
+        promotionCandidates: record.generatedCopy.promotionCandidates.map(
+          (candidate) => ({
+            ...candidate,
+            product: {
+              id: candidate.product.id,
+              source:
+                candidate.product.source === 'OFFICIAL'
+                  ? 'OFFICIAL'
+                  : candidate.product.source === 'MANUAL'
+                    ? 'MANUAL'
+                    : 'MOCK',
+              providerProductId: candidate.product.providerProductId,
+              productName: candidate.product.nome,
+              shopName: candidate.product.loja,
+              productLink: candidate.product.productLink,
+              affiliateLink: candidate.product.affiliateLink,
+              price: decimalString(candidate.product.preco) ?? '',
+              priceMin: decimalString(candidate.product.precoMin) ?? null,
+              priceMax: decimalString(candidate.product.precoMax) ?? null,
+              discountRate: Number(candidate.product.desconto),
+              commissionRate: Number(candidate.product.comissao),
+              rating: Number(candidate.product.nota),
+              sales: Number(candidate.product.vendidos),
+              offerStartsAt: candidate.product.offerStartsAt,
+              urlImagem: candidate.product.urlImagem,
+              offerEndsAt: candidate.product.offerEndsAt,
+              unavailableAt: candidate.product.unavailableAt,
+              commercialSnapshotRevision:
+                candidate.product.commercialSnapshotRevision,
+              commercialSnapshotFingerprint:
+                candidate.product.commercialSnapshotFingerprint,
+              updatedAt: candidate.product.updatedAt,
+            },
+          }),
+        ),
+      },
+    };  }
 
   async findByIdWithDetails(
     id: string,

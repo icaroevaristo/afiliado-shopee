@@ -65,6 +65,7 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
       leaseExpiresAt: input.leaseExpiresAt,
       mode: input.mode,
       status: 'STARTED',
+      externalStage: 'NOT_REACHED',
       reasons: [],
       commercialRunId: null,
       failureCode: null,
@@ -96,6 +97,7 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
       leaseExpiresAt: null,
       mode: input.mode,
       status: 'BLOCKED',
+      externalStage: 'NOT_REACHED',
       reasons: input.reasons,
       commercialRunId: null,
       failureCode: null,
@@ -127,6 +129,26 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
     }
     record.heartbeatAt = input.heartbeatAt;
     record.leaseExpiresAt = input.leaseExpiresAt;
+  }
+
+  async markExternalMayHaveStarted(
+    ownership: { executionId: string; ownerId: string },
+    input: { markedAt: Date },
+  ) {
+    const record = this.records.find(
+      (candidate) => candidate.id === ownership.executionId,
+    );
+    if (
+      !record ||
+      record.status !== 'STARTED' ||
+      record.ownerId !== ownership.ownerId ||
+      !record.leaseExpiresAt ||
+      record.leaseExpiresAt <= input.markedAt
+    ) {
+      throw new AppError('ownership lost', COMMERCIAL_EXECUTION_OWNERSHIP_LOST);
+    }
+    record.externalStage = 'EXTERNAL_MAY_HAVE_STARTED';
+    return record;
   }
 
   async finish(
@@ -467,10 +489,14 @@ const createRealCandidateFlowForIntegration = () => {
     preview: vi.fn(),
     generate: vi.fn(),
   };
+  const lifecycle: string[] = [];
   const flowPipeline = {
-    dryRunFromPromotionCandidate: vi.fn(async ({ candidate }: { candidate: { id: string } }) => ({
-      runId: `run-${candidate.id}`,
-    })),
+    dryRunFromPromotionCandidate: vi.fn(
+      async ({ candidate }: { candidate: { id: string } }) => {
+        lifecycle.push('runs.create');
+        return { runId: `run-${candidate.id}` };
+      },
+    ),
   };
   const service = new CommercialAutomationCandidateFlowService({
     groups: { list: vi.fn(async () => [groupA, groupB]) } as never,
@@ -535,7 +561,7 @@ const createRealCandidateFlowForIntegration = () => {
     clock: () => NOW,
   });
 
-  return { service, mining, copyGeneration, flowPipeline };
+  return { service, mining, copyGeneration, flowPipeline, lifecycle };
 };
 
 const createStatefulCrossTickCandidateFlow = () => {
@@ -872,6 +898,44 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.executions.heartbeatCalls).toBe(2);
     expect(clearIntervalSpy).toHaveBeenCalled();
   });
+  it('persiste EXTERNAL_MAY_HAVE_STARTED antes de syncOffers', async () => {
+    const subject = createSubject();
+    subject.syncOffers.run.mockImplementation(async () => {
+      expect(subject.executions.records[0].externalStage).toBe(
+        'EXTERNAL_MAY_HAVE_STARTED',
+      );
+      return { synced: 1 };
+    });
+
+    await subject.orchestrator.executeTick(tick);
+
+    expect(subject.executions.records[0].externalStage).toBe(
+      'EXTERNAL_MAY_HAVE_STARTED',
+    );
+    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+  });
+
+  it('falha fechado antes de syncOffers quando a persistencia do marcador falha', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.preflight.mockResolvedValue({ outcome: 'NO_CANDIDATE' });
+    vi.spyOn(subject.executions, 'markExternalMayHaveStarted').mockRejectedValue(
+      new Error('marker persistence failed'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
+  });
   it('registra BLOCKED e nao sincroniza nem executa pipeline quando o guardrail bloqueia', async () => {
     const subject = createSubject();
     subject.policy.evaluateAutomationReadiness.mockResolvedValue({
@@ -889,6 +953,7 @@ describe('CommercialAutomationOrchestrator', () => {
       },
     );
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
   });
@@ -940,7 +1005,7 @@ describe('CommercialAutomationOrchestrator', () => {
         logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
         campaignId: 'campaign-1',
         nicheId: 'niche-1',
-      dailyLimit: 60,
+        dailyLimit: 60,
       },
     });
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
@@ -981,6 +1046,7 @@ describe('CommercialAutomationOrchestrator', () => {
       reasons: [COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED],
     });
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
   });
 
@@ -1034,6 +1100,7 @@ describe('CommercialAutomationOrchestrator', () => {
       leaseExpiresAt: new Date('2026-07-26T15:02:00.000Z'),
       mode: 'PREVIEW',
       status: 'STARTED',
+      externalStage: 'NOT_REACHED',
       reasons: [],
       commercialRunId: null,
       failureCode: null,
@@ -1059,6 +1126,28 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.executions.records[0].status).toBe('STARTED');
   });
 
+
+  it('falha de replenishment nao cria reserva nem toca a campanha', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.preflight.mockResolvedValue({ outcome: 'NO_CANDIDATE' });
+    subject.syncOffers.run.mockRejectedValue(new Error('offline'));
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed', commercialRunId: null });
+
+    expect(subject.executions.records[0].externalStage).toBe(
+      'EXTERNAL_MAY_HAVE_STARTED',
+    );
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
   it('finaliza FAILED quando a sincronizacao falha antes do dry-run', async () => {
     const subject = createSubject();
     subject.syncOffers.run.mockRejectedValue(new Error('offline'));
@@ -1245,6 +1334,7 @@ describe('CommercialAutomationOrchestrator', () => {
     const outbox: string[] = [];
     const jobs: string[] = [];
     subject.confirmation.confirm.mockImplementation(async (runId?: string) => {
+      realFlow.lifecycle.push('confirmation');
       const confirmedRunId = runId ?? '';
       dispatches.push(confirmedRunId);
       outbox.push(confirmedRunId);
@@ -1284,9 +1374,11 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(realFlow.copyGeneration.generate).not.toHaveBeenCalled();
     expect(realFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenCalledWith(
       expect.objectContaining({
+        executionId: 'execution-1',
         candidate: expect.objectContaining({ id: 'candidate-b' }),
       }),
     );
+    expect(realFlow.lifecycle).toEqual(['runs.create', 'confirmation']);
     expect(writesForSkippedTargets).toEqual({
       copies: 0,
       runs: 0,
@@ -1439,6 +1531,75 @@ describe('CommercialAutomationOrchestrator', () => {
     );
   });
 
+  it('faz NO_CANDIDATE -> marcador -> syncOffers -> reserva -> prepare', async () => {
+    const subject = createSubject();
+    const events: string[] = [];
+    const mark = subject.executions.markExternalMayHaveStarted.bind(
+      subject.executions,
+    );
+    vi.spyOn(subject.executions, 'markExternalMayHaveStarted').mockImplementation(
+      async (ownership, input) => {
+        events.push('marker');
+        return mark(ownership, input);
+      },
+    );
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-after-sync',
+        candidateStatus: 'COPY_READY',
+      });
+    subject.syncOffers.run.mockImplementation(async () => {
+      events.push('sync');
+      expect(subject.executions.records[0].externalStage).toBe(
+        'EXTERNAL_MAY_HAVE_STARTED',
+      );
+      return { synced: 1 };
+    });
+    subject.candidateFlow.replenish.mockImplementation(async () => {
+      events.push('replenish');
+      return { rejectionSummary: {} };
+    });
+    subject.candidateFlow.reserveAttempt.mockImplementation(
+      async (target, input) => {
+        events.push('reserve');
+        return {
+          kind: 'RESERVED',
+          campaignId: target.campaignId,
+          executionId: input.executionId,
+          reservedAt: input.reservedAt,
+          leaseExpiresAt: input.leaseExpiresAt,
+          acquired: true,
+        };
+      },
+    );
+    subject.candidateFlow.prepare.mockImplementation(async ({ target, candidateId }) => {
+      events.push('prepare');
+      expect(subject.executions.records[0].externalStage).toBe(
+        'EXTERNAL_MAY_HAVE_STARTED',
+      );
+      return {
+        runId: 'run-after-sync',
+        generatedCopyId: 'copy-after-sync',
+        candidateId,
+        campaignId: target.campaignId,
+        groupId: target.groupId,
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        nicheId: target.nicheId,
+      };
+    });
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(events).toEqual(['marker', 'sync', 'replenish', 'reserve', 'prepare']);
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+  });
   it('reabastece cada target vazio uma vez e bloqueia sem preparar artefatos', async () => {
     const targets: CommercialAutomationTarget[] = ['a', 'b'].map((suffix) => ({
       groupId: `group-${suffix}`,

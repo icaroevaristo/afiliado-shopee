@@ -354,6 +354,10 @@ export class CommercialAutomationOrchestrator {
         let synced = false;
         const syncOffers = async () => {
           if (synced) return;
+          await this.dependencies.executions.markExternalMayHaveStarted(
+            ownership,
+            { markedAt: this.clock() },
+          );
           await this.dependencies.syncOffers.run();
           synced = true;
           await heartbeat.checkpoint();
@@ -455,6 +459,10 @@ export class CommercialAutomationOrchestrator {
         await syncOffers();
       }
       if (!this.dependencies.candidateFlow) {
+        await this.dependencies.executions.markExternalMayHaveStarted(
+          ownership,
+          { markedAt: this.clock() },
+        );
         await this.dependencies.syncOffers.run();
         await heartbeat.checkpoint();
       }

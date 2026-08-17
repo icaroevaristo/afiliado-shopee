@@ -10,6 +10,11 @@ import type {
   WhatsAppDispatchDetails,
 } from './repositories';
 import type { WhatsAppGroupSendPolicy } from './whatsapp-group-send-policy';
+import {
+  COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+} from './commercial-ai-copy-prompt';
+import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 
 import {
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
@@ -96,8 +101,81 @@ export class SenderService {
         );
       }
 
+      const selectedCandidate = matches[0];
+      if (!selectedCandidate) {
+        throw new AppError(
+          'Inconsistencia na relacao do candidato de promocao comercial',
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        );
+      }
+
+      if (
+        dispatch.generatedCopyId !== dispatch.generatedCopy.id ||
+        dispatch.productId !== dispatch.generatedCopy.productId ||
+        selectedCandidate.generatedCopyId !== dispatch.generatedCopy.id ||
+        selectedCandidate.productId !== dispatch.productId ||
+        selectedCandidate.snapshotId !== dispatch.generatedCopy.snapshotId ||
+        selectedCandidate.campaignId !== selectedCandidate.campaign.id ||
+        dispatch.destinationId !== dispatch.destination.id
+      ) {
+        throw new AppError(
+          'Inconsistencia na relacao do dispatch comercial',
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        );
+      }
+
+      if (dispatch.destination.type !== 'GROUP') {
+        throw new AppError(
+          'Dispatch promocional exige destino de grupo',
+          'COMMERCIAL_MESSAGE_DESTINATION_TYPE_MISMATCH',
+        );
+      }
+
+      if (
+        !dispatch.destination.fingerprint ||
+        selectedCandidate.campaign.logicalGroupFingerprint !==
+          dispatch.destination.fingerprint
+      ) {
+        throw new AppError(
+          'Destino comercial nao corresponde a campanha selecionada',
+          'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH',
+        );
+      }
+
+      if (
+        dispatch.generatedCopy.source !== 'AI' ||
+        dispatch.generatedCopy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
+        dispatch.generatedCopy.validationVersion !==
+          COMMERCIAL_AI_COPY_VALIDATION_VERSION
+      ) {
+        throw new AppError(
+          'Copy comercial incompativel com o contrato certificado',
+          'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE',
+        );
+      }
+
+      const provenance = validateCommercialAffiliateLinkProvenance(
+        {
+          candidate: selectedCandidate,
+          campaign: selectedCandidate.campaign,
+          product: selectedCandidate.product,
+          snapshot: selectedCandidate.snapshot,
+        },
+        {
+          candidateId,
+          campaignId: selectedCandidate.campaign.id,
+          groupId: dispatch.destination.id,
+        },
+      );
+      if (!provenance.valid) {
+        throw new AppError(
+          'Proveniencia do affiliate link invalida no dispatch',
+          provenance.code,
+        );
+      }
+
       const candidate = {
-        ...matches[0],
+        ...selectedCandidate,
         generatedCopy: {
           id: dispatch.generatedCopy.id,
           productId: dispatch.generatedCopy.productId,
@@ -113,18 +191,36 @@ export class SenderService {
       try {
         const draft = this.options.draftService.createDraft(candidate);
         if (
-          draft.deliveryMode !== 'IMAGE' ||
-          !draft.imageUrl ||
-          draft.warnings.length > 0
+          draft.candidateId !== candidateId ||
+          draft.generatedCopyId !== dispatch.generatedCopy.id
         ) {
           throw new AppError(
-            'Automacao comercial exige rascunho de imagem',
-            COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+            'Rascunho comercial nao corresponde ao dispatch',
+            'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
           );
         }
         message = draft.caption;
-        imageUrl = draft.imageUrl;
-        deliveryMode = 'IMAGE';
+        if (draft.deliveryMode === 'IMAGE') {
+          if (!draft.imageUrl || draft.warnings.length > 0) {
+            throw new AppError(
+              'Rascunho comercial de imagem inconsistente',
+              COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
+            );
+          }
+          imageUrl = draft.imageUrl;
+          deliveryMode = 'IMAGE';
+        } else {
+          imageUrl = undefined;
+          deliveryMode = 'TEXT';
+          this.options.logger.info(
+            {
+              event: 'whatsapp.dispatch.image_fallback',
+              dispatchId,
+              warningCodes: draft.warnings,
+            },
+            'Commercial message falling back to text',
+          );
+        }
       } catch (error) {
         let errorCode = 'COMMERCIAL_MESSAGE_DRAFT_FAILED';
         if (error instanceof AppError) {
@@ -143,6 +239,8 @@ export class SenderService {
       message = this.options.messageBuilder
         ? this.options.messageBuilder(dispatch.generatedCopy)
         : buildWhatsAppPublicMessage(dispatch.generatedCopy);
+      imageUrl = undefined;
+      deliveryMode = 'TEXT';
     }
 
     if (dispatch.destination.type === 'GROUP') {
@@ -152,11 +250,7 @@ export class SenderService {
           'WHATSAPP_GROUP_POLICY_REQUIRED',
         );
       }
-      this.options.groupSendPolicy.assertAuthorized(
-        dispatch.destination as Parameters<
-          WhatsAppGroupSendPolicy['assertAuthorized']
-        >[0],
-      );
+      this.options.groupSendPolicy.assertAuthorized(dispatch.destination);
     }
 
     const claimed = await this.options.dispatches.markAttemptPending(

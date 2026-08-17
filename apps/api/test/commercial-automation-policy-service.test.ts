@@ -316,6 +316,114 @@ describe('CommercialAutomationPolicyService', () => {
     });
   });
 
+  it.each([
+    { campaignLimit: 1, groupLimit: 3, sentToday: 1 },
+    { campaignLimit: 3, groupLimit: 1, sentToday: 1 },
+    { campaignLimit: 2, groupLimit: 2, sentToday: 2 },
+  ])(
+    'aplica a menor quota entre campanha ($campaignLimit) e grupo ($groupLimit)',
+    async ({ campaignLimit, groupLimit, sentToday }) => {
+      const { service, history } = createSubject({
+        config: { dailyGlobalLimit: 10, dailyGroupLimit: groupLimit },
+      });
+      history.groupSentToday = sentToday;
+
+      await expect(
+        service.evaluateAutomationReadiness({
+          target: target('group-1', campaignLimit),
+        }),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reasons: ['GROUP_DAILY_LIMIT_REACHED'],
+        groupRemainingToday: 0,
+      });
+    },
+  );
+
+  it('mantem a campanha dentro da quota efetiva quando o fallback e maior', async () => {
+    const { service, history } = createSubject({
+      config: { dailyGlobalLimit: 10, dailyGroupLimit: 5 },
+    });
+    history.groupSentToday = 1;
+
+    await expect(
+      service.evaluateAutomationReadiness({ target: target('group-1', 2) }),
+    ).resolves.toMatchObject({ allowed: true, groupRemainingToday: 1 });
+  });
+
+  it.each([
+    ['quota da campanha', target('group-1', 0), {}],
+    ['quota global', target(), { dailyGlobalLimit: 0 }],
+    ['fallback do grupo', target(), { dailyGroupLimit: 0 }],
+  ] as const)(
+    'bloqueia com zero em %s',
+    async (_description, quotaTarget, config) => {
+      const { service } = createSubject({ config });
+
+      await expect(
+        service.evaluateAutomationReadiness({ target: quotaTarget }),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.each([
+    ['campanha negativa', target('group-1', -1), {}],
+    ['campanha fracionaria', target('group-1', 1.5), {}],
+    ['campanha nao numerica', target('group-1', Number.NaN), {}],
+    ['global negativo', target(), { dailyGlobalLimit: -1 }],
+    ['global nao finito', target(), { dailyGlobalLimit: Number.POSITIVE_INFINITY }],
+    ['grupo negativo', target(), { dailyGroupLimit: -1 }],
+    ['grupo fracionario', target(), { dailyGroupLimit: 1.5 }],
+  ] as const)(
+    'bloqueia quota invalida: %s',
+    async (_description, quotaTarget, config) => {
+      const { service } = createSubject({ config });
+
+      await expect(
+        service.evaluateAutomationReadiness({ target: quotaTarget }),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.each([
+    { globalLimit: 1, groupSentToday: 0, globalSentToday: 1, allowed: false },
+    { globalLimit: 3, groupSentToday: 0, globalSentToday: 1, allowed: true },
+  ])(
+    'mantem o teto global independente da quota efetiva do grupo',
+    async ({ globalLimit, groupSentToday, globalSentToday, allowed }) => {
+      const { service, history } = createSubject({
+        config: { dailyGlobalLimit: globalLimit, dailyGroupLimit: 5 },
+      });
+      history.groupSentToday = groupSentToday;
+      history.globalSentToday = globalSentToday;
+
+      await expect(
+        service.evaluateAutomationReadiness({ target: target('group-1', 2) }),
+      ).resolves.toMatchObject({ allowed });
+    },
+  );
+
+  it('mantem quota por campanha e grupo, sem usar capacidade de fila', async () => {
+    const { service, history } = createSubject({
+      config: { dailyGlobalLimit: 10, dailyGroupLimit: 5 },
+      groups: [group('1'), group('2')],
+    });
+    history.groupSentTodayById.set('1', 2);
+    history.groupSentTodayById.set('2', 0);
+    const firstTarget = { ...target('1', 2), queueTargetSize: 1, protectedCount: 1 };
+    const secondTarget = { ...target('2', 2), queueTargetSize: 0, protectedCount: 99 };
+
+    await expect(
+      service.evaluateAutomationReadiness({ target: firstTarget }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['GROUP_DAILY_LIMIT_REACHED'],
+    });
+    await expect(
+      service.evaluateAutomationReadiness({ target: secondTarget }),
+    ).resolves.toMatchObject({ allowed: true, groupRemainingToday: 2 });
+  });
+
   it('calcula o intervalo minimo desde o ultimo SENT', async () => {
     const { service, history } = createSubject();
     const lastSentAt = new Date('2026-07-25T14:30:00.000Z');

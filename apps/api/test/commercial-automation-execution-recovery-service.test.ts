@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
-  COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+  COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
   COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS,
   COMMERCIAL_OUTBOX_RECONCILIATION_REQUIRED,
   CommercialAutomationExecutionRecoveryService,
@@ -26,6 +26,7 @@ const execution = (
   leaseExpiresAt: new Date('2026-07-28T14:59:00.000Z'),
   mode: 'SEND',
   status: 'STARTED',
+  externalStage: 'NOT_REACHED',
   reasons: [],
   commercialRunId: null,
   failureCode: null,
@@ -68,6 +69,12 @@ const createSubject = (
     jobExists?: boolean;
     jobError?: boolean;
     jobDispatchId?: string;
+    preMarkerRecovery?: 'RECOVERED' | 'BLOCKED' | 'ALREADY_RECOVERED';
+    preMarkerBlockedReason?:
+      | 'RESERVATION_NOT_UNIQUE'
+      | 'COPY_ATTEMPT_EVIDENCE'
+      | 'CAS_CONFLICT'
+      | 'LOOKUP_FAILED';
   } = {},
 ) => {
   let record = { ...initial.execution };
@@ -97,6 +104,35 @@ const createSubject = (
       return { ...record };
     },
   );
+  const recoverStalePreMarkerReservation = vi.fn(async () => {
+    const outcome = options.preMarkerRecovery ?? 'RECOVERED';
+    if (outcome === 'BLOCKED') {
+      return {
+        outcome: 'BLOCKED' as const,
+        reason: options.preMarkerBlockedReason ?? 'RESERVATION_NOT_UNIQUE',
+      };
+    }
+    if (outcome === 'ALREADY_RECOVERED') {
+      return { outcome: 'ALREADY_RECOVERED' as const, execution: { ...record } };
+    }
+    if (record.status === 'STARTED') {
+      mutations += 1;
+      record = {
+        ...record,
+        activeKey: null,
+        status: 'FAILED',
+        failureCode: COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
+        completedAt: NOW,
+      };
+    }
+    return {
+      outcome: 'RECOVERED' as const,
+      execution: { ...record },
+      campaignId: 'campaign-1',
+      failureCount: 1,
+      nextEligibleAt: new Date('2026-07-28T16:00:00.000Z'),
+    };
+  });
   const findJob = vi.fn(async (jobId: string) => {
     if (options.jobError) throw new Error('redis unavailable');
     return options.jobExists
@@ -107,15 +143,26 @@ const createSubject = (
       : null;
   });
   const service = new CommercialAutomationExecutionRecoveryService({
-    executions: { findRecoveryContext, recoverStale } as never,
+    executions: {
+      findRecoveryContext,
+      recoverStale,
+      recoverStalePreMarkerReservation,
+    } as never,
     jobs: { findJob },
     clock: () => NOW,
+    minimumIntervalMinutes: 60,
   });
-  return { service, recoverStale, findJob, getMutations: () => mutations };
+  return {
+    service,
+    recoverStale,
+    recoverStalePreMarkerReservation,
+    findJob,
+    getMutations: () => mutations,
+  };
 };
 
 describe('CommercialAutomationExecutionRecoveryService', () => {
-  it('recupera execucao stale sem run como FAILED seguro', async () => {
+  it('recupera execution stale pre-marker com reserva owned como FAILED seguro', async () => {
     const subject = createSubject({ execution: execution(), run: null });
 
     await expect(subject.service.recover('execution-1')).resolves.toMatchObject(
@@ -123,13 +170,88 @@ describe('CommercialAutomationExecutionRecoveryService', () => {
         outcome: 'recovered',
         execution: {
           status: 'failed',
-          failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+          failureCode: COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
         },
       },
     );
+    expect(subject.recoverStalePreMarkerReservation).toHaveBeenCalledWith(
+      'execution-1',
+      {
+        completedAt: NOW,
+        minimumIntervalMinutes: 60,
+        failureCode: COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
+      },
+    );
+    expect(subject.recoverStale).not.toHaveBeenCalled();
     expect(subject.findJob).not.toHaveBeenCalled();
   });
 
+  it('mantem bloqueio quando a prova pre-marker e ambigua', async () => {
+    const subject = createSubject(
+      { execution: execution(), run: null },
+      {
+        preMarkerRecovery: 'BLOCKED',
+        preMarkerBlockedReason: 'COPY_ATTEMPT_EVIDENCE',
+      },
+    );
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'investigation-required',
+      reason: 'COPY_ATTEMPT_EVIDENCE',
+      execution: { status: 'started' },
+    });
+    expect(subject.getMutations()).toBe(0);
+    expect(subject.recoverStale).not.toHaveBeenCalled();
+    expect(subject.findJob).not.toHaveBeenCalled();
+  });
+
+  it('mapeia LOOKUP_FAILED pre-marker para investigation-required sem recovery generico', async () => {
+    const subject = createSubject(
+      { execution: execution(), run: null },
+      {
+        preMarkerRecovery: 'BLOCKED',
+        preMarkerBlockedReason: 'LOOKUP_FAILED',
+      },
+    );
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'investigation-required',
+      reason: 'LOOKUP_FAILED',
+      execution: { status: 'started' },
+    });
+    expect(subject.getMutations()).toBe(0);
+    expect(subject.recoverStale).not.toHaveBeenCalled();
+    expect(subject.findJob).not.toHaveBeenCalled();
+  });
+  it('repeticao do recovery pre-marker nao duplica a finalizacao', async () => {
+    const subject = createSubject({ execution: execution(), run: null });
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'recovered',
+    });
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'already-terminal',
+    });
+
+    expect(subject.getMutations()).toBe(1);
+    expect(subject.recoverStalePreMarkerReservation).toHaveBeenCalledTimes(1);
+  });
+
+  it('recupera execution marcada sem run como AMBIGUOUS', async () => {
+    const subject = createSubject({
+      execution: execution({ externalStage: 'EXTERNAL_MAY_HAVE_STARTED' }),
+      run: null,
+    });
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'recovered',
+      execution: {
+        status: 'ambiguous',
+        failureCode: COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS,
+      },
+    });
+    expect(subject.findJob).not.toHaveBeenCalled();
+  });
   it('recupera DRY_RUN sem dispatch, outbox ou job', async () => {
     const context = confirmedContext({
       mode: 'DRY_RUN',

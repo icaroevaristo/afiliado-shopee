@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import { CommercialCopyService } from '../src/commercial-copy-service';
 import { CommercialPipelineService } from '../src/commercial-pipeline-service';
@@ -162,9 +162,10 @@ const build = ({
       };
     },
   };
+  const listCommercialCandidates = vi.fn(async () => candidates);
   const service = new CommercialPipelineService({
     offers: {
-      listCommercialCandidates: async () => candidates,
+      listCommercialCandidates,
     } as never,
     groups: {
       list: async () => groups,
@@ -185,7 +186,7 @@ const build = ({
     logger: { info: () => undefined, error: () => undefined },
     clock: () => new Date(now),
   });
-  return { service, runs };
+  return { service, runs, listCommercialCandidates };
 };
 
 const expectCode = async (promise: Promise<unknown>, code: string) => {
@@ -241,11 +242,94 @@ describe('CommercialPipelineService', () => {
     expect((await service.dryRun()).selectedProduct.id).toBe('b');
   });
 
-  it('usa providerProductId como desempate final deterministico', async () => {
+  it('usa productId estavel como desempate final deterministico', async () => {
     const { service } = build({
-      candidates: [offer('b'), offer('a')],
+      candidates: [
+        offer('internal-b', { providerProductId: 'provider-a' }),
+        offer('internal-a', { providerProductId: 'provider-z' }),
+      ],
     });
-    expect((await service.dryRun()).selectedProduct.id).toBe('a');
+    expect((await service.dryRun()).selectedProduct.id).toBe('internal-a');
+  });
+
+  it('mantem o dry-run legado separado do ranking promocional e nao muta candidatos', async () => {
+    const candidates = [
+      offer('promotion-favored', { discountRate: 99 }),
+      offer('score-favored', { discountRate: 1 }),
+    ];
+    const { service } = build({
+      candidates,
+      scores: { 'promotion-favored': 80, 'score-favored': 90 },
+    });
+
+    const result = await service.dryRun();
+
+    expect(result.selectedProduct.id).toBe('score-favored');
+    expect(candidates.map(({ id }) => id)).toEqual([
+      'promotion-favored',
+      'score-favored',
+    ]);
+  });
+
+  it('dryRunFromPromotionCandidate consome um candidato ja ranqueado sem reranquear', async () => {
+    const { service, runs } = build();
+
+    const result = await service.dryRunFromPromotionCandidate({
+      executionId: 'execution-1',
+      candidate: {
+        id: 'candidate-promotional-rank-2',
+        productId: 'product-promotional-rank-2',
+        productName: 'Produto da fila promocional',
+        price: '49.90',
+        commercialScore: 61,
+        scorePolicyVersion: 'official-v2',
+        minimumScoreUsed: 60,
+        rankPosition: 2,
+        scoreBreakdown: {
+          policyVersion: 'official-v2',
+          rawTotal: 61,
+          finalScore: 61,
+          components: {},
+        },
+      },
+      group: {
+        id: 'group-1',
+        name: 'Grupo ficticio autorizado',
+        fingerprint: 'grp_123456789abc',
+      },
+      campaign: 'commercial-automation',
+      copyPreview: 'copy pronta',
+      candidateCount: 2,
+      eligibleCount: 2,
+      rejectedCount: 0,
+      rejectionSummary: {},
+    });
+
+    expect(result.selectedProduct).toMatchObject({
+      id: 'product-promotional-rank-2',
+      score: 61,
+    });
+    expect(result.selectionReasons).toEqual(
+      expect.arrayContaining([
+        'Candidato selecionado pela fila de promocoes comerciais',
+        'Politica de score: official-v2',
+        'Rank da fila: 2',
+      ]),
+    );
+    expect(runs.records[0]).toMatchObject({
+      executionId: 'execution-1',
+      productId: 'product-promotional-rank-2',
+      candidateCount: 2,
+      eligibleCount: 2,
+    });
+  });
+
+  it('mantem runs legados sem executionId', async () => {
+    const { service, runs } = build();
+
+    await service.dryRun();
+
+    expect(runs.records[0]?.executionId).toBeNull();
   });
 
   it('rejeita produto sem affiliateLink', async () => {
@@ -596,4 +680,57 @@ describe('CommercialPipelineService', () => {
     });
     expect(JSON.stringify(runs.records[0])).not.toContain('@g.us');
   });
+
+  it('encaminha todos os filtros ao pool bruto antes da elegibilidade e ranking', async () => {
+    const { service, listCommercialCandidates } = build();
+
+    await service.dryRun({
+      source: 'OFFICIAL',
+      categoryId: ' cat-1 ',
+      minPrice: 10,
+      maxPrice: 200,
+      minDiscountRate: 15,
+      minRating: 4,
+      minSales: 50,
+      minCommissionRate: 5,
+      minimumScore: 60,
+      limitCandidates: 7,
+    });
+
+    expect(listCommercialCandidates).toHaveBeenCalledWith({
+      source: 'OFFICIAL',
+      categoryId: 'cat-1',
+      minPrice: 10,
+      maxPrice: 200,
+      minDiscountRate: 15,
+      minRating: 4,
+      minSales: 50,
+      minCommissionRate: 5,
+      limit: 7,
+    });
+  });
+
+  it('rejeita filtros invalidos antes de consultar o catalogo', async () => {
+    const { service, listCommercialCandidates } = build();
+
+    await expectCode(
+      service.dryRun({ minPrice: 200, maxPrice: 10 }),
+      'INVALID_PIPELINE_FILTERS',
+    );
+    await expectCode(
+      service.dryRun({ minRating: 6 }),
+      'INVALID_PIPELINE_FILTERS',
+    );
+    await expectCode(
+      service.dryRun({ minSales: 1.5 }),
+      'INVALID_PIPELINE_FILTERS',
+    );
+    await expectCode(
+      service.dryRun({ limitCandidates: 101 }),
+      'INVALID_PIPELINE_FILTERS',
+    );
+
+    expect(listCommercialCandidates).not.toHaveBeenCalled();
+  });
+
 });

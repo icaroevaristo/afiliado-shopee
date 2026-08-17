@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
+import { fingerprintWhatsAppGroupId, MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
 import {
   COMMERCIAL_AUTOMATION_JOB_OPTIONS,
   JOB_NAMES,
   type WhatsAppDispatchJob,
 } from '@shopee-auto-affiliate-ai/queue';
+import { fingerprintCommercialOffer } from '../../api/src/commercial-offer-snapshot';
+import {
+  COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+} from '../../api/src/commercial-ai-copy-prompt';
 import { CommercialDispatchOutboxPublisher } from '../../api/src/commercial-dispatch-outbox-publisher';
 import {
   COMMERCIAL_CONFIRMATION_TOKEN,
@@ -27,7 +32,8 @@ import type {
 } from '../../api/src/repositories';
 
 const now = new Date('2026-08-08T12:00:00.000Z');
-const affiliateLink = 'https://example.invalid/affiliate/product-1';
+const productLink = 'https://shopee.com.br/product/1/1';
+const affiliateLink = 'https://shope.ee/affiliate-product-1';
 const groupDestination = '120363000000000000@g.us';
 
 const group: WhatsAppGroupRecord = {
@@ -37,7 +43,7 @@ const group: WhatsAppGroupRecord = {
   type: 'GROUP',
   active: true,
   available: true,
-  fingerprint: 'grp_123456789abc',
+  fingerprint: fingerprintWhatsAppGroupId(groupDestination),
   sourceInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
@@ -58,7 +64,7 @@ const offer: ShopeeOfferRecord = {
   sales: 100,
   commissionRate: 10,
   imageUrl: 'https://example.invalid/image.jpg',
-  productLink: 'https://example.invalid/product-1',
+  productLink,
   affiliateLink,
   fetchedAt: now,
   lastSeenAt: now,
@@ -70,6 +76,7 @@ const offer: ShopeeOfferRecord = {
 
 const createRun = (copyPreview: string): CommercialPipelineRunRecord => ({
   id: 'run-1',
+  executionId: null,
   mode: 'DRY_RUN',
   status: 'COMPLETED',
   productId: offer.id,
@@ -96,6 +103,20 @@ const createRun = (copyPreview: string): CommercialPipelineRunRecord => ({
   completedAt: now,
 });
 
+const commercialFingerprint = fingerprintCommercialOffer({
+  source: 'OFFICIAL',
+  providerProductId: offer.providerProductId,
+  productLink,
+  affiliateLink,
+  price: offer.price,
+  priceMin: offer.priceMin,
+  priceMax: offer.priceMax,
+  discountRate: offer.discountRate,
+  commissionRate: offer.commissionRate,
+  offerStartsAt: null,
+  offerEndsAt: null,
+  unavailableAt: null,
+});
 describe('commercial candidate dispatch integration', () => {
   it('confirma, reserva, envia IMAGE e finaliza o candidato sem copy legacy', async () => {
     let candidateStatus: 'COPY_READY' | 'RESERVED' | 'DISPATCHED' =
@@ -109,6 +130,11 @@ describe('commercial candidate dispatch integration', () => {
 
     const candidate = () => ({
       id: 'candidate-1',
+      campaignId: 'campaign-1',
+      campaign: {
+        id: 'campaign-1',
+        logicalGroupFingerprint: group.fingerprint,
+      },
       productId: offer.id,
       snapshotId: 'snapshot-1',
       generatedCopyId: 'copy-1',
@@ -116,25 +142,44 @@ describe('commercial candidate dispatch integration', () => {
       expiresAt: null,
       product: {
         id: offer.id,
-        unavailableAt: null,
+        source: offer.source,
+        providerProductId: offer.providerProductId,
+        productName: offer.productName,
+        shopName: offer.shopName,
+        productLink,
         affiliateLink,
+        price: offer.price,
+        priceMin: offer.priceMin,
+        priceMax: offer.priceMax,
+        discountRate: offer.discountRate,
+        commissionRate: offer.commissionRate,
+        rating: offer.rating,
+        sales: offer.sales,
+        offerStartsAt: null,
         urlImagem: offer.imageUrl,
+        offerEndsAt: null,
+        unavailableAt: null,
         commercialSnapshotRevision: 1,
+        commercialSnapshotFingerprint: commercialFingerprint,
+        updatedAt: now,
       },
       snapshot: {
         id: 'snapshot-1',
         productId: offer.id,
         revision: 1,
+        fingerprint: commercialFingerprint,
         unavailableAt: null,
         offerEndsAt: null,
       },
     });
-
     const generatedCopy = (): WhatsAppDispatchDetails['generatedCopy'] => ({
       id: 'copy-1',
       productId: offer.id,
       snapshotId: 'snapshot-1',
       createdFromCandidateId: 'candidate-1',
+      source: 'AI',
+      promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       titulo: 'Oferta validada',
       mensagem: 'Produto com dados atuais.',
       cta: `Confira: ${affiliateLink}`,
@@ -155,7 +200,11 @@ describe('commercial candidate dispatch integration', () => {
       createdAt: now,
       updatedAt: now,
       destination: group,
-      product: { comissao: offer.commissionRate },
+      product: {
+        comissao: offer.commissionRate,
+        urlImagem: offer.imageUrl,
+        affiliateLink: offer.affiliateLink,
+      },
       generatedCopy: generatedCopy(),
     });
 
@@ -328,12 +377,18 @@ describe('commercial candidate dispatch integration', () => {
       return {
         kind: 'DISPATCHED' as const,
         candidateId: 'candidate-1',
+        campaignId: 'campaign-1',
         transitioned: true,
       };
     });
     const markBlockedByGeneratedCopyId = vi.fn(async () => {
       throw new Error('unexpected safe failure finalization');
     });
+    const resetCampaignFailureStateByGeneratedCopyId = vi.fn(async () => ({
+      kind: 'RESET' as const,
+      campaignId: 'campaign-1',
+      transitioned: true,
+    }));
     const whatsappDispatches = {
       findByIdForSending: vi.fn(async () => dispatchDetails()),
       findByIdWithDetails: vi.fn(async () => dispatchDetails()),
@@ -349,6 +404,7 @@ describe('commercial candidate dispatch integration', () => {
       commercialPromotions: {
         markDispatchedByGeneratedCopyId,
         markBlockedByGeneratedCopyId,
+        resetCampaignFailureStateByGeneratedCopyId,
       },
     };
     const provider = new MockWhatsAppProvider();

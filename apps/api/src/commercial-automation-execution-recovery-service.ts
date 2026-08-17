@@ -1,3 +1,4 @@
+import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
@@ -10,6 +11,8 @@ import type {
 
 export const COMMERCIAL_EXECUTION_ABANDONED_SAFE =
   'COMMERCIAL_EXECUTION_ABANDONED_SAFE';
+export const COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED =
+  'COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED';
 export const COMMERCIAL_OUTBOX_RECONCILIATION_REQUIRED =
   'COMMERCIAL_OUTBOX_RECONCILIATION_REQUIRED';
 export const COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS =
@@ -43,6 +46,7 @@ const baseIdentitiesAreConsistent = (
 
 export class CommercialAutomationExecutionRecoveryService {
   private readonly clock: () => Date;
+  private readonly minimumIntervalMinutes: number;
 
   constructor(
     private readonly dependencies: {
@@ -51,9 +55,13 @@ export class CommercialAutomationExecutionRecoveryService {
         findJob(jobId: string): Promise<CommercialDispatchJobEvidence | null>;
       };
       clock?: () => Date;
+      minimumIntervalMinutes?: number;
     },
   ) {
     this.clock = dependencies.clock ?? (() => new Date());
+    this.minimumIntervalMinutes =
+      dependencies.minimumIntervalMinutes ??
+      loadConfig().COMMERCIAL_MIN_INTERVAL_MINUTES;
   }
 
   async recover(executionId: string) {
@@ -76,6 +84,49 @@ export class CommercialAutomationExecutionRecoveryService {
       );
     }
 
+    if (
+      context.execution.externalStage === 'NOT_REACHED' &&
+      context.execution.commercialRunId === null
+    ) {
+      const recoverPreMarkerReservation =
+        this.dependencies.executions.recoverStalePreMarkerReservation;
+      if (!recoverPreMarkerReservation) {
+        return {
+          outcome: 'investigation-required' as const,
+          reason: 'PREMARKER_RECOVERY_CONTRACT_UNAVAILABLE' as const,
+          execution: sanitizeCommercialAutomationExecution(
+            context.execution,
+            now,
+          ),
+        };
+      }
+      const safeRecovery =
+        await recoverPreMarkerReservation.call(
+          this.dependencies.executions,
+          executionId,
+          {
+            completedAt: now,
+            minimumIntervalMinutes: this.minimumIntervalMinutes,
+            failureCode:
+              COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
+          },
+        );
+      if (safeRecovery.outcome === 'RECOVERED') {
+        return this.result('recovered', safeRecovery.execution, now);
+      }
+      if (safeRecovery.outcome === 'ALREADY_RECOVERED') {
+        return this.result('already-terminal', safeRecovery.execution, now);
+      }
+      return {
+        outcome: 'investigation-required' as const,
+        reason: safeRecovery.reason,
+        execution: sanitizeCommercialAutomationExecution(
+          context.execution,
+          now,
+        ),
+      };
+    }
+
     const decision = await this.classify(context);
     const recovered = await this.dependencies.executions.recoverStale(
       executionId,
@@ -89,6 +140,9 @@ export class CommercialAutomationExecutionRecoveryService {
   ): Promise<RecoveryDecision> {
     const { execution, run } = context;
     if (!execution.commercialRunId) {
+      if (execution.externalStage === 'EXTERNAL_MAY_HAVE_STARTED') {
+        return this.ambiguous();
+      }
       return {
         status: 'FAILED',
         failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
