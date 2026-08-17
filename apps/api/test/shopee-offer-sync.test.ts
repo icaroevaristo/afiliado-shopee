@@ -71,6 +71,8 @@ class MemoryOfferRepository implements ShopeeOfferRepository {
     const commercialFingerprint = fingerprintCommercialOffer({
       source: offer.source,
       providerProductId: offer.providerProductId,
+      productLink: offer.productLink,
+      affiliateLink: offer.affiliateLink ?? null,
       price: offer.price,
       priceMin: offer.priceMin,
       priceMax: offer.priceMax,

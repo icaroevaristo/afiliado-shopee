@@ -10,6 +10,7 @@ const offer = (
   source: 'OFFICIAL',
   providerProductId: 'official-1',
   productName: 'Produto sanitizado',
+  shopId: 'shop-1',
   shopName: 'Loja sanitizada',
   categoryIds: ['category-1'],
   price,
@@ -344,4 +345,72 @@ describe('PrismaShopeeOfferRepository official snapshots', () => {
       capturedAt: observedAt,
     });
   });
+
+  it('nao sobrescreve produto quando o mesmo providerProductId muda de loja', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    await repository.upsertOfficialOfferWithSnapshot(offer());
+    const before = structuredClone(fake.readState());
+
+    await expect(
+      repository.upsertOfficialOfferWithSnapshot(offer('10.00', { shopId: 'shop-2' })),
+    ).rejects.toMatchObject({ code: 'PRODUCT_VARIANT_DEDUPLICATION' });
+    expect(fake.readState()).toEqual(before);
+  });
+
+  it('atualiza affiliate link em nova revision sem criar novo produto', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    await repository.upsertOfficialOfferWithSnapshot(offer());
+
+    await expect(
+      repository.upsertOfficialOfferWithSnapshot(
+        offer('10.00', { affiliateLink: 'https://example.invalid/affiliate-v2' }),
+      ),
+    ).resolves.toMatchObject({
+      productAction: 'updated',
+      commercialStateChanged: true,
+      snapshotCreated: true,
+      snapshotRevision: 2,
+    });
+    expect(fake.readState().products).toHaveLength(1);
+    expect(fake.readState().snapshots).toHaveLength(2);
+    expect(fake.readState().products[0]?.affiliateLink).toBe(
+      'https://example.invalid/affiliate-v2',
+    );
+  });
+
+  it('preserva providerProductIds distintos como produtos atomicos distintos', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    await repository.upsertOfficialOfferWithSnapshot(offer());
+    await repository.upsertOfficialOfferWithSnapshot(
+      offer('10.00', { providerProductId: 'official-2' }),
+    );
+
+    expect(fake.readState().products).toHaveLength(2);
+    expect(fake.readState().snapshots).toHaveLength(2);
+    expect(new Set(fake.readState().products.map((item) => item.providerProductId))).toEqual(
+      new Set(['official-1', 'official-2']),
+    );
+  });
+
+
+  it('enriquece registro legado sem shopId na proxima observacao OFFICIAL completa', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    await repository.upsertOfficialOfferWithSnapshot(offer());
+    fake.readState().products[0]!.shopId = null;
+
+    await expect(repository.upsertOfficialOfferWithSnapshot(offer())).resolves.toMatchObject({
+      productAction: 'updated',
+      commercialStateChanged: false,
+      snapshotCreated: false,
+      snapshotRevision: 1,
+    });
+    expect(fake.readState().products[0]?.shopId).toBe('shop-1');
+    expect(fake.readState().products).toHaveLength(1);
+    expect(fake.readState().snapshots).toHaveLength(1);
+  });
+
 });

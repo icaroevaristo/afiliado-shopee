@@ -22,6 +22,7 @@ import {
   CommercialAiCopyValidator,
   sanitizeCommercialAiCopyValidationFailureCodes,
 } from './commercial-ai-copy-validator';
+import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 import {
   CommercialPromotionCopyAssembler,
   hasAsciiControlOrDel,
@@ -97,8 +98,9 @@ const candidateBlockers = (
   ) {
     blockers.push('COMMERCIAL_AI_COPY_OFFER_EXPIRED');
   }
-  if (!validAffiliateLink(product.affiliateLink)) {
-    blockers.push('COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED');
+  const affiliateLinkValidation = validateCommercialAffiliateLinkProvenance(context);
+  if (!affiliateLinkValidation.valid) {
+    blockers.push(affiliateLinkValidation.code);
   }
   if (
     candidate.snapshotId !== snapshot.id ||

@@ -6,6 +6,7 @@ import {
 } from '../src/commercial-ai-copy-provider';
 import { CommercialPromotionCopyGenerationService } from '../src/commercial-promotion-copy-generation-service';
 import { CommercialAiCopyValidator } from '../src/commercial-ai-copy-validator';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type {
   CommercialAiCopyClaimInput,
   CommercialAiCopyCompletionInput,
@@ -16,7 +17,23 @@ import type {
 } from '../src/repositories';
 
 const now = new Date('2026-08-01T12:00:00.000Z');
-const affiliateLink = 'https://example.invalid/affiliate/internal';
+const productLink = 'https://shopee.com.br/product/1/internal';
+const affiliateLink = 'https://s.shopee.com.br/affiliate/internal';
+const providerProductId = 'provider-internal';
+const snapshotFingerprint = fingerprintCommercialOffer({
+  source: 'OFFICIAL',
+  providerProductId,
+  productLink,
+  affiliateLink,
+  price: '99.90',
+  priceMin: null,
+  priceMax: null,
+  discountRate: 20,
+  commissionRate: 10,
+  offerStartsAt: null,
+  offerEndsAt: new Date('2999-12-31T23:59:59.000Z'),
+  unavailableAt: null,
+});
 
 const contextFixture = (): CommercialPromotionCopyContext => ({
   candidate: {
@@ -91,24 +108,30 @@ const contextFixture = (): CommercialPromotionCopyContext => ({
   product: {
     id: 'product-internal',
     source: 'OFFICIAL',
+    providerProductId,
+    productLink,
     productName: 'Produto verificado',
     shopName: 'Loja verificada',
     price: '99.90',
+    priceMin: null,
+    priceMax: null,
     discountRate: 20,
+    commissionRate: 10,
     rating: 4.8,
     sales: 500,
     affiliateLink,
+    offerStartsAt: null,
     offerEndsAt: new Date('2999-12-31T23:59:59.000Z'),
     unavailableAt: null,
     commercialSnapshotRevision: 2,
-    commercialSnapshotFingerprint: 'snapshot-fingerprint',
+    commercialSnapshotFingerprint: snapshotFingerprint,
     updatedAt: now,
   },
   snapshot: {
     id: 'snapshot-internal',
     productId: 'product-internal',
     revision: 2,
-    fingerprint: 'snapshot-fingerprint',
+    fingerprint: snapshotFingerprint,
     price: '99.90',
     priceMin: null,
     priceMax: null,
@@ -397,13 +420,13 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
       await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
         eligible: false,
-        blockers: ['COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED'],
+        blockers: ['COMMERCIAL_AI_COPY_AFFILIATE_LINK_INVALID'],
         sanitizedPreview: null,
       });
       await expect(
         copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
       ).rejects.toMatchObject({
-        code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+        code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_INVALID',
       });
 
       expect(provider.generate).not.toHaveBeenCalled();
@@ -433,10 +456,10 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
     expect(first.sanitizedCopy).toEqual({
       titulo: 'OFERTA CONFIÁVEL',
-      mensagem: 'Uma escolha prática para sua rotina.\n🔥 POR R$ 99,90\n💸 20% OFF',
-      cta: '🛒 Ver oferta:\n[LINK_AFILIADO]',
+      mensagem: 'Uma escolha prática para sua rotina.\n\u{1F525} POR R$ 99,90\n\u{1F4B8} 20% OFF',
+      cta: '\u{1F6D2} Ver oferta:\n[LINK_AFILIADO]',
       hashtags:
-        '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
+        '\u{1F4F2} Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
     });
     expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
       'Produto verificado',
@@ -444,6 +467,78 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(first.sanitizedCopy)).not.toContain('Loja verificada');
   });
 
+  it('mantém candidate MANUAL com link válido fora da Copy V10 por contrato OFFICIAL-only', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const productLinkManual = 'https://merchant.example/product/manual-1';
+    const affiliateLinkManual = 'https://affiliate.example/manual-1';
+    const fingerprint = fingerprintCommercialOffer({
+      source: 'MANUAL',
+      providerProductId,
+      productLink: productLinkManual,
+      affiliateLink: affiliateLinkManual,
+      price: '99.90',
+      priceMin: null,
+      priceMax: null,
+      discountRate: 20,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt: new Date('2999-12-31T23:59:59.000Z'),
+      unavailableAt: null,
+    });
+    repository.context!.product.source = 'MANUAL';
+    repository.context!.product.productLink = productLinkManual;
+    repository.context!.product.affiliateLink = affiliateLinkManual;
+    repository.context!.product.commercialSnapshotFingerprint = fingerprint;
+    repository.context!.snapshot.fingerprint = fingerprint;
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_SOURCE_INVALID' });
+
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context!.product.affiliateLink).toBe(affiliateLinkManual);
+    expect(repository.copies.size).toBe(0);
+  });
+  it('mantém candidate MOCK explícito fora da Copy V10 por contrato OFFICIAL-only', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const productLinkMock = 'https://example.invalid/product/mock-1';
+    const affiliateLinkMock = 'https://example.invalid/affiliate/mock-1';
+    const fingerprint = fingerprintCommercialOffer({
+      source: 'MOCK',
+      providerProductId,
+      productLink: productLinkMock,
+      affiliateLink: affiliateLinkMock,
+      price: '99.90',
+      priceMin: null,
+      priceMax: null,
+      discountRate: 20,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt: new Date('2999-12-31T23:59:59.000Z'),
+      unavailableAt: null,
+    });
+    repository.context!.product.source = 'MOCK';
+    repository.context!.product.productLink = productLinkMock;
+    repository.context!.product.affiliateLink = affiliateLinkMock;
+    repository.context!.product.commercialSnapshotFingerprint = fingerprint;
+    repository.context!.snapshot.fingerprint = fingerprint;
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_SOURCE_INVALID' });
+
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context!.product.affiliateLink).toBe(affiliateLinkMock);
+    expect(repository.copies.size).toBe(0);
+  });
   it('reutiliza cache válido com HOKON.br em fato confiável', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.product.shopName = 'HOKON.br';
@@ -649,11 +744,11 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository);
     await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
     repository.context!.product.affiliateLink =
-      'https://example.invalid/affiliate/changed';
+      'https://s.shopee.com.br/affiliate/changed';
     repository.context!.product.updatedAt = new Date('2026-08-01T12:00:01Z');
     await expect(
       copyService.findCopy('candidate-internal'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT' });
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH' });
   });
 
   it('deduplica falha terminal quando somente product.updatedAt muda', async () => {

@@ -13,6 +13,7 @@ import {
   type CommercialAutomationCandidatePreflight,
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import { COMMERCIAL_EXECUTION_OWNERSHIP_LOST } from '../src/commercial-automation-execution-domain';
 import {
   COMMERCIAL_EXECUTION_IN_PROGRESS,
@@ -232,7 +233,14 @@ const createSubject = ({
     prepare: vi.fn<
       (
         selection: CommercialAutomationCandidateSelection,
-        ) => Promise<{
+        options: {
+          executionId: string;
+          miningReport?: Pick<
+            CommercialPromotionMiningReport,
+            'rejectionSummary'
+          >;
+        },
+      ) => Promise<{
         runId: string;
         generatedCopyId: string;
         candidateId: string;
@@ -353,7 +361,24 @@ const createRealCandidateFlowForIntegration = () => {
     const productId = `product-${suffix}`;
     const snapshotId = `snapshot-${suffix}`;
     const generatedCopyId = `copy-${suffix}`;
-    const affiliateLink = `https://example.invalid/affiliate/${suffix}`;
+    const providerProductId = `provider-product-${suffix}`;
+    const productLink = `https://shopee.com.br/product/1/${suffix}`;
+    const affiliateLink = `https://s.shopee.com.br/affiliate-${suffix}`;
+    const offerEndsAt = new Date('2026-07-27T15:00:00.000Z');
+    const snapshotFingerprint = fingerprintCommercialOffer({
+      source: 'OFFICIAL',
+      providerProductId,
+      productLink,
+      affiliateLink,
+      price: '99.90',
+      priceMin: null,
+      priceMax: null,
+      discountRate: 20,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt,
+      unavailableAt: null,
+    });
     return {
       candidate: {
         id: candidateId,
@@ -372,19 +397,41 @@ const createRealCandidateFlowForIntegration = () => {
       campaign: campaignFor(group),
       product: {
         id: productId,
+        source: 'OFFICIAL',
+        providerProductId,
         productName: `Produto ${suffix.toUpperCase()}`,
-        price: '99.90',
+        shopName: `Loja ${suffix.toUpperCase()}`,
+        productLink,
         affiliateLink,
+        price: '99.90',
+        priceMin: null,
+        priceMax: null,
+        discountRate: 20,
+        commissionRate: 10,
+        rating: 4.8,
+        sales: 100,
+        offerStartsAt: null,
+        offerEndsAt,
         urlImagem: imageUrl,
         unavailableAt: null,
         commercialSnapshotRevision: 1,
+        commercialSnapshotFingerprint: snapshotFingerprint,
       },
       snapshot: {
         id: snapshotId,
         productId,
         revision: 1,
+        fingerprint: snapshotFingerprint,
+        price: '99.90',
+        priceMin: null,
+        priceMax: null,
+        discountRate: 20,
+        commissionRate: 10,
+        observedRating: 4.8,
+        observedSales: 100,
+        offerStartsAt: null,
         unavailableAt: null,
-        offerEndsAt: new Date('2026-07-27T15:00:00.000Z'),
+        offerEndsAt,
       },
     };
   };
@@ -546,6 +593,24 @@ const createStatefulCrossTickCandidateFlow = () => {
     const suffix = state.group.id.slice(-1);
     const productId = `product-${suffix}`;
     const snapshotId = `snapshot-${suffix}`;
+    const providerProductId = `provider-product-${suffix}`;
+    const productLink = `https://shopee.com.br/product/1/${suffix}`;
+    const affiliateLink = `https://s.shopee.com.br/affiliate-${suffix}`;
+    const offerEndsAt = new Date('2026-07-27T15:00:00.000Z');
+    const snapshotFingerprint = fingerprintCommercialOffer({
+      source: 'OFFICIAL',
+      providerProductId,
+      productLink,
+      affiliateLink,
+      price: '99.90',
+      priceMin: null,
+      priceMax: null,
+      discountRate: 20,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt,
+      unavailableAt: null,
+    });
     return {
       candidate: {
         id: state.id,
@@ -564,19 +629,41 @@ const createStatefulCrossTickCandidateFlow = () => {
       campaign: campaignFor(state.group),
       product: {
         id: productId,
+        source: 'OFFICIAL',
+        providerProductId,
         productName: `Produto ${suffix.toUpperCase()}`,
+        shopName: `Loja ${suffix.toUpperCase()}`,
+        productLink,
+        affiliateLink,
         price: '99.90',
-        affiliateLink: `https://example.invalid/affiliate/${suffix}`,
+        priceMin: null,
+        priceMax: null,
+        discountRate: 20,
+        commissionRate: 10,
+        rating: 4.8,
+        sales: 100,
+        offerStartsAt: null,
+        offerEndsAt,
         urlImagem: `https://example.invalid/images/product-${suffix}.jpg`,
         unavailableAt: null,
         commercialSnapshotRevision: 1,
+        commercialSnapshotFingerprint: snapshotFingerprint,
       },
       snapshot: {
         id: snapshotId,
         productId,
         revision: 1,
+        fingerprint: snapshotFingerprint,
+        price: '99.90',
+        priceMin: null,
+        priceMax: null,
+        discountRate: 20,
+        commissionRate: 10,
+        observedRating: 4.8,
+        observedSales: 100,
+        offerStartsAt: null,
         unavailableAt: null,
-        offerEndsAt: new Date('2026-07-27T15:00:00.000Z'),
+        offerEndsAt,
       },
     };
   };
@@ -844,6 +931,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
     expect(subject.pipeline.dryRun).toHaveBeenCalledOnce();
     expect(subject.pipeline.dryRun).toHaveBeenCalledWith({
+      executionId: 'execution-1',
       source: 'MOCK',
       campaign: 'commercial-automation',
       target: {
@@ -1086,6 +1174,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.revalidate).toHaveBeenCalledWith(
@@ -1141,6 +1230,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
@@ -1258,6 +1348,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
   });
 
@@ -1300,7 +1391,10 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
-      { rejectionSummary: {} },
+      {
+        executionId: 'execution-1',
+        miningReport: { rejectionSummary: {} },
+      },
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
@@ -1341,6 +1435,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[2] }),
+      { executionId: 'execution-1' },
     );
   });
 
@@ -1548,6 +1643,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[0] }),
+      { executionId: 'execution-1' },
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
@@ -1579,6 +1675,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
   });
 
@@ -1611,6 +1708,7 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(
       targets[0],
@@ -1776,6 +1874,7 @@ describe('CommercialAutomationOrchestrator', () => {
         candidateId: 'candidate-1',
         candidateStatus: 'COPY_READY',
       }),
+      { executionId: 'execution-1' },
     );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
@@ -1808,6 +1907,7 @@ describe('CommercialAutomationOrchestrator', () => {
       status: 'preview-ready',
     });
     expect(subject.pipeline.dryRun).toHaveBeenCalledWith({
+      executionId: 'execution-1',
       source: 'MOCK',
       campaign: 'commercial-automation',
       target: targets[0],
@@ -1925,6 +2025,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
+      { executionId: 'execution-1' },
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });

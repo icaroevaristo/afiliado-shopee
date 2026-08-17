@@ -55,6 +55,15 @@ describe('CommercialMessageDraftService', () => {
     expect(draft.caption).toBe(expectedCaption);
   });
 
+  it('should generate an IMAGE draft for a valid HTTP image', () => {
+    const candidate = createValidCandidate();
+    candidate.product.urlImagem = 'http://shopee.com/image.jpg';
+
+    const draft = service.createDraft(candidate, { now: () => fixedNow });
+
+    expect(draft.deliveryMode).toBe('IMAGE');
+    expect(draft.imageUrl).toBe('http://shopee.com/image.jpg');
+  });
   it('should generate the same IMAGE draft for a reserved candidate', () => {
     const copyReadyDraft = service.createDraft(createValidCandidate(), {
       now: () => fixedNow,
@@ -90,6 +99,22 @@ describe('CommercialMessageDraftService', () => {
     expect(draft.warnings).toContain('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
   });
 
+  it.each([
+    'https://shopee.com/im\nage.jpg',
+    'https://shopee.com/im\tage.jpg',
+    "https://shopee.com/im\u0000age.jpg",
+  ])('should fallback to TEXT when imageUrl contains control characters', (urlImagem) => {
+    const candidate = createValidCandidate();
+    candidate.product.urlImagem = urlImagem;
+
+    const draft = service.createDraft(candidate, { now: () => fixedNow });
+
+    expect(draft).toMatchObject({
+      deliveryMode: 'TEXT',
+      imageUrl: null,
+      warnings: ['COMMERCIAL_MESSAGE_IMAGE_URL_INVALID'],
+    });
+  });
   it('should fallback to TEXT when imageUrl equals affiliateLink', () => {
     const candidate = createValidCandidate();
     candidate.product.urlImagem = 'https://shope.ee/link';

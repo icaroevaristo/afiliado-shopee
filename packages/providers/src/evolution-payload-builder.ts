@@ -43,7 +43,10 @@ export const buildEvolutionMessagePayload = (
   const normalizedBaseUrl = options.baseUrl.replace(/\/+$/, '');
 
   if (options.deliveryMode === 'IMAGE') {
-    if (!options.imageUrl) {
+    if (
+      !options.imageUrl ||
+      /[\u0000-\u001f\u007f]/u.test(options.imageUrl)
+    ) {
       throw new Error('COMMERCIAL_EVOLUTION_INVALID_IMAGE_URL');
     }
     try {
