@@ -904,6 +904,35 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
+  it('pula rejeicao terminal do rank-1 e seleciona rank-2 deterministicamente sem gerar novamente', async () => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    const first = queueItem({ status: 'QUEUED', generatedCopyId: null, rankPosition: 1 });
+    const second = queueItem({ id: 'candidate-2', status: 'QUEUED', generatedCopyId: null, rankPosition: 2 });
+    subject.candidates.listQueue.mockResolvedValue({ items: [first, second], total: 2 });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({ id: candidateId, status: 'QUEUED', generatedCopyId: null, rankPosition: candidateId === 'candidate-1' ? 1 : 2 }),
+    );
+    subject.copyGeneration.preview.mockImplementation(async (candidateId: string) =>
+      candidateId === 'candidate-1'
+        ? { eligible: false, blockers: ['COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED'] }
+        : { eligible: true, blockers: [] },
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
+    'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+    'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
+  ])('mantem blocker %s fail-closed no rank-1', async (blocker) => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    subject.copyGeneration.preview.mockResolvedValue({ eligible: false, blockers: [blocker] });
+    await expect(subject.service.preflight(subject.target)).rejects.toMatchObject({ code: blocker });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
   it('falha fechado para source invalid em vez de converter eligible=false em fallback', async () => {
     const subject = createSubject({
       candidate: { status: 'QUEUED', generatedCopyId: null },

@@ -4,7 +4,10 @@ import {
   CommercialAiCopyProviderError,
   type CommercialAiCopyProvider,
 } from '../src/commercial-ai-copy-provider';
-import { CommercialPromotionCopyGenerationService } from '../src/commercial-promotion-copy-generation-service';
+import {
+  COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+  CommercialPromotionCopyGenerationService,
+} from '../src/commercial-promotion-copy-generation-service';
 import { CommercialAiCopyValidator } from '../src/commercial-ai-copy-validator';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type {
@@ -404,6 +407,58 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.attempts.size).toBe(0);
   });
 
+  it('marca output terminal rejeitado como inelegivel somente no fingerprint atual', async () => {
+    const repository = new MemoryCopyRepository();
+    let rejectedFingerprint: string | null = null;
+    repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => {
+      rejectedFingerprint ??= fingerprint;
+      if (fingerprint !== rejectedFingerprint) return null;
+      return {
+        ...legacyAttempt('FAILED', fingerprint),
+        failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+        validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
+      };
+    });
+    const copyService = service(repository);
+
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: false,
+      blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
+    });
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: false,
+      blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
+    });
+
+    repository.context!.candidate.snapshotId = 'snapshot-current-2';
+    repository.context!.snapshot.id = 'snapshot-current-2';
+    repository.context!.snapshot.revision = 3;
+    repository.context!.product.commercialSnapshotRevision = 3;
+
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: true,
+      blockers: [],
+    });
+  });
+
+  it.each([
+    ['STARTED', null, 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
+    ['AMBIGUOUS', null, 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
+  ] as const)(
+    'mantem attempt %s fail-closed no preview',
+    async (status, failureCode, expectedBlocker) => {
+      const repository = new MemoryCopyRepository();
+      repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => ({
+        ...legacyAttempt(status, fingerprint),
+        failureCode,
+      }));
+      await expect(service(repository).preview('candidate-internal')).resolves.toMatchObject({
+        eligible: false,
+        blockers: [expectedBlocker],
+      });
+    },
+  );
   it.each([
     ['LF', '\n'],
     ['CR', '\r'],
