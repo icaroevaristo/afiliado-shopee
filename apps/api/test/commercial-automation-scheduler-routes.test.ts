@@ -70,7 +70,7 @@ describe('commercial automation scheduler read-only routes', () => {
         leaseExpiresAt: null,
         mode: 'PREVIEW',
         status: 'STARTED',
-      externalStage: 'NOT_REACHED',
+        externalStage: 'NOT_REACHED',
         reasons: [],
         commercialRunId: null,
         failureCode: null,

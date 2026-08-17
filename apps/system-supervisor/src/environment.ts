@@ -22,10 +22,14 @@ export const loadLocalSystemEnvironment = (
   processEnv: NodeJS.ProcessEnv = process.env,
 ) => {
   const envPath = resolve(root, '.env');
+  const runtimeEnvPath = resolve(root, 'runtime.env');
   const fileEnv = existsSync(envPath)
     ? parseDotEnv(readFileSync(envPath, 'utf8'))
     : {};
-  const env = { ...fileEnv, ...processEnv };
+  const runtimeFileEnv = existsSync(runtimeEnvPath)
+    ? parseDotEnv(readFileSync(runtimeEnvPath, 'utf8'))
+    : {};
+  const env = { ...fileEnv, ...runtimeFileEnv, ...processEnv };
   const mode = (env.COMMERCIAL_AUTOMATION_MODE ?? 'preview').toLowerCase();
   if (mode !== 'preview' && mode !== 'send') {
     throw new LocalSystemError(

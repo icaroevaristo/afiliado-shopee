@@ -78,6 +78,36 @@ describe('BullMqCommercialAutomationScheduler', () => {
     });
   });
 
+  it('exposes deterministic nextRunAt from the registered BullMQ scheduler state', async () => {
+    const scheduler = new BullMqCommercialAutomationScheduler(queue);
+    await expect(
+      scheduler.register({
+        enabled: true,
+        cronExpression: '0 9 * * *',
+        timezone: 'America/Sao_Paulo',
+        mode: 'preview',
+        jobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+      }),
+    ).resolves.toMatchObject({
+      nextRunAt: '2026-07-27T12:00:00.000Z',
+      cronExpression: '0 9 * * *',
+      timezone: 'America/Sao_Paulo',
+    });
+  });
+
+  it('keeps nextRunAt null when the commercial scheduler is disabled', async () => {
+    const scheduler = new BullMqCommercialAutomationScheduler(queue);
+    await expect(
+      scheduler.register({
+        enabled: false,
+        cronExpression: '0 9 * * *',
+        timezone: 'America/Sao_Paulo',
+        mode: 'preview',
+        jobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+      }),
+    ).resolves.toMatchObject({ status: 'disabled', nextRunAt: null });
+    expect(queue.upsertJobScheduler).not.toHaveBeenCalled();
+  });
   it('nao altera o Scheduler quando o contrato ja coincide', async () => {
     const scheduler = new BullMqCommercialAutomationScheduler(queue);
     const config = {

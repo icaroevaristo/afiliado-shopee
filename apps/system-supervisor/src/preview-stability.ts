@@ -21,6 +21,7 @@ export const PREVIEW_STABILITY_ENVIRONMENT = {
   COMMERCIAL_ALLOWED_END_TIME: '23:59',
   SCHEDULER_ENABLED: 'false',
   SHOPEE_AFFILIATE_PROVIDER: 'mock',
+  WHATSAPP_PROVIDER: 'mock',
   WHATSAPP_GROUP_SEND_ENABLED: 'false',
 } as const;
 
@@ -73,6 +74,43 @@ export type PreviewStabilityInfrastructure = {
   envFingerprint: string;
 };
 
+export type PreviewStabilityTopologyDiagnostic = {
+  topologyStage: 'startSystem' | 'requireRunning' | 'scheduled-preview';
+  component:
+    | 'api'
+    | 'dashboard'
+    | 'commercial-worker'
+    | 'dispatch-worker'
+    | 'commercial-scheduler'
+    | 'legacy-scheduler'
+    | 'docker'
+    | 'ports'
+    | 'unknown';
+  observedState:
+    | 'running'
+    | 'stopped'
+    | 'unavailable'
+    | 'unhealthy'
+    | 'starting'
+    | 'unknown';
+  expectedState: 'running' | 'stopped' | 'not-required';
+};
+
+export type PreviewStabilityMainInfrastructureDiagnostic = {
+  mainInfraStage: 'resolve' | 'stop' | 'start' | 'health';
+  service: 'postgres' | 'redis';
+  operation: 'restart';
+  commandKind: 'discovery' | 'container' | 'compose';
+  errorCode:
+    | 'OWNERSHIP_UNPROVEN'
+    | 'AMBIGUOUS_OWNERSHIP'
+    | 'COMMAND_FAILED'
+    | 'HEALTH_TIMEOUT'
+    | 'UNEXPECTED_STATE';
+  observedHealth: 'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown';
+  expectedHealth: 'healthy';
+};
+
 export type PreviewStabilityReport = {
   startedAt: string;
   completedAt: string;
@@ -107,6 +145,8 @@ export type PreviewStabilityReport = {
     volumesPreserved: boolean;
   };
   bugs: Array<{ severity: 'P0' | 'P1' | 'P2' | 'P3'; code: string }>;
+  topologyDiagnostic?: PreviewStabilityTopologyDiagnostic;
+  mainInfrastructureDiagnostic?: PreviewStabilityMainInfrastructureDiagnostic;
   failureCode?: string;
 };
 
@@ -114,7 +154,10 @@ export type PreviewStabilityDependencies = {
   now(): Date;
   sleep(milliseconds: number): Promise<void>;
   status(environment: NodeJS.ProcessEnv): Promise<SystemStatusSnapshot>;
-  prepareMainInfrastructure(environment: NodeJS.ProcessEnv): Promise<void>;
+  prepareMainInfrastructure(
+    environment: NodeJS.ProcessEnv,
+    reuseManagedInfrastructure: boolean,
+  ): Promise<void>;
   stopMainInfrastructure(environment: NodeJS.ProcessEnv): Promise<void>;
   startSystem(environment: NodeJS.ProcessEnv): Promise<SystemStatusSnapshot>;
   stopSystem(environment: NodeJS.ProcessEnv): Promise<void>;
@@ -318,6 +361,48 @@ const completedPreviewCount = (
   ).length;
 };
 
+export const assertPausedStartupEvidence = (
+  before: PreviewStabilityEvidence,
+  after: PreviewStabilityEvidence,
+) => {
+  const beforeExecutionIds = idSet(before.executions.map((execution) => execution.id));
+  const newExecutions = after.executions.filter(
+    (execution) => !beforeExecutionIds.has(execution.id),
+  );
+  const newCommercialJobs = newValues(
+    before.queues.commercialJobIds,
+    after.queues.commercialJobIds,
+  );
+  const unsafe =
+    !after.settings.present ||
+    !after.settings.paused ||
+    newExecutions.length > 1 ||
+    newExecutions.some(
+      (execution) =>
+        execution.status !== 'BLOCKED' ||
+        !execution.bullMqJobId ||
+        execution.stale,
+    ) ||
+    newCommercialJobs.length > 1 ||
+    after.runs.total !== before.runs.total ||
+    after.runs.dryRun !== before.runs.dryRun ||
+    after.dispatches.total !== before.dispatches.total ||
+    after.dispatches.processing !== before.dispatches.processing ||
+    after.outboxes.total !== before.outboxes.total ||
+    after.outboxes.pending !== before.outboxes.pending ||
+    after.outboxes.ambiguous !== before.outboxes.ambiguous ||
+    newValues(before.queues.whatsappJobIds, after.queues.whatsappJobIds).length > 0 ||
+    newValues(before.queues.productJobIds, after.queues.productJobIds).length > 0 ||
+    after.queues.legacySchedulerIds.length > 0 ||
+    duplicateBullMqJobIds(after.executions);
+  if (unsafe) {
+    throw new LocalSystemError(
+      'O startup pausado criou estado comercial inesperado',
+      'PREVIEW_STABILITY_PAUSED_STARTUP_UNSAFE',
+    );
+  }
+};
+
 export const assertNoBootstrapTick = (
   before: PreviewStabilityEvidence,
   after: PreviewStabilityEvidence,
@@ -391,8 +476,87 @@ const waitForPreviewCount = async (
   );
 };
 
+const hasReusableManagedMainInfrastructure = (status: SystemStatusSnapshot) => {
+  const allowedServices = new Set(['postgres', 'redis']);
+  return (
+    status.docker.services.length === allowedServices.size &&
+    status.docker.services.every(
+      (service) =>
+        allowedServices.has(service.service) &&
+        service.state === 'running' &&
+        service.health === 'healthy',
+    ) &&
+    [...allowedServices].every((service) =>
+      status.docker.services.some((candidate) => candidate.service === service),
+    )
+  );
+};
+
+const hasNoActiveShopeeRuntime = (status: SystemStatusSnapshot) =>
+  Object.values(status.processes).every(
+    (processStatus) =>
+      processStatus === 'stopped' || processStatus === 'not-required',
+  ) &&
+  status.endpoints.api === 'unavailable' &&
+  status.endpoints.dashboard === 'unavailable' &&
+  status.schedulers.legacy.enabled !== true &&
+  status.schedulers.legacy.status !== 'registered' &&
+  status.schedulers.commercial.enabled !== true &&
+  status.schedulers.commercial.status !== 'registered';
+
+const isReusableInfrastructureOnlyPartial = (status: SystemStatusSnapshot) =>
+  status.overall === 'partial' &&
+  status.mode === 'preview' &&
+  hasReusableManagedMainInfrastructure(status) &&
+  hasNoActiveShopeeRuntime(status);
+
+const hasFinalSchedulersDisabled = (status: SystemStatusSnapshot) =>
+  status.schedulers.legacy.enabled !== true &&
+  (status.schedulers.legacy.status === 'disabled' ||
+    status.schedulers.legacy.status === 'unavailable') &&
+  status.schedulers.commercial.enabled !== true &&
+  (status.schedulers.commercial.status === 'disabled' ||
+    status.schedulers.commercial.status === 'unavailable');
+
+const hasNoObservedEvolutionRuntime = (status: SystemStatusSnapshot) =>
+  status.evolution.api === 'unavailable' &&
+  status.evolution.services.every((service) => service.state !== 'running');
+
+export const isSafePreviewStabilityFinalState = (input: {
+  status: SystemStatusSnapshot | undefined;
+  automationPaused: boolean;
+  legacySchedulerIds: number;
+  commercialSchedulerIds: number;
+  managedProcessesActive: number;
+  volumesPreserved: boolean;
+}) => {
+  const status = input.status;
+  if (!status) return false;
+  const aggregateStateAllowed =
+    status.overall === 'stopped' || status.overall === 'partial';
+  return (
+    aggregateStateAllowed &&
+    status.mode === 'preview' &&
+    status.operationLock === 'unlocked' &&
+    status.docker.daemon === 'available' &&
+    hasReusableManagedMainInfrastructure(status) &&
+    hasNoActiveShopeeRuntime(status) &&
+    hasFinalSchedulersDisabled(status) &&
+    hasNoObservedEvolutionRuntime(status) &&
+    status.externalPortOccupants.length === 0 &&
+    input.automationPaused &&
+    input.legacySchedulerIds === 0 &&
+    input.commercialSchedulerIds === 0 &&
+    input.managedProcessesActive === 0 &&
+    input.volumesPreserved
+  );
+};
+
 const requireStoppedPreflight = (status: SystemStatusSnapshot) => {
-  if (status.overall !== 'stopped') {
+  if (
+    status.overall !== 'stopped' &&
+    !isReusableInfrastructureOnlyPartial(status)
+  ) {
     throw new LocalSystemError(
       'O sistema deve estar completamente parado antes do teste',
       'PREVIEW_STABILITY_SYSTEM_ALREADY_ACTIVE',
@@ -418,19 +582,156 @@ const requireStoppedPreflight = (status: SystemStatusSnapshot) => {
   }
 };
 
-const requireRunning = (status: SystemStatusSnapshot) => {
-  if (
-    status.overall !== 'running' ||
-    status.operationLock !== 'unlocked' ||
-    status.mode !== 'preview' ||
-    status.schedulers.legacy.status !== 'disabled' ||
-    status.processes['whatsapp-dispatch-worker'] !== 'not-required'
-  ) {
-    throw new LocalSystemError(
+const observedProcessState = (
+  state: SystemStatusSnapshot['processes'][keyof SystemStatusSnapshot['processes']],
+): PreviewStabilityTopologyDiagnostic['observedState'] => {
+  if (state === 'running' || state === 'stopped') return state;
+  if (state === 'not-required') return 'unavailable';
+  return 'unknown';
+};
+
+export const diagnoseRunningTopology = (
+  status: SystemStatusSnapshot,
+): PreviewStabilityTopologyDiagnostic | null => {
+  if (status.operationLock !== 'unlocked' || status.mode !== 'preview') {
+    return {
+      topologyStage: 'requireRunning',
+      component: 'unknown',
+      observedState: 'unknown',
+      expectedState: 'running',
+    };
+  }
+
+  if (status.overall !== 'running') {
+    const mainInfrastructureHealthy = ['postgres', 'redis'].every((service) =>
+      status.docker.services.some(
+        (item) =>
+          item.service === service &&
+          item.state === 'running' &&
+          item.health === 'healthy',
+      ),
+    );
+    if (!mainInfrastructureHealthy) {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'docker',
+        observedState: 'unhealthy',
+        expectedState: 'running',
+      };
+    }
+    if (status.processes.api !== 'running') {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'api',
+        observedState: observedProcessState(status.processes.api),
+        expectedState: 'running',
+      };
+    }
+    if (status.endpoints.api !== 'available') {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'api',
+        observedState: 'unhealthy',
+        expectedState: 'running',
+      };
+    }
+    if (status.processes.dashboard !== 'running') {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'dashboard',
+        observedState: observedProcessState(status.processes.dashboard),
+        expectedState: 'running',
+      };
+    }
+    if (status.endpoints.dashboard !== 'available') {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'dashboard',
+        observedState: 'unhealthy',
+        expectedState: 'running',
+      };
+    }
+    if (status.processes['commercial-worker'] !== 'running') {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'commercial-worker',
+        observedState: observedProcessState(status.processes['commercial-worker']),
+        expectedState: 'running',
+      };
+    }
+    if (
+      !status.schedulers.commercial.enabled ||
+      status.schedulers.commercial.status !== 'registered'
+    ) {
+      return {
+        topologyStage: 'requireRunning',
+        component: 'commercial-scheduler',
+        observedState:
+          status.schedulers.commercial.status === 'unavailable'
+            ? 'unavailable'
+            : status.schedulers.commercial.status === 'registered'
+              ? 'running'
+              : 'stopped',
+        expectedState: 'running',
+      };
+    }
+  }
+
+  if (status.schedulers.legacy.status !== 'disabled') {
+    return {
+      topologyStage: 'requireRunning',
+      component: 'legacy-scheduler',
+      observedState:
+        status.schedulers.legacy.status === 'registered'
+          ? 'running'
+          : status.schedulers.legacy.status === 'unavailable'
+            ? 'unavailable'
+            : 'stopped',
+      expectedState: 'not-required',
+    };
+  }
+  if (status.processes['whatsapp-dispatch-worker'] !== 'not-required') {
+    return {
+      topologyStage: 'requireRunning',
+      component: 'dispatch-worker',
+      observedState: observedProcessState(
+        status.processes['whatsapp-dispatch-worker'],
+      ),
+      expectedState: 'not-required',
+    };
+  }
+  if (status.overall === 'running') return null;
+  return {
+    topologyStage: 'requireRunning',
+    component: 'unknown',
+    observedState: status.overall === 'stopped' ? 'stopped' : 'unhealthy',
+    expectedState: 'running',
+  };
+};
+
+class PreviewStabilityTopologyError extends LocalSystemError {
+  constructor(readonly diagnostic: PreviewStabilityTopologyDiagnostic) {
+    super(
       'Topologia preview nao esta integralmente saudavel',
       'PREVIEW_STABILITY_TOPOLOGY_UNHEALTHY',
     );
+    this.name = 'PreviewStabilityTopologyError';
   }
+}
+
+export class PreviewStabilityMainInfrastructureError extends LocalSystemError {
+  constructor(
+    code: string,
+    readonly diagnostic: PreviewStabilityMainInfrastructureDiagnostic,
+  ) {
+    super('Falha controlada na infraestrutura principal do preview', code);
+    this.name = 'PreviewStabilityMainInfrastructureError';
+  }
+}
+
+const requireRunning = (status: SystemStatusSnapshot) => {
+  const diagnostic = diagnoseRunningTopology(status);
+  if (diagnostic) throw new PreviewStabilityTopologyError(diagnostic);
 };
 
 const requireExactlyOneCommercialScheduler = (
@@ -497,6 +798,29 @@ export const sanitizePreviewStabilityReport = (
     invariants: { ...report.invariants },
     finalState: { ...report.finalState },
     bugs: report.bugs.map(({ severity, code }) => ({ severity, code })),
+    ...(report.topologyDiagnostic
+      ? {
+          topologyDiagnostic: {
+            topologyStage: report.topologyDiagnostic.topologyStage,
+            component: report.topologyDiagnostic.component,
+            observedState: report.topologyDiagnostic.observedState,
+            expectedState: report.topologyDiagnostic.expectedState,
+          },
+        }
+      : {}),
+    ...(report.mainInfrastructureDiagnostic
+      ? {
+          mainInfrastructureDiagnostic: {
+            mainInfraStage: report.mainInfrastructureDiagnostic.mainInfraStage,
+            service: report.mainInfrastructureDiagnostic.service,
+            operation: report.mainInfrastructureDiagnostic.operation,
+            commandKind: report.mainInfrastructureDiagnostic.commandKind,
+            errorCode: report.mainInfrastructureDiagnostic.errorCode,
+            observedHealth: report.mainInfrastructureDiagnostic.observedHealth,
+            expectedHealth: report.mainInfrastructureDiagnostic.expectedHealth,
+          },
+        }
+      : {}),
     ...(report.failureCode ? { failureCode: report.failureCode } : {}),
   }) satisfies PreviewStabilityReport;
 
@@ -556,11 +880,16 @@ export const runPreviewStabilityValidation = async ({
     },
   ];
   let initialEvidence: PreviewStabilityEvidence | undefined;
+  let operationalBaseline: PreviewStabilityEvidence | undefined;
   let latestEvidence: PreviewStabilityEvidence | undefined;
   let initialInfrastructure: PreviewStabilityInfrastructure | undefined;
   let finalInfrastructure: PreviewStabilityInfrastructure | undefined;
   let finalStatus: SystemStatusSnapshot | undefined;
   let failureCode: string | undefined;
+  let topologyDiagnostic: PreviewStabilityTopologyDiagnostic | undefined;
+  let mainInfrastructureDiagnostic:
+    | PreviewStabilityMainInfrastructureDiagnostic
+    | undefined;
   let infrastructurePrepared = false;
   let restorationRequired = false;
   let cleanupPromise: Promise<void> | undefined;
@@ -683,7 +1012,10 @@ export const runPreviewStabilityValidation = async ({
         await dependencies.captureInfrastructure(environment);
       restorationRequired = true;
       infrastructurePrepared = true;
-      await dependencies.prepareMainInfrastructure(environment);
+      await dependencies.prepareMainInfrastructure(
+        environment,
+        hasReusableManagedMainInfrastructure(status),
+      );
       const previewGroupInstance =
         await dependencies.resolvePreviewGroupInstance(environment);
       environment = {
@@ -717,18 +1049,29 @@ export const runPreviewStabilityValidation = async ({
       const status = await dependencies.startSystem(environment);
       requireRunning(status);
       infrastructurePrepared = false;
+      const startupEvidence = await dependencies.captureEvidence(environment);
+      assertPausedStartupEvidence(baseline, startupEvidence);
+      requireExactlyOneCommercialScheduler(startupEvidence);
+      operationalBaseline = startupEvidence;
       await dependencies.setAutomationPaused(false, environment);
       const schedulerEvidence = await dependencies.captureEvidence(environment);
+      if (!schedulerEvidence.settings.present || schedulerEvidence.settings.paused) {
+        throw new LocalSystemError(
+          'A automacao comercial permaneceu pausada apos a retomada',
+          'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        );
+      }
       requireExactlyOneCommercialScheduler(schedulerEvidence);
       latestEvidence = await waitForPreviewCount(
         dependencies,
         environment,
-        baseline,
+        startupEvidence,
         3,
         300_000,
         assertNotInterrupted,
       );
     });
+    const runtimeBaseline = operationalBaseline ?? baseline;
 
     await scenario('commercial-worker-abrupt-stop', async () => {
       await dependencies.killManagedProcess('commercial-worker');
@@ -745,7 +1088,7 @@ export const runPreviewStabilityValidation = async ({
       latestEvidence = await waitForPreviewCount(
         dependencies,
         environment,
-        baseline,
+        runtimeBaseline,
         4,
         120_000,
         assertNotInterrupted,
@@ -770,8 +1113,8 @@ export const runPreviewStabilityValidation = async ({
     await scenario('redis-temporary-unavailability', async () => {
       await dependencies.waitForSafeTickGap(20_000, environment);
       const beforeOutage = await dependencies.captureEvidence(environment);
-      assertEvidenceInvariants(baseline, beforeOutage);
-      const recoveryTarget = completedPreviewCount(baseline, beforeOutage) + 1;
+      assertEvidenceInvariants(runtimeBaseline, beforeOutage);
+      const recoveryTarget = completedPreviewCount(runtimeBaseline, beforeOutage) + 1;
       const outage = await dependencies.restartMainService(
         'redis',
         environment,
@@ -787,7 +1130,7 @@ export const runPreviewStabilityValidation = async ({
       latestEvidence = await waitForPreviewCount(
         dependencies,
         environment,
-        baseline,
+        runtimeBaseline,
         recoveryTarget,
         120_000,
         assertNotInterrupted,
@@ -811,7 +1154,7 @@ export const runPreviewStabilityValidation = async ({
       failuresInjected.push('postgres-temporarily-stopped');
       requireRunning(await dependencies.startSystem(environment));
       latestEvidence = await dependencies.captureEvidence(environment);
-      assertEvidenceInvariants(baseline, latestEvidence);
+      assertEvidenceInvariants(runtimeBaseline, latestEvidence);
       recoveries.push('postgres-reconnected');
     });
 
@@ -821,7 +1164,7 @@ export const runPreviewStabilityValidation = async ({
         environment,
       );
       const beforeRestart = await dependencies.captureEvidence(environment);
-      assertEvidenceInvariants(baseline, beforeRestart);
+      assertEvidenceInvariants(runtimeBaseline, beforeRestart);
       const infrastructureBeforeRestart =
         await dependencies.captureInfrastructure(environment);
       await dependencies.stopSystem(environment);
@@ -841,14 +1184,14 @@ export const runPreviewStabilityValidation = async ({
       requireRunning(await dependencies.startSystem(environment));
       latestEvidence = await dependencies.captureEvidence(environment);
       assertNoBootstrapTick(beforeRestart, latestEvidence, scheduledAt);
-      assertEvidenceInvariants(baseline, latestEvidence);
+      assertEvidenceInvariants(runtimeBaseline, latestEvidence);
       requireExactlyOneCommercialScheduler(latestEvidence);
       const nextPreviewTarget =
-        completedPreviewCount(baseline, latestEvidence) + 1;
+        completedPreviewCount(runtimeBaseline, latestEvidence) + 1;
       latestEvidence = await waitForPreviewCount(
         dependencies,
         environment,
-        baseline,
+        runtimeBaseline,
         nextPreviewTarget,
         120_000,
         assertNotInterrupted,
@@ -857,6 +1200,12 @@ export const runPreviewStabilityValidation = async ({
     });
   } catch (error) {
     failureCode = safeCode(error);
+    if (error instanceof PreviewStabilityTopologyError) {
+      topologyDiagnostic = error.diagnostic;
+    }
+    if (error instanceof PreviewStabilityMainInfrastructureError) {
+      mainInfrastructureDiagnostic = error.diagnostic;
+    }
     throw error;
   } finally {
     const cleanupStartedAt = dependencies.now();
@@ -885,9 +1234,10 @@ export const runPreviewStabilityValidation = async ({
       initialInfrastructure.volumeFingerprint ===
         finalInfrastructure.volumeFingerprint,
     );
+    const invariantBefore = operationalBaseline ?? before;
     const evidenceInvariants =
-      before && after
-        ? evaluateEvidenceInvariants(before, after)
+      invariantBefore && after
+        ? evaluateEvidenceInvariants(invariantBefore, after)
         : {
             noDispatchCreated: false,
             noOutboxCreated: false,
@@ -919,14 +1269,14 @@ export const runPreviewStabilityValidation = async ({
     const finalManagedProcesses = finalStatus
       ? managedProcessCount(finalStatus)
       : -1;
-    const finalStateSafe = Boolean(
-      finalStatus?.overall === 'stopped' &&
-      finalStatus.operationLock === 'unlocked' &&
-      finalManagedProcesses === 0 &&
-      after?.settings.paused &&
-      after.queues.legacySchedulerIds.length === 0 &&
-      after.queues.commercialSchedulerIds.length === 0,
-    );
+    const finalStateSafe = isSafePreviewStabilityFinalState({
+      status: finalStatus,
+      automationPaused: after?.settings.paused ?? false,
+      legacySchedulerIds: after?.queues.legacySchedulerIds.length ?? -1,
+      commercialSchedulerIds: after?.queues.commercialSchedulerIds.length ?? -1,
+      managedProcessesActive: finalManagedProcesses,
+      volumesPreserved,
+    });
     if (
       Object.values(finalInvariants).some((value) => !value) ||
       (restorationRequired && !finalStateSafe)
@@ -1002,6 +1352,10 @@ export const runPreviewStabilityValidation = async ({
         volumesPreserved,
       },
       bugs,
+      ...(topologyDiagnostic ? { topologyDiagnostic } : {}),
+      ...(mainInfrastructureDiagnostic
+        ? { mainInfrastructureDiagnostic }
+        : {}),
       ...(failureCode ? { failureCode } : {}),
     };
     try {

@@ -846,7 +846,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ active: false }),
     );
 
-    await expect(subject.service.prepare(selection(subject.target), preparationOptions)).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'CAMPAIGN_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();

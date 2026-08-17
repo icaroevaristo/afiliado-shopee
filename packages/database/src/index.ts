@@ -18,4 +18,5 @@ export {
   BASELINE_MIGRATION,
   createBaselineRuntime,
   listRepositoryMigrations,
+  MigrationBaselineSubstageError,
 } from './migration-baseline.js';
