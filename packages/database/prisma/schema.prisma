@@ -455,11 +455,6 @@ enum CommercialAutomationExecutionMode {
   SEND
 }
 
-enum CommercialAutomationExecutionExternalStage {
-  NOT_REACHED
-  EXTERNAL_MAY_HAVE_STARTED
-}
-
 enum CommercialAutomationExecutionStatus {
   STARTED
   BLOCKED
@@ -467,6 +462,11 @@ enum CommercialAutomationExecutionStatus {
   QUEUED
   FAILED
   AMBIGUOUS
+}
+
+enum CommercialAutomationExecutionExternalStage {
+  NOT_REACHED
+  EXTERNAL_MAY_HAVE_STARTED
 }
 
 enum CommercialPromotionCandidateStatus {
