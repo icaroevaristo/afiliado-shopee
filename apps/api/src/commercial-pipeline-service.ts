@@ -212,7 +212,7 @@ const rankCandidates = (
   right.product.sales - left.product.sales ||
   right.product.discountRate - left.product.discountRate ||
   right.product.rating - left.product.rating ||
-  left.product.providerProductId.localeCompare(right.product.providerProductId);
+  left.product.id.localeCompare(right.product.id);
 
 export const sanitizeCommercialPipelineRun = (
   run: CommercialPipelineRunRecord,
@@ -516,7 +516,7 @@ export class CommercialPipelineService {
         ...Object.entries(selectedScoreBreakdown.components).map(
           ([name, value]) => `${name}: ${value}`,
         ),
-        'Desempate deterministico por comissao, vendas, desconto, avaliacao e ID do provider',
+        'Desempate deterministico por comissao, vendas, desconto, avaliacao e productId estavel',
         'Produto ainda nao enviado ao grupo autorizado',
       ];
       const rejectedCount = initialRejectedCount + alreadySentCount;
