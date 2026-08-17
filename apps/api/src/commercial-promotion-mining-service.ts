@@ -21,6 +21,12 @@ import type {
   ShopeeOfferRecord,
 } from './repositories';
 import type { ScoreService } from './score-service';
+import {
+  assertCompatibleShopeeProductIdentity,
+  PRODUCT_VARIANT_DEDUPLICATION,
+  resolveShopeeProductIdentity,
+  type ShopeeProductIdentityInput,
+} from './shopee-product-identity';
 
 const CATALOG_BATCH_SIZE = 200;
 const MAX_EVALUATED_PRODUCTS = 2_000;
@@ -311,6 +317,10 @@ export class CommercialPromotionMiningService {
     let nicheMatchedCount = 0;
     let promotionMatchedCount = 0;
     let evaluationTruncated = false;
+    const seenCatalogIdentities = new Map<
+      string,
+      { productId: string; identity: ShopeeProductIdentityInput }
+    >();
     const promotionMatches: Array<{
       candidate: EvaluatedCandidate;
       productCodes: Set<CommercialPromotionRejectionCode>;
@@ -324,6 +334,25 @@ export class CommercialPromotionMiningService {
         limit: Math.min(CATALOG_BATCH_SIZE, remaining),
       });
       for (const item of page.items) {
+        const identity = resolveShopeeProductIdentity(item.product);
+        const previousIdentity = seenCatalogIdentities.get(identity.key);
+        if (previousIdentity) {
+          assertCompatibleShopeeProductIdentity(
+            previousIdentity.identity,
+            item.product,
+          );
+          if (previousIdentity.productId !== item.product.id) {
+            promotionError(
+              'Catalogo contem identidade de produto duplicada',
+              PRODUCT_VARIANT_DEDUPLICATION,
+            );
+          }
+          continue;
+        }
+        seenCatalogIdentities.set(identity.key, {
+          productId: item.product.id,
+          identity: item.product,
+        });
         evaluatedCount += 1;
         const productCodes = new Set<CommercialPromotionRejectionCode>();
         const structural = commercialProductRejections(item.product, now);

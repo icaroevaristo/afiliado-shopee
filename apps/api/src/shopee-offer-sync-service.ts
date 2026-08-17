@@ -6,6 +6,12 @@ import type {
 } from '@shopee-auto-affiliate-ai/providers';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { ShopeeOfferRepository } from './repositories';
+import {
+  assertCompatibleShopeeProductIdentity,
+  assertCompleteShopeeProductIdentity,
+  SHOPEE_PRODUCT_IDENTITY_INCOMPLETE,
+  type ShopeeProductIdentityInput,
+} from './shopee-product-identity';
 
 export type ShopeeOfferSyncReport = {
   source: 'mock' | 'manual' | 'official';
@@ -121,11 +127,10 @@ export class ShopeeOfferSyncService {
         incrementSanitizedRejection(report.rejectionSummary, rejection.code);
       }
       report.hasNextPage = page.hasNextPage;
-      const seen = new Set<string>();
+      const seen = new Map<string, ShopeeProductIdentityInput>();
       const now = this.options.now?.() ?? new Date();
 
       for (const offer of page.items.slice(0, limit)) {
-        const logicalKey = `${offer.source}:${offer.providerProductId}`;
         if (!isValidShopeeProductOffer(offer)) {
           report.skipped += 1;
           incrementSanitizedRejection(
@@ -134,7 +139,23 @@ export class ShopeeOfferSyncService {
           );
           continue;
         }
-        if (seen.has(logicalKey)) {
+        let identity: ReturnType<typeof assertCompleteShopeeProductIdentity>;
+        try {
+          identity = assertCompleteShopeeProductIdentity(offer);
+        } catch (error) {
+          if (
+            error instanceof AppError &&
+            error.code === SHOPEE_PRODUCT_IDENTITY_INCOMPLETE
+          ) {
+            report.skipped += 1;
+            incrementSanitizedRejection(report.rejectionSummary, error.code);
+            continue;
+          }
+          throw error;
+        }
+        const previous = seen.get(identity.key);
+        if (previous) {
+          assertCompatibleShopeeProductIdentity(previous, offer);
           report.skipped += 1;
           incrementSanitizedRejection(
             report.rejectionSummary,
@@ -142,7 +163,7 @@ export class ShopeeOfferSyncService {
           );
           continue;
         }
-        seen.add(logicalKey);
+        seen.set(identity.key, offer);
         report.valid += 1;
         if (offer.affiliateLink) report.affiliateLinkPresentCount += 1;
         if (offer.offerEndsAt && offer.offerEndsAt <= now) {

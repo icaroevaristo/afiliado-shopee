@@ -709,31 +709,33 @@ export class CommercialAutomationCandidateFlowService {
       eligibleCount,
       rejectedCount: Math.max(queue.total - eligibleCount, 0),
     };
-    const ready = await this.findReadyCandidate(
-      queue.items,
-      campaign,
-      group.id,
-    );
-    if (ready) {
-      return {
-        outcome: 'READY',
-        candidateId: ready.context.candidate.id,
-        candidateStatus: 'COPY_READY',
-        queue: queueSummary,
-      };
-    }
-    const queued = await this.findQueuedCandidate(
-      queue.items,
-      campaign,
-      group.id,
-    );
-    if (queued) {
-      return {
-        outcome: 'READY',
-        candidateId: queued.candidate.id,
-        candidateStatus: 'QUEUED',
-        queue: queueSummary,
-      };
+    const orderedCandidates = queue.items
+      .filter(
+        ({ status }) => status === 'COPY_READY' || status === 'QUEUED',
+      )
+      .sort(queueOrder);
+    for (const item of orderedCandidates) {
+      if (item.status === 'COPY_READY') {
+        const ready = await this.findReadyCandidate([item], campaign, group.id);
+        if (ready) {
+          return {
+            outcome: 'READY',
+            candidateId: ready.context.candidate.id,
+            candidateStatus: 'COPY_READY',
+            queue: queueSummary,
+          };
+        }
+        continue;
+      }
+      const queued = await this.findQueuedCandidate([item], campaign, group.id);
+      if (queued) {
+        return {
+          outcome: 'READY',
+          candidateId: queued.candidate.id,
+          candidateStatus: 'QUEUED',
+          queue: queueSummary,
+        };
+      }
     }
     return { outcome: 'NO_CANDIDATE' };
   }

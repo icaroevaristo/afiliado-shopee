@@ -6,6 +6,8 @@ import {
 } from '../src/commercial-offer-snapshot';
 
 const base = (): CommercialOfferFingerprintInput => ({
+  source: 'OFFICIAL',
+  providerProductId: 'official-1',
   price: '10.0000',
   priceMin: null,
   priceMax: '10.00',
@@ -27,6 +29,8 @@ describe('commercial offer fingerprint', () => {
   it('e deterministico, usa ordem fixa, null explicito e datas UTC', () => {
     const input = base();
     const reordered = {
+      providerProductId: 'official-1',
+      source: 'OFFICIAL' as const,
       unavailableAt: null,
       offerEndsAt: null,
       offerStartsAt: new Date('2026-07-29T15:00:00.000Z'),

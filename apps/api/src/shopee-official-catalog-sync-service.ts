@@ -11,6 +11,12 @@ import {
   type ShopeeOfferSyncReport,
 } from './shopee-offer-sync-service';
 import type { ShopeeOfferRepository } from './repositories';
+import {
+  assertCompatibleShopeeProductIdentity,
+  assertCompleteShopeeProductIdentity,
+  SHOPEE_PRODUCT_IDENTITY_INCOMPLETE,
+  type ShopeeProductIdentityInput,
+} from './shopee-product-identity';
 import type { FastifyBaseLogger } from 'fastify';
 
 export type SanitizedShopeeOfficialSyncReport = Pick<
@@ -123,7 +129,7 @@ export class ShopeeOfficialCatalogSyncService {
       categoryId,
       sort,
     };
-    const seenProviderProductIds = new Set<string>();
+    const seenProviderProductIds = new Map<string, ShopeeProductIdentityInput>();
     let hasError = false;
 
     try {
@@ -184,14 +190,6 @@ export class ShopeeOfficialCatalogSyncService {
           }
 
           for (const offer of providerPage.items) {
-            const logicalKey = `${offer.source}:${offer.providerProductId}`;
-
-            if (seenProviderProductIds.has(logicalKey)) {
-              report.duplicatedAcrossPages++;
-              continue;
-            }
-            seenProviderProductIds.add(logicalKey);
-
             if (!isValidShopeeProductOffer(offer)) {
               report.skipped += 1;
               incrementSanitizedRejection(
@@ -200,6 +198,27 @@ export class ShopeeOfficialCatalogSyncService {
               );
               continue;
             }
+            let identity: ReturnType<typeof assertCompleteShopeeProductIdentity>;
+            try {
+              identity = assertCompleteShopeeProductIdentity(offer);
+            } catch (error) {
+              if (
+                error instanceof AppError &&
+                error.code === SHOPEE_PRODUCT_IDENTITY_INCOMPLETE
+              ) {
+                report.skipped += 1;
+                incrementSanitizedRejection(report.rejectionSummary, error.code);
+                continue;
+              }
+              throw error;
+            }
+            const previous = seenProviderProductIds.get(identity.key);
+            if (previous) {
+              assertCompatibleShopeeProductIdentity(previous, offer);
+              report.duplicatedAcrossPages++;
+              continue;
+            }
+            seenProviderProductIds.set(identity.key, offer);
 
             report.valid += 1;
             if (offer.affiliateLink) report.affiliateLinkPresentCount += 1;

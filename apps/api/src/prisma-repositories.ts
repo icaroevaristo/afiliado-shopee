@@ -84,6 +84,11 @@ import { sha256 } from './commercial-ai-copy-fingerprint';
 import { sanitizeCommercialAiCopyValidationFailureCodes } from './commercial-ai-copy-validator';
 import { isSafeAssembledCommercialPromotionCopy } from './commercial-promotion-copy-assembler';
 
+import {
+  assertCompatibleShopeeProductIdentity,
+  assertCompleteShopeeProductIdentity,
+} from './shopee-product-identity';
+
 const prismaErrorCode = (error: unknown) =>
   typeof error === 'object' && error !== null && 'code' in error
     ? String((error as { code?: unknown }).code)
@@ -241,6 +246,8 @@ type CommercialSnapshotMaterial = CommercialOfferFingerprintInput & {
 const snapshotMaterialFromOffer = (
   offer: ShopeeProductOffer,
 ): CommercialSnapshotMaterial => ({
+  source: offer.source,
+  providerProductId: offer.providerProductId,
   price: offer.price,
   priceMin: offer.priceMin,
   priceMax: offer.priceMax,
@@ -257,6 +264,8 @@ const snapshotMaterialFromOffer = (
 const snapshotMaterialFromPersistedOffer = (
   record: Record<string, unknown>,
 ): CommercialSnapshotMaterial => ({
+  source: record.source as CommercialOfferFingerprintInput['source'],
+  providerProductId: String(record.providerProductId),
   price: decimalString(record.preco as PrismaDecimalLike) as string,
   priceMin: decimalString(record.precoMin as PrismaDecimalLike | null) ?? null,
   priceMax: decimalString(record.precoMax as PrismaDecimalLike | null) ?? null,
@@ -475,6 +484,7 @@ export class PrismaShopeeOfferRepository
         'SHOPEE_OFFICIAL_SNAPSHOT_SOURCE_REQUIRED',
       );
     }
+    assertCompleteShopeeProductIdentity(offer);
     const material = snapshotMaterialFromOffer(offer);
     const fingerprint = fingerprintCommercialOffer(material);
     try {
@@ -510,6 +520,14 @@ export class PrismaShopeeOfferRepository
             };
           }
 
+          assertCompatibleShopeeProductIdentity(
+            {
+              source: 'OFFICIAL',
+              providerProductId: current.providerProductId,
+              shopId: current.shopId ?? undefined,
+            },
+            offer,
+          );
           const currentRevision = current.commercialSnapshotRevision;
           const currentFingerprint = current.commercialSnapshotFingerprint;
           const lastSnapshot =

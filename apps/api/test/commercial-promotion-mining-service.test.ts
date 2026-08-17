@@ -68,6 +68,7 @@ const product = (
   source: 'OFFICIAL',
   providerProductId: `external-${id}`,
   productName: `Produto ${id}`,
+  shopId: 'shop-1',
   shopName: 'Loja',
   categoryIds: ['cat'],
   price: '80',
@@ -204,6 +205,9 @@ const setup = ({
     markBlockedByGeneratedCopyId: vi.fn(async () => ({
       kind: 'LEGACY' as const,
     })),
+    resetCampaignFailureStateByGeneratedCopyId: vi.fn(async () => ({
+      kind: 'LEGACY' as const,
+    })),
   };
   const scorePolicies = new CommercialOfferScorePolicyResolver({
     calculate: () => 0,
@@ -259,6 +263,56 @@ describe('CommercialPromotionMiningService', () => {
     expect(JSON.stringify(report)).not.toMatch(
       /affiliate|productLink|providerProductId|shopId|fingerprint-/i,
     );
+  });
+
+  it('usa o ranking promocional no entrypoint de candidatos mesmo quando o score legado favoreceria outro', async () => {
+    const priceDropLowScore = catalogItem('price-drop-low-score', {
+      product: product('price-drop-low-score', {
+        rating: 0,
+        sales: 0,
+        commissionRate: 0,
+        discountRate: 5,
+      }),
+      commercialSnapshotRevision: 2,
+      commercialSnapshotFingerprint: 'fingerprint-price-drop-2',
+      latestSnapshotRevision: 2,
+    });
+    priceDropLowScore.currentSnapshot = {
+      ...priceDropLowScore.currentSnapshot!,
+      id: 'snapshot-price-drop-2',
+      revision: 2,
+      fingerprint: 'fingerprint-price-drop-2',
+      price: '80',
+      discountRate: 5,
+      commissionRate: 0,
+    };
+    priceDropLowScore.previousSnapshot = {
+      ...priceDropLowScore.currentSnapshot,
+      id: 'snapshot-price-drop-1',
+      revision: 1,
+      fingerprint: 'fingerprint-price-drop-1',
+      price: '100',
+    };
+
+    const scoreFirst = catalogItem('score-first', {
+      product: product('score-first', {
+        rating: 5,
+        sales: 10_000,
+        commissionRate: 20,
+        discountRate: 100,
+      }),
+    });
+    const { service } = setup({
+      products: [scoreFirst, priceDropLowScore],
+      campaignRecord: campaign({ queueTargetSize: 1 }),
+    });
+
+    const report = await service.preview('campaign-1');
+
+    expect(report.projectedCandidates?.[0]).toMatchObject({
+      productId: 'price-drop-low-score',
+      promotionSignals: expect.arrayContaining(['PRICE_DROP']),
+    });
   });
 
   it('informa campanha inativa e grupo indisponivel sem impedir a analise do preview', async () => {
@@ -487,4 +541,69 @@ describe('CommercialPromotionMiningService', () => {
       }),
     ).rejects.toMatchObject({ code: 'GROUP_UNAVAILABLE' });
   });
+
+  it('deduplica repeticao exata do mesmo produto no catalogo antes do ranking', async () => {
+    const repeated = catalogItem('product-a');
+    const { service } = setup({ products: [repeated, repeated, catalogItem('product-b')] });
+
+    const report = await service.preview('campaign-1');
+
+    expect(report.evaluatedCount).toBe(2);
+    expect(report.projectedCandidates?.map(({ productId }) => productId)).toEqual([
+      'product-a',
+      'product-b',
+    ]);
+  });
+
+  it('falha fechado se dois ProductLead diferentes reivindicam a mesma identidade do provider', async () => {
+    const first = catalogItem('product-a');
+    const duplicateIdentity = catalogItem('product-b', {
+      product: product('product-b', {
+        providerProductId: first.product.providerProductId,
+        shopId: first.product.shopId,
+      }),
+    });
+    const { service } = setup({ products: [first, duplicateIdentity] });
+
+    await expect(service.preview('campaign-1')).rejects.toMatchObject({
+      code: 'PRODUCT_VARIANT_DEDUPLICATION',
+    });
+  });
+
+  it('falha fechado se a mesma identidade atomica aparece com outra loja', async () => {
+    const first = catalogItem('product-a');
+    const conflictingShop = catalogItem('product-b', {
+      product: product('product-b', {
+        providerProductId: first.product.providerProductId,
+        shopId: 'shop-2',
+      }),
+    });
+    const { service } = setup({ products: [first, conflictingShop] });
+
+    await expect(service.preview('campaign-1')).rejects.toMatchObject({
+      code: 'PRODUCT_VARIANT_DEDUPLICATION',
+    });
+  });
+
+
+  it('ignora score legado persistido e ranqueia pelo official-v2 recalculado', async () => {
+    const persistedHigh = catalogItem('product-b', {
+      product: product('product-b', { score: 100 }),
+    });
+    const persistedLow = catalogItem('product-a', {
+      product: product('product-a', { score: 1 }),
+    });
+    const { service } = setup({ products: [persistedHigh, persistedLow] });
+
+    const report = await service.preview('campaign-1');
+
+    expect(report.projectedCandidates?.map(({ productId }) => productId)).toEqual([
+      'product-a',
+      'product-b',
+    ]);
+    expect(report.projectedCandidates?.[0]?.commercialScore).toBe(
+      report.projectedCandidates?.[1]?.commercialScore,
+    );
+  });
+
 });
