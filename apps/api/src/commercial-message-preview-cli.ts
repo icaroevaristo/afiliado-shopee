@@ -64,8 +64,8 @@ export async function runCommercialMessagePreviewCli(
   let config;
   try {
     config = deps.config ?? loadConfig();
-  } catch (err) {
-    stderr('Erro ao carregar configuracao: ' + String(err));
+  } catch {
+    stderr('Erro ao carregar configuracao');
     return;
   }
 
@@ -162,8 +162,8 @@ export async function runCommercialMessagePreviewCli(
 }
 
 if (process.argv[1] && import.meta.url.startsWith('file:') && fileURLToPath(import.meta.url) === process.argv[1]) {
-  runCommercialMessagePreviewCli(process.argv.slice(2)).catch((err) => {
-    console.error('Fatal error:', err);
+  runCommercialMessagePreviewCli(process.argv.slice(2)).catch(() => {
+    console.error('Erro fatal no preview');
     process.exit(1);
   });
 }

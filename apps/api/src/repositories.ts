@@ -910,13 +910,19 @@ export type CommercialPromotionCopyContext = {
   product: {
     id: string;
     source: ShopeeAffiliateOfferSource;
+    providerProductId: string;
     productName: string;
     shopName: string;
+    productLink: string | null;
+    affiliateLink: string | null;
     price: string;
+    priceMin: string | null;
+    priceMax: string | null;
     discountRate: number;
+    commissionRate: number;
     rating: number;
     sales: number;
-    affiliateLink: string | null;
+    offerStartsAt: Date | null;
     urlImagem?: string;
     offerEndsAt: Date | null;
     unavailableAt: Date | null;

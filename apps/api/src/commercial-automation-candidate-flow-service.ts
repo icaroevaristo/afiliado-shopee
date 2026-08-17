@@ -1,6 +1,9 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
+  validateCommercialAffiliateLinkProvenance,
+} from './commercial-affiliate-link-provenance';
+import {
   COMMERCIAL_PROMOTION_MINING_CONFIRMATION,
   type CommercialPromotionMiningReport,
   type CommercialPromotionMiningService,
@@ -56,6 +59,14 @@ export type CommercialAutomationCandidateFlowResult = {
   deliveryMode: 'IMAGE';
   copyPreview: string;
   pipeline: CommercialPipelineDryRunResult;
+};
+
+export type CommercialAutomationCandidatePreparationOptions = {
+  executionId: string;
+  miningReport?: Pick<
+    CommercialPromotionMiningReport,
+    'rejectionSummary'
+  >;
 };
 
 export type CommercialAutomationCandidateRevalidation = Pick<
@@ -533,7 +544,11 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
-        this.assertAffiliateLinkEligible(loaded.context);
+        this.assertAffiliateLinkEligible(loaded.context, {
+          candidateId: item.id,
+          campaignId: campaign.id,
+          groupId,
+        });
         this.assertImageEligible(loaded.context);
         this.draft(loaded);
         return loaded;
@@ -581,7 +596,11 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
-        this.assertAffiliateLinkEligible(context);
+        this.assertAffiliateLinkEligible(context, {
+          candidateId: item.id,
+          campaignId: campaign.id,
+          groupId,
+        });
         this.assertImageEligible(context);
         const preview = await this.options.copyGeneration.preview(item.id);
         if (!preview.eligible) {
@@ -642,7 +661,11 @@ export class CommercialAutomationCandidateFlowService {
       );
     }
     try {
-      this.assertAffiliateLinkEligible(context);
+      this.assertAffiliateLinkEligible(context, {
+        candidateId: selection.candidateId,
+        campaignId: campaign.id,
+        groupId: group.id,
+      });
       this.assertImageEligible(context);
     } catch (error) {
       if (isExpectedNoCandidate(error)) {
@@ -686,7 +709,11 @@ export class CommercialAutomationCandidateFlowService {
       );
     }
     try {
-      this.assertAffiliateLinkEligible(loaded.context);
+      this.assertAffiliateLinkEligible(loaded.context, {
+        candidateId: selection.candidateId,
+        campaignId: campaign.id,
+        groupId: group.id,
+      });
       this.assertImageEligible(loaded.context);
       this.draft(loaded);
     } catch (error) {
@@ -722,23 +749,15 @@ export class CommercialAutomationCandidateFlowService {
     }
   }
 
-  private assertAffiliateLinkEligible(context: CommercialPromotionCopyContext) {
-    const affiliateLink = context.product.affiliateLink?.trim();
-    if (!affiliateLink) {
+  private assertAffiliateLinkEligible(
+    context: CommercialPromotionCopyContext,
+    expected: { candidateId: string; campaignId: string; groupId: string },
+  ) {
+    const validation = validateCommercialAffiliateLinkProvenance(context, expected);
+    if (!validation.valid) {
       throw appError(
-        'Automacao comercial exige link de afiliado valido',
-        'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
-      );
-    }
-    try {
-      const url = new URL(affiliateLink);
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new Error('invalid affiliate link protocol');
-      }
-    } catch {
-      throw appError(
-        'Automacao comercial exige link de afiliado valido',
-        'COMMERCIAL_AI_COPY_AFFILIATE_LINK_REQUIRED',
+        'Automacao comercial exige link de afiliado com proveniencia valida',
+        validation.code,
       );
     }
   }
@@ -802,7 +821,7 @@ export class CommercialAutomationCandidateFlowService {
 
   async prepare(
     selection: CommercialAutomationCandidateSelection,
-    miningReport?: Pick<CommercialPromotionMiningReport, 'rejectionSummary'>,
+    options: CommercialAutomationCandidatePreparationOptions,
   ): Promise<CommercialAutomationCandidateFlowResult> {
     const { group, campaign } = await this.resolveTarget(selection.target);
     if (selection.candidateStatus === 'QUEUED') {
@@ -847,13 +866,14 @@ export class CommercialAutomationCandidateFlowService {
         scoreBreakdown: loaded.context.candidate.scoreBreakdown,
       },
       group,
+      executionId: options.executionId,
       campaign: 'commercial-automation',
       copyPreview: draft.caption,
       candidateCount: selection.queue.candidateCount,
       eligibleCount: selection.queue.eligibleCount,
       rejectedCount: selection.queue.rejectedCount,
       rejectionSummary: toPipelineRejectionSummary(
-        miningReport?.rejectionSummary ?? {},
+        options.miningReport?.rejectionSummary ?? {},
       ),
     });
     this.options.logger?.info(

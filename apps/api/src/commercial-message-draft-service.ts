@@ -45,6 +45,52 @@ export type CommercialMessageDraft = {
 export const COMMERCIAL_AUTOMATION_IMAGE_REQUIRED =
   'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED';
 
+export type CommercialImageDelivery = {
+  imageUrl: string | null;
+  deliveryMode: 'IMAGE' | 'TEXT';
+  warnings: string[];
+};
+
+export const resolveCommercialImageDelivery = (input: {
+  imageUrl?: string | null;
+  affiliateLink?: string | null;
+}): CommercialImageDelivery => {
+  const affiliateLink = input.affiliateLink?.trim() || null;
+  const rawImageUrl = input.imageUrl ?? null;
+  let imageUrl = rawImageUrl?.trim() || null;
+  let deliveryMode: 'IMAGE' | 'TEXT' = 'IMAGE';
+  const warnings: string[] = [];
+
+  if (rawImageUrl && /[\u0000-\u001f\u007f]/u.test(rawImageUrl)) {
+    deliveryMode = 'TEXT';
+    imageUrl = null;
+    warnings.push('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
+  } else if (!imageUrl) {
+    deliveryMode = 'TEXT';
+    imageUrl = null;
+    warnings.push('COMMERCIAL_MESSAGE_IMAGE_MISSING');
+  } else {
+    try {
+      const url = new URL(imageUrl);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        deliveryMode = 'TEXT';
+        imageUrl = null;
+        warnings.push('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
+      } else if (affiliateLink && imageUrl === affiliateLink) {
+        deliveryMode = 'TEXT';
+        imageUrl = null;
+        warnings.push('COMMERCIAL_MESSAGE_IMAGE_EQUALS_AFFILIATE_LINK');
+      }
+    } catch {
+      deliveryMode = 'TEXT';
+      imageUrl = null;
+      warnings.push('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
+    }
+  }
+
+  return { imageUrl, deliveryMode, warnings };
+};
+
 export class CommercialMessageDraftService {
   createDraft(
     candidate: CommercialMessageDraftCandidate,
@@ -113,32 +159,10 @@ export class CommercialMessageDraftService {
       throw new Error('COMMERCIAL_MESSAGE_INVALID_LINK_OCCURRENCES');
     }
 
-    let imageUrl: string | null = product.urlImagem?.trim() || null;
-    let deliveryMode: 'IMAGE' | 'TEXT' = 'IMAGE';
-    const warnings: string[] = [];
-
-    if (!imageUrl) {
-      deliveryMode = 'TEXT';
-      imageUrl = null;
-      warnings.push('COMMERCIAL_MESSAGE_IMAGE_MISSING');
-    } else {
-      try {
-        const url = new URL(imageUrl);
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-          deliveryMode = 'TEXT';
-          imageUrl = null;
-          warnings.push('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
-        } else if (imageUrl === affiliateLink) {
-          deliveryMode = 'TEXT';
-          imageUrl = null;
-          warnings.push('COMMERCIAL_MESSAGE_IMAGE_EQUALS_AFFILIATE_LINK');
-        }
-      } catch {
-        deliveryMode = 'TEXT';
-        imageUrl = null;
-        warnings.push('COMMERCIAL_MESSAGE_IMAGE_URL_INVALID');
-      }
-    }
+    const { imageUrl, deliveryMode, warnings } = resolveCommercialImageDelivery({
+      imageUrl: product.urlImagem,
+      affiliateLink,
+    });
 
     return {
       candidateId: candidate.id,

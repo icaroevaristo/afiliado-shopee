@@ -8,6 +8,8 @@ import {
 const base = (): CommercialOfferFingerprintInput => ({
   source: 'OFFICIAL',
   providerProductId: 'official-1',
+  productLink: 'https://shopee.com.br/product/1/2',
+  affiliateLink: 'https://s.shopee.com.br/affiliate-link',
   price: '10.0000',
   priceMin: null,
   priceMax: '10.00',
@@ -29,6 +31,8 @@ describe('commercial offer fingerprint', () => {
   it('e deterministico, usa ordem fixa, null explicito e datas UTC', () => {
     const input = base();
     const reordered = {
+      affiliateLink: 'https://s.shopee.com.br/affiliate-link',
+      productLink: 'https://shopee.com.br/product/1/2',
       providerProductId: 'official-1',
       source: 'OFFICIAL' as const,
       unavailableAt: null,
@@ -54,6 +58,10 @@ describe('commercial offer fingerprint', () => {
   });
 
   it.each([
+    ['source', { source: 'MANUAL' as const }],
+    ['providerProductId', { providerProductId: 'official-2' }],
+    ['productLink', { productLink: 'https://shopee.com.br/product/1/3' }],
+    ['affiliateLink', { affiliateLink: 'https://s.shopee.com.br/affiliate-v2' }],
     ['price', { price: '11' }],
     ['discount', { discountRate: 11 }],
     ['commission', { commissionRate: 6 }],

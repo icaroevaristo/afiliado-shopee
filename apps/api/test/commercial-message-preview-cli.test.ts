@@ -223,11 +223,35 @@ describe('CommercialMessagePreviewCli', () => {
     expect(payload.endpointKind).toBe('sendMedia');
     expect(payload.method).toBe('POST');
     expect(payload.destinationPresent).toBe(true);
-    expect(payload.bodyKeys).toContain('mediatype');
+    expect(payload.bodyKeys.sort()).toEqual(['caption', 'media', 'mediatype', 'number']);
     
     // Ensures real destination, caption, URL are not printed
     expect(stdoutOutput).not.toContain('5511999999999');
     expect(stdoutOutput).not.toContain('Oferta incrivel');
     expect(stdoutOutput).not.toContain('https://shopee.com/image.jpg');
+  });
+
+  it('11. --payload TEXT usa exatamente o contrato sendText sem imageUrl', async () => {
+    const candidate = createMockCandidate();
+    candidate.product.urlImagem = '';
+    const prisma = createMockPrisma(candidate);
+    const { stdoutOutput } = await runCli(
+      ['--candidate-id=candidate-1', '--payload'],
+      prisma,
+    );
+
+    const result = JSON.parse(stdoutOutput);
+    expect(result.deliveryMode).toBe('TEXT');
+    expect(result.imagePresent).toBe(false);
+    expect(result.payloadPreview).toMatchObject({
+      endpointKind: 'sendText',
+      method: 'POST',
+      deliveryMode: 'TEXT',
+      destinationPresent: true,
+      imagePresent: false,
+    });
+    expect(result.payloadPreview.bodyKeys.sort()).toEqual(['number', 'text']);
+    expect(stdoutOutput).not.toContain('5511999999999');
+    expect(stdoutOutput).not.toContain('https://shope.ee/link');
   });
 });

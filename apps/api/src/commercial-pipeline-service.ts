@@ -50,6 +50,7 @@ export type CommercialPipelineInput = {
   campaign?: string;
   limitCandidates?: number;
   target?: CommercialAutomationTarget;
+  executionId?: string | null;
 };
 
 type NormalizedCommercialPipelineInput = Required<
@@ -97,6 +98,7 @@ export type CommercialPipelineDryRunResult = {
 };
 
 export type CommercialPromotionCandidatePipelineSelection = {
+  executionId: string;
   candidate: Pick<
     CommercialPromotionCandidateRecord,
     | 'id'

@@ -116,6 +116,22 @@ describe('EvolutionPayloadBuilder', () => {
     })).toThrowError('COMMERCIAL_EVOLUTION_INVALID_IMAGE_URL');
   });
 
+  it.each([
+    'https://example.com/im\nage.jpg',
+    'https://example.com/im\tage.jpg',
+    "https://example.com/im\u0000age.jpg",
+  ])('should reject control characters in IMAGE imageUrl', (imageUrl) => {
+    expect(() =>
+      buildEvolutionMessagePayload({
+        baseUrl: 'https://api.example.com',
+        instanceName: 'test-instance',
+        destination: '5511999999999',
+        deliveryMode: 'IMAGE',
+        text: 'Hello',
+        imageUrl,
+      }),
+    ).toThrowError('COMMERCIAL_EVOLUTION_INVALID_IMAGE_URL');
+  });
   it('should reject missing imageUrl in IMAGE mode', () => {
     expect(() => buildEvolutionMessagePayload({
       baseUrl: 'https://api.example.com',

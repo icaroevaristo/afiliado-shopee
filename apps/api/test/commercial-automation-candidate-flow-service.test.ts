@@ -5,6 +5,7 @@ import {
   CommercialAutomationCandidateFlowService,
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-service';
 import type {
   CommercialGroupCampaignRecord,
@@ -16,8 +17,25 @@ import type {
 } from '../src/repositories';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
+const preparationOptions = { executionId: 'execution-1' } as const;
 const GROUP_FINGERPRINT = 'grp_123456789abc';
-const AFFILIATE_LINK = 'https://example.invalid/affiliate/product-1';
+const PRODUCT_LINK = 'https://shopee.com.br/product/1/product-1';
+const AFFILIATE_LINK = 'https://s.shopee.com.br/affiliate/product-1';
+const PROVIDER_PRODUCT_ID = 'provider-product-1';
+const SNAPSHOT_FINGERPRINT = fingerprintCommercialOffer({
+  source: 'OFFICIAL',
+  providerProductId: PROVIDER_PRODUCT_ID,
+  productLink: PRODUCT_LINK,
+  affiliateLink: AFFILIATE_LINK,
+  price: '99.90',
+  priceMin: null,
+  priceMax: null,
+  discountRate: 20,
+  commissionRate: 10,
+  offerStartsAt: null,
+  offerEndsAt: new Date('2026-08-09T12:00:00.000Z'),
+  unavailableAt: null,
+});
 
 const candidateRecord = (
   overrides: Partial<CommercialPromotionCandidateRecord> = {},
@@ -150,18 +168,24 @@ const context = (
   product: {
     id: 'product-1',
     source: 'OFFICIAL',
+    providerProductId: PROVIDER_PRODUCT_ID,
+    productLink: PRODUCT_LINK,
     productName: 'Produto validado',
     shopName: 'Loja validada',
     price: '99.90',
+    priceMin: null,
+    priceMax: null,
     discountRate: 20,
+    commissionRate: 10,
     rating: 4.8,
     sales: 100,
     affiliateLink: AFFILIATE_LINK,
     urlImagem: 'https://example.invalid/image.jpg',
+    offerStartsAt: null,
     offerEndsAt: new Date('2026-08-09T12:00:00.000Z'),
     unavailableAt: null,
     commercialSnapshotRevision: 1,
-    commercialSnapshotFingerprint: 'snapshot-fingerprint-1',
+    commercialSnapshotFingerprint: SNAPSHOT_FINGERPRINT,
     updatedAt: NOW,
     ...productOverrides,
   },
@@ -169,7 +193,7 @@ const context = (
     id: 'snapshot-1',
     productId: 'product-1',
     revision: 1,
-    fingerprint: 'snapshot-fingerprint-1',
+    fingerprint: SNAPSHOT_FINGERPRINT,
     price: '99.90',
     priceMin: null,
     priceMax: null,
@@ -487,6 +511,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
     const result = await subject.service.prepare(
       selection(subject.target),
+      preparationOptions,
     );
 
     expect(result).toMatchObject({
@@ -499,6 +524,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.mining.mine).not.toHaveBeenCalled();
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRunFromPromotionCandidate).toHaveBeenCalledOnce();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({ executionId: 'execution-1' }),
+    );
   });
 
   it('usa copy generation existente para QUEUED com uma unica tentativa', async () => {
@@ -508,6 +536,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
     const result = await subject.service.prepare(
       selection(subject.target, 'QUEUED'),
+      preparationOptions,
     );
 
     expect(result.generatedCopyId).toBe('copy-1');
@@ -589,7 +618,10 @@ describe('CommercialAutomationCandidateFlowService', () => {
     subject.copies.loadContext.mockClear();
 
     await expect(
-      subject.service.prepare(selection(subject.target, 'QUEUED', 'candidate-1')),
+      subject.service.prepare(
+        selection(subject.target, 'QUEUED', 'candidate-1'),
+        preparationOptions,
+      ),
     ).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
@@ -630,7 +662,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
     const subject = createSubject();
     subject.deliveryHistory.wasProductSentToGroup.mockResolvedValue(true);
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
@@ -654,7 +688,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       null,
     );
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -665,7 +701,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group: { active: false, available: false },
     });
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'NO_AUTHORIZED_GROUP',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -716,6 +754,13 @@ describe('CommercialAutomationCandidateFlowService', () => {
       'group-2',
       'group-1',
     ]);
+    subject.groups.list.mockResolvedValue([groupTwo, group()]);
+    const permutedTargets = await subject.service.listTargets();
+    expect(permutedTargets.map(({ groupId }) => groupId)).toEqual([
+      'group-2',
+      'group-1',
+    ]);
+
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
@@ -724,7 +769,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group: { sourceInstanceName: 'other-instance' },
     });
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'NO_AUTHORIZED_GROUP',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -785,7 +832,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       group({ id: 'group-2', fingerprint: GROUP_FINGERPRINT }),
     ]);
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
     });
     expect(subject.campaigns.findByLogicalGroupFingerprint).not.toHaveBeenCalled();
@@ -797,7 +846,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       campaign({ active: false }),
     );
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(subject.service.prepare(selection(subject.target), preparationOptions)).rejects.toMatchObject({
       code: 'CAMPAIGN_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -815,7 +864,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       },
     });
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'NICHE_INACTIVE',
     });
     expect(subject.mining.mine).not.toHaveBeenCalled();
@@ -874,15 +925,20 @@ describe('CommercialAutomationCandidateFlowService', () => {
       },
     });
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
-      code: 'COMMERCIAL_MESSAGE_INVALID_LINK_OCCURRENCES',
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_DOMAIN_UNAUTHORIZED',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
   it('revalida copy, campanha, grupo e IMAGE antes da confirmacao', async () => {
     const subject = createSubject();
-    const prepared = await subject.service.prepare(selection(subject.target));
+    const prepared = await subject.service.prepare(
+      selection(subject.target),
+      preparationOptions,
+    );
 
     await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledOnce();
@@ -896,7 +952,9 @@ describe('CommercialAutomationCandidateFlowService', () => {
       new AppError('Candidato expirado', 'COMMERCIAL_AI_COPY_OFFER_EXPIRED'),
     );
 
-    await expect(subject.service.prepare(selection(subject.target))).rejects.toMatchObject({
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
     });
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
@@ -911,7 +969,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
     );
 
     await expect(
-      subject.service.prepare(selection(subject.target)),
+      subject.service.prepare(selection(subject.target), preparationOptions),
     ).rejects.toMatchObject({
       code: 'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
     });

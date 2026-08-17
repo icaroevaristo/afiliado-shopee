@@ -163,10 +163,13 @@ export class CommercialAutomationOrchestrator {
         >;
         prepare(
           selection: CommercialAutomationCandidateSelection,
-          miningReport?: Pick<
+          options: {
+            executionId: string;
+            miningReport?: Pick<
             CommercialPromotionMiningReport,
             'rejectionSummary'
-          >,
+            >;
+          },
         ): Promise<{
           runId: string;
           generatedCopyId: string;
@@ -469,14 +472,15 @@ export class CommercialAutomationOrchestrator {
         const candidateSelection = selectedCandidateSelection;
         let prepared;
         try {
-          prepared = selectedMiningReport
-            ? await this.dependencies.candidateFlow!.prepare(
-                candidateSelection,
-                selectedMiningReport,
-              )
-            : await this.dependencies.candidateFlow!.prepare(
-                candidateSelection,
-              );
+          prepared = await this.dependencies.candidateFlow!.prepare(
+            candidateSelection,
+            {
+              executionId: execution.id,
+              ...(selectedMiningReport
+                ? { miningReport: selectedMiningReport }
+                : {}),
+            },
+          );
         } catch (error) {
           if (
             safeFailureCode(error) ===
@@ -498,6 +502,7 @@ export class CommercialAutomationOrchestrator {
         candidatePreparation = prepared;
       } else {
         const dryRun = await this.dependencies.pipeline.dryRun({
+          executionId: execution.id,
           source: toCommercialAutomationProviderSource(input.provider),
           campaign: 'commercial-automation',
           ...(selectedTarget ? { target: selectedTarget } : {}),
