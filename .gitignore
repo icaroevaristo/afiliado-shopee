@@ -2,6 +2,7 @@ node_modules
 .env
 .env.*
 !.env.example
+runtime.env
 infra/evolution/.env.local
 dist
 .next
