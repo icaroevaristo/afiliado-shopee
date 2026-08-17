@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  fingerprintWhatsAppGroupId,
   MockWhatsAppProvider,
   type WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
@@ -9,15 +10,44 @@ import {
 } from '../src/sender-service';
 import { PrismaWhatsAppDispatchRepository } from '../src/prisma-repositories';
 import { WhatsAppGroupSendPolicy } from '../src/whatsapp-group-send-policy';
+import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import {
-  CommercialMessageDraftService,
-  type CommercialMessageDraftCandidate,
-} from '../src/commercial-message-draft-service';
-import type { WhatsAppDispatchDetails } from '../src/repositories';
+  COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+} from '../src/commercial-ai-copy-prompt';
+import type {
+  CommercialDispatchCandidateDetails,
+  WhatsAppDispatchDetails,
+} from '../src/repositories';
 
 const logger = { info: vi.fn(), error: vi.fn() };
-const mockCandidate: Omit<CommercialMessageDraftCandidate, 'generatedCopy'> = {
+const groupDestination = '120363000000000000@g.us';
+const groupFingerprint = fingerprintWhatsAppGroupId(groupDestination);
+const productLink = 'https://shopee.com.br/product/1/1';
+const affiliateLink = 'https://s.shopee.com.br/affiliate-1';
+const commercialFingerprint = fingerprintCommercialOffer({
+  source: 'OFFICIAL',
+  providerProductId: 'provider-product-1',
+  productLink,
+  affiliateLink,
+  price: '99.90',
+  priceMin: null,
+  priceMax: null,
+  discountRate: 20,
+  commissionRate: 10,
+  offerStartsAt: null,
+  offerEndsAt: null,
+  unavailableAt: null,
+});
+
+const mockCandidate: CommercialDispatchCandidateDetails = {
   id: 'candidate-123',
+  campaignId: 'campaign-1',
+  campaign: {
+    id: 'campaign-1',
+    logicalGroupFingerprint: groupFingerprint,
+  },
   productId: 'product-1',
   snapshotId: 'snap-1',
   generatedCopyId: 'copy-1',
@@ -25,15 +55,32 @@ const mockCandidate: Omit<CommercialMessageDraftCandidate, 'generatedCopy'> = {
   expiresAt: null,
   product: {
     id: 'product-1',
-    unavailableAt: null,
-    affiliateLink: 'https://shopee.com/affiliate-link',
+    source: 'OFFICIAL',
+    providerProductId: 'provider-product-1',
+    productName: 'Produto',
+    shopName: 'Loja',
+    productLink,
+    affiliateLink,
+    price: '99.90',
+    priceMin: null,
+    priceMax: null,
+    discountRate: 20,
+    commissionRate: 10,
+    rating: 4.8,
+    sales: 100,
+    offerStartsAt: null,
     urlImagem: 'https://shopee.com/image.jpg',
+    offerEndsAt: null,
+    unavailableAt: null,
     commercialSnapshotRevision: 1,
+    commercialSnapshotFingerprint: commercialFingerprint,
+    updatedAt: new Date('2026-08-16T12:00:00.000Z'),
   },
   snapshot: {
     id: 'snap-1',
     productId: 'product-1',
     revision: 1,
+    fingerprint: commercialFingerprint,
     unavailableAt: null,
     offerEndsAt: null,
   },
@@ -58,6 +105,7 @@ const dispatch: WhatsAppDispatchDetails = {
     promotionCandidates: [],
   },
   destination: {
+    id: 'dest-1',
     destination: 'mock-group-01',
     type: 'INDIVIDUAL',
     active: true,
@@ -65,19 +113,60 @@ const dispatch: WhatsAppDispatchDetails = {
     fingerprint: null,
     sourceInstanceName: 'affiliate-bot',
   },
-  product: { comissao: 0.2 },
+  product: {
+    comissao: 0.2,
+    urlImagem: '',
+    affiliateLink: 'https://shopee.com/affiliate-link',
+  },
 };
 
-const prismaMock = (dispatchData = dispatch) => ({
-  whatsAppDispatch: {
-    findUnique: vi.fn(async () => dispatchData),
-    updateMany: vi.fn(async () => ({ count: 1 })),
-    update: vi.fn(async ({ data }) => ({ ...dispatch, ...data })),
-  },
-});
+const prismaMock = (dispatchData = dispatch) => {
+  const rawDispatchData = {
+    ...dispatchData,
+    generatedCopy: {
+      ...dispatchData.generatedCopy,
+      promotionCandidates:
+        dispatchData.generatedCopy.promotionCandidates?.map((candidate) => ({
+          ...candidate,
+          product: {
+            id: candidate.product.id,
+            source: candidate.product.source,
+            providerProductId: candidate.product.providerProductId,
+            nome: candidate.product.productName,
+            loja: candidate.product.shopName,
+            productLink: candidate.product.productLink,
+            affiliateLink: candidate.product.affiliateLink,
+            preco: candidate.product.price,
+            precoMin: candidate.product.priceMin,
+            precoMax: candidate.product.priceMax,
+            desconto: candidate.product.discountRate,
+            comissao: candidate.product.commissionRate,
+            nota: candidate.product.rating,
+            vendidos: candidate.product.sales,
+            offerStartsAt: candidate.product.offerStartsAt,
+            urlImagem: candidate.product.urlImagem,
+            offerEndsAt: candidate.product.offerEndsAt,
+            unavailableAt: candidate.product.unavailableAt,
+            commercialSnapshotRevision:
+              candidate.product.commercialSnapshotRevision,
+            commercialSnapshotFingerprint:
+              candidate.product.commercialSnapshotFingerprint,
+            updatedAt: candidate.product.updatedAt,
+          },
+        })) ?? [],
+    },
+  };
+  return {
+    whatsAppDispatch: {
+      findUnique: vi.fn(async () => rawDispatchData),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+      update: vi.fn(async ({ data }) => ({ ...dispatch, ...data })),
+    },
+  };
+};
 
 const createService = (
-  prisma = prismaMock(),
+  prisma: object = prismaMock(),
   provider: WhatsAppProvider = new MockWhatsAppProvider(),
   options?: {
     draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
@@ -88,6 +177,13 @@ const createService = (
     dispatches: new PrismaWhatsAppDispatchRepository(prisma as never),
     provider,
     logger,
+    groupSendPolicy:
+      options?.groupSendPolicy ??
+      new WhatsAppGroupSendPolicy({
+        enabled: true,
+        safeMode: true,
+        instanceName: 'affiliate-bot',
+      }),
     ...(options || {}),
   });
 
@@ -275,13 +371,67 @@ describe('SenderService', () => {
   });
 
   describe('Integração com CommercialMessageDraftService', () => {
-    const commercialDispatch = {
+    const commercialDispatch: WhatsAppDispatchDetails = {
       ...dispatch,
+      destination: {
+        id: 'dest-1',
+        destination: groupDestination,
+        type: 'GROUP',
+        active: true,
+        available: true,
+        fingerprint: groupFingerprint,
+        sourceInstanceName: 'affiliate-bot',
+      },
       generatedCopy: {
         ...dispatch.generatedCopy,
+        source: 'AI',
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        snapshotId: 'snap-1',
         createdFromCandidateId: 'candidate-123',
         promotionCandidates: [mockCandidate],
       },
+    }
+
+    const cloneCommercialDispatch = (): WhatsAppDispatchDetails =>
+      structuredClone(commercialDispatch);
+
+    const candidateFrom = (dispatchData: WhatsAppDispatchDetails) => {
+      const [candidate] = dispatchData.generatedCopy.promotionCandidates ?? [];
+      if (!candidate) throw new Error('commercial candidate fixture missing');
+      return candidate;
+    };
+
+    const validDraftService = () =>
+      ({
+        createDraft: vi.fn(() => ({
+          candidateId: 'candidate-123',
+          generatedCopyId: 'copy-1',
+          warnings: [],
+          caption: `Oferta certificada ${affiliateLink}`,
+          imageUrl: 'https://shopee.com/image.jpg',
+          deliveryMode: 'IMAGE' as const,
+        })),
+      }) satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
+
+    const expectPreClaimFailure = async (
+      dispatchData: WhatsAppDispatchDetails,
+      expectedCode: string,
+      draftService: Pick<CommercialMessageDraftService, 'createDraft'> = validDraftService(),
+    ) => {
+      const prisma = prismaMock(dispatchData);
+      const provider = new MockWhatsAppProvider();
+      logger.error.mockClear();
+      await expect(
+        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1'),
+      ).rejects.toMatchObject({ code: expectedCode });
+      expect(prisma.whatsAppDispatch.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
+      expect(provider.sentMessages).toHaveLength(0);
+      const serializedLogs = JSON.stringify(logger.error.mock.calls);
+      expect(serializedLogs).not.toContain(affiliateLink);
+      expect(serializedLogs).not.toContain(groupDestination);
+      expect(serializedLogs).not.toContain('Oferta certificada');
     };
 
     it('usa draft com imagem se candidato válido e draft image for gerado', async () => {
@@ -290,7 +440,7 @@ describe('SenderService', () => {
       const draftService = {
         createDraft: vi.fn(() => ({
           candidateId: 'candidate-123',
-          generatedCopyId: 'copy-123',
+          generatedCopyId: 'copy-1',
           warnings: [],
           caption: 'Draft caption',
           imageUrl: 'https://shopee.com/image.jpg',
@@ -314,12 +464,13 @@ describe('SenderService', () => {
       const prisma = prismaMock({
         ...commercialDispatch,
         destination: {
-          destination: 'mock-group-01',
+          id: 'dest-1',
+          destination: groupDestination,
           type: 'GROUP',
           active: true,
           available: true,
           sourceInstanceName: 'affiliate-bot',
-          fingerprint: 'grp_123456789abc',
+          fingerprint: groupFingerprint,
         },
         generatedCopy: {
           ...commercialDispatch.generatedCopy,
@@ -332,7 +483,7 @@ describe('SenderService', () => {
       const draftService = {
         createDraft: vi.fn(() => ({
           candidateId: 'candidate-123',
-          generatedCopyId: 'copy-123',
+          generatedCopyId: 'copy-1',
           warnings: [],
           caption: 'Draft caption',
           imageUrl: 'https://shopee.com/image.jpg',
@@ -355,7 +506,7 @@ describe('SenderService', () => {
 
       expect(provider.sentMessages).toHaveLength(1);
       expect(provider.sentMessages[0]).toMatchObject({
-        destination: 'mock-group-01',
+        destination: groupDestination,
         message: 'Draft caption',
         imageUrl: 'https://shopee.com/image.jpg',
         destinationType: 'GROUP',
@@ -430,9 +581,14 @@ describe('SenderService', () => {
       expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
     });
 
-    it('fluxo legado: envia apenas texto e não chama draftService se createdFromCandidateId for nulo', async () => {
+    it('fluxo classico sem imagem usa fallback texto e nao chama draftService', async () => {
       const dispatchLegado = {
         ...commercialDispatch,
+        product: {
+          comissao: 0.2,
+          urlImagem: '',
+          affiliateLink: 'https://shopee.com/affiliate-link',
+        },
         generatedCopy: {
           ...commercialDispatch.generatedCopy,
           createdFromCandidateId: null,
@@ -452,40 +608,101 @@ describe('SenderService', () => {
         message: expect.stringContaining(dispatchLegado.generatedCopy.titulo),
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'whatsapp.dispatch.image_fallback',
+          warningCodes: ['COMMERCIAL_MESSAGE_IMAGE_MISSING'],
+        }),
+        'Commercial message falling back to text',
+      );
       expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
     });
 
-    it('bloqueia candidate-scoped quando draft disser deliveryMode=TEXT', async () => {
+    it('fluxo classico com imagem valida envia media preservando a mensagem como caption', async () => {
+      const dispatchWithImage = {
+        ...commercialDispatch,
+        product: {
+          comissao: 0.2,
+          urlImagem: 'https://cdn.example.com/product.jpg',
+          affiliateLink: 'https://shopee.com/affiliate-link',
+        },
+        generatedCopy: {
+          ...commercialDispatch.generatedCopy,
+          createdFromCandidateId: null,
+          promotionCandidates: [],
+        },
+      };
+      const prisma = prismaMock(dispatchWithImage);
+      const provider = new MockWhatsAppProvider();
+
+      await createService(prisma, provider).sendDispatch('dispatch-1');
+
+      expect(provider.sentMessages).toHaveLength(1);
+      expect(provider.sentMessages[0]).toMatchObject({
+        message: buildWhatsAppPublicMessage(dispatchWithImage.generatedCopy),
+        imageUrl: 'https://cdn.example.com/product.jpg',
+      });
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
+    });
+
+    it('fluxo classico com URL de imagem invalida faz fallback texto seguro', async () => {
+      const invalidImageDispatch = {
+        ...commercialDispatch,
+        product: {
+          comissao: 0.2,
+          urlImagem: 'not-a-url',
+          affiliateLink: 'https://shopee.com/affiliate-link',
+        },
+        generatedCopy: {
+          ...commercialDispatch.generatedCopy,
+          createdFromCandidateId: null,
+          promotionCandidates: [],
+        },
+      };
+      const prisma = prismaMock(invalidImageDispatch);
+      const provider = new MockWhatsAppProvider();
+
+      await createService(prisma, provider).sendDispatch('dispatch-1');
+
+      expect(provider.sentMessages).toHaveLength(1);
+      expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'whatsapp.dispatch.image_fallback',
+          warningCodes: ['COMMERCIAL_MESSAGE_IMAGE_URL_INVALID'],
+        }),
+        'Commercial message falling back to text',
+      );
+    });
+    it('candidate-scoped faz fallback texto quando a imagem esta ausente', async () => {
       const prisma = prismaMock(commercialDispatch);
       const provider = new MockWhatsAppProvider();
       const draftService = {
         createDraft: vi.fn(() => ({
           candidateId: 'candidate-123',
-          generatedCopyId: 'copy-123',
-          warnings: [],
+          generatedCopyId: 'copy-1',
+          warnings: ['COMMERCIAL_MESSAGE_IMAGE_MISSING'],
           caption: 'Draft caption text',
-          imageUrl: 'https://shopee.com/image.jpg',
+          imageUrl: null,
           deliveryMode: 'TEXT' as const,
         })),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1'),
-      ).rejects.toMatchObject({
-        code: 'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED',
-      });
+      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
 
-      expect(provider.sentMessages).toHaveLength(0);
-      expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
+      expect(provider.sentMessages).toHaveLength(1);
+      expect(provider.sentMessages[0]).toMatchObject({ message: 'Draft caption text' });
+      expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
     });
 
-    it('bloqueia candidate-scoped quando draft possui warning', async () => {
+    it('candidate-scoped faz fallback texto quando a URL de imagem e invalida', async () => {
       const prisma = prismaMock(commercialDispatch);
       const provider = new MockWhatsAppProvider();
       const draftService = {
         createDraft: vi.fn(() => ({
           candidateId: 'candidate-123',
-          generatedCopyId: 'copy-123',
+          generatedCopyId: 'copy-1',
           warnings: ['COMMERCIAL_MESSAGE_IMAGE_URL_INVALID'],
           caption: 'Draft caption',
           imageUrl: null,
@@ -493,14 +710,12 @@ describe('SenderService', () => {
         })),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1'),
-      ).rejects.toMatchObject({
-        code: 'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED',
-      });
+      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
 
-      expect(provider.sentMessages).toHaveLength(0);
-      expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
+      expect(provider.sentMessages).toHaveLength(1);
+      expect(provider.sentMessages[0]).toMatchObject({ message: 'Draft caption' });
+      expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
     });
 
     it('bloqueia candidate-scoped quando imageUrl esta ausente', async () => {
@@ -509,7 +724,7 @@ describe('SenderService', () => {
       const draftService = {
         createDraft: vi.fn(() => ({
           candidateId: 'candidate-123',
-          generatedCopyId: 'copy-123',
+          generatedCopyId: 'copy-1',
           warnings: [],
           caption: 'Draft caption',
           imageUrl: null,
@@ -527,6 +742,120 @@ describe('SenderService', () => {
       expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
     });
 
+    describe('boundary fail-closed de identidade e provenance', () => {
+      it('bloqueia snapshot fingerprint divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        candidateFrom(dispatchData).snapshot.fingerprint = 'snapshot-divergente';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH');
+      });
+
+      it('bloqueia product commercialSnapshotFingerprint divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        candidateFrom(dispatchData).product.commercialSnapshotFingerprint = 'product-fingerprint-divergente';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH');
+      });
+
+      it('bloqueia provenance invalida', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        candidateFrom(dispatchData).product.productLink = 'ftp://produto-invalido';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID');
+      });
+
+      it('bloqueia affiliateLink divergente do contrato afiliado', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        const candidate = candidateFrom(dispatchData);
+        candidate.product.affiliateLink = candidate.product.productLink;
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_NOT_AFFILIATE');
+      });
+
+      it('bloqueia campaign fingerprint divergente do target', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        candidateFrom(dispatchData).campaign.logicalGroupFingerprint = 'grp_bbbbbbbbbbbb';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH');
+      });
+
+      it('bloqueia destination id divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.destination.id = 'dest-outro';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+      });
+
+      it('bloqueia group fingerprint divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.destination.fingerprint = 'grp_cccccccccccc';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH');
+      });
+
+      it('bloqueia instance divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.destination.sourceInstanceName = 'outra-instancia';
+        await expectPreClaimFailure(dispatchData, 'WHATSAPP_GROUP_INSTANCE_MISMATCH');
+      });
+    });
+
+    describe('boundary fail-closed de draft, copy e relacoes', () => {
+      it('bloqueia draft candidateId divergente', async () => {
+        const draftService = validDraftService();
+        draftService.createDraft.mockReturnValue({
+          candidateId: 'candidate-outro', generatedCopyId: 'copy-1', warnings: [],
+          caption: `Oferta certificada ${affiliateLink}`,
+          imageUrl: 'https://shopee.com/image.jpg', deliveryMode: 'IMAGE',
+        });
+        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_MESSAGE_RELATION_MISMATCH', draftService);
+      });
+
+      it('bloqueia draft generatedCopyId divergente', async () => {
+        const draftService = validDraftService();
+        draftService.createDraft.mockReturnValue({
+          candidateId: 'candidate-123', generatedCopyId: 'copy-outra', warnings: [],
+          caption: `Oferta certificada ${affiliateLink}`,
+          imageUrl: 'https://shopee.com/image.jpg', deliveryMode: 'IMAGE',
+        });
+        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_MESSAGE_RELATION_MISMATCH', draftService);
+      });
+
+      it('bloqueia Copy V10 version divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.generatedCopy.promptVersion = 'commercial-promotion-copy-v9';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE');
+      });
+
+      it('bloqueia validation version divergente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.generatedCopy.validationVersion = 'commercial-promotion-copy-validation-v3';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE');
+      });
+
+      it('bloqueia candidate ausente sem fallback legado', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.generatedCopy.promotionCandidates = [];
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+      });
+
+      it('bloqueia multiplos candidates sem fallback legado', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        const candidate = candidateFrom(dispatchData);
+        dispatchData.generatedCopy.promotionCandidates = [candidate, structuredClone(candidate)];
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+      });
+
+      it('bloqueia draft IMAGE sem imagem valida', async () => {
+        const draftService = validDraftService();
+        draftService.createDraft.mockReturnValue({
+          candidateId: 'candidate-123', generatedCopyId: 'copy-1', warnings: [],
+          caption: `Oferta certificada ${affiliateLink}`,
+          imageUrl: '', deliveryMode: 'IMAGE',
+        });
+        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED', draftService);
+      });
+
+      it('bloqueia relacao product/snapshot inconsistente', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        candidateFrom(dispatchData).snapshot.productId = 'product-outro';
+        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID');
+      });
+    });
+
     describe('Testes com CommercialMessageDraftService real', () => {
       const buildRealDispatch = (): WhatsAppDispatchDetails => {
         const now = new Date();
@@ -538,51 +867,40 @@ describe('SenderService', () => {
           status: 'PENDING',
           attemptCount: 0,
           destination: {
-            type: 'INDIVIDUAL',
-            destination: '11999999999',
+            id: 'dest-1',
+            type: 'GROUP',
+            destination: groupDestination,
             active: true,
             available: true,
-            fingerprint: null,
+            fingerprint: groupFingerprint,
             sourceInstanceName: 'affiliate-bot',
           },
-          product: { comissao: 0.2 },
+          product: {
+            comissao: 0.2,
+            urlImagem: '',
+            affiliateLink,
+          },
           generatedCopy: {
             id: 'copy-1',
             productId: 'product-1',
             snapshotId: 'snap-1',
-            createdFromCandidateId: 'candidate-1',
+            createdFromCandidateId: 'candidate-123',
+            source: 'AI',
+            promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+            validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
             titulo: 'Title',
             mensagem: 'Message',
-            cta: 'CTA https://shope.ee/link',
+            cta: `CTA ${affiliateLink}`,
             hashtags: '#hash',
             promotionCandidates: [
               {
-                id: 'candidate-1',
-                productId: 'product-1',
-                snapshotId: 'snap-1',
-                generatedCopyId: 'copy-1',
-                status: 'COPY_READY',
+                ...mockCandidate,
                 expiresAt: new Date(now.getTime() + 100000),
-                product: {
-                  id: 'product-1',
-                  unavailableAt: null,
-                  affiliateLink: 'https://shope.ee/link',
-                  urlImagem: 'https://shopee.com/image.jpg',
-                  commercialSnapshotRevision: 1,
-                },
-                snapshot: {
-                  id: 'snap-1',
-                  productId: 'product-1',
-                  revision: 1,
-                  unavailableAt: null,
-                  offerEndsAt: null,
-                },
               },
             ],
           },
         };
       };
-
       it('generatedCopy.productId diferente do produto gera erro de integridade de relação', async () => {
         const dispatchObj = buildRealDispatch();
         dispatchObj.generatedCopy.productId = 'other-product';

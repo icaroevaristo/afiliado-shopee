@@ -309,6 +309,7 @@ model Coupon {
 
 model CommercialPipelineRun {
   id                    String                         @id @default(cuid())
+  executionId           String?                        @unique
   mode                  CommercialPipelineRunMode
   status                CommercialPipelineRunStatus
   productId             String?
@@ -383,6 +384,7 @@ model CommercialAutomationExecution {
   leaseExpiresAt  DateTime?
   mode            CommercialAutomationExecutionMode
   status          CommercialAutomationExecutionStatus
+  externalStage   CommercialAutomationExecutionExternalStage @default(NOT_REACHED)
   reasons         Json
   commercialRunId String?
   failureCode     String?
@@ -451,6 +453,11 @@ enum CommercialDispatchOutboxStatus {
 enum CommercialAutomationExecutionMode {
   PREVIEW
   SEND
+}
+
+enum CommercialAutomationExecutionExternalStage {
+  NOT_REACHED
+  EXTERNAL_MAY_HAVE_STARTED
 }
 
 enum CommercialAutomationExecutionStatus {

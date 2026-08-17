@@ -38,6 +38,7 @@ import type {
 import type { ScoreService } from './score-service';
 
 export type CommercialPipelineInput = {
+  executionId?: string | null;
   source?: 'MOCK' | 'MANUAL' | 'OFFICIAL';
   categoryId?: string;
   minPrice?: number;
@@ -50,7 +51,6 @@ export type CommercialPipelineInput = {
   campaign?: string;
   limitCandidates?: number;
   target?: CommercialAutomationTarget;
-  executionId?: string | null;
 };
 
 type NormalizedCommercialPipelineInput = Required<
@@ -287,6 +287,7 @@ export class CommercialPipelineService {
     const run = await this.options.runs.create({
       mode: 'DRY_RUN',
       status: 'STARTED',
+      executionId: input.executionId ?? null,
       candidateCount: 0,
       eligibleCount: 0,
       rejectedCount: 0,
@@ -638,6 +639,7 @@ export class CommercialPipelineService {
     const run = await this.options.runs.create({
       mode: 'DRY_RUN',
       status: 'STARTED',
+      executionId: input.executionId,
       candidateCount: input.candidateCount,
       eligibleCount: input.eligibleCount,
       rejectedCount: input.rejectedCount,

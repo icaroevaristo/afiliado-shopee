@@ -228,6 +228,9 @@ describe('EvolutionApiWhatsAppProvider', () => {
     'javascript:alert(1)',
     'file:///tmp/image.jpg',
     'data:image/png;base64,abc',
+    'https://example.com/im\nage.jpg',
+    'https://example.com/im\tage.jpg',
+    "https://example.com/im\u0000age.jpg",
   ])('rejeita imagem com URL/esquema invalido (%s) e nao chama httpClient', async (invalidUrl) => {
     const httpClient = vi.fn();
     const provider = createProvider(httpClient);

@@ -7,6 +7,11 @@ import type { CommercialMessageDraftService } from '../../api/src/commercial-mes
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { Job } from 'bullmq';
 import type { WhatsAppDispatchDetails } from '../../api/src/repositories';
+import { fingerprintCommercialOffer } from '../../api/src/commercial-offer-snapshot';
+import {
+  COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+} from '../../api/src/commercial-ai-copy-prompt';
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 
 const fakeDestination = {
@@ -46,7 +51,7 @@ const fakeProduct = {
   commercialSnapshotFingerprint: 'hash',
 };
 
-const fakeCopy = {
+const fakeCopy: WhatsAppDispatchDetails['generatedCopy'] = {
   id: 'copy-123',
   productId: 'prod-123',
   snapshotId: 'snap-123',
@@ -54,37 +59,11 @@ const fakeCopy = {
   mensagem: 'Message',
   cta: 'Buy now',
   hashtags: '#sale',
-  createdAt: new Date(),
-  createdFromCandidateId: 'candidate-123',
-  promotionCandidates: [
-    {
-      id: 'candidate-123',
-      status: 'COPY_READY' as const,
-      productId: 'prod-123',
-      snapshotId: 'snap-123',
-      generatedCopyId: 'copy-123',
-      createdAt: new Date(),
-      expiresAt: null,
-      snapshot: {
-        id: 'snap-123',
-        productId: 'prod-123',
-        revision: 1,
-        fingerprint: 'hash',
-        preco: 10,
-        comissao: 1,
-        desconto: 0,
-        nota: 5,
-        vendidos: 100,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        unavailableAt: null,
-        offerEndsAt: null,
-      },
-      product: fakeProduct,
-    },
-  ],
+  createdFromCandidateId: null,
+  source: 'AI',
+  promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
 };
-
 const fakeDispatch: WhatsAppDispatchDetails = {
   id: 'dispatch-123',
   destinationId: 'dest-123',
@@ -102,6 +81,109 @@ const fakeDispatch: WhatsAppDispatchDetails = {
   generatedCopy: fakeCopy,
 };
 
+const commercialGroupId = '120363000000000000@g.us';
+const commercialGroupFingerprint = fingerprintWhatsAppGroupId(commercialGroupId);
+const commercialProductLink = 'https://shopee.com.br/product/1/1';
+const commercialAffiliateLink = 'https://shope.ee/affiliate-product-1';
+const commercialFingerprint = fingerprintCommercialOffer({
+  source: 'OFFICIAL',
+  providerProductId: 'prod-id-1',
+  productLink: commercialProductLink,
+  affiliateLink: commercialAffiliateLink,
+  price: '10',
+  priceMin: null,
+  priceMax: null,
+  discountRate: 0,
+  commissionRate: 1,
+  offerStartsAt: null,
+  offerEndsAt: null,
+  unavailableAt: null,
+});
+
+const commercialDispatch: WhatsAppDispatchDetails = {
+  ...fakeDispatch,
+  destination: {
+    id: 'dest-commercial',
+    destination: commercialGroupId,
+    type: 'GROUP',
+    active: true,
+    available: true,
+    fingerprint: commercialGroupFingerprint,
+    sourceInstanceName: 'instance',
+  },
+  destinationId: 'dest-commercial',
+  product: {
+    comissao: 1,
+    urlImagem: 'https://shopee.com.br/image.jpg',
+    affiliateLink: commercialAffiliateLink,
+  },
+  generatedCopy: {
+    id: 'copy-123',
+    productId: 'prod-123',
+    snapshotId: 'snap-123',
+    titulo: 'Title',
+    mensagem: 'Message',
+    cta: `Buy now ${commercialAffiliateLink}`,
+    hashtags: '#sale',
+    createdFromCandidateId: 'candidate-123',
+    source: 'AI',
+    promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+    validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+    promotionCandidates: [
+      {
+        id: 'candidate-123',
+        campaignId: 'campaign-1',
+        campaign: {
+          id: 'campaign-1',
+          logicalGroupFingerprint: commercialGroupFingerprint,
+        },
+        status: 'COPY_READY',
+        productId: 'prod-123',
+        snapshotId: 'snap-123',
+        generatedCopyId: 'copy-123',
+        expiresAt: null,
+        snapshot: {
+          id: 'snap-123',
+          productId: 'prod-123',
+          revision: 1,
+          fingerprint: commercialFingerprint,
+          unavailableAt: null,
+          offerEndsAt: null,
+        },
+        product: {
+          id: 'prod-123',
+          source: 'OFFICIAL',
+          providerProductId: 'prod-id-1',
+          productName: 'Test',
+          shopName: 'Shopee',
+          productLink: commercialProductLink,
+          affiliateLink: commercialAffiliateLink,
+          price: '10',
+          priceMin: null,
+          priceMax: null,
+          discountRate: 0,
+          commissionRate: 1,
+          rating: 5,
+          sales: 100,
+          offerStartsAt: null,
+          urlImagem: 'https://shopee.com.br/image.jpg',
+          offerEndsAt: null,
+          unavailableAt: null,
+          commercialSnapshotRevision: 1,
+          commercialSnapshotFingerprint: commercialFingerprint,
+          updatedAt: new Date(),
+        },
+      },
+    ],
+  },
+};
+
+const commercialGroupSendPolicy = () =>
+  new WhatsAppGroupSendPolicy({
+    enabled: true,
+    safeMode: true,
+    instanceName: 'instance',
+  });
 describe('processWhatsAppDispatchJob', () => {
   it('inicia runs deterministicas para dois jobs GROUP no mesmo provider', async () => {
     const groupId = '120363000000000000@g.us';
@@ -259,8 +341,8 @@ describe('processWhatsAppDispatchJob', () => {
 
   it('dispatch comercial recebe draftService sem COMMERCIAL_MESSAGE_DRAFT_SERVICE_UNAVAILABLE e chama provider uma vez para draft IMAGE', async () => {
     const markAttemptPending = vi.fn().mockResolvedValue(true);
-    const markSent = vi.fn().mockResolvedValue(fakeDispatch);
-    const findByIdWithDetails = vi.fn().mockResolvedValue(fakeDispatch);
+    const markSent = vi.fn().mockResolvedValue(commercialDispatch);
+    const findByIdWithDetails = vi.fn().mockResolvedValue(commercialDispatch);
 
     const repositories: WhatsAppDispatchProcessorRepositories = {
       whatsappDispatches: {
@@ -268,7 +350,7 @@ describe('processWhatsAppDispatchJob', () => {
         markAttemptPending,
         markSent,
         createPending: vi.fn(),
-        findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
+        findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
       },
@@ -314,12 +396,14 @@ describe('processWhatsAppDispatchJob', () => {
       whatsAppProvider,
       logger,
       draftService,
+      groupSendPolicy: commercialGroupSendPolicy(),
     });
 
     expect(draftService.createDraft).toHaveBeenCalledOnce();
     expect(whatsAppProvider.sendMessage).toHaveBeenCalledOnce();
     expect(whatsAppProvider.sendMessage).toHaveBeenCalledWith({
-      destination: '5511999999999',
+      destination: commercialGroupId,
+      destinationType: 'GROUP',
       message: 'draft text',
       imageUrl: 'http://image',
     });
@@ -328,8 +412,8 @@ describe('processWhatsAppDispatchJob', () => {
 
   it('falha na criacao do draft nao chama o provider e falha sem tentativas adicionais', async () => {
     const markAttemptPending = vi.fn().mockResolvedValue(true);
-    const markFailed = vi.fn().mockResolvedValue(fakeDispatch);
-    const findByIdWithDetails = vi.fn().mockResolvedValue(fakeDispatch);
+    const markFailed = vi.fn().mockResolvedValue(commercialDispatch);
+    const findByIdWithDetails = vi.fn().mockResolvedValue(commercialDispatch);
 
     const repositories: WhatsAppDispatchProcessorRepositories = {
       whatsappDispatches: {
@@ -338,7 +422,7 @@ describe('processWhatsAppDispatchJob', () => {
         markFailed,
         markSent: vi.fn(),
         createPending: vi.fn(),
-        findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
+        findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
       },
       commercialRuns: {
@@ -375,6 +459,7 @@ describe('processWhatsAppDispatchJob', () => {
         whatsAppProvider,
         logger,
         draftService,
+        groupSendPolicy: commercialGroupSendPolicy(),
       })
     ).rejects.toThrow('Falha ao montar mensagem');
 
@@ -393,7 +478,7 @@ describe('processWhatsAppDispatchJob', () => {
       'COMMERCIAL_PIPELINE_RUN_FINALIZATION_CONFLICT',
     );
     const dispatch = {
-      ...fakeDispatch,
+      ...commercialDispatch,
       status: 'PROCESSING' as const,
       attemptCount: 1,
     };

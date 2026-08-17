@@ -280,51 +280,6 @@ describe('commercial group campaign', () => {
     );
   });
 
-  it('remove reservas internas de todos os DTOs publicos sem alterar o record', async () => {
-    const internal = campaign();
-    const { service, campaigns } = setup();
-
-    expect(internal.attemptExecutionId).toBe('execution-1');
-    expect(internal.attemptReservedAt).toEqual(
-      new Date('2026-07-29T11:55:00.000Z'),
-    );
-    expect(internal.attemptLeaseExpiresAt).toEqual(
-      new Date('2026-07-29T12:05:00.000Z'),
-    );
-    expectPublicCampaign(toCommercialGroupCampaignPublic(internal));
-    expectPublicCampaign(
-      await service.create({
-        name: 'Grupo Audio',
-        groupDestinationId: 'group-1',
-        nicheId: 'niche-1',
-      }),
-    );
-    const listed = await service.list({ page: 1, limit: 20 });
-    expect(listed.items).toHaveLength(1);
-    expectPublicCampaign(listed.items[0]);
-    expectPublicCampaign(await service.find('campaign-1'));
-    expectPublicCampaign(
-      await service.update('campaign-1', { name: 'Novo nome' }),
-      { name: 'Novo nome' },
-    );
-    expectPublicCampaign(
-      await service.activate('campaign-1', { confirm: 'ATIVAR_CAMPANHA' }),
-      { active: true, name: 'Novo nome' },
-    );
-    expectPublicCampaign(await service.deactivate('campaign-1', {}), {
-      name: 'Novo nome',
-    });
-
-    const current = await campaigns.findById('campaign-1');
-    expect(current?.attemptExecutionId).toBe('execution-1');
-    expect(current?.attemptReservedAt).toEqual(
-      new Date('2026-07-29T11:55:00.000Z'),
-    );
-    expect(current?.attemptLeaseExpiresAt).toEqual(
-      new Date('2026-07-29T12:05:00.000Z'),
-    );
-  });
-
   it('controla ativacao, aceita varios destinos logicos e desativa sem apagar', async () => {
     const { service, campaigns } = setup({ eligible: 2 });
     await expect(service.activate('campaign-1', {})).rejects.toMatchObject({

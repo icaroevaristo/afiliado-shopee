@@ -31,7 +31,11 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
 > & {
   commercialPromotions?: Pick<
     ApplicationRepositories['commercialPromotions'],
-    'markDispatchedByGeneratedCopyId' | 'markBlockedByGeneratedCopyId'
+    | 'markDispatchedByGeneratedCopyId'
+    | 'markBlockedByGeneratedCopyId'
+    | 'resetCampaignFailureStateByGeneratedCopyId'
+    | 'findAttemptContextByGeneratedCopyId'
+    | 'releaseAttempt'
   >;
 };
 

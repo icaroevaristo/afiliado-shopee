@@ -193,3 +193,96 @@ describe('PrismaCommercialPipelineRunRepository.finalizeByDispatchId', () => {
     });
   });
 });
+
+const runData = (executionId: string | null = null) => ({
+  mode: 'DRY_RUN' as const,
+  status: 'STARTED' as const,
+  executionId,
+  candidateCount: 0,
+  eligibleCount: 0,
+  rejectedCount: 0,
+  rejectionSummary: {},
+  selectionReasons: [],
+  plannedSubIds: [],
+  createdAt: new Date('2026-08-14T12:00:00.000Z'),
+  completedAt: null,
+});
+
+const persistedRun = (executionId: string | null = null) => ({
+  ...runData(executionId),
+  id: 'run-id',
+  createdAt: new Date('2026-08-14T12:00:00.000Z'),
+});
+
+describe('PrismaCommercialPipelineRunRepository.executionId', () => {
+  it('persists executionId when creating an automated run', async () => {
+    const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) =>
+      persistedRun(data.executionId as string | null));
+    const repository = new PrismaCommercialPipelineRunRepository({
+      commercialPipelineRun: { create },
+    } as never);
+
+    const result = await repository.create(runData('execution-1'));
+
+    expect(create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ executionId: 'execution-1' }),
+    });
+    expect(result.executionId).toBe('execution-1');
+  });
+
+  it('translates an execution uniqueness conflict without reassociating a run', async () => {
+    const create = vi.fn(async () => {
+      throw { code: 'P2002' };
+    });
+    const repository = new PrismaCommercialPipelineRunRepository({
+      commercialPipelineRun: { create },
+    } as never);
+
+    await expect(repository.create(runData('execution-1'))).rejects.toMatchObject({
+      code: 'COMMERCIAL_PIPELINE_RUN_EXECUTION_CONFLICT',
+    });
+  });
+
+  it('rejects attaching an execution after a legacy run was created', async () => {
+    const findUnique = vi.fn(async () => ({ executionId: null }));
+    const update = vi.fn();
+    const repository = new PrismaCommercialPipelineRunRepository({
+      commercialPipelineRun: { findUnique, update },
+    } as never);
+
+    await expect(
+      repository.update('run-id', { executionId: 'execution-1' }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_PIPELINE_RUN_EXECUTION_LINK_IMMUTABLE',
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('rejects reassociating an automated run to another execution', async () => {
+    const findUnique = vi.fn(async () => ({ executionId: 'execution-1' }));
+    const update = vi.fn();
+    const repository = new PrismaCommercialPipelineRunRepository({
+      commercialPipelineRun: { findUnique, update },
+    } as never);
+
+    await expect(
+      repository.update('run-id', { executionId: 'execution-2' }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_PIPELINE_RUN_EXECUTION_LINK_IMMUTABLE',
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('allows an idempotent update with the same execution', async () => {
+    const findUnique = vi.fn(async () => ({ executionId: 'execution-1' }));
+    const update = vi.fn(async () => persistedRun('execution-1'));
+    const repository = new PrismaCommercialPipelineRunRepository({
+      commercialPipelineRun: { findUnique, update },
+    } as never);
+
+    await expect(
+      repository.update('run-id', { executionId: 'execution-1' }),
+    ).resolves.toMatchObject({ executionId: 'execution-1' });
+    expect(update).toHaveBeenCalledOnce();
+  });
+});

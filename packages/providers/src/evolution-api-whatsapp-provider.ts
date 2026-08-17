@@ -184,7 +184,13 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
       const rawImageUrl = input.imageUrl;
       imageRequested = rawImageUrl !== undefined && rawImageUrl !== null;
       if (imageRequested) {
-        const trimmed = typeof rawImageUrl === 'string' ? rawImageUrl.trim() : '';
+        if (
+          typeof rawImageUrl !== 'string' ||
+          /[\u0000-\u001f\u007f]/u.test(rawImageUrl)
+        ) {
+          throw new AppError('URL de imagem invalida', 'WHATSAPP_IMAGE_URL_INVALID');
+        }
+        const trimmed = rawImageUrl.trim();
         if (trimmed.length === 0) {
           throw new AppError('URL de imagem invalida', 'WHATSAPP_IMAGE_URL_INVALID');
         }

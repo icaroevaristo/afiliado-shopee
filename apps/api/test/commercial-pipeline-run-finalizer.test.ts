@@ -6,14 +6,19 @@ import type {
   CommercialPipelineRunFinalizationKind,
   CommercialPipelineRunRepository,
   CommercialPipelineRunFinalizationRepository,
+  CommercialPromotionAttemptContext,
   WhatsAppDispatchRecord,
 } from '../src/repositories';
 
 const now = new Date('2026-07-25T23:00:00.000Z');
 
-const build = (investigationRequired = false) => {
+const build = (
+  investigationRequired = false,
+  executionId: string | null = null,
+) => {
   let run: CommercialPipelineRunRecord = {
     id: 'run-id',
+    executionId,
     mode: 'CONFIRMED',
     status: 'STARTED',
     candidateCount: 1,
@@ -77,11 +82,15 @@ const build = (investigationRequired = false) => {
     return { kind, transitioned: true };
   });
   const update = vi.fn();
+  const findExecutionById = vi.fn(async (id: string) =>
+    id === run.executionId ? { id, commercialRunId: run.id } : null,
+  );
   const runs = {
     create: vi.fn(),
     list: vi.fn(),
     findById: vi.fn(),
     findByDispatchId: async (id: string) => (id === 'dispatch-id' ? run : null),
+    findExecutionById,
     update,
     finalizeByDispatchId,
   } as CommercialPipelineRunRepository &
@@ -97,9 +106,32 @@ const build = (investigationRequired = false) => {
     candidateId: 'candidate-id',
     transitioned: true,
   }));
+  const findAttemptContextByGeneratedCopyId = vi.fn<
+    (generatedCopyId: string) => Promise<CommercialPromotionAttemptContext>
+  >(async () => ({
+    kind: 'FOUND',
+    candidateId: 'candidate-id',
+    campaignId: 'campaign-id',
+    attemptExecutionId: executionId,
+  }));
   const promotionCandidates = {
     markDispatchedByGeneratedCopyId,
     markBlockedByGeneratedCopyId,
+    resetCampaignFailureStateByGeneratedCopyId: vi.fn(async () => ({
+      kind: 'RESET' as const,
+      campaignId: 'campaign-id',
+      transitioned: true,
+    })),
+    findAttemptContextByGeneratedCopyId,
+    releaseAttempt: vi.fn(async (input: {
+      campaignId: string;
+      executionId: string;
+    }) => ({
+      kind: 'RELEASED' as const,
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+      released: true,
+    })),
   };
   return {
     runs,
@@ -115,6 +147,8 @@ const build = (investigationRequired = false) => {
       run = { ...run, ...data };
     },
     getRun: () => run,
+    findExecutionById,
+    findAttemptContextByGeneratedCopyId,
   };
 };
 
@@ -167,6 +201,9 @@ describe('finalizeCommercialPipelineRun', () => {
     expect(
       state.promotionCandidates.markBlockedByGeneratedCopyId,
     ).not.toHaveBeenCalled();
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledWith('copy-id');
   });
 
   it('reconcilia SENT mesmo quando o run carregava investigação pendente', async () => {
@@ -214,6 +251,43 @@ describe('finalizeCommercialPipelineRun', () => {
       finalStatus: 'SENT',
       investigationRequired: false,
     });
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledTimes(2);
+  });
+
+  it('nao reseta o estado de campanha para FAILED ou PROCESSING', async () => {
+    const state = build();
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('FAILED'), true),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('PROCESSING'), true),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('repete somente o reset quando SENT ja estava finalizado e a limpeza anterior falhou', async () => {
+    const state = build();
+    state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId
+      .mockRejectedValueOnce(new Error('reset unavailable'));
+
+    await expect(
+      finalizeCommercialPipelineRun(finalizerOptions(state, dispatch('SENT'))),
+    ).rejects.toThrow('reset unavailable');
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(state.finalizeByDispatchId).toHaveBeenCalledTimes(2);
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledTimes(2);
   });
 
   it('persiste falha segura, bloqueia o candidato e nao autoriza retry', async () => {
@@ -494,4 +568,256 @@ describe('finalizeCommercialPipelineRun', () => {
       state.promotionCandidates.markBlockedByGeneratedCopyId,
     ).not.toHaveBeenCalled();
   });
-});
+
+  it('libera a reserva somente apos SENT e com o vinculo exato', async () => {
+    const state = build(false, 'execution-1');
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(state.findExecutionById).toHaveBeenCalledWith('execution-1');
+    expect(
+      state.findAttemptContextByGeneratedCopyId,
+    ).toHaveBeenCalledWith('copy-id');
+    expect(state.promotionCandidates.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-id',
+      executionId: 'execution-1',
+    });
+  });
+
+  it('mantem a reserva quando o vinculo da execution diverge do run', async () => {
+    const state = build(false, 'execution-1');
+    state.findExecutionById.mockResolvedValue({
+      id: 'execution-1',
+      commercialRunId: 'other-run',
+    });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+    expect(
+      state.findAttemptContextByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('mantem a reserva quando o candidato esta ausente ou ambiguo', async () => {
+    const state = build(false, 'execution-1');
+    state.findAttemptContextByGeneratedCopyId
+      .mockResolvedValueOnce({ kind: 'NONE' })
+      .mockResolvedValueOnce({ kind: 'AMBIGUOUS' });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('nao libera a reserva em FAILED ou PROCESSING', async () => {
+    const state = build(false, 'execution-1');
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('FAILED'), true),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('PROCESSING'), true),
+    );
+
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('repete a liberacao de SENT de forma idempotente', async () => {
+    const state = build(false, 'execution-1');
+    state.promotionCandidates.releaseAttempt
+      .mockResolvedValueOnce({
+        kind: 'RELEASED',
+        campaignId: 'campaign-id',
+        executionId: 'execution-1',
+        released: true,
+      })
+      .mockResolvedValueOnce({
+        kind: 'RELEASED',
+        campaignId: 'campaign-id',
+        executionId: 'execution-1',
+        released: false,
+      });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(state.promotionCandidates.releaseAttempt).toHaveBeenCalledTimes(2);
+  });
+
+  it('SENT automatizado valida todos os vinculos antes de resetar e liberar', async () => {
+    const state = build(false, 'execution-1');
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledWith('copy-id', {
+      campaignId: 'campaign-id',
+      executionId: 'execution-1',
+    });
+    expect(state.promotionCandidates.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-id',
+      executionId: 'execution-1',
+    });
+    const executionOrder = state.findExecutionById.mock.invocationCallOrder[0];
+    const contextOrder =
+      state.findAttemptContextByGeneratedCopyId.mock.invocationCallOrder[0];
+    const dispatchedOrder =
+      state.promotionCandidates.markDispatchedByGeneratedCopyId.mock
+        .invocationCallOrder[0];
+    const resetOrder =
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId.mock
+        .invocationCallOrder[0];
+    const releaseOrder =
+      state.promotionCandidates.releaseAttempt.mock.invocationCallOrder[0];
+    expect(executionOrder).toBeLessThan(contextOrder);
+    expect(contextOrder).toBeLessThan(dispatchedOrder);
+    expect(dispatchedOrder).toBeLessThan(resetOrder);
+    expect(resetOrder).toBeLessThan(releaseOrder);
+  });
+
+  it('execution ausente nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.findExecutionById.mockResolvedValue(null);
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('commercialRunId divergente nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.findExecutionById.mockResolvedValue({
+      id: 'execution-1',
+      commercialRunId: 'other-run',
+    });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('candidato ausente ou multiplo nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.findAttemptContextByGeneratedCopyId
+      .mockResolvedValueOnce({ kind: 'NONE' })
+      .mockResolvedValueOnce({ kind: 'AMBIGUOUS' });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('campaignId divergente nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.promotionCandidates.markDispatchedByGeneratedCopyId.mockResolvedValue({
+      kind: 'DISPATCHED',
+      candidateId: 'candidate-id',
+      campaignId: 'other-campaign',
+      transitioned: true,
+    });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('owner divergente nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.findAttemptContextByGeneratedCopyId.mockResolvedValue({
+      kind: 'FOUND',
+      candidateId: 'candidate-id',
+      campaignId: 'campaign-id',
+      attemptExecutionId: 'other-execution',
+    });
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('falha durante validacao nao altera estado de falha nem libera', async () => {
+    const state = build(false, 'execution-1');
+    state.findExecutionById.mockRejectedValue(new Error('validation unavailable'));
+
+    await expect(
+      finalizeCommercialPipelineRun(finalizerOptions(state, dispatch('SENT'))),
+    ).rejects.toThrow('validation unavailable');
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('run legado preserva reset sem contrato de reserva', async () => {
+    const state = build(false, null);
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledWith('copy-id');
+    expect(state.findExecutionById).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });
+  it('run ausente apos SENT nao reseta nem libera', async () => {
+    const state = build(false, 'execution-1');
+    vi.spyOn(state.runs, 'findByDispatchId').mockResolvedValue(null);
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).not.toHaveBeenCalled();
+    expect(state.findExecutionById).not.toHaveBeenCalled();
+    expect(state.promotionCandidates.releaseAttempt).not.toHaveBeenCalled();
+  });});
