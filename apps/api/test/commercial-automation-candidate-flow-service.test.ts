@@ -716,6 +716,12 @@ describe('CommercialAutomationCandidateFlowService', () => {
       'group-2',
       'group-1',
     ]);
+    subject.groups.list.mockResolvedValue([groupTwo, group()]);
+    const permutedTargets = await subject.service.listTargets();
+    expect(permutedTargets.map(({ groupId }) => groupId)).toEqual([
+      'group-2',
+      'group-1',
+    ]);
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
