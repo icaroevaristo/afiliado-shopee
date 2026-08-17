@@ -302,7 +302,7 @@ describe('OfficialShopeeAffiliateOfferProvider', () => {
       priceMax: '110.00',
       commissionAmount: '1.23',
       commissionRate: 1.23,
-      sellerCommissionRate: 0.22999999999999998,
+      sellerCommissionRate: 0.23,
       shopeeCommissionRate: 1,
       affiliateLink: 'https://s.shopee.com.br/affiliate-link-exato',
       categoryIds: ['100', '200'],
@@ -322,6 +322,23 @@ describe('OfficialShopeeAffiliateOfferProvider', () => {
     });
   });
 
+  it('converte ratios decimais em percentuais canonicos sem ruido binario', async () => {
+    const { provider } = createProvider([
+      officialNode({
+        commissionRate: '0.14',
+        sellerCommissionRate: '0.00125',
+        shopeeCommissionRate: '0.14125',
+      }),
+    ]);
+    const page = await provider.listProductOffers({ limit: 1 });
+    expect(page.rejected).toEqual([]);
+    expect(page.items[0]).toMatchObject({
+      commissionRate: 14,
+      sellerCommissionRate: 0.125,
+      shopeeCommissionRate: 14.125,
+    });
+    expect(page.items[0]?.commissionRate).not.toBe(Number('0.14') * 100);
+  });
   it.each([
     ['seconds observado', 1_785_196_800, '2026-07-28T00:00:00.000Z'],
     ['seconds far-future', 32_503_651_199, '2999-12-31T15:59:59.000Z'],

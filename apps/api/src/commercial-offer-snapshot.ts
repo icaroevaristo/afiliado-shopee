@@ -30,11 +30,18 @@ export const canonicalizeCommercialDecimal = (value: string): string => {
   return negative && magnitude !== '0' ? `-${magnitude}` : magnitude;
 };
 
+// Binary64 preserves at least 15 significant decimal digits; trim only representation noise beyond that.
+const COMMERCIAL_NUMBER_SIGNIFICANT_DIGITS = 15;
+
 const canonicalNumber = (value: number) => {
   if (!Number.isFinite(value)) {
     throw new TypeError('Commercial number must be finite');
   }
-  return Object.is(value, -0) ? '0' : String(value);
+  if (Object.is(value, -0)) return '0';
+  const persistenceStable = Number(
+    value.toPrecision(COMMERCIAL_NUMBER_SIGNIFICANT_DIGITS),
+  );
+  return Object.is(persistenceStable, -0) ? '0' : String(persistenceStable);
 };
 
 const canonicalDate = (value: Date | null | undefined) => {

@@ -453,10 +453,23 @@ const integerString = (value: unknown, code: string) => {
   throw new Error(code);
 };
 
+const decimalRatioToPercent = (ratio: string) => {
+  const [integerPart, fractionPart = ''] = ratio.split('.');
+  const digits = `${integerPart}${fractionPart}`.replace(/^0+(?=\d)/, '');
+  const decimalPlaces = Math.max(fractionPart.length - 2, 0);
+  if (decimalPlaces === 0) {
+    return Number(`${digits}${'0'.repeat(Math.max(2 - fractionPart.length, 0))}`);
+  }
+  const padded = digits.padStart(decimalPlaces + 1, '0');
+  const splitAt = padded.length - decimalPlaces;
+  return Number(`${padded.slice(0, splitAt)}.${padded.slice(splitAt)}`);
+};
+
 const percentFromRatio = (value: unknown, code: string) => {
-  const ratio = Number(decimalString(value, code));
+  const ratioText = decimalString(value, code);
+  const ratio = Number(ratioText);
   if (ratio < 0 || ratio > 1) throw new Error(code);
-  return ratio * 100;
+  return decimalRatioToPercent(ratioText);
 };
 
 const httpUrl = (value: unknown, code: string) => {
