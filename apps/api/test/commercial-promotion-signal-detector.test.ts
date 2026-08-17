@@ -211,7 +211,7 @@ const rankedCandidate = (
 });
 
 describe('rankCommercialPromotionCandidates', () => {
-  it('ordena por queda, percentual, score, desconto, comissao, vendas e ID', () => {
+  it('mantem o ranking promocional separado do score legado', () => {
     const values = [
       rankedCandidate('g'),
       rankedCandidate('f', { sales: 101 }),
@@ -234,7 +234,7 @@ describe('rankCommercialPromotionCandidates', () => {
     ).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g']);
   });
 
-  it('e deterministico e nao altera a entrada', () => {
+  it('preserva desempates deterministas e nao altera a entrada', () => {
     const values = [rankedCandidate('b'), rankedCandidate('a')];
     expect(
       rankCommercialPromotionCandidates(values).map(

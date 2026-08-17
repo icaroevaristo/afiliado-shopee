@@ -965,7 +965,6 @@ export type CouponData = {
   terms?: string | null;
   lastValidatedAt?: Date | null;
 };
-
 export type CouponRecord = CouponData & {
   id: string;
   createdAt: Date;

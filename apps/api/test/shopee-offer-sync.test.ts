@@ -69,6 +69,8 @@ class MemoryOfferRepository implements ShopeeOfferRepository {
         item.providerProductId === offer.providerProductId,
     );
     const commercialFingerprint = fingerprintCommercialOffer({
+      source: offer.source,
+      providerProductId: offer.providerProductId,
       price: offer.price,
       priceMin: offer.priceMin,
       priceMax: offer.priceMax,
@@ -128,6 +130,7 @@ class MemoryOfferRepository implements ShopeeOfferRepository {
 const manual = (overrides: Record<string, unknown> = {}) => ({
   providerProductId: 'manual-001',
   productName: 'Produto ficticio',
+  shopId: 'shop-fixture',
   shopName: 'Loja ficticia',
   price: '99.90',
   discountRate: 20,
@@ -319,6 +322,7 @@ describe('ShopeeOfferSyncService', () => {
           {
             source: 'OFFICIAL' as const,
             providerProductId: 'official-1',
+            shopId: 'shop-official-1',
             productName: 'Produto oficial ficticio',
             shopName: 'Loja ficticia',
             categoryIds: [],
@@ -446,4 +450,145 @@ describe('ShopeeOfferSyncService', () => {
     });
     expect(offers.snapshots.size).toBe(5);
   });
+
+  it('deduplica item OFFICIAL repetido na mesma pagina sem segunda persistencia', async () => {
+    const offer = {
+      ...manual({ providerProductId: 'same-item', shopId: 'shop-1' }),
+      source: 'OFFICIAL' as const,
+      categoryIds: [],
+      priceMin: '99.90',
+      priceMax: '99.90',
+      fetchedAt: observedAt,
+    } satisfies ShopeeProductOffer;
+    const offers = new MemoryOfferRepository();
+    const upsert = vi.spyOn(offers, 'upsertOfficialOfferWithSnapshot');
+    const service = new ShopeeOfferSyncService({
+      provider: {
+        source: 'OFFICIAL',
+        listProductOffers: async () => ({
+          items: [offer, { ...offer, price: '89.90' }],
+          page: 1,
+          limit: 2,
+          hasNextPage: false,
+        }),
+      },
+      offers,
+      maxOffersPerSync: 2,
+      logger,
+    });
+
+    await expect(service.run()).resolves.toMatchObject({
+      valid: 1,
+      skipped: 1,
+      rejectionSummary: { SHOPEE_OFFER_DUPLICATE: 1 },
+    });
+    expect(upsert).toHaveBeenCalledOnce();
+  });
+
+  it('falha fechado se o mesmo itemId OFFICIAL aparecer em lojas diferentes', async () => {
+    const first = {
+      ...manual({ providerProductId: 'same-item', shopId: 'shop-1' }),
+      source: 'OFFICIAL' as const,
+      categoryIds: [],
+      priceMin: '99.90',
+      priceMax: '99.90',
+      fetchedAt: observedAt,
+    } satisfies ShopeeProductOffer;
+    const second = { ...first, shopId: 'shop-2' };
+    const offers = new MemoryOfferRepository();
+    const upsert = vi.spyOn(offers, 'upsertOfficialOfferWithSnapshot');
+    const service = new ShopeeOfferSyncService({
+      provider: {
+        source: 'OFFICIAL',
+        listProductOffers: async () => ({
+          items: [first, second],
+          page: 1,
+          limit: 2,
+          hasNextPage: false,
+        }),
+      },
+      offers,
+      maxOffersPerSync: 2,
+      logger,
+    });
+
+    await expect(service.run()).rejects.toMatchObject({
+      code: 'PRODUCT_VARIANT_DEDUPLICATION',
+    });
+    expect(upsert).toHaveBeenCalledOnce();
+  });
+
+  it('preserva itens distintos mesmo com nome, loja e links iguais', async () => {
+    const base = {
+      ...manual({ shopId: 'shop-1' }),
+      source: 'OFFICIAL' as const,
+      categoryIds: [],
+      priceMin: '99.90',
+      priceMax: '99.90',
+      fetchedAt: observedAt,
+    } satisfies ShopeeProductOffer;
+    const items = [
+      { ...base, providerProductId: 'variant-a' },
+      { ...base, providerProductId: 'variant-b' },
+    ];
+    const offers = new MemoryOfferRepository();
+    const upsert = vi.spyOn(offers, 'upsertOfficialOfferWithSnapshot');
+    const service = new ShopeeOfferSyncService({
+      provider: {
+        source: 'OFFICIAL',
+        listProductOffers: async () => ({
+          items,
+          page: 1,
+          limit: 2,
+          hasNextPage: false,
+        }),
+      },
+      offers,
+      maxOffersPerSync: 2,
+      logger,
+    });
+
+    await expect(service.run()).resolves.toMatchObject({
+      valid: 2,
+      created: 2,
+      skipped: 0,
+    });
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(offers.store.size).toBe(2);
+  });
+
+  it('rejeita observacao OFFICIAL sem shopId antes da persistencia', async () => {
+    const offer = {
+      ...manual({ providerProductId: 'missing-shop', shopId: undefined }),
+      source: 'OFFICIAL' as const,
+      categoryIds: [],
+      priceMin: '99.90',
+      priceMax: '99.90',
+      fetchedAt: observedAt,
+    } satisfies ShopeeProductOffer;
+    const offers = new MemoryOfferRepository();
+    const upsert = vi.spyOn(offers, 'upsertOfficialOfferWithSnapshot');
+    const service = new ShopeeOfferSyncService({
+      provider: {
+        source: 'OFFICIAL',
+        listProductOffers: async () => ({
+          items: [offer],
+          page: 1,
+          limit: 1,
+          hasNextPage: false,
+        }),
+      },
+      offers,
+      maxOffersPerSync: 1,
+      logger,
+    });
+
+    await expect(service.run()).resolves.toMatchObject({
+      valid: 0,
+      skipped: 1,
+      rejectionSummary: { SHOPEE_PRODUCT_IDENTITY_INCOMPLETE: 1 },
+    });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
 });

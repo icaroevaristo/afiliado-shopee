@@ -37,6 +37,7 @@ describe('ShopeeOfficialCatalogSyncService', () => {
           {
             source: 'OFFICIAL',
             providerProductId: 'prod1',
+            shopId: 'shop-1',
             productName: 'Produto 1',
             shopName: 'Loja 1',
             price: '10.00',
@@ -142,6 +143,7 @@ describe('ShopeeOfficialCatalogSyncService', () => {
     const item = {
       source: 'OFFICIAL',
       providerProductId: 'prod1',
+      shopId: 'shop-1',
       productName: 'Produto 1',
       shopName: 'Loja 1',
       price: '10.00',
@@ -195,7 +197,7 @@ describe('ShopeeOfficialCatalogSyncService', () => {
     mockProvider.listProductOffers
       .mockResolvedValueOnce({
         items: [{
-          source: 'OFFICIAL', providerProductId: 'prod1', productName: 'Produto 1',
+          source: 'OFFICIAL', providerProductId: 'prod1', shopId: 'shop-1', productName: 'Produto 1',
           shopName: 'Loja 1', price: '10.00', priceMin: '10.00', priceMax: '10.00', discountRate: 0, rating: 5, sales: 10,
           commissionRate: 10, imageUrl: 'http://img.com', productLink: 'http://prod.com', fetchedAt: new Date(),
         }],
@@ -317,4 +319,51 @@ describe('ShopeeOfficialCatalogSyncService', () => {
     expect(sleepCalls).toBe(1); // Somente antes da request 2
     expect(mockProvider.listProductOffers.mock.calls[0][0].limit).toBe(20);
   });
+
+  it('falha fechado em overlap do mesmo itemId com shopId divergente', async () => {
+    const item = {
+      source: 'OFFICIAL',
+      providerProductId: 'prod-conflict',
+      shopId: 'shop-1',
+      productName: 'Produto',
+      shopName: 'Loja',
+      categoryIds: [],
+      price: '10.00', priceMin: '10.00', priceMax: '10.00',
+      discountRate: 0, rating: 5, sales: 10, commissionRate: 10,
+      imageUrl: 'http://img.com', productLink: 'http://prod.com', fetchedAt: new Date(),
+    };
+    mockProvider.listProductOffers
+      .mockResolvedValueOnce({ items: [item], page: 1, limit: 20, hasNextPage: true, nextCursor: 'cursor1', fetchedCount: 1, rejected: [] })
+      .mockResolvedValueOnce({ items: [{ ...item, shopId: 'shop-2' }], page: 2, limit: 20, hasNextPage: false, fetchedCount: 1, rejected: [] });
+    mockOffers.upsertOfficialOfferWithSnapshot.mockResolvedValue({ productAction: 'created', snapshotCreated: true });
+
+    const report = await service.sync({ pageSize: 20, maxPages: 3, minimumIntervalMs: 0 });
+
+    expect(report).toMatchObject({
+      status: 'PARTIAL',
+      completed: false,
+      failureCode: 'PRODUCT_VARIANT_DEDUPLICATION',
+      pagesCompleted: 1,
+    });
+    expect(mockOffers.upsertOfficialOfferWithSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it('nao deduplica providerProductIds distintos com metadados iguais', async () => {
+    const base = {
+      source: 'OFFICIAL', shopId: 'shop-1', productName: 'Mesmo nome', shopName: 'Loja',
+      categoryIds: [], price: '10.00', priceMin: '10.00', priceMax: '10.00',
+      discountRate: 0, rating: 5, sales: 10, commissionRate: 10,
+      imageUrl: 'http://img.com', productLink: 'http://prod.com', fetchedAt: new Date(),
+    };
+    mockProvider.listProductOffers
+      .mockResolvedValueOnce({ items: [{ ...base, providerProductId: 'prod-a' }], page: 1, limit: 20, hasNextPage: true, nextCursor: 'cursor1', fetchedCount: 1, rejected: [] })
+      .mockResolvedValueOnce({ items: [{ ...base, providerProductId: 'prod-b' }], page: 2, limit: 20, hasNextPage: false, fetchedCount: 1, rejected: [] });
+    mockOffers.upsertOfficialOfferWithSnapshot.mockResolvedValue({ productAction: 'created', snapshotCreated: true });
+
+    const report = await service.sync({ pageSize: 20, maxPages: 3, minimumIntervalMs: 0 });
+
+    expect(report).toMatchObject({ status: 'SUCCEEDED', valid: 2, created: 2, duplicatedAcrossPages: 0 });
+    expect(mockOffers.upsertOfficialOfferWithSnapshot).toHaveBeenCalledTimes(2);
+  });
+
 });

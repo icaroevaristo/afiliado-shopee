@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 export type CommercialOfferFingerprintInput = {
+  source: 'MOCK' | 'MANUAL' | 'OFFICIAL';
+  providerProductId: string;
   price: string;
   priceMin?: string | null;
   priceMax?: string | null;
@@ -50,6 +52,8 @@ export const fingerprintCommercialOffer = (
   input: CommercialOfferFingerprintInput,
 ): string => {
   const canonical = JSON.stringify({
+    source: input.source,
+    providerProductId: input.providerProductId,
     price: canonicalizeCommercialDecimal(input.price),
     priceMin: canonicalNullableDecimal(input.priceMin),
     priceMax: canonicalNullableDecimal(input.priceMax),
