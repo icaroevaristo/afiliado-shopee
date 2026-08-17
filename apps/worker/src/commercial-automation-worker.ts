@@ -60,9 +60,10 @@ const closeResources = async (cleanups: Array<() => Promise<unknown>>) => {
 export const processCommercialAutomationJob = async (
   job: Pick<Job<CommercialAutomationJob>, 'id' | 'name' | 'data'>,
   options: {
-    orchestrator: ReturnType<
-      typeof createCommercialAutomationOrchestratorRuntime
-    >['orchestrator'];
+    orchestrator: Pick<
+      ReturnType<typeof createCommercialAutomationOrchestratorRuntime>['orchestrator'],
+      'executeTick'
+    >;
     provider: 'mock' | 'manual' | 'official';
     mode: 'preview' | 'send';
   },

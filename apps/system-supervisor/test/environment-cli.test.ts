@@ -39,6 +39,40 @@ describe('local system environment', () => {
     expect(loaded.env.SECRET_VALUE).toBe('file-only');
   });
 
+  it('loads runtime.env between .env and process variables', () => {
+    const root = temporaryDirectory();
+    writeFileSync(
+      join(root, '.env'),
+      'COMMERCIAL_AUTOMATION_MODE=send\nPORT=3334\nSOURCE_LAYER=env\n',
+    );
+    writeFileSync(
+      join(root, 'runtime.env'),
+      'COMMERCIAL_AUTOMATION_MODE=preview\nPORT=4444\nSOURCE_LAYER=runtime\n',
+    );
+
+    const runtimeOnly = loadLocalSystemEnvironment(root, {});
+    expect(runtimeOnly.mode).toBe('preview');
+    expect(runtimeOnly.ports.api).toBe(4444);
+    expect(runtimeOnly.env.SOURCE_LAYER).toBe('runtime');
+
+    const processOverride = loadLocalSystemEnvironment(root, {
+      PORT: '5555',
+      SOURCE_LAYER: 'process',
+    });
+    expect(processOverride.ports.api).toBe(5555);
+    expect(processOverride.env.SOURCE_LAYER).toBe('process');
+  });
+
+  it('keeps runtime.env optional and rejects an invalid effective mode deterministically', () => {
+    const root = temporaryDirectory();
+    writeFileSync(join(root, '.env'), 'COMMERCIAL_AUTOMATION_MODE=preview\n');
+    expect(loadLocalSystemEnvironment(root, {}).mode).toBe('preview');
+
+    writeFileSync(join(root, 'runtime.env'), 'COMMERCIAL_AUTOMATION_MODE=invalid\n');
+    expect(() => loadLocalSystemEnvironment(root, {})).toThrowError(
+      expect.objectContaining({ code: 'SYSTEM_INVALID_AUTOMATION_MODE' }),
+    );
+  });
   it('parses quoted values and strips only unquoted comments', () => {
     expect(
       parseDotEnv('A="value # kept"\nB=value # ignored\nexport C=ok\n'),

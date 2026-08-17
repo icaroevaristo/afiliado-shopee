@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, delimiter, resolve } from 'node:path';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/providers';
 
@@ -93,6 +93,404 @@ export const parseComposeStatuses = (stdout: string): ComposeServiceStatus[] =>
       }
     });
 
+type MainInfrastructureService = 'postgres' | 'redis';
+
+type ExpectedMainInfrastructure = {
+  service: MainInfrastructureService;
+  image: string;
+  targetPort: number;
+  publishedPort: number;
+  healthTest: string[];
+  mounts: Array<{ type: string; target: string }>;
+};
+
+type DockerInspection = {
+  Id?: string;
+  Config?: {
+    Image?: string;
+    Labels?: Record<string, string>;
+    Healthcheck?: { Test?: string[] };
+  };
+  State?: { Running?: boolean; Health?: { Status?: string } };
+  NetworkSettings?: {
+    Ports?: Record<string, Array<{ HostPort?: string }> | null>;
+  };
+  Mounts?: Array<{
+    Type?: string;
+    Destination?: string;
+    RW?: boolean;
+    Mode?: string;
+    Propagation?: string;
+  }>;
+};
+
+const objectRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const stringArray = (value: unknown) =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+
+
+const arraysEqual = (left: readonly string[], right: readonly string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const parseExpectedMainInfrastructure = (
+  stdout: string,
+  ports: LocalSystemState['ports'],
+): ExpectedMainInfrastructure[] | null => {
+  try {
+    const root = objectRecord(JSON.parse(stdout));
+    const services = objectRecord(root?.services);
+    if (!services) return null;
+    return (['postgres', 'redis'] as const).map((service) => {
+      const definition = objectRecord(services[service]);
+      if (!definition || typeof definition.image !== 'string') {
+        throw new Error('invalid service definition');
+      }
+      const expectedPublishedPort = ports[service];
+      const portDefinitions = Array.isArray(definition.ports)
+        ? definition.ports
+        : [];
+      const matchingPort = portDefinitions
+        .map(objectRecord)
+        .find((item) => {
+          if (!item) return false;
+          return Number(item.published) === expectedPublishedPort;
+        });
+      const targetPort = Number(matchingPort?.target);
+      if (!Number.isInteger(targetPort) || targetPort <= 0) {
+        throw new Error('invalid service port');
+      }
+      const healthcheck = objectRecord(definition.healthcheck);
+      const healthTest = stringArray(healthcheck?.test);
+      const volumes = Array.isArray(definition.volumes) ? definition.volumes : [];
+      const mounts = volumes.flatMap((value) => {
+        const mount = objectRecord(value);
+        return mount &&
+          typeof mount.type === 'string' &&
+          typeof mount.target === 'string'
+          ? [{ type: mount.type, target: mount.target }]
+          : [];
+      });
+      return {
+        service,
+        image: definition.image,
+        targetPort,
+        publishedPort: expectedPublishedPort,
+        healthTest,
+        mounts,
+      };
+    });
+  } catch {
+    return null;
+  }
+};
+
+type DockerImageInspection = {
+  Config?: { Volumes?: Record<string, unknown> | null };
+};
+
+const parseDockerImageInspection = (
+  stdout: string,
+): DockerImageInspection | null => {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (!Array.isArray(parsed) || parsed.length !== 1) return null;
+    const inspection = objectRecord(parsed[0]);
+    const config = objectRecord(inspection?.Config);
+    if (!inspection || !config) return null;
+    const volumes = config.Volumes;
+    if (
+      volumes !== undefined &&
+      volumes !== null &&
+      objectRecord(volumes) === null
+    ) {
+      return null;
+    }
+    return {
+      Config: {
+        Volumes:
+          volumes === undefined || volumes === null
+            ? volumes
+            : (volumes as Record<string, unknown>),
+      },
+    };
+  } catch {
+    return null;
+  }
+};
+
+const declaredImageVolumeTargets = (inspection: DockerImageInspection) => {
+  const volumes = inspection.Config?.Volumes;
+  return volumes && typeof volumes === 'object' && !Array.isArray(volumes)
+    ? Object.keys(volumes).sort((left, right) => left.localeCompare(right))
+    : [];
+};
+
+const isCompatibleImplicitImageVolume = (
+  mount: NonNullable<DockerInspection['Mounts']>[number],
+) =>
+  mount.Type === 'volume' &&
+  mount.RW !== false &&
+  (mount.Mode === undefined || mount.Mode === '' || mount.Mode === 'z') &&
+  (mount.Propagation === undefined ||
+    mount.Propagation === '' ||
+    mount.Propagation === 'rprivate');
+
+const mountsMatchExpected = (
+  inspection: DockerInspection,
+  expected: ExpectedMainInfrastructure,
+  imageVolumeTargets: readonly string[],
+) => {
+  const explicitMounts = new Map(
+    expected.mounts.map((mount) => [mount.target, mount.type]),
+  );
+  const implicitTargets = new Set(
+    imageVolumeTargets.filter((target) => !explicitMounts.has(target)),
+  );
+  const candidateMounts = inspection.Mounts ?? [];
+  const seenTargets = new Set<string>();
+
+  for (const mount of candidateMounts) {
+    if (typeof mount.Destination !== 'string' || typeof mount.Type !== 'string') {
+      return false;
+    }
+    if (seenTargets.has(mount.Destination)) return false;
+    seenTargets.add(mount.Destination);
+
+    const explicitType = explicitMounts.get(mount.Destination);
+    if (explicitType !== undefined) {
+      if (mount.Type !== explicitType) return false;
+      continue;
+    }
+    if (
+      !implicitTargets.has(mount.Destination) ||
+      !isCompatibleImplicitImageVolume(mount)
+    ) {
+      return false;
+    }
+  }
+
+  return [...explicitMounts.keys()].every((target) => seenTargets.has(target));
+};
+const parseDockerInspections = (stdout: string): DockerInspection[] | null => {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return Array.isArray(parsed) ? (parsed as DockerInspection[]) : null;
+  } catch {
+    return null;
+  }
+};
+
+const inspectionMatchesExpected = (
+  inspection: DockerInspection,
+  expected: ExpectedMainInfrastructure,
+  imageVolumeTargets: readonly string[],
+) => {
+  const labels = inspection.Config?.Labels;
+  if (
+    !labels ||
+    labels['com.docker.compose.service'] !== expected.service ||
+    !labels['com.docker.compose.project'] ||
+    !labels['com.docker.compose.project.config_files'] ||
+    !labels['com.docker.compose.project.working_dir'] ||
+    inspection.Config?.Image !== expected.image ||
+    inspection.State?.Running !== true
+  ) {
+    return false;
+  }
+  if (
+    expected.healthTest.length > 0 &&
+    !arraysEqual(inspection.Config?.Healthcheck?.Test ?? [], expected.healthTest)
+  ) {
+    return false;
+  }
+  const bindings =
+    inspection.NetworkSettings?.Ports?.[`${expected.targetPort}/tcp`] ?? [];
+  if (
+    !bindings.some(
+      (binding) => Number(binding.HostPort) === expected.publishedPort,
+    )
+  ) {
+    return false;
+  }
+  return mountsMatchExpected(inspection, expected, imageVolumeTargets);
+
+};
+
+export type ResolvedMainInfrastructureContainer = {
+  id: string;
+  service: 'postgres' | 'redis';
+  health: 'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown';
+};
+
+const normalizedInfrastructureHealth = (value: string | undefined) =>
+  value === 'healthy' || value === 'starting' || value === 'unhealthy'
+    ? value
+    : value
+      ? 'unknown'
+      : 'unavailable';
+
+type MainInfrastructureContainerDiscovery =
+  | { status: 'resolved'; containers: ResolvedMainInfrastructureContainer[] }
+  | { status: 'unproven' }
+  | { status: 'ambiguous' };
+
+const discoverEquivalentMainInfrastructureContainers = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  ports: LocalSystemState['ports'],
+): Promise<MainInfrastructureContainerDiscovery> => {
+  try {
+    const configResult = await deps.run(
+      composeSpec(root, [...composeArguments, 'config', '--format', 'json'], env),
+    );
+    if (configResult.code !== 0) return { status: 'unproven' };
+    const expected = parseExpectedMainInfrastructure(configResult.stdout, ports);
+    if (!expected) return { status: 'unproven' };
+    const listResult = await deps.run({
+      command: 'docker',
+      args: ['ps', '--format', '{{.ID}}'],
+      cwd: root,
+      env,
+    });
+    if (listResult.code !== 0) return { status: 'unproven' };
+    const ids = [
+      ...new Set(
+        listResult.stdout
+          .split(/\r?\n/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (
+      ids.length === 0 ||
+      ids.some((id) => !/^[a-f0-9]{12,64}$/i.test(id))
+    ) {
+      return { status: 'unproven' };
+    }
+    const inspectResult = await deps.run({
+      command: 'docker',
+      args: ['inspect', ...ids],
+      cwd: root,
+      env,
+    });
+    if (inspectResult.code !== 0) return { status: 'unproven' };
+    const inspections = parseDockerInspections(inspectResult.stdout);
+    if (!inspections) return { status: 'unproven' };
+    const containers: ResolvedMainInfrastructureContainer[] = [];
+    for (const service of expected) {
+      const imageInspectResult = await deps.run({
+        command: 'docker',
+        args: ['image', 'inspect', service.image],
+        cwd: root,
+        env,
+      });
+      if (imageInspectResult.code !== 0) return { status: 'unproven' };
+      const imageInspection = parseDockerImageInspection(imageInspectResult.stdout);
+      if (!imageInspection) return { status: 'unproven' };
+      const imageVolumeTargets = declaredImageVolumeTargets(imageInspection);
+      const candidates = inspections.filter((inspection) =>
+        inspectionMatchesExpected(inspection, service, imageVolumeTargets),
+      );
+      if (candidates.length > 1) return { status: 'ambiguous' };
+      if (candidates.length === 0) return { status: 'unproven' };
+      const candidate = candidates[0];
+      if (!candidate?.Id || !/^[a-f0-9]{12,64}$/i.test(candidate.Id)) {
+        return { status: 'unproven' };
+      }
+      containers.push({
+        id: candidate.Id,
+        service: service.service,
+        health: normalizedInfrastructureHealth(candidate.State?.Health?.Status),
+      });
+    }
+    return { status: 'resolved', containers };
+  } catch {
+    return { status: 'unproven' };
+  }
+};
+
+export type MainInfrastructureServiceResolution =
+  | { status: 'resolved'; container: ResolvedMainInfrastructureContainer }
+  | { status: 'unproven' }
+  | { status: 'ambiguous' };
+
+export const resolveEquivalentMainServiceContainer = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  ports: LocalSystemState['ports'],
+  service: 'postgres' | 'redis',
+): Promise<MainInfrastructureServiceResolution> => {
+  const discovery = await discoverEquivalentMainInfrastructureContainers(
+    root,
+    deps,
+    env,
+    ports,
+  );
+  if (discovery.status !== 'resolved') return discovery;
+  const matches = discovery.containers.filter(
+    (candidate) => candidate.service === service,
+  );
+  if (matches.length > 1) return { status: 'ambiguous' };
+  if (matches.length === 0) return { status: 'unproven' };
+  return { status: 'resolved', container: matches[0]! };
+};
+
+const discoverEquivalentMainInfrastructure = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  ports: LocalSystemState['ports'],
+): Promise<ComposeServiceStatus[]> => {
+  const discovery = await discoverEquivalentMainInfrastructureContainers(
+    root,
+    deps,
+    env,
+    ports,
+  );
+  return discovery.status === 'resolved'
+    ? discovery.containers.map(({ service, health }) => ({
+        service,
+        state: 'running',
+        health,
+      }))
+    : [];
+};
+
+const hasHealthyMainInfrastructure = (statuses: ComposeServiceStatus[]) =>
+  (['postgres', 'redis'] as const).every((service) =>
+    statuses.some(
+      (item) =>
+        item.service === service &&
+        item.state === 'running' &&
+        (item.health === 'healthy' || item.health === ''),
+    ),
+  );
+
+const hasCompleteMainInfrastructure = (statuses: ComposeServiceStatus[]) =>
+  (['postgres', 'redis'] as const).every((service) =>
+    statuses.some(
+      (item) => item.service === service && item.state === 'running',
+    ),
+  );
+
+const mergeMainInfrastructureStatuses = (
+  primary: ComposeServiceStatus[],
+  equivalent: ComposeServiceStatus[],
+) => [
+  ...primary,
+  ...equivalent.filter(
+    (candidate) =>
+      !primary.some((item) => item.service === candidate.service),
+  ),
+];
 const processMarker = (path: string) => basename(path).toLowerCase();
 
 export const createServiceSpecs = (root: string): ServiceSpec[] => {
@@ -149,7 +547,23 @@ const composeSpec = (
   env?: NodeJS.ProcessEnv,
 ): CommandSpec => ({ command: 'docker', args, cwd: root, env });
 
-const corepackSpec = (
+const resolveWindowsPnpmEntrypoint = (env: NodeJS.ProcessEnv) => {
+  const pathValue = env.Path ?? env.PATH ?? process.env.Path ?? process.env.PATH ?? '';
+  for (const pathEntry of pathValue.split(delimiter)) {
+    if (!pathEntry) continue;
+    const pnpmCommand = resolve(pathEntry, 'pnpm.cmd');
+    const pnpmEntrypoint = resolve(pathEntry, 'node_modules/pnpm/bin/pnpm.cjs');
+    if (existsSync(pnpmCommand) && existsSync(pnpmEntrypoint)) {
+      return pnpmEntrypoint;
+    }
+  }
+  throw new LocalSystemError(
+    'pnpm nao esta disponivel no PATH',
+    'PNPM_UNAVAILABLE',
+  );
+};
+
+const pnpmSpec = (
   root: string,
   args: string[],
   env: NodeJS.ProcessEnv,
@@ -157,18 +571,16 @@ const corepackSpec = (
   process.platform === 'win32'
     ? {
         command: process.execPath,
-        args: [
-          resolve(
-            dirname(process.execPath),
-            'node_modules/corepack/dist/corepack.js',
-          ),
-          ...args,
-        ],
+        args: [resolveWindowsPnpmEntrypoint(env), ...args],
         cwd: root,
         env,
       }
-    : { command: 'corepack', args, cwd: root, env };
+    : { command: 'pnpm', args, cwd: root, env };
 
+const shouldSkipEvolutionForExplicitSafePreview = (env: NodeJS.ProcessEnv) =>
+  env.COMMERCIAL_AUTOMATION_MODE === 'preview' &&
+  env.WHATSAPP_PROVIDER === 'mock' &&
+  env.WHATSAPP_GROUP_SEND_ENABLED === 'false';
 const expectedServices = (mode: AutomationMode) =>
   SERVICE_NAMES.filter(
     (name) => name !== 'whatsapp-dispatch-worker' || mode === 'send',
@@ -228,6 +640,23 @@ const waitForComposeHealth = async (
     deps,
     code,
     `Servicos Docker nao ficaram saudaveis: ${required.join(', ')}`,
+    90,
+  );
+
+const waitForEquivalentMainInfrastructureHealth = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  ports: LocalSystemState['ports'],
+) =>
+  waitFor(
+    async () =>
+      hasHealthyMainInfrastructure(
+        await discoverEquivalentMainInfrastructure(root, deps, env, ports),
+      ),
+    deps,
+    'MAIN_COMPOSE_UNHEALTHY',
+    'Infraestrutura principal equivalente nao ficou saudavel',
     90,
   );
 
@@ -349,6 +778,13 @@ export type SystemStatusSnapshot = OperationLockSnapshot & {
   }>;
 };
 
+const localApiAuthHeaders = (
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> | undefined => {
+  const token = environment.LOCAL_API_AUTH_TOKEN?.trim();
+  return token ? { authorization: `Bearer ${token}` } : undefined;
+};
+
 const safeRequestBody = async (
   deps: SystemDependencies,
   url: string,
@@ -461,6 +897,7 @@ export class LocalSystemSupervisor {
 
     const loaded = loadLocalSystemEnvironment(this.root, processEnv);
     const runtimeEnv = loaded.env;
+    const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(runtimeEnv);
     try {
       loadConfig(runtimeEnv);
     } catch {
@@ -502,9 +939,9 @@ export class LocalSystemSupervisor {
     }
     await runRequired(
       this.deps,
-      corepackSpec(this.root, ['--version'], runtimeEnv),
-      'COREPACK_UNAVAILABLE',
-      'Corepack nao esta disponivel',
+      pnpmSpec(this.root, ['--version'], runtimeEnv),
+      'PNPM_UNAVAILABLE',
+      'pnpm nao esta disponivel',
       this.root,
     );
     await runRequired(
@@ -533,66 +970,106 @@ export class LocalSystemSupervisor {
       inspected.valid.dashboard?.pid,
       this.deps,
     );
-    const [mainBeforeStart, evolutionBeforeStart] = await Promise.all([
-      this.deps.run(
-        composeSpec(
-          this.root,
-          [...composeArguments, 'ps', '--format', 'json'],
-          runtimeEnv,
-        ),
+    const mainBeforeStart = await this.deps.run(
+      composeSpec(
+        this.root,
+        [...composeArguments, 'ps', '--format', 'json'],
+        runtimeEnv,
       ),
-      this.deps.run(
-        composeSpec(
+    );
+    const evolutionBeforeStart = skipEvolution
+      ? { code: 0, stdout: '', stderr: '' }
+      : await this.deps.run(
+          composeSpec(
+            this.root,
+            [...evolutionComposeArguments, 'ps', '--format', 'json'],
+            runtimeEnv,
+          ),
+        );
+    const currentMainServices = parseComposeStatuses(mainBeforeStart.stdout);
+    const currentMainHealthy = hasHealthyMainInfrastructure(currentMainServices);
+    const equivalentMainServices = currentMainHealthy
+      ? []
+      : await discoverEquivalentMainInfrastructure(
           this.root,
-          [...evolutionComposeArguments, 'ps', '--format', 'json'],
+          this.deps,
           runtimeEnv,
-        ),
-      ),
-    ]);
-    const mainServices = parseComposeStatuses(mainBeforeStart.stdout);
+          loaded.ports,
+        );
+    const equivalentMainComplete =
+      hasCompleteMainInfrastructure(equivalentMainServices);
+    const reuseEquivalentMain = !currentMainHealthy && equivalentMainComplete;
+    const mainServices = mergeMainInfrastructureStatuses(
+      currentMainServices,
+      equivalentMainServices,
+    );
     const evolutionServices = parseComposeStatuses(evolutionBeforeStart.stdout);
-    for (const [port, expectedService, statuses] of [
+    const managedPortChecks: Array<
+      readonly [number, string, ComposeServiceStatus[]]
+    > = [
       [loaded.ports.postgres, 'postgres', mainServices],
       [loaded.ports.redis, 'redis', mainServices],
-      [loaded.ports.evolution, 'evolution-api', evolutionServices],
-    ] as const) {
+      ...(skipEvolution
+        ? []
+        : [[loaded.ports.evolution, 'evolution-api', evolutionServices] as const]),
+    ];
+    for (const [port, expectedService, statuses] of managedPortChecks) {
       const managed = statuses.some(
         (item) => item.service === expectedService && item.state === 'running',
       );
       if (!managed) await assertPortAvailable(port, undefined, this.deps);
     }
 
-    await runRequired(
-      this.deps,
-      composeSpec(this.root, [...composeArguments, 'up', '-d'], runtimeEnv),
-      'MAIN_COMPOSE_START_FAILED',
-      'Falha ao iniciar PostgreSQL e Redis principais',
-      this.root,
-    );
-    await runRequired(
-      this.deps,
-      corepackSpec(this.root, ['pnpm', 'evolution:up'], runtimeEnv),
-      'EVOLUTION_COMPOSE_START_FAILED',
-      'Falha ao iniciar a stack Evolution',
-      this.root,
-    );
+    if (!reuseEquivalentMain) {
+      await runRequired(
+        this.deps,
+        composeSpec(this.root, [...composeArguments, 'up', '-d'], runtimeEnv),
+        'MAIN_COMPOSE_START_FAILED',
+        'Falha ao iniciar PostgreSQL e Redis principais',
+        this.root,
+      );
+    }
+    if (!skipEvolution) {
+      await runRequired(
+        this.deps,
+        pnpmSpec(this.root, ['evolution:up'], runtimeEnv),
+        'EVOLUTION_COMPOSE_START_FAILED',
+        'Falha ao iniciar a stack Evolution',
+        this.root,
+      );
+    }
     await Promise.all([
-      waitForComposeHealth(
-        this.root,
-        this.deps,
-        composeArguments,
-        ['postgres', 'redis'],
-        'MAIN_COMPOSE_UNHEALTHY',
-        runtimeEnv,
-      ),
-      waitForComposeHealth(
-        this.root,
-        this.deps,
-        evolutionComposeArguments,
-        ['evolution-api', 'evolution-postgres', 'evolution-redis'],
-        'EVOLUTION_COMPOSE_UNHEALTHY',
-        runtimeEnv,
-      ),
+      ...(reuseEquivalentMain
+        ? [
+            waitForEquivalentMainInfrastructureHealth(
+              this.root,
+              this.deps,
+              runtimeEnv,
+              loaded.ports,
+            ),
+          ]
+        : [
+            waitForComposeHealth(
+              this.root,
+              this.deps,
+              composeArguments,
+              ['postgres', 'redis'],
+              'MAIN_COMPOSE_UNHEALTHY',
+              runtimeEnv,
+            ),
+          ]),
+      ...(skipEvolution
+        ? []
+        : [
+            waitForComposeHealth(
+              this.root,
+              this.deps,
+              evolutionComposeArguments,
+              ['evolution-api', 'evolution-postgres', 'evolution-redis'],
+              'EVOLUTION_COMPOSE_UNHEALTHY',
+              runtimeEnv,
+            ),
+          ]),
     ]);
     const validatedPreviewClient =
       runtimeEnv[PREVIEW_STABILITY_PRISMA_VALIDATION] === 'true' &&
@@ -607,10 +1084,9 @@ export class LocalSystemSupervisor {
     ) {
       await runRequired(
         this.deps,
-        corepackSpec(
+        pnpmSpec(
           this.root,
           [
-            'pnpm',
             '--filter',
             '@shopee-auto-affiliate-ai/database',
             'db:generate',
@@ -624,9 +1100,9 @@ export class LocalSystemSupervisor {
     }
     await runRequired(
       this.deps,
-      corepackSpec(
+      pnpmSpec(
         this.root,
-        ['pnpm', '--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
+        ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
         runtimeEnv,
       ),
       'PRISMA_MIGRATE_DEPLOY_FAILED',
@@ -742,6 +1218,7 @@ export class LocalSystemSupervisor {
     processEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<SystemStatusSnapshot> {
     const loaded = loadLocalSystemEnvironment(this.root, processEnv);
+    const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     const state = readState(this.root);
     const operationLockPromise = inspectOperationLock(this.root, this.deps);
     const ports = state?.ports ?? loaded.ports;
@@ -780,18 +1257,34 @@ export class LocalSystemSupervisor {
           ),
         )
         .catch(() => ({ code: 1, stdout: '', stderr: '' })),
-      this.deps
-        .run(
-          composeSpec(
-            this.root,
-            [...evolutionComposeArguments, 'ps', '--format', 'json'],
-            loaded.env,
-          ),
-        )
-        .catch(() => ({ code: 1, stdout: '', stderr: '' })),
+      skipEvolution
+        ? Promise.resolve({ code: 0, stdout: '', stderr: '' })
+        : this.deps
+            .run(
+              composeSpec(
+                this.root,
+                [...evolutionComposeArguments, 'ps', '--format', 'json'],
+                loaded.env,
+              ),
+            )
+            .catch(() => ({ code: 1, stdout: '', stderr: '' })),
     ]);
-    const dockerServices =
+    const currentDockerServices =
       dockerResult.code === 0 ? parseComposeStatuses(dockerResult.stdout) : [];
+    const equivalentMainServices = hasHealthyMainInfrastructure(
+      currentDockerServices,
+    )
+      ? []
+      : await discoverEquivalentMainInfrastructure(
+          this.root,
+          this.deps,
+          loaded.env,
+          ports,
+        );
+    const dockerServices = mergeMainInfrastructureStatuses(
+      currentDockerServices,
+      equivalentMainServices,
+    );
     const evolutionServices =
       evolutionResult.code === 0
         ? parseComposeStatuses(evolutionResult.stdout)
@@ -805,14 +1298,24 @@ export class LocalSystemSupervisor {
       this.deps.request(dashboardBase).catch(() => ({ ok: false, status: 0 })),
     ]);
     const apiAvailable = processStatuses.api === 'running' && apiHealth.ok;
+    const apiAuthHeaders = localApiAuthHeaders(loaded.env);
     const [legacyBody, commercialBody, automationBody] = apiAvailable
       ? await Promise.all([
-          safeRequestBody(this.deps, `${apiBase}/scheduler`),
+          safeRequestBody(
+            this.deps,
+            `${apiBase}/scheduler`,
+            apiAuthHeaders,
+          ),
           safeRequestBody(
             this.deps,
             `${apiBase}/commercial-automation/scheduler`,
+            apiAuthHeaders,
           ),
-          safeRequestBody(this.deps, `${apiBase}/commercial-automation/status`),
+          safeRequestBody(
+            this.deps,
+            `${apiBase}/commercial-automation/status`,
+            apiAuthHeaders,
+          ),
         ])
       : [
           { status: 'unavailable' },
@@ -825,16 +1328,18 @@ export class LocalSystemSupervisor {
     const evolutionBase = (
       loaded.env.EVOLUTION_API_URL ?? `http://127.0.0.1:${ports.evolution}`
     ).replace(/\/+$/, '');
-    const [evolutionHealth, connectionBody] = await Promise.all([
-      safeRequestBody(this.deps, evolutionBase),
-      loaded.env.EVOLUTION_API_KEY && loaded.env.EVOLUTION_INSTANCE_NAME
-        ? safeRequestBody(
-            this.deps,
-            `${evolutionBase}/instance/connectionState/${encodeURIComponent(loaded.env.EVOLUTION_INSTANCE_NAME)}`,
-            { apikey: loaded.env.EVOLUTION_API_KEY },
-          )
-        : Promise.resolve(undefined),
-    ]);
+    const [evolutionHealth, connectionBody] = skipEvolution
+      ? [undefined, undefined]
+      : await Promise.all([
+          safeRequestBody(this.deps, evolutionBase),
+          loaded.env.EVOLUTION_API_KEY && loaded.env.EVOLUTION_INSTANCE_NAME
+            ? safeRequestBody(
+                this.deps,
+                `${evolutionBase}/instance/connectionState/${encodeURIComponent(loaded.env.EVOLUTION_INSTANCE_NAME)}`,
+                { apikey: loaded.env.EVOLUTION_API_KEY },
+              )
+            : Promise.resolve(undefined),
+        ]);
     const rawConnectionState = connectionBody
       ? parseEvolutionConnectionState(connectionBody)
       : undefined;
@@ -882,7 +1387,13 @@ export class LocalSystemSupervisor {
     if (processStatuses.dashboard === 'running' && dashboardHealth.ok) {
       expectedManagedPorts.add(ports.dashboard);
     }
-    const uniquePorts = [...new Set(Object.values(ports))];
+    const uniquePorts = [
+      ...new Set(
+        Object.entries(ports)
+          .filter(([name]) => !skipEvolution || name !== 'evolution')
+          .map(([, port]) => port),
+      ),
+    ];
     const occupants = await Promise.all(
       uniquePorts.map(async (port) => ({
         port,
@@ -913,11 +1424,13 @@ export class LocalSystemSupervisor {
           item.health === 'healthy',
       ),
     );
-    const evolutionHealthy = [
-      'evolution-api',
+    const evolutionHealthy =
+      skipEvolution ||
+      [
+        'evolution-api',
       'evolution-postgres',
-      'evolution-redis',
-    ].every((service) =>
+        'evolution-redis',
+      ].every((service) =>
       evolutionServices.some(
         (item) =>
           item.service === service &&
@@ -946,7 +1459,9 @@ export class LocalSystemSupervisor {
       },
       evolution: {
         api:
-          evolutionHealth &&
+          skipEvolution
+            ? 'unavailable'
+            : evolutionHealth &&
           typeof evolutionHealth === 'object' &&
           'status' in evolutionHealth &&
           evolutionHealth.status === 'unavailable'
@@ -971,6 +1486,7 @@ export class LocalSystemSupervisor {
 
   async stop(processEnv: NodeJS.ProcessEnv = process.env) {
     const loaded = loadLocalSystemEnvironment(this.root, processEnv);
+    const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     const state = readState(this.root);
     const manualIntervention: string[] = [];
     if (state) {
@@ -997,15 +1513,19 @@ export class LocalSystemSupervisor {
     const mainStop = await this.deps.run(
       composeSpec(this.root, [...composeArguments, 'stop'], loaded.env),
     );
-    const evolutionStop = await this.deps.run(
-      composeSpec(
-        this.root,
-        [...evolutionComposeArguments, 'stop'],
-        loaded.env,
-      ),
-    );
+    const evolutionStop = skipEvolution
+      ? { code: 0, stdout: '', stderr: '' }
+      : await this.deps.run(
+          composeSpec(
+            this.root,
+            [...evolutionComposeArguments, 'stop'],
+            loaded.env,
+          ),
+        );
     if (mainStop.code !== 0) manualIntervention.push('compose principal');
-    if (evolutionStop.code !== 0) manualIntervention.push('compose Evolution');
+    if (!skipEvolution && evolutionStop.code !== 0) {
+      manualIntervention.push('compose Evolution');
+    }
     if (mainStop.code === 0) {
       const status = await this.deps.run(
         composeSpec(
@@ -1023,7 +1543,7 @@ export class LocalSystemSupervisor {
         manualIntervention.push('confirmacao do compose principal');
       }
     }
-    if (evolutionStop.code === 0) {
+    if (!skipEvolution && evolutionStop.code === 0) {
       const status = await this.deps.run(
         composeSpec(
           this.root,

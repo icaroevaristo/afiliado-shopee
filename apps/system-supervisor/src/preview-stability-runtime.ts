@@ -14,6 +14,7 @@ import {
 import { loadLocalSystemEnvironment } from './environment';
 import {
   fingerprintValues,
+  PreviewStabilityMainInfrastructureError,
   type PreviewStabilityDependencies,
   type PreviewStabilityEvidence,
   type PreviewStabilityInfrastructure,
@@ -25,6 +26,7 @@ import {
   createServiceSpecs,
   LocalSystemSupervisor,
   parseComposeStatuses,
+  resolveEquivalentMainServiceContainer,
 } from './supervisor';
 import { LocalSystemError, type SystemDependencies } from './types';
 
@@ -57,6 +59,86 @@ const systemCommandSucceeded = (
   throw new LocalSystemError(message, reportedCode ?? fallbackCode);
 };
 
+const DATABASE_HELPER_CAPTURE_STAGES = [
+  'migrations', 'settings', 'executions', 'runs-total', 'runs-dry-run',
+  'runs-ambiguous', 'runs-investigation', 'dispatch-total',
+  'dispatch-processing', 'outbox-total', 'outbox-pending',
+  'outbox-ambiguous', 'table-counts',
+] as const;
+
+type DatabaseHelperFailureDiagnostic = {
+  code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED';
+  operation: 'capture' | 'executions' | 'group-instance' | 'force-pause' | 'unknown';
+  captureStage?: (typeof DATABASE_HELPER_CAPTURE_STAGES)[number];
+  captureSubstage?: 'inspect' | 'diff';
+  errorKind: 'PRISMA' | 'PRISMA_VALIDATION' | 'PRISMA_UNKNOWN' |
+    'PRISMA_INITIALIZATION' | 'DATABASE_BASELINE' | 'SYSTEM' | 'UNKNOWN';
+  errorCode?: string;
+  failed: true;
+};
+
+const SAFE_DATABASE_HELPER_SYSTEM_CODES = new Set(['ENOENT','EACCES','ETIMEDOUT','ECONNREFUSED','EPIPE']);
+const SAFE_DATABASE_BASELINE_ERROR_CODES = new Set([
+  'DATABASE_BASELINE_ADOPTION_BLOCKED',
+  'DATABASE_BASELINE_ARGUMENTS_INVALID',
+  'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+  'DATABASE_BASELINE_POSTCHECK_FAILED',
+  'DATABASE_BASELINE_RESOLVE_FAILED',
+]);
+
+export const parseDatabaseHelperFailureDiagnostic = (
+  stderr: string,
+): DatabaseHelperFailureDiagnostic | null => {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).reverse();
+  for (const line of lines) {
+    let value: unknown;
+    try { value = JSON.parse(line); } catch { continue; }
+    if (typeof value !== 'object' || value === null) continue;
+    const code = Reflect.get(value, 'code');
+    const operation = Reflect.get(value, 'operation');
+    const captureStage = Reflect.get(value, 'captureStage');
+    const captureSubstage = Reflect.get(value, 'captureSubstage');
+    const errorKind = Reflect.get(value, 'errorKind');
+    const errorCode = Reflect.get(value, 'errorCode');
+    const failed = Reflect.get(value, 'failed');
+    if (
+      code !== 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED' ||
+      !['capture','executions','group-instance','force-pause','unknown'].includes(typeof operation === 'string' ? operation : '') ||
+      !['PRISMA','PRISMA_VALIDATION','PRISMA_UNKNOWN','PRISMA_INITIALIZATION','DATABASE_BASELINE','SYSTEM','UNKNOWN'].includes(typeof errorKind === 'string' ? errorKind : '') ||
+      failed !== true
+    ) continue;
+    const validStage = typeof captureStage === 'string' && DATABASE_HELPER_CAPTURE_STAGES.includes(captureStage as (typeof DATABASE_HELPER_CAPTURE_STAGES)[number]);
+    if (operation === 'capture' && !validStage) continue;
+    if (operation !== 'capture' && captureStage !== undefined) continue;
+    const validSubstage = captureSubstage === 'inspect' || captureSubstage === 'diff';
+    if (operation === 'capture' && captureStage === 'migrations' && !validSubstage) continue;
+    if ((operation !== 'capture' || captureStage !== 'migrations') && captureSubstage !== undefined) continue;
+    const safeCode =
+      (errorKind === 'PRISMA' || errorKind === 'PRISMA_INITIALIZATION') && typeof errorCode === 'string' && /^P\d{4}$/.test(errorCode)
+        ? errorCode
+        : errorKind === 'DATABASE_BASELINE' && typeof errorCode === 'string' && SAFE_DATABASE_BASELINE_ERROR_CODES.has(errorCode)
+          ? errorCode
+          : errorKind === 'SYSTEM' && typeof errorCode === 'string' && SAFE_DATABASE_HELPER_SYSTEM_CODES.has(errorCode)
+            ? errorCode
+            : undefined;
+    if (errorKind === 'PRISMA' && !safeCode) continue;
+    if (errorKind === 'SYSTEM' && !safeCode) continue;
+    if (['PRISMA_VALIDATION','PRISMA_UNKNOWN','UNKNOWN'].includes(String(errorKind)) && errorCode !== undefined) continue;
+    if (['PRISMA_INITIALIZATION','DATABASE_BASELINE'].includes(String(errorKind)) && errorCode !== undefined && !safeCode) continue;
+    return {
+      code,
+      operation: operation as DatabaseHelperFailureDiagnostic['operation'],
+      ...(operation === 'capture' ? { captureStage: captureStage as DatabaseHelperFailureDiagnostic['captureStage'] } : {}),
+      ...(operation === 'capture' && captureStage === 'migrations'
+        ? { captureSubstage: captureSubstage as 'inspect' | 'diff' }
+        : {}),
+      errorKind: errorKind as DatabaseHelperFailureDiagnostic['errorKind'],
+      ...(safeCode ? { errorCode: safeCode } : {}),
+      failed: true,
+    };
+  }
+  return null;
+};
 const asJobIds = (jobs: Array<{ id?: string }>) =>
   jobs.flatMap((job) => (job.id ? [job.id] : [])).sort();
 
@@ -195,11 +277,81 @@ const waitForComposeService = async (
   );
 };
 
-const managedVolumes = (stdout: string) =>
+const waitForResolvedMainServiceHealth = async (
+  root: string,
+  dependencies: SystemDependencies,
+  service: 'postgres' | 'redis',
+  containerId: string,
+  environment: NodeJS.ProcessEnv,
+  ports: ReturnType<typeof loadLocalSystemEnvironment>['ports'],
+) => {
+  let observedHealth:
+    | 'healthy'
+    | 'starting'
+    | 'unhealthy'
+    | 'unavailable'
+    | 'unknown' = 'unknown';
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const resolution = await resolveEquivalentMainServiceContainer(
+      root,
+      dependencies,
+      environment,
+      ports,
+      service,
+    );
+    if (resolution.status === 'ambiguous') {
+      throw new PreviewStabilityMainInfrastructureError(
+        `PREVIEW_STABILITY_${service.toUpperCase()}_UNHEALTHY`,
+        {
+          mainInfraStage: 'health',
+          service,
+          operation: 'restart',
+          commandKind: 'discovery',
+          errorCode: 'AMBIGUOUS_OWNERSHIP',
+          observedHealth: 'unknown',
+          expectedHealth: 'healthy',
+        },
+      );
+    }
+    if (
+      resolution.status === 'resolved' &&
+      resolution.container.id === containerId
+    ) {
+      observedHealth = resolution.container.health;
+      if (resolution.container.health === 'healthy') return;
+    } else {
+      observedHealth = 'unavailable';
+    }
+    await dependencies.sleep(1_000);
+  }
+  throw new PreviewStabilityMainInfrastructureError(
+    `PREVIEW_STABILITY_${service.toUpperCase()}_UNHEALTHY`,
+    {
+      mainInfraStage: 'health',
+      service,
+      operation: 'restart',
+      commandKind: 'discovery',
+      errorCode: 'HEALTH_TIMEOUT',
+      observedHealth,
+      expectedHealth: 'healthy',
+    },
+  );
+};
+
+const isExplicitSafePreviewEvolutionIsolation = (environment: NodeJS.ProcessEnv) =>
+  environment.COMMERCIAL_AUTOMATION_MODE === 'preview' &&
+  environment.WHATSAPP_PROVIDER === 'mock' &&
+  environment.WHATSAPP_GROUP_SEND_ENABLED === 'false';
+
+const managedVolumes = (stdout: string, includeEvolution: boolean) =>
   stdout
     .split(/\r?\n/)
     .map((value) => value.trim())
-    .filter((value) => /^(afiliado-shopee|shopee-evolution)/i.test(value));
+    .filter((value) =>
+      includeEvolution
+        ? /^(afiliado-shopee|shopee-evolution)/i.test(value)
+        : /^afiliado-shopee/i.test(value),
+    );
 
 export const stopValidatedManagedProcess = async ({
   service,
@@ -259,11 +411,21 @@ export const createPreviewStabilityDependencies = (
     const result = await dependencies.run(
       createDatabaseHelperCommand(root, command, environment),
     );
-    commandSucceeded(
-      result,
-      'PREVIEW_STABILITY_DATABASE_HELPER_FAILED',
-      'Falha na captura isolada de evidencia do banco',
-    );
+    if (result.code !== 0) {
+      const diagnostic = parseDatabaseHelperFailureDiagnostic(result.stderr);
+      if (diagnostic) {
+        console.error(
+          JSON.stringify({
+            event: 'preview-stability.database-helper.failed',
+            ...diagnostic,
+          }),
+        );
+      }
+      throw new LocalSystemError(
+        'Falha na captura isolada de evidencia do banco',
+        'PREVIEW_STABILITY_DATABASE_HELPER_FAILED',
+      );
+    }
     try {
       return JSON.parse(result.stdout) as T;
     } catch {
@@ -277,7 +439,8 @@ export const createPreviewStabilityDependencies = (
     now: () => dependencies.now(),
     sleep: (milliseconds) => dependencies.sleep(milliseconds),
     status: (environment) => supervisor.status(loadedEnvironment(environment)),
-    async prepareMainInfrastructure(environment) {
+    async prepareMainInfrastructure(environment, reuseManagedInfrastructure) {
+      if (reuseManagedInfrastructure) return;
       const env = loadedEnvironment(environment);
       const dockerInfo = await dependencies.run({
         command: 'docker',
@@ -344,25 +507,62 @@ export const createPreviewStabilityDependencies = (
     },
     async setAutomationPaused(paused, environment) {
       const loaded = loadLocalSystemEnvironment(root, environment);
-      const response = await fetch(
-        `http://127.0.0.1:${loaded.ports.api}/commercial-automation/settings`,
-        {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(
-            paused
-              ? { paused: true }
-              : {
-                  paused: false,
-                  confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
-                },
-          ),
-          signal: AbortSignal.timeout(5_000),
-        },
-      );
+      const token = loaded.env.LOCAL_API_AUTH_TOKEN?.trim();
+      if (!token) {
+        throw new LocalSystemError(
+          'Autenticacao local indisponivel para alterar a pausa',
+          'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        );
+      }
+      let response: Response;
+      try {
+        response = await fetch(
+          `http://127.0.0.1:${loaded.ports.api}/commercial-automation/settings`,
+          {
+            method: 'PATCH',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(
+              paused
+                ? { paused: true }
+                : {
+                    paused: false,
+                    confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+                  },
+            ),
+            signal: AbortSignal.timeout(5_000),
+          },
+        );
+      } catch {
+        throw new LocalSystemError(
+          'Falha na alteracao temporaria da pausa',
+          'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        );
+      }
       if (!response.ok) {
         throw new LocalSystemError(
           'API recusou a alteracao temporaria da pausa',
+          'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        );
+      }
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw new LocalSystemError(
+          'API retornou estado invalido apos alterar a pausa',
+          'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        );
+      }
+      if (
+        typeof body !== 'object' ||
+        body === null ||
+        Reflect.get(body, 'paused') !== paused
+      ) {
+        throw new LocalSystemError(
+          'API retornou estado invalido apos alterar a pausa',
           'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
         );
       }
@@ -406,26 +606,11 @@ export const createPreviewStabilityDependencies = (
     },
     async captureInfrastructure(environment) {
       const env = loadedEnvironment(environment);
-      const [main, evolution, volumes] = await Promise.all([
+      const skipEvolution = isExplicitSafePreviewEvolutionIsolation(env);
+      const [main, volumes] = await Promise.all([
         dependencies.run({
           command: 'docker',
           args: ['compose', 'ps', '-a', '--format', 'json'],
-          cwd: root,
-          env,
-        }),
-        dependencies.run({
-          command: 'docker',
-          args: [
-            'compose',
-            '--env-file',
-            'infra/evolution/.env.local',
-            '-f',
-            'infra/evolution/docker-compose.yml',
-            'ps',
-            '-a',
-            '--format',
-            'json',
-          ],
           cwd: root,
           env,
         }),
@@ -442,19 +627,40 @@ export const createPreviewStabilityDependencies = (
         'Falha ao capturar containers principais',
       );
       commandSucceeded(
-        evolution,
-        'PREVIEW_STABILITY_EVOLUTION_CONTAINER_CAPTURE_FAILED',
-        'Falha ao capturar containers Evolution',
-      );
-      commandSucceeded(
         volumes,
         'PREVIEW_STABILITY_VOLUME_CAPTURE_FAILED',
         'Falha ao capturar volumes gerenciados',
       );
-      const volumeNames = managedVolumes(volumes.stdout);
+      const evolutionServices = skipEvolution
+        ? []
+        : await (async () => {
+            const evolution = await dependencies.run({
+              command: 'docker',
+              args: [
+                'compose',
+                '--env-file',
+                'infra/evolution/.env.local',
+                '-f',
+                'infra/evolution/docker-compose.yml',
+                'ps',
+                '-a',
+                '--format',
+                'json',
+              ],
+              cwd: root,
+              env,
+            });
+            commandSucceeded(
+              evolution,
+              'PREVIEW_STABILITY_EVOLUTION_CONTAINER_CAPTURE_FAILED',
+              'Falha ao capturar containers Evolution',
+            );
+            return parseComposeStatuses(evolution.stdout);
+          })();
+      const volumeNames = managedVolumes(volumes.stdout, !skipEvolution);
       const services = [
         ...parseComposeStatuses(main.stdout),
-        ...parseComposeStatuses(evolution.stdout),
+        ...evolutionServices,
       ];
       const envPath = resolve(root, '.env');
       const envFingerprint = existsSync(envPath)
@@ -463,9 +669,12 @@ export const createPreviewStabilityDependencies = (
       return {
         volumeCount: volumeNames.length,
         volumeFingerprint: fingerprintValues(volumeNames),
-        containers: Object.fromEntries(
-          services.map((service) => [service.service, service.state]),
-        ),
+        containers: {
+          ...Object.fromEntries(
+            services.map((service) => [service.service, service.state]),
+          ),
+          ...(skipEvolution ? { evolution: 'not-required' } : {}),
+        },
         envFingerprint,
       } satisfies PreviewStabilityInfrastructure;
     },
@@ -478,33 +687,84 @@ export const createPreviewStabilityDependencies = (
       });
     },
     async restartMainService(service, environment) {
-      const env = loadedEnvironment(environment);
+      const loaded = loadLocalSystemEnvironment(root, environment);
+      const env = loaded.env;
+      const resolution = await resolveEquivalentMainServiceContainer(
+        root,
+        dependencies,
+        env,
+        loaded.ports,
+        service,
+      );
+      if (resolution.status !== 'resolved') {
+        throw new PreviewStabilityMainInfrastructureError(
+          `PREVIEW_STABILITY_${service.toUpperCase()}_START_FAILED`,
+          {
+            mainInfraStage: 'resolve',
+            service,
+            operation: 'restart',
+            commandKind: 'discovery',
+            errorCode:
+              resolution.status === 'ambiguous'
+                ? 'AMBIGUOUS_OWNERSHIP'
+                : 'OWNERSHIP_UNPROVEN',
+            observedHealth: 'unknown',
+            expectedHealth: 'healthy',
+          },
+        );
+      }
+      const target = resolution.container;
       const stopped = await dependencies.run({
         command: 'docker',
-        args: ['compose', 'stop', service],
+        args: ['stop', target.id],
         cwd: root,
         env,
       });
-      commandSucceeded(
-        stopped,
-        `PREVIEW_STABILITY_${service.toUpperCase()}_STOP_FAILED`,
-        `Falha ao parar ${service}`,
-      );
+      if (stopped.code !== 0) {
+        throw new PreviewStabilityMainInfrastructureError(
+          `PREVIEW_STABILITY_${service.toUpperCase()}_STOP_FAILED`,
+          {
+            mainInfraStage: 'stop',
+            service,
+            operation: 'restart',
+            commandKind: 'container',
+            errorCode: 'COMMAND_FAILED',
+            observedHealth: target.health,
+            expectedHealth: 'healthy',
+          },
+        );
+      }
       const unavailableAt = dependencies.now().getTime();
       await dependencies.sleep(5_000);
       const started = await dependencies.run({
         command: 'docker',
-        args: ['compose', 'start', service],
+        args: ['start', target.id],
         cwd: root,
         env,
       });
       const unavailableMs = dependencies.now().getTime() - unavailableAt;
-      commandSucceeded(
-        started,
-        `PREVIEW_STABILITY_${service.toUpperCase()}_START_FAILED`,
-        `Falha ao reiniciar ${service}`,
+      if (started.code !== 0) {
+        throw new PreviewStabilityMainInfrastructureError(
+          'MAIN_COMPOSE_START_FAILED',
+          {
+            mainInfraStage: 'start',
+            service,
+            operation: 'restart',
+            commandKind: 'container',
+            errorCode: 'COMMAND_FAILED',
+            observedHealth: 'unavailable',
+            expectedHealth: 'healthy',
+          },
+        );
+      }
+      await waitForResolvedMainServiceHealth(
+        root,
+        dependencies,
+        service,
+        target.id,
+        env,
+        loaded.ports,
       );
-      await waitForComposeService(root, dependencies, service, env);
       return { unavailableMs };
     },
     async waitForSafeTickGap(minimumMilliseconds, environment) {

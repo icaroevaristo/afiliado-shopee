@@ -7,6 +7,7 @@ import {
   createBaselineRuntime,
   createPrismaClient,
   listRepositoryMigrations,
+  MigrationBaselineSubstageError,
 } from '@shopee-auto-affiliate-ai/database';
 
 import type {
@@ -20,6 +21,137 @@ const MIGRATIONS_DIRECTORY = resolve(
   'packages/database/prisma/migrations',
 );
 
+
+export type PreviewStabilityDatabaseHelperOperation =
+  | 'capture'
+  | 'executions'
+  | 'group-instance'
+  | 'force-pause'
+  | 'unknown';
+
+export const CAPTURE_STAGES = [
+  'migrations', 'settings', 'executions', 'runs-total', 'runs-dry-run',
+  'runs-ambiguous', 'runs-investigation', 'dispatch-total',
+  'dispatch-processing', 'outbox-total', 'outbox-pending',
+  'outbox-ambiguous', 'table-counts',
+] as const;
+
+export type PreviewStabilityDatabaseCaptureStage = (typeof CAPTURE_STAGES)[number];
+export type PreviewStabilityDatabaseHelperErrorKind =
+  | 'PRISMA' | 'PRISMA_VALIDATION' | 'PRISMA_UNKNOWN'
+  | 'PRISMA_INITIALIZATION' | 'DATABASE_BASELINE' | 'SYSTEM' | 'UNKNOWN';
+
+export type PreviewStabilityDatabaseHelperFailure = {
+  code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED';
+  operation: PreviewStabilityDatabaseHelperOperation;
+  captureStage?: PreviewStabilityDatabaseCaptureStage;
+  captureSubstage?: 'inspect' | 'diff';
+  errorKind: PreviewStabilityDatabaseHelperErrorKind;
+  errorCode?: string;
+  failed: true;
+};
+
+const SAFE_SYSTEM_ERROR_CODES = new Set(['ENOENT','EACCES','ETIMEDOUT','ECONNREFUSED','EPIPE']);
+const SAFE_DATABASE_BASELINE_ERROR_CODES = new Set([
+  'DATABASE_BASELINE_ADOPTION_BLOCKED',
+  'DATABASE_BASELINE_ARGUMENTS_INVALID',
+  'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+  'DATABASE_BASELINE_POSTCHECK_FAILED',
+  'DATABASE_BASELINE_RESOLVE_FAILED',
+]);
+
+class CaptureStageError extends Error {
+  constructor(
+    readonly captureStage: PreviewStabilityDatabaseCaptureStage,
+    readonly originalError: unknown,
+  ) {
+    super('preview stability capture stage failed');
+    this.name = 'CaptureStageError';
+  }
+}
+
+export const withCaptureStage = async <T>(
+  captureStage: PreviewStabilityDatabaseCaptureStage,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  try { return await operation(); }
+  catch (error: unknown) { throw new CaptureStageError(captureStage, error); }
+};
+
+export const normalizeDatabaseHelperOperation = (
+  operation: string | undefined,
+): PreviewStabilityDatabaseHelperOperation => {
+  switch (operation) {
+    case 'capture': case 'executions': case 'group-instance': case 'force-pause':
+      return operation;
+    default: return 'unknown';
+  }
+};
+
+const safeStringProperty = (error: unknown, property: string) => {
+  if (typeof error !== 'object' || error === null) return null;
+  const value = Reflect.get(error, property);
+  return typeof value === 'string' ? value : null;
+};
+
+const classifyDatabaseHelperError = (
+  error: unknown,
+): Pick<PreviewStabilityDatabaseHelperFailure, 'errorKind' | 'errorCode'> => {
+  const code = safeStringProperty(error, 'code');
+  const name = safeStringProperty(error, 'name');
+  if (code && /^P\d{4}$/.test(code)) return { errorKind: 'PRISMA', errorCode: code };
+  if (name === 'PrismaClientValidationError') return { errorKind: 'PRISMA_VALIDATION' };
+  if (name === 'PrismaClientUnknownRequestError') return { errorKind: 'PRISMA_UNKNOWN' };
+  if (name === 'PrismaClientInitializationError') {
+    const initCode = safeStringProperty(error, 'errorCode');
+    return { errorKind: 'PRISMA_INITIALIZATION', ...(initCode && /^P\d{4}$/.test(initCode) ? { errorCode: initCode } : {}) };
+  }
+  if (name === 'DatabaseBaselineError') {
+    return { errorKind: 'DATABASE_BASELINE', ...(code && SAFE_DATABASE_BASELINE_ERROR_CODES.has(code) ? { errorCode: code } : {}) };
+  }
+  if (code && SAFE_SYSTEM_ERROR_CODES.has(code)) return { errorKind: 'SYSTEM', errorCode: code };
+  return { errorKind: 'UNKNOWN' };
+};
+
+export const createDatabaseHelperFailureDiagnostic = (
+  operation: string | undefined,
+  error: unknown,
+): PreviewStabilityDatabaseHelperFailure => {
+  const normalizedOperation = normalizeDatabaseHelperOperation(operation);
+  const staged = error instanceof CaptureStageError ? error : null;
+  const migrationSubstage =
+    staged?.captureStage === 'migrations' &&
+    staged.originalError instanceof MigrationBaselineSubstageError
+      ? staged.originalError
+      : null;
+  const classified = classifyDatabaseHelperError(
+    migrationSubstage?.cause ?? (staged ? staged.originalError : error),
+  );
+  return {
+    code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED',
+    operation: normalizedOperation,
+    ...(normalizedOperation === 'capture' && staged ? { captureStage: staged.captureStage } : {}),
+    ...(normalizedOperation === 'capture' && migrationSubstage
+      ? { captureSubstage: migrationSubstage.substage }
+      : {}),
+    ...classified,
+    failed: true,
+  };
+};
+
+export const serializeDatabaseHelperSuccess = (result: unknown) => JSON.stringify(result);
+
+export const emitDatabaseHelperFailure = (
+  operation: string | undefined,
+  error: unknown,
+  output: { writeError(line: string): void; setExitCode(code: number): void } = {
+    writeError: (line) => console.error(line),
+    setExitCode: (code) => { process.exitCode = code; },
+  },
+) => {
+  output.writeError(JSON.stringify(createDatabaseHelperFailureDiagnostic(operation, error)));
+  output.setExitCode(1);
+};
 const executionIsStale = (
   execution: {
     status: string;
@@ -126,28 +258,36 @@ const captureDatabaseEvidence = async (
       ambiguousOutboxes,
       tableCounts,
     ] = await Promise.all([
-      readMigrations(environment),
-      prisma.commercialAutomationSettings.findUnique({
-        where: { id: 'commercial-automation' },
-        select: { paused: true },
-      }),
-      readExecutions(prisma, new Date()),
-      prisma.commercialPipelineRun.count(),
-      prisma.commercialPipelineRun.count({ where: { mode: 'DRY_RUN' } }),
-      prisma.commercialPipelineRun.count({
-        where: { finalStatus: 'AMBIGUOUS' },
-      }),
-      prisma.commercialPipelineRun.count({
-        where: { investigationRequired: true },
-      }),
-      prisma.whatsAppDispatch.count(),
-      prisma.whatsAppDispatch.count({ where: { status: 'PROCESSING' } }),
-      prisma.commercialDispatchOutbox.count(),
-      prisma.commercialDispatchOutbox.count({ where: { status: 'PENDING' } }),
-      prisma.commercialDispatchOutbox.count({
-        where: { status: 'AMBIGUOUS' },
-      }),
-      countTables(prisma),
+      withCaptureStage('migrations', () => readMigrations(environment)),
+      withCaptureStage('settings', () =>
+        prisma.commercialAutomationSettings.findUnique({
+          where: { id: 'commercial-automation' },
+          select: { paused: true },
+        }),
+      ),
+      withCaptureStage('executions', () => readExecutions(prisma, new Date())),
+      withCaptureStage('runs-total', () => prisma.commercialPipelineRun.count()),
+      withCaptureStage('runs-dry-run', () =>
+        prisma.commercialPipelineRun.count({ where: { mode: 'DRY_RUN' } }),
+      ),
+      withCaptureStage('runs-ambiguous', () =>
+        prisma.commercialPipelineRun.count({ where: { finalStatus: 'AMBIGUOUS' } }),
+      ),
+      withCaptureStage('runs-investigation', () =>
+        prisma.commercialPipelineRun.count({ where: { investigationRequired: true } }),
+      ),
+      withCaptureStage('dispatch-total', () => prisma.whatsAppDispatch.count()),
+      withCaptureStage('dispatch-processing', () =>
+        prisma.whatsAppDispatch.count({ where: { status: 'PROCESSING' } }),
+      ),
+      withCaptureStage('outbox-total', () => prisma.commercialDispatchOutbox.count()),
+      withCaptureStage('outbox-pending', () =>
+        prisma.commercialDispatchOutbox.count({ where: { status: 'PENDING' } }),
+      ),
+      withCaptureStage('outbox-ambiguous', () =>
+        prisma.commercialDispatchOutbox.count({ where: { status: 'AMBIGUOUS' } }),
+      ),
+      withCaptureStage('table-counts', () => countTables(prisma)),
     ]);
     return {
       migrations,
@@ -175,8 +315,7 @@ const captureDatabaseEvidence = async (
   }
 };
 
-const run = async () => {
-  const command = process.argv[2];
+const run = async (command: string | undefined) => {
   if (command === 'capture') return captureDatabaseEvidence(process.env);
 
   const prisma = createPrismaClient();
@@ -210,11 +349,12 @@ const run = async () => {
   }
 };
 
-void run()
-  .then((result) => console.log(JSON.stringify(result)))
-  .catch(() => {
-    console.error(
-      JSON.stringify({ code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED' }),
-    );
-    process.exitCode = 1;
-  });
+const currentFile = fileURLToPath(import.meta.url);
+const isMainModule = Boolean(process.argv[1]) && resolve(process.argv[1]!) === currentFile;
+
+if (isMainModule) {
+  const operation = process.argv[2];
+  void run(operation)
+    .then((result) => console.log(serializeDatabaseHelperSuccess(result)))
+    .catch((error: unknown) => emitDatabaseHelperFailure(operation, error));
+}

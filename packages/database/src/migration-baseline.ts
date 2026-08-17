@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 import { spawn } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 
@@ -91,6 +91,26 @@ export class DatabaseBaselineError extends Error {
   ) {
     super(message);
     this.name = 'DatabaseBaselineError';
+  }
+}
+
+export type MigrationBaselineSubstage = 'inspect' | 'diff';
+
+export class MigrationBaselineSubstageError extends Error {
+  declare readonly cause: unknown;
+
+  constructor(
+    readonly substage: MigrationBaselineSubstage,
+    cause: unknown,
+  ) {
+    super('migration baseline substage failed');
+    this.name = 'MigrationBaselineSubstageError';
+    Object.defineProperty(this, 'cause', {
+      value: cause,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
   }
 }
 
@@ -418,31 +438,47 @@ const inspectWithPrisma = async (
 
 type CommandResult = { code: number; stdout: string; stderr: string };
 
+type CommandOutputStream = {
+  setEncoding(encoding: 'utf8'): void;
+  on(event: 'data', listener: (chunk: string) => void): void;
+};
+
+type SanitizedChildProcess = {
+  stdout: CommandOutputStream;
+  stderr: CommandOutputStream;
+  once(event: 'error', listener: (error: Error) => void): void;
+  once(event: 'close', listener: (code: number | null) => void): void;
+};
+
+type SpawnCommand = (
+  command: string,
+  args: string[],
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    shell: false;
+    windowsHide: true;
+    stdio: ['ignore', 'pipe', 'pipe'];
+  },
+) => SanitizedChildProcess;
+
+const spawnCommand: SpawnCommand = (command, args, options) =>
+  spawn(command, args, options);
+
 export const runSanitizedCommand = (
   command: string,
   args: readonly string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
+  spawnProcess: SpawnCommand = spawnCommand,
 ): Promise<CommandResult> =>
   new Promise((resolveCommand, reject) => {
-    const corepackEntrypoint = resolve(
-      dirname(process.execPath),
-      'node_modules/corepack/dist/corepack.js',
-    );
-    const useCorepackEntrypoint =
-      process.platform === 'win32' &&
-      /^corepack(?:\.cmd)?$/i.test(command) &&
-      existsSync(corepackEntrypoint);
-    const child = spawn(
-      useCorepackEntrypoint ? process.execPath : command,
-      useCorepackEntrypoint ? [corepackEntrypoint, ...args] : [...args],
-      {
-        cwd: options.cwd,
-        env: options.env,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    const child = spawnProcess(command, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -459,23 +495,75 @@ export const runSanitizedCommand = (
     );
   });
 
+type PrismaCommandDependencies = {
+  platform: NodeJS.Platform;
+  execPath: string;
+  fileExists: (path: string) => boolean;
+};
+
+const defaultPrismaCommandDependencies: PrismaCommandDependencies = {
+  platform: process.platform,
+  execPath: process.execPath,
+  fileExists: existsSync,
+};
+
+const resolveWindowsPnpmEntrypoint = (
+  environment: NodeJS.ProcessEnv,
+  dependencies: PrismaCommandDependencies,
+) => {
+  const pathValue =
+    environment.Path ??
+    environment.PATH ??
+    process.env.Path ??
+    process.env.PATH ??
+    '';
+  for (const pathEntry of pathValue.split(win32.delimiter)) {
+    if (!pathEntry) continue;
+    const pnpmCommand = win32.resolve(pathEntry, 'pnpm.cmd');
+    const pnpmEntrypoint = win32.resolve(
+      pathEntry,
+      'node_modules/pnpm/bin/pnpm.cjs',
+    );
+    if (
+      dependencies.fileExists(pnpmCommand) &&
+      dependencies.fileExists(pnpmEntrypoint)
+    ) {
+      return pnpmEntrypoint;
+    }
+  }
+  throw new DatabaseBaselineError(
+    'pnpm nao esta disponivel para validar o migration diff',
+    'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+  );
+};
+
 export const runPrismaCommand = (
   args: readonly string[],
   options: { root: string; environment: NodeJS.ProcessEnv },
   commandRunner: typeof runSanitizedCommand = runSanitizedCommand,
-) =>
-  commandRunner(
-    process.platform === 'win32' ? 'corepack.cmd' : 'corepack',
-    [
-      'pnpm',
-      '--filter',
-      '@shopee-auto-affiliate-ai/database',
-      'exec',
-      'prisma',
-      ...args,
-    ],
-    { cwd: options.root, env: options.environment },
-  );
+  dependencies: PrismaCommandDependencies = defaultPrismaCommandDependencies,
+) => {
+  const pnpmArgs = [
+    '--filter',
+    '@shopee-auto-affiliate-ai/database',
+    'exec',
+    'prisma',
+    ...args,
+  ];
+  return dependencies.platform === 'win32'
+    ? commandRunner(
+        dependencies.execPath,
+        [
+          resolveWindowsPnpmEntrypoint(options.environment, dependencies),
+          ...pnpmArgs,
+        ],
+        { cwd: options.root, env: options.environment },
+      )
+    : commandRunner('pnpm', pnpmArgs, {
+        cwd: options.root,
+        env: options.environment,
+      });
+};
 
 export const loadDatabaseEnvironment = (
   root: string,
@@ -511,17 +599,21 @@ export const createBaselineRuntime = ({
   root,
   environment,
   commandRunner = runSanitizedCommand,
+  commandDependencies = defaultPrismaCommandDependencies,
 }: {
   root: string;
   environment: NodeJS.ProcessEnv;
   commandRunner?: typeof runSanitizedCommand;
+  commandDependencies?: PrismaCommandDependencies;
 }): BaselineRuntime => {
   const prisma = new PrismaClient({
     datasources: { db: { url: environment.DATABASE_URL } },
   });
   const inspect = async () => {
     const [inspection, drift] = await Promise.all([
-      inspectWithPrisma(prisma),
+      inspectWithPrisma(prisma).catch((error: unknown) => {
+        throw new MigrationBaselineSubstageError('inspect', error);
+      }),
       runPrismaCommand(
         [
           'migrate',
@@ -534,12 +626,18 @@ export const createBaselineRuntime = ({
         ],
         { root, environment },
         commandRunner,
-      ),
+        commandDependencies,
+      ).catch((error: unknown) => {
+        throw new MigrationBaselineSubstageError('diff', error);
+      }),
     ]);
     if (drift.code !== 0 && drift.code !== 2) {
-      throw new DatabaseBaselineError(
-        'Nao foi possivel validar drift do banco existente',
-        'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+      throw new MigrationBaselineSubstageError(
+        'diff',
+        new DatabaseBaselineError(
+          'Nao foi possivel validar drift do banco existente',
+          'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+        ),
       );
     }
     return { ...inspection, schemaMatchesCurrent: drift.code === 0 };
@@ -583,6 +681,7 @@ export const createBaselineRuntime = ({
         ],
         { root, environment },
         commandRunner,
+        commandDependencies,
       );
       if (result.code !== 0) {
         throw new DatabaseBaselineError(
