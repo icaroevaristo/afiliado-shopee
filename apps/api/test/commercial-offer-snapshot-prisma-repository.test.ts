@@ -240,6 +240,42 @@ describe('PrismaShopeeOfferRepository official snapshots', () => {
     });
   });
 
+  it('nao cria revision por ruido de float equivalente apos round-trip', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    const noisy = Number('0.14') * 100;
+    await repository.upsertOfficialOfferWithSnapshot(
+      offer('10.00', { commissionRate: noisy }),
+    );
+    await expect(
+      repository.upsertOfficialOfferWithSnapshot(
+        offer('10.0000', { commissionRate: 14 }),
+      ),
+    ).resolves.toMatchObject({
+      commercialStateChanged: false,
+      snapshotCreated: false,
+      snapshotRevision: 1,
+    });
+    expect(fake.readState().snapshots).toHaveLength(1);
+  });
+
+  it('mantem mudancas reais de commission e discount como novas revisions', async () => {
+    const fake = createTransactionalPrisma();
+    const repository = new PrismaShopeeOfferRepository(fake.prisma as never);
+    await repository.upsertOfficialOfferWithSnapshot(
+      offer('10.00', { commissionRate: 14, discountRate: 10 }),
+    );
+    await expect(
+      repository.upsertOfficialOfferWithSnapshot(
+        offer('10.00', { commissionRate: 15, discountRate: 10 }),
+      ),
+    ).resolves.toMatchObject({ snapshotCreated: true, snapshotRevision: 2 });
+    await expect(
+      repository.upsertOfficialOfferWithSnapshot(
+        offer('10.00', { commissionRate: 15, discountRate: 11 }),
+      ),
+    ).resolves.toMatchObject({ snapshotCreated: true, snapshotRevision: 3 });
+  });
   it('preserva A -> B -> A em revisions monotonicas', async () => {
     const fake = createTransactionalPrisma();
     const repository = new PrismaShopeeOfferRepository(fake.prisma as never);

@@ -49,6 +49,27 @@ describe('commercial offer fingerprint', () => {
     );
   });
 
+  it('canonicaliza artefatos IEEE-754 sem apagar diferencas comerciais', () => {
+    const exactArtifact = Number('0.14') * 100;
+    expect(exactArtifact).toBe(14.000000000000002);
+    expect(
+      fingerprintCommercialOffer({ ...base(), commissionRate: exactArtifact }),
+    ).toBe(fingerprintCommercialOffer({ ...base(), commissionRate: 14 }));
+
+    expect(
+      fingerprintCommercialOffer({ ...base(), commissionRate: 1.23 }),
+    ).toBe(
+      fingerprintCommercialOffer({
+        ...base(),
+        commissionRate: 1.2300000000000002,
+      }),
+    );
+    expect(
+      fingerprintCommercialOffer({ ...base(), commissionRate: 14.125 }),
+    ).not.toBe(
+      fingerprintCommercialOffer({ ...base(), commissionRate: 14.126 }),
+    );
+  });
   it('ignora rating e sales, que nao pertencem ao material canonico', () => {
     const withObservations = { ...base(), rating: 1, sales: 2 };
     const changedObservations = { ...base(), rating: 5, sales: 9999 };

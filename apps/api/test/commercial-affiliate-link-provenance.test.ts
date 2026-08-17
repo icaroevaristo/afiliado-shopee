@@ -53,6 +53,36 @@ describe('commercial affiliate link provenance', () => {
     expect(r).toMatchObject({ valid: true, provenance: { source: 'OFFICIAL', productId: 'product-1', providerProductId: 'provider-1', snapshotId: 'snapshot-1', snapshotRevision: 1, candidateId: 'candidate-1', campaignId: 'campaign-1', groupId: 'group-1', productLink: 'https://shopee.com.br/product/1/100', affiliateLink: 'https://s.shopee.com.br/affiliate-1', origin: 'OFFICIAL_OFFER_LINK', validationState: 'VALID' } });
   });
 
+  it('permanece valido apos round-trip de percentual semanticamente equivalente', () => {
+    const c = context();
+    const noisyCommission = Number('0.14') * 100;
+    const persistedCommission = 14;
+    const stableFingerprint = fingerprintCommercialOffer({
+      source: c.product.source,
+      providerProductId: c.product.providerProductId,
+      productLink: c.product.productLink,
+      affiliateLink: c.product.affiliateLink,
+      price: c.product.price,
+      priceMin: c.product.priceMin,
+      priceMax: c.product.priceMax,
+      discountRate: c.product.discountRate,
+      commissionRate: noisyCommission,
+      offerStartsAt: c.product.offerStartsAt,
+      offerEndsAt: c.product.offerEndsAt,
+      unavailableAt: c.product.unavailableAt,
+    });
+    c.product.commissionRate = persistedCommission;
+    c.snapshot.commissionRate = persistedCommission;
+    c.product.commercialSnapshotFingerprint = stableFingerprint;
+    c.snapshot.fingerprint = stableFingerprint;
+
+    expect(validateCommercialAffiliateLinkProvenance(c)).toMatchObject({
+      valid: true,
+    });
+
+    c.product.affiliateLink = 'https://s.shopee.com.br/affiliate-changed';
+    expect(code(c)).toBe(COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH);
+  });
   it('falha fechado com productLink valido sem affiliateLink', () => {
     expect(code(context({ affiliateLink: null }))).toBe(COMMERCIAL_AFFILIATE_LINK_REQUIRED);
   });
