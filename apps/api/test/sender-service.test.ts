@@ -581,7 +581,7 @@ describe('SenderService', () => {
       expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
     });
 
-    it('fluxo classico sem imagem usa fallback texto e nao chama draftService', async () => {
+    it('fluxo classico sem imagem permanece TEXT e nao chama draftService', async () => {
       const dispatchLegado = {
         ...commercialDispatch,
         product: {
@@ -608,17 +608,10 @@ describe('SenderService', () => {
         message: expect.stringContaining(dispatchLegado.generatedCopy.titulo),
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event: 'whatsapp.dispatch.image_fallback',
-          warningCodes: ['COMMERCIAL_MESSAGE_IMAGE_MISSING'],
-        }),
-        'Commercial message falling back to text',
-      );
       expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
     });
 
-    it('fluxo classico com imagem valida envia media preservando a mensagem como caption', async () => {
+    it('fluxo classico com imagem valida permanece TEXT-only', async () => {
       const dispatchWithImage = {
         ...commercialDispatch,
         product: {
@@ -640,12 +633,12 @@ describe('SenderService', () => {
       expect(provider.sentMessages).toHaveLength(1);
       expect(provider.sentMessages[0]).toMatchObject({
         message: buildWhatsAppPublicMessage(dispatchWithImage.generatedCopy),
-        imageUrl: 'https://cdn.example.com/product.jpg',
       });
+      expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
       expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
     });
 
-    it('fluxo classico com URL de imagem invalida faz fallback texto seguro', async () => {
+    it('fluxo classico com URL de imagem invalida permanece TEXT-only', async () => {
       const invalidImageDispatch = {
         ...commercialDispatch,
         product: {
@@ -666,13 +659,6 @@ describe('SenderService', () => {
 
       expect(provider.sentMessages).toHaveLength(1);
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event: 'whatsapp.dispatch.image_fallback',
-          warningCodes: ['COMMERCIAL_MESSAGE_IMAGE_URL_INVALID'],
-        }),
-        'Commercial message falling back to text',
-      );
     });
     it('candidate-scoped faz fallback texto quando a imagem esta ausente', async () => {
       const prisma = prismaMock(commercialDispatch);
