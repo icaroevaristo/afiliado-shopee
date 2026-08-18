@@ -69,10 +69,6 @@ export const finalizeCommercialPipelineRun = async ({
         'Commercial pipeline attempt release blocked',
       );
     } else {
-      const findExecutionById = runs.findExecutionById;
-      const findAttemptContext =
-        promotionCandidates.findAttemptContextByGeneratedCopyId;
-      const releaseAttempt = promotionCandidates.releaseAttempt;
       const logBlocked = (reason: string, campaignId?: string) =>
         logger.error(
           {
@@ -86,16 +82,23 @@ export const finalizeCommercialPipelineRun = async ({
           'Commercial pipeline attempt release blocked',
         );
 
-      if (!findExecutionById || !findAttemptContext || !releaseAttempt) {
+      if (
+        !runs.findExecutionById ||
+        !promotionCandidates.findAttemptContextByGeneratedCopyId ||
+        !promotionCandidates.releaseAttempt
+      ) {
         logBlocked('RESERVATION_CONTRACT_UNAVAILABLE');
       } else {
-        const execution = await findExecutionById(run.executionId);
+        const execution = await runs.findExecutionById(run.executionId);
         if (!execution || execution.id !== run.executionId) {
           logBlocked('EXECUTION_LINK_MISSING');
         } else if (execution.commercialRunId !== run.id) {
           logBlocked('EXECUTION_RUN_LINK_MISMATCH');
         } else {
-          const context = await findAttemptContext(dispatch.generatedCopyId);
+          const context =
+            await promotionCandidates.findAttemptContextByGeneratedCopyId(
+              dispatch.generatedCopyId,
+            );
           if (context.kind !== 'FOUND') {
             logBlocked(
               context.kind === 'AMBIGUOUS'
@@ -131,7 +134,7 @@ export const finalizeCommercialPipelineRun = async ({
               ) {
                 logBlocked('CAMPAIGN_LINK_MISMATCH', context.campaignId);
               } else {
-                const release = await releaseAttempt({
+                const release = await promotionCandidates.releaseAttempt({
                   campaignId: context.campaignId,
                   executionId: run.executionId,
                 });
