@@ -730,4 +730,67 @@ describe('PrismaCommercialPromotionRepository', () => {
       /affiliate|productLink|providerProductId|shopId|fingerprint|scoreBreakdown/i,
     );
   });
+  it('retira QUEUED stale da fila elegivel e deixa o proximo candidate assumir rank 1', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 1;
+    addProducts(state, 'stale', 'next');
+    const stale = candidate('campaign-1', 'stale', { rankPosition: 1 });
+    state.candidates.push(stale);
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+
+    const result = await repository.materialize(
+      materializationInput([ranked('next')]),
+    );
+
+    expect(result).toMatchObject({ queuedBlocked: 1, queuedAfter: 1 });
+    const byProduct = new Map(
+      fake.state.candidates.map((entry) => [entry.productId, entry]),
+    );
+    expect(byProduct.get('stale')).toMatchObject({
+      status: 'BLOCKED',
+      rankPosition: null,
+      blockedReason: 'QUEUE_NOT_SELECTED',
+    });
+    expect(byProduct.get('next')).toMatchObject({
+      status: 'QUEUED',
+      rankPosition: 1,
+    });
+  });
+
+  it('mantem COPY_READY e RESERVED protegidos quando nao participam do novo ranking', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 2;
+    addProducts(state, 'copy-ready', 'reserved');
+    state.candidates.push(
+      candidate('campaign-1', 'copy-ready', {
+        status: 'COPY_READY',
+        rankPosition: 7,
+      }),
+      candidate('campaign-1', 'reserved', {
+        status: 'RESERVED',
+        rankPosition: 8,
+      }),
+    );
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+
+    const result = await repository.materialize(materializationInput([]));
+
+    expect(result.protectedCount).toBe(2);
+    expect(fake.state.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          productId: 'copy-ready',
+          status: 'COPY_READY',
+          rankPosition: 7,
+        }),
+        expect.objectContaining({
+          productId: 'reserved',
+          status: 'RESERVED',
+          rankPosition: 8,
+        }),
+      ]),
+    );
+  });
 });

@@ -1,4 +1,4 @@
-import { fingerprintCommercialOffer } from './commercial-offer-snapshot';
+import { commercialOfferSnapshotMatchesProduct } from './commercial-offer-snapshot';
 import type { CommercialPromotionCopyContext } from './repositories';
 
 export const COMMERCIAL_AFFILIATE_LINK_REQUIRED =
@@ -137,27 +137,13 @@ export const validateCommercialAffiliateLinkProvenance = (
   }
 
   if (
-    product.commercialSnapshotRevision !== snapshot.revision ||
-    product.commercialSnapshotFingerprint !== snapshot.fingerprint
+    !commercialOfferSnapshotMatchesProduct({
+      product,
+      productSnapshotRevision: product.commercialSnapshotRevision,
+      productSnapshotFingerprint: product.commercialSnapshotFingerprint,
+      snapshot,
+    })
   ) {
-    return { valid: false, code: COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH };
-  }
-
-  const currentFingerprint = fingerprintCommercialOffer({
-    source: product.source,
-    providerProductId: product.providerProductId,
-    productLink: product.productLink,
-    affiliateLink: product.affiliateLink,
-    price: product.price.trim(),
-    priceMin: product.priceMin?.trim() ?? null,
-    priceMax: product.priceMax?.trim() ?? null,
-    discountRate: product.discountRate,
-    commissionRate: product.commissionRate,
-    offerStartsAt: product.offerStartsAt,
-    offerEndsAt: product.offerEndsAt,
-    unavailableAt: product.unavailableAt,
-  });
-  if (currentFingerprint !== snapshot.fingerprint) {
     return { valid: false, code: COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH };
   }
 

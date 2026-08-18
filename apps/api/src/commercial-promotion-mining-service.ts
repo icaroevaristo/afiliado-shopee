@@ -1,6 +1,7 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import { commercialProductRejections } from './commercial-offer-eligibility';
+import { commercialOfferSnapshotMatchesProduct } from './commercial-offer-snapshot';
 import {
   CommercialOfferScorePolicyResolver,
   sanitizeCommercialScoreBreakdown,
@@ -162,8 +163,12 @@ const snapshotState = ({
     !fingerprint ||
     latestSnapshotRevision === null ||
     currentSnapshot.productId !== product.id ||
-    currentSnapshot.revision !== revision ||
-    currentSnapshot.fingerprint !== fingerprint
+    !commercialOfferSnapshotMatchesProduct({
+      product,
+      productSnapshotRevision: revision,
+      productSnapshotFingerprint: fingerprint,
+      snapshot: currentSnapshot,
+    })
   ) {
     return 'SNAPSHOT_OUTDATED' as const;
   }
