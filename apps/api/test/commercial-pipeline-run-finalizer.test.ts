@@ -586,6 +586,90 @@ describe('finalizeCommercialPipelineRun', () => {
     });
   });
 
+  it('preserva o receiver dos repositories stateful na finalizacao SENT', async () => {
+    const state = build(false, 'execution-1');
+    const runsWithReceiver = state.runs as typeof state.runs & {
+      receiverExecution: { id: string; commercialRunId: string };
+    };
+    runsWithReceiver.receiverExecution = {
+      id: 'execution-1',
+      commercialRunId: 'run-id',
+    };
+    runsWithReceiver.findExecutionById = async function (
+      this: typeof runsWithReceiver,
+      id: string,
+    ) {
+      return id === this.receiverExecution.id ? this.receiverExecution : null;
+    };
+
+    type StatefulPromotionCandidates = Omit<
+      typeof state.promotionCandidates,
+      'findAttemptContextByGeneratedCopyId' | 'releaseAttempt'
+    > & {
+      receiverState: {
+        context: CommercialPromotionAttemptContext;
+        releaseCalls: number;
+      };
+      findAttemptContextByGeneratedCopyId: (
+        this: StatefulPromotionCandidates,
+        generatedCopyId: string,
+      ) => Promise<CommercialPromotionAttemptContext>;
+      releaseAttempt: (
+        this: StatefulPromotionCandidates,
+        input: { campaignId: string; executionId: string },
+      ) => Promise<{
+        kind: 'RELEASED';
+        campaignId: string;
+        executionId: string;
+        released: boolean;
+      }>;
+    };
+    const candidatesWithReceiver = state.promotionCandidates as unknown as StatefulPromotionCandidates;
+    candidatesWithReceiver.receiverState = {
+      context: {
+        kind: 'FOUND',
+        candidateId: 'candidate-id',
+        campaignId: 'campaign-id',
+        attemptExecutionId: 'execution-1',
+      },
+      releaseCalls: 0,
+    };
+    candidatesWithReceiver.findAttemptContextByGeneratedCopyId = async function (
+      this: StatefulPromotionCandidates,
+      generatedCopyId: string,
+    ) {
+      return generatedCopyId === 'copy-id'
+        ? this.receiverState.context
+        : ({ kind: 'NONE' } as const);
+    };
+    candidatesWithReceiver.releaseAttempt = async function (
+      this: StatefulPromotionCandidates,
+      input: { campaignId: string; executionId: string },
+    ) {
+      this.receiverState.releaseCalls += 1;
+      return {
+        kind: 'RELEASED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: this.receiverState.releaseCalls === 1,
+      };
+    };
+
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+    await finalizeCommercialPipelineRun(
+      finalizerOptions(state, dispatch('SENT')),
+    );
+
+    expect(
+      state.promotionCandidates.markDispatchedByGeneratedCopyId,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      state.promotionCandidates.resetCampaignFailureStateByGeneratedCopyId,
+    ).toHaveBeenCalledTimes(2);
+    expect(candidatesWithReceiver.receiverState.releaseCalls).toBe(2);
+  });
   it('mantem a reserva quando o vinculo da execution diverge do run', async () => {
     const state = build(false, 'execution-1');
     state.findExecutionById.mockResolvedValue({
