@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { CommercialNicheMatcher } from '../src/commercial-niche-matcher';
+import { fingerprintCommercialOfferProduct } from '../src/commercial-offer-snapshot';
 import { CommercialOfferScorePolicyResolver } from '../src/commercial-offer-score-policy';
 import { CommercialPromotionMiningService } from '../src/commercial-promotion-mining-service';
 import { CommercialPromotionSignalDetector } from '../src/commercial-promotion-signal-detector';
@@ -95,15 +96,19 @@ const product = (
   ...overrides,
 });
 
+const productFingerprint = (value: ShopeeOfferRecord) =>
+  fingerprintCommercialOfferProduct(value);
+
 const catalogItem = (
   id: string,
   overrides: Partial<CommercialPromotionCatalogItem> = {},
 ): CommercialPromotionCatalogItem => {
+  const currentProduct = overrides.product ?? product(id);
   const currentSnapshot = {
     id: `snapshot-${id}`,
     productId: id,
     revision: 1,
-    fingerprint: `fingerprint-${id}`,
+    fingerprint: productFingerprint(currentProduct),
     price: '80',
     priceMin: '80',
     priceMax: '80',
@@ -118,7 +123,7 @@ const catalogItem = (
     createdAt: NOW,
   };
   return {
-    product: product(id),
+    product: currentProduct,
     commercialSnapshotRevision: 1,
     commercialSnapshotFingerprint: currentSnapshot.fingerprint,
     latestSnapshotRevision: 1,
@@ -282,11 +287,13 @@ describe('CommercialPromotionMiningService', () => {
       commercialSnapshotFingerprint: 'fingerprint-price-drop-2',
       latestSnapshotRevision: 2,
     });
+    const priceDropFingerprint = productFingerprint(priceDropLowScore.product);
+    priceDropLowScore.commercialSnapshotFingerprint = priceDropFingerprint;
     priceDropLowScore.currentSnapshot = {
       ...priceDropLowScore.currentSnapshot!,
       id: 'snapshot-price-drop-2',
       revision: 2,
-      fingerprint: 'fingerprint-price-drop-2',
+      fingerprint: priceDropFingerprint,
       price: '80',
       discountRate: 5,
       commissionRate: 0,
@@ -415,11 +422,13 @@ describe('CommercialPromotionMiningService', () => {
       commercialSnapshotFingerprint: 'fingerprint-changed-2',
       latestSnapshotRevision: 2,
     });
+    const currentFingerprint = productFingerprint(current.product);
+    current.commercialSnapshotFingerprint = currentFingerprint;
     current.currentSnapshot = {
       ...current.currentSnapshot!,
       id: 'snapshot-changed-2',
       revision: 2,
-      fingerprint: 'fingerprint-changed-2',
+      fingerprint: currentFingerprint,
       price: '80',
     };
     current.previousSnapshot = {
@@ -434,9 +443,12 @@ describe('CommercialPromotionMiningService', () => {
       commercialSnapshotFingerprint: 'fingerprint-missing-previous',
       latestSnapshotRevision: 2,
     });
+    const missingPreviousFingerprint = productFingerprint(missingPrevious.product);
+    missingPrevious.commercialSnapshotFingerprint = missingPreviousFingerprint;
     missingPrevious.currentSnapshot = {
       ...missingPrevious.currentSnapshot!,
       revision: 2,
+      fingerprint: missingPreviousFingerprint,
     };
     const { service } = setup({ products: [current, missingPrevious] });
     const report = await service.preview('campaign-1');
@@ -611,4 +623,68 @@ describe('CommercialPromotionMiningService', () => {
     );
   });
 
+  it('rejeita snapshot stale recalculado antes do ranking e promove o proximo elegivel', async () => {
+    const stale = catalogItem('stale');
+    stale.product.price = '79';
+    stale.product.priceMin = '79';
+    stale.product.priceMax = '79';
+    const next = catalogItem('next');
+    const staleCandidate = existingCandidate('stale', { rankPosition: 1 });
+    const { service, materialize } = setup({
+      products: [stale, next],
+      candidates: [staleCandidate],
+      campaignRecord: campaign({ queueTargetSize: 1 }),
+    });
+
+    const preview = await service.preview('campaign-1');
+    expect(preview.rejectionSummary.SNAPSHOT_OUTDATED).toBe(1);
+    expect(preview.projectedCandidates).toEqual([
+      expect.objectContaining({ productId: 'next', projectedRank: 1 }),
+    ]);
+
+    await service.mine('campaign-1', { confirm: 'MINERAR_PROMOCOES' });
+    expect(materialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rankedCandidates: [expect.objectContaining({ productId: 'next' })],
+      }),
+    );
+  });
+
+  it('preserva snapshot atual e torna o produto reelegivel apos snapshot novo coerente', async () => {
+    const current = catalogItem('current');
+    const currentPreview = await setup({ products: [current] }).service.preview(
+      'campaign-1',
+    );
+    expect(currentPreview.rejectionSummary.SNAPSHOT_OUTDATED).toBeUndefined();
+    expect(currentPreview.projectedCandidates?.[0]).toMatchObject({
+      productId: 'current',
+      projectedRank: 1,
+    });
+
+    const stale = catalogItem('reeligible');
+    stale.product.price = '70';
+    stale.product.priceMin = '70';
+    stale.product.priceMax = '70';
+    const stalePreview = await setup({ products: [stale] }).service.preview(
+      'campaign-1',
+    );
+    expect(stalePreview.projectedCandidates).toEqual([]);
+    expect(stalePreview.rejectionSummary.SNAPSHOT_OUTDATED).toBe(1);
+
+    const refreshed = catalogItem('reeligible', {
+      product: product('reeligible', {
+        price: '70',
+        priceMin: '70',
+        priceMax: '70',
+      }),
+    });
+    const refreshedPreview = await setup({ products: [refreshed] }).service.preview(
+      'campaign-1',
+    );
+    expect(refreshedPreview.rejectionSummary.SNAPSHOT_OUTDATED).toBeUndefined();
+    expect(refreshedPreview.projectedCandidates?.[0]).toMatchObject({
+      productId: 'reeligible',
+      projectedRank: 1,
+    });
+  });
 });

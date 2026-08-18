@@ -76,3 +76,53 @@ export const fingerprintCommercialOffer = (
   });
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 };
+
+export type CommercialOfferProductLike = {
+  source: CommercialOfferFingerprintInput['source'];
+  providerProductId: string;
+  productLink?: string | null;
+  affiliateLink?: string | null;
+  price: string;
+  priceMin?: string | null;
+  priceMax?: string | null;
+  discountRate: number;
+  commissionRate: number;
+  offerStartsAt?: Date | null;
+  offerEndsAt?: Date | null;
+  unavailableAt?: Date | null;
+};
+
+export const fingerprintCommercialOfferProduct = (
+  product: CommercialOfferProductLike,
+): string =>
+  fingerprintCommercialOffer({
+    source: product.source,
+    providerProductId: product.providerProductId,
+    productLink: product.productLink ?? null,
+    affiliateLink: product.affiliateLink ?? null,
+    price: product.price.trim(),
+    priceMin: product.priceMin?.trim() ?? null,
+    priceMax: product.priceMax?.trim() ?? null,
+    discountRate: product.discountRate,
+    commissionRate: product.commissionRate,
+    offerStartsAt: product.offerStartsAt,
+    offerEndsAt: product.offerEndsAt,
+    unavailableAt: product.unavailableAt,
+  });
+
+export type CommercialOfferSnapshotCoherenceInput = {
+  product: CommercialOfferProductLike;
+  productSnapshotRevision: number;
+  productSnapshotFingerprint: string | null;
+  snapshot: { revision: number; fingerprint: string };
+};
+
+export const commercialOfferSnapshotMatchesProduct = ({
+  product,
+  productSnapshotRevision,
+  productSnapshotFingerprint,
+  snapshot,
+}: CommercialOfferSnapshotCoherenceInput): boolean =>
+  productSnapshotRevision === snapshot.revision &&
+  productSnapshotFingerprint === snapshot.fingerprint &&
+  fingerprintCommercialOfferProduct(product) === snapshot.fingerprint;
