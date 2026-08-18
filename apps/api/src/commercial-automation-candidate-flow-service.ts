@@ -10,6 +10,7 @@ import {
 } from './commercial-promotion-mining-service';
 import {
   COMMERCIAL_AI_COPY_CONFIRMATION,
+  COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   type CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
 import {
@@ -114,6 +115,7 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_MESSAGE_PRODUCT_UNAVAILABLE',
   'COMMERCIAL_MESSAGE_SNAPSHOT_EXPIRED',
   'COMMERCIAL_MESSAGE_SNAPSHOT_UNAVAILABLE',
+  COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
 ] as const;
 

@@ -39,6 +39,8 @@ import type {
 } from './repositories';
 
 export const COMMERCIAL_AI_COPY_CONFIRMATION = 'GERAR_COPY_COM_IA';
+export const COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED =
+  'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED';
 
 export type CommercialAiCopyConfig = {
   enabled: boolean;
@@ -298,14 +300,37 @@ export class CommercialPromotionCopyGenerationService {
     return sanitizeCommercialPromotionCopy(copy, context.product.affiliateLink);
   }
 
+  private currentAttemptBlocker(
+    attempt: CommercialCopyGenerationAttemptRecord | null,
+  ): string | null {
+    if (!attempt || attempt.status === 'SUCCEEDED') return null;
+    if (attempt.status === 'STARTED') {
+      return 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS';
+    }
+    if (attempt.status === 'AMBIGUOUS') {
+      return 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS';
+    }
+    if (attempt.failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID') {
+      return COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED;
+    }
+    return 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED';
+  }
+
   async preview(candidateId: string) {
     const context = await this.context(candidateId);
     const validationFacts = this.validationFacts(context);
-    const blockers = candidateBlockers(context, this.clock());
     const fingerprint = this.fingerprint(context);
-    const cache = fingerprint
-      ? await this.options.repository.findCopyByInputFingerprint(fingerprint)
-      : null;
+    const [cache, attempt] = fingerprint
+      ? await Promise.all([
+          this.options.repository.findCopyByInputFingerprint(fingerprint),
+          this.options.repository.findAttemptByInputFingerprint(fingerprint),
+        ])
+      : [null, null];
+    const attemptBlocker = this.currentAttemptBlocker(attempt);
+    const blockers = [
+      ...candidateBlockers(context, this.clock()),
+      ...(attemptBlocker ? [attemptBlocker] : []),
+    ];
     return {
       candidateId: context.candidate.id,
       status: context.candidate.status,
