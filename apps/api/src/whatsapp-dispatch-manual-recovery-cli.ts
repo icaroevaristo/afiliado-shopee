@@ -51,11 +51,8 @@ const repository = new PrismaWhatsAppDispatchManualRecoveryRepository(prisma);
 
 const main = async () => {
   if (action === 'authorize') {
-    const service = new WhatsAppDispatchManualRecoveryService(repository, {
-      getJob: async () => null,
-      findEquivalentJobIds: async () => [],
-    });
-    const result = await service.authorizeAndRearm(input);
+    const service = new WhatsAppDispatchManualRecoveryService(repository);
+    const result = await service.authorize(input);
     console.log(JSON.stringify(result, null, 2));
     return;
   }

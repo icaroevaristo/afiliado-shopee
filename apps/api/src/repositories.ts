@@ -1363,7 +1363,7 @@ export type WhatsAppDispatchManualRecoveryAuthorization = {
   candidateId: string;
 };
 
-export type WhatsAppDispatchManualRecoveryRequeueContext = {
+export type WhatsAppDispatchManualRecoveryInspection = {
   recovery: WhatsAppDispatchManualRecoveryRecord;
   jobId: string;
   campaignId: string;
@@ -1371,13 +1371,26 @@ export type WhatsAppDispatchManualRecoveryRequeueContext = {
   dispatchId: string;
   runId: string;
   executionId: string;
+  dispatchStatus: WhatsAppDispatchStatus;
+  attemptCount: number;
+  externalMessageId: string | null;
+  sentAt: Date | null;
+  runStatus: CommercialPipelineRunStatus;
+  runFinalStatus: CommercialPipelineFinalStatus | null;
+  investigationRequired: boolean;
 };
 
+export type WhatsAppDispatchManualRecoveryRequeueContext =
+  WhatsAppDispatchManualRecoveryInspection;
+
 export interface WhatsAppDispatchManualRecoveryRepository {
-  rearmAfterConfirmedNonDelivery(
+  authorizeConfirmedNonDelivery(
     input: WhatsAppDispatchManualRecoveryInput & { authorizedAt: Date },
   ): Promise<WhatsAppDispatchManualRecoveryAuthorization>;
-  prepareManualRecoveryRequeue(
+  inspectAuthorizedRecovery(
+    input: WhatsAppDispatchManualRecoveryInput,
+  ): Promise<WhatsAppDispatchManualRecoveryInspection>;
+  rearmAuthorizedRetry(
     input: WhatsAppDispatchManualRecoveryInput & {
       leaseExpiresAt: Date;
       checkedAt: Date;

@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PrismaWhatsAppDispatchManualRecoveryRepository } from '../src/prisma-whatsapp-dispatch-manual-recovery-repository';
+import { WhatsAppDispatchManualRecoveryService } from '../src/whatsapp-dispatch-manual-recovery-service';
 import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from '../src/repositories';
 
 type RecoveryRow = {
@@ -178,16 +179,16 @@ const codeOf = async (p: Promise<unknown>) => {
 };
 
 describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
-  it('audits and rearms the same dispatch without resetting attemptCount', async () => {
+  it('authorize audits without rearming the dispatch', async () => {
     const s = makeState();
-    const r = await repoFor(s).rearmAfterConfirmedNonDelivery({
+    const r = await repoFor(s).authorizeConfirmedNonDelivery({
       ...input,
       authorizedAt: now,
     });
     expect(r.kind).toBe('AUTHORIZED');
     expect(s.dispatch).toMatchObject({
       id: 'dispatch-1',
-      status: 'PENDING',
+      status: 'PROCESSING',
       attemptCount: 1,
       externalMessageId: null,
       sentAt: null,
@@ -201,24 +202,24 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     });
     expect(s.recoveryCreates).toBe(1);
   });
-  it('is idempotent after rearm and creates no second recovery', async () => {
+  it('authorize is idempotent and creates no second recovery', async () => {
     const s = makeState(),
       repo = repoFor(s);
-    await repo.rearmAfterConfirmedNonDelivery({ ...input, authorizedAt: now });
-    const r = await repo.rearmAfterConfirmedNonDelivery({
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
+    const r = await repo.authorizeConfirmedNonDelivery({
       ...input,
       authorizedAt: new Date(now.getTime() + 1),
     });
     expect(r.kind).toBe('ALREADY_AUTHORIZED');
     expect(s.recoveryCreates).toBe(1);
-    expect(s.dispatchRearms).toBe(1);
+    expect(s.dispatchRearms).toBe(0);
   });
   it('blocks externalMessageId evidence', async () => {
     const s = makeState();
     s.dispatch.externalMessageId = 'msg-1';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -230,7 +231,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.dispatch.sentAt = now;
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -242,7 +243,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.dispatch.attemptCount = 0;
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -254,7 +255,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.dispatch.status = 'FAILED';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -266,7 +267,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.run.finalStatus = 'FAILED';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -278,7 +279,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.run.investigationRequired = false;
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -289,7 +290,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const s = makeState();
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           expectedExecutionId: 'other',
           authorizedAt: now,
@@ -302,7 +303,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.outbox.jobId = 'other';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -314,7 +315,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.copy.createdFromCandidateId = 'other';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -326,7 +327,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     s.campaign.attemptExecutionId = 'other';
     expect(
       await codeOf(
-        repoFor(s).rearmAfterConfirmedNonDelivery({
+        repoFor(s).authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: now,
         }),
@@ -336,9 +337,9 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
   it('renews only the same execution ownership before requeue', async () => {
     const s = makeState(),
       repo = repoFor(s);
-    await repo.rearmAfterConfirmedNonDelivery({ ...input, authorizedAt: now });
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
     const expiry = new Date(now.getTime() + 120000);
-    const r = await repo.prepareManualRecoveryRequeue({
+    const r = await repo.rearmAuthorizedRetry({
       ...input,
       checkedAt: now,
       leaseExpiresAt: expiry,
@@ -350,12 +351,12 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
   it('persistently blocks a third recovery after second attempt begins', async () => {
     const s = makeState(),
       repo = repoFor(s);
-    await repo.rearmAfterConfirmedNonDelivery({ ...input, authorizedAt: now });
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
     s.dispatch.status = 'PROCESSING';
     s.dispatch.attemptCount = 2;
     expect(
       await codeOf(
-        repo.rearmAfterConfirmedNonDelivery({
+        repo.authorizeConfirmedNonDelivery({
           ...input,
           authorizedAt: new Date(now.getTime() + 1000),
         }),
@@ -366,11 +367,11 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const s = makeState(),
       repo = repoFor(s);
     const results = await Promise.allSettled([
-      repo.rearmAfterConfirmedNonDelivery({ ...input, authorizedAt: now }),
-      repo.rearmAfterConfirmedNonDelivery({ ...input, authorizedAt: now }),
+      repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now }),
+      repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now }),
     ]);
     expect(s.recoveryCreates).toBe(1);
-    expect(s.dispatchRearms).toBe(1);
+    expect(s.dispatchRearms).toBe(0);
     expect(
       results.filter((x) => x.status === 'fulfilled').length,
     ).toBeGreaterThanOrEqual(1);
@@ -384,7 +385,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
         candidate: { ...s.candidate },
         execution: { ...s.execution },
       };
-    await repoFor(s).rearmAfterConfirmedNonDelivery({
+    await repoFor(s).authorizeConfirmedNonDelivery({
       ...input,
       authorizedAt: now,
     });
@@ -395,5 +396,171 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
       candidate: s.candidate,
       execution: s.execution,
     }).toEqual(before);
+  });
+  const prepareIntegratedRecovery = async () => {
+    const state = makeState();
+    const repo = repoFor(state);
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
+    await repo.rearmAuthorizedRetry({
+      ...input,
+      checkedAt: now,
+      leaseExpiresAt: new Date(now.getTime() + 120_000),
+    });
+    return { state, repo };
+  };
+
+  const integratedQueue = (state: string, attemptsMade: number) => {
+    const job = {
+      id: 'job-1',
+      attemptsMade,
+      getState: vi.fn(async () => state as never),
+      retry: vi.fn(async () => undefined),
+    };
+    return {
+      job,
+      queue: {
+        getJob: vi.fn(async () => job),
+        findEquivalentJobIds: vi.fn(async () => ['job-1']),
+      },
+    };
+  };
+
+  it('integrates repository + service restart from waiting without another retry', async () => {
+    const { state, repo } = await prepareIntegratedRecovery();
+    const { job, queue } = integratedQueue('waiting', 1);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
+      clock: () => new Date(now.getTime() + 1_000),
+    });
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('CONVERGED_AFTER_RESTART');
+    expect(state.dispatch).toMatchObject({ status: 'PENDING', attemptCount: 1 });
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(state.recovery?.requeuedAt).not.toBeNull();
+  });
+
+  it('integrates repository + service restart from active PROCESSING/2', async () => {
+    const { state, repo } = await prepareIntegratedRecovery();
+    state.dispatch.status = 'PROCESSING';
+    state.dispatch.attemptCount = 2;
+    const { job, queue } = integratedQueue('active', 2);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
+      clock: () => new Date(now.getTime() + 1_000),
+    });
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('CONVERGED_AFTER_RESTART');
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(state.recovery?.requeuedAt).not.toBeNull();
+  });
+
+  it('integrates repository + service restart from completed SENT/2', async () => {
+    const { state, repo } = await prepareIntegratedRecovery();
+    state.dispatch.status = 'SENT';
+    state.dispatch.attemptCount = 2;
+    state.dispatch.externalMessageId = 'message-2';
+    state.dispatch.sentAt = now;
+    state.run.status = 'COMPLETED';
+    state.run.finalStatus = 'SENT';
+    state.run.investigationRequired = false;
+    const { job, queue } = integratedQueue('completed', 2);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
+      clock: () => new Date(now.getTime() + 1_000),
+    });
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('CONVERGED_AFTER_RESTART');
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(state.recovery?.requeuedAt).not.toBeNull();
+  });
+
+  it('integrates repository + service restart from failed attempt 2 without third retry', async () => {
+    const { state, repo } = await prepareIntegratedRecovery();
+    state.dispatch.status = 'PROCESSING';
+    state.dispatch.attemptCount = 2;
+    const { job, queue } = integratedQueue('failed', 2);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
+      clock: () => new Date(now.getTime() + 1_000),
+    });
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('CONVERGED_AFTER_RESTART');
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(state.recovery?.requeuedAt).not.toBeNull();
+  });
+  it('integrates BullMQ validation before repository rearm and retry after PENDING/1', async () => {
+    const state = makeState();
+    const repo = repoFor(state);
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
+    let jobState = 'failed';
+    const job = {
+      id: 'job-1',
+      attemptsMade: 1,
+      getState: vi.fn(async () => {
+        if (jobState === 'failed') {
+          expect(state.dispatch).toMatchObject({ status: 'PROCESSING', attemptCount: 1 });
+          expect(state.recovery?.rearmedAt).toBeNull();
+        }
+        return jobState as never;
+      }),
+      retry: vi.fn(async () => {
+        expect(state.dispatch).toMatchObject({ status: 'PENDING', attemptCount: 1 });
+        expect(state.recovery?.rearmedAt).not.toBeNull();
+        jobState = 'waiting';
+      }),
+    };
+    const service = new WhatsAppDispatchManualRecoveryService(
+      repo,
+      {
+        getJob: vi.fn(async () => job),
+        findEquivalentJobIds: vi.fn(async () => ['job-1']),
+      },
+      { clock: () => new Date(now.getTime() + 1_000) },
+    );
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('REQUEUED');
+    expect(state.dispatch).toMatchObject({ status: 'PENDING', attemptCount: 1 });
+    expect(state.dispatchRearms).toBe(1);
+    expect(job.retry).toHaveBeenCalledTimes(1);
+    expect(state.recovery?.requeuedAt).not.toBeNull();
+  });
+
+  it.each([
+    ['missing', null, ['job-1']],
+    ['invalid-state', 'paused', ['job-1']],
+    ['equivalent', 'failed', ['job-1', 'job-shadow']],
+  ])('integrated %s BullMQ gate leaves PROCESSING/1 unrearmed', async (_name, jobState, equivalents) => {
+    const state = makeState();
+    const repo = repoFor(state);
+    await repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
+    const job = jobState
+      ? {
+          id: 'job-1',
+          attemptsMade: 1,
+          getState: vi.fn(async () => jobState as never),
+          retry: vi.fn(async () => undefined),
+        }
+      : null;
+    const service = new WhatsAppDispatchManualRecoveryService(
+      repo,
+      {
+        getJob: vi.fn(async () => job),
+        findEquivalentJobIds: vi.fn(async () => equivalents),
+      },
+      { clock: () => new Date(now.getTime() + 1_000) },
+    );
+
+    await expect(service.requeueAuthorizedRetry(input)).rejects.toBeDefined();
+
+    expect(state.dispatch).toMatchObject({ status: 'PROCESSING', attemptCount: 1 });
+    expect(state.recovery?.rearmedAt).toBeNull();
+    expect(state.dispatchRearms).toBe(0);
+    if (job) expect(job.retry).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,8 @@
-import { AppError } from '@shopee-auto-affiliate-ai/shared';
+﻿import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
   type WhatsAppDispatchManualRecoveryInput,
+  type WhatsAppDispatchManualRecoveryInspection,
   type WhatsAppDispatchManualRecoveryRepository,
 } from './repositories';
 
@@ -35,58 +36,111 @@ const assertConfirmation = (confirmation: string) => {
   }
 };
 
-const isEvidenceOfExistingRetry = (
+const isAmbiguousRun = (inspection: WhatsAppDispatchManualRecoveryInspection) =>
+  inspection.runStatus === 'FAILED' &&
+  inspection.runFinalStatus === 'AMBIGUOUS' &&
+  inspection.investigationRequired;
+
+const assertRetryProgressIsProven = (
   state: ManualRecoveryJobState,
   attemptsMade: number,
-) =>
-  state === 'waiting' ||
-  state === 'active' ||
-  state === 'delayed' ||
-  state === 'completed' ||
-  (state === 'failed' && attemptsMade >= 2);
+  inspection: WhatsAppDispatchManualRecoveryInspection,
+) => {
+  if (!inspection.recovery.rearmedAt) return false;
+  if (state === 'waiting' || state === 'delayed') {
+    return (
+      attemptsMade === 1 &&
+      inspection.dispatchStatus === 'PENDING' &&
+      inspection.attemptCount === 1 &&
+      !inspection.externalMessageId &&
+      !inspection.sentAt &&
+      isAmbiguousRun(inspection)
+    );
+  }
+  if (state === 'active') {
+    const dispatchMatches =
+      (inspection.dispatchStatus === 'PENDING' && inspection.attemptCount === 1) ||
+      (inspection.dispatchStatus === 'PROCESSING' && inspection.attemptCount === 2);
+    return dispatchMatches && isAmbiguousRun(inspection);
+  }
+  if (state === 'completed') {
+    return (
+      inspection.dispatchStatus === 'SENT' &&
+      inspection.attemptCount === 2 &&
+      Boolean(inspection.externalMessageId) &&
+      Boolean(inspection.sentAt) &&
+      inspection.runStatus === 'COMPLETED' &&
+      inspection.runFinalStatus === 'SENT' &&
+      !inspection.investigationRequired
+    );
+  }
+  if (state === 'failed' && attemptsMade >= 2) {
+    const secondAmbiguous =
+      inspection.dispatchStatus === 'PROCESSING' &&
+      inspection.attemptCount === 2 &&
+      isAmbiguousRun(inspection);
+    const safeFailure =
+      inspection.dispatchStatus === 'FAILED' &&
+      inspection.attemptCount === 2 &&
+      inspection.runStatus === 'FAILED' &&
+      inspection.runFinalStatus === 'FAILED';
+    return secondAmbiguous || safeFailure;
+  }
+  return false;
+};
+
+const assertInitialRetryLifecycle = (
+  inspection: WhatsAppDispatchManualRecoveryInspection,
+) => {
+  if (
+    inspection.dispatchStatus !== 'PROCESSING' ||
+    inspection.attemptCount !== 1 ||
+    inspection.externalMessageId ||
+    inspection.sentAt ||
+    !isAmbiguousRun(inspection)
+  ) {
+    throw new AppError(
+      'Lifecycle nao permite o primeiro retry manual',
+      'WHATSAPP_DISPATCH_MANUAL_RECOVERY_LIFECYCLE_NOT_RETRYABLE',
+    );
+  }
+};
 
 export class WhatsAppDispatchManualRecoveryService {
   constructor(
     private readonly repository: WhatsAppDispatchManualRecoveryRepository,
-    private readonly queue: ManualRecoveryQueue,
-    private readonly options: {
-      clock?: () => Date;
-      reservationLeaseMs?: number;
-    } = {},
+    private readonly queue?: ManualRecoveryQueue,
+    private readonly options: { clock?: () => Date; reservationLeaseMs?: number } = {},
   ) {}
 
-  async authorizeAndRearm(input: WhatsAppDispatchManualRecoveryInput) {
+  async authorize(input: WhatsAppDispatchManualRecoveryInput) {
     assertConfirmation(input.confirmation);
     const now = this.options.clock?.() ?? new Date();
-    return this.repository.rearmAfterConfirmedNonDelivery({
-      ...input,
-      authorizedAt: now,
-    });
+    return this.repository.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
   }
 
   async requeueAuthorizedRetry(input: WhatsAppDispatchManualRecoveryInput) {
     assertConfirmation(input.confirmation);
+    if (!this.queue) {
+      throw new AppError(
+        'BullMQ e obrigatorio somente para a etapa de requeue',
+        'WHATSAPP_DISPATCH_MANUAL_RECOVERY_QUEUE_REQUIRED',
+      );
+    }
     const now = this.options.clock?.() ?? new Date();
     const leaseMs = this.options.reservationLeaseMs ?? 120_000;
-    const context = await this.repository.prepareManualRecoveryRequeue({
-      ...input,
-      checkedAt: now,
-      leaseExpiresAt: new Date(now.getTime() + leaseMs),
-    });
+    let inspection = await this.repository.inspectAuthorizedRecovery(input);
 
-    const job = await this.queue.getJob(context.jobId);
-    if (!job || job.id !== context.jobId) {
+    const job = await this.queue.getJob(inspection.jobId);
+    if (!job || job.id !== inspection.jobId) {
       throw new AppError(
         'Job BullMQ deterministico nao encontrado para recovery',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_JOB_MISSING',
       );
     }
-
-    const equivalentJobIds = await this.queue.findEquivalentJobIds(
-      context.dispatchId,
-    );
+    const equivalentJobIds = await this.queue.findEquivalentJobIds(inspection.dispatchId);
     const foreignEquivalentJobIds = [...new Set(equivalentJobIds)].filter(
-      (jobId) => jobId !== context.jobId,
+      (jobId) => jobId !== inspection.jobId,
     );
     if (foreignEquivalentJobIds.length > 0) {
       throw new AppError(
@@ -97,23 +151,23 @@ export class WhatsAppDispatchManualRecoveryService {
 
     let state = await job.getState();
     let attemptsMade = job.attemptsMade;
+    const existingRetryIsProven = assertRetryProgressIsProven(
+      state,
+      attemptsMade,
+      inspection,
+    );
 
-    if (context.recovery.requeuedAt) {
-      if (isEvidenceOfExistingRetry(state, attemptsMade)) {
-        return {
-          kind: 'ALREADY_REQUEUED' as const,
-          state,
-          attemptsMade,
-          context,
-        };
+    if (inspection.recovery.requeuedAt) {
+      if (existingRetryIsProven) {
+        return { kind: 'ALREADY_REQUEUED' as const, state, attemptsMade, context: inspection };
       }
       throw new AppError(
-        'Recovery ja marcado como requeued sem evidencia de retry no BullMQ',
+        'Recovery marcado como requeued sem evidencia coerente do retry',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_QUEUE_STATE_CONFLICT',
       );
     }
 
-    if (isEvidenceOfExistingRetry(state, attemptsMade)) {
+    if (existingRetryIsProven) {
       const recovery = await this.repository.markManualRecoveryRequeued({
         dispatchId: input.dispatchId,
         requeuedAt: now,
@@ -122,7 +176,7 @@ export class WhatsAppDispatchManualRecoveryService {
         kind: 'CONVERGED_AFTER_RESTART' as const,
         state,
         attemptsMade,
-        context: { ...context, recovery },
+        context: { ...inspection, recovery },
       };
     }
 
@@ -133,17 +187,37 @@ export class WhatsAppDispatchManualRecoveryService {
       );
     }
 
+    if (!inspection.recovery.rearmedAt) {
+      assertInitialRetryLifecycle(inspection);
+      inspection = await this.repository.rearmAuthorizedRetry({
+        ...input,
+        checkedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + leaseMs),
+      });
+    } else if (
+      inspection.dispatchStatus !== 'PENDING' ||
+      inspection.attemptCount !== 1 ||
+      !isAmbiguousRun(inspection)
+    ) {
+      throw new AppError(
+        'Recovery rearmado nao esta pronto para job.retry()',
+        'WHATSAPP_DISPATCH_MANUAL_RECOVERY_REARM_STATE_CONFLICT',
+      );
+    }
+
     try {
       await job.retry();
     } catch (error) {
       state = await job.getState();
       attemptsMade = job.attemptsMade;
-      if (!isEvidenceOfExistingRetry(state, attemptsMade)) throw error;
+      inspection = await this.repository.inspectAuthorizedRecovery(input);
+      if (!assertRetryProgressIsProven(state, attemptsMade, inspection)) throw error;
     }
 
     state = await job.getState();
     attemptsMade = job.attemptsMade;
-    if (!isEvidenceOfExistingRetry(state, attemptsMade)) {
+    inspection = await this.repository.inspectAuthorizedRecovery(input);
+    if (!assertRetryProgressIsProven(state, attemptsMade, inspection)) {
       throw new AppError(
         'BullMQ retry nao convergiu para estado observavel seguro',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_REQUEUE_UNCERTAIN',
@@ -158,7 +232,7 @@ export class WhatsAppDispatchManualRecoveryService {
       kind: 'REQUEUED' as const,
       state,
       attemptsMade,
-      context: { ...context, recovery },
+      context: { ...inspection, recovery },
     };
   }
 }
