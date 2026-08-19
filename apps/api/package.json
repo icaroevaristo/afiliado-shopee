@@ -27,7 +27,8 @@
     "commercial:copy:preview": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-promotion-copy-cli.ts preview",
     "commercial:copy:generate": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-promotion-copy-cli.ts generate",
     "commercial:copy:attempt:status": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-copy-attempt-status-cli.ts",
-    "commercial:message:preview": "tsx --env-file=../../.env --tsconfig ../../tsconfig.runtime.json src/commercial-message-preview-cli.ts"
+    "commercial:message:preview": "tsx --env-file=../../.env --tsconfig ../../tsconfig.runtime.json src/commercial-message-preview-cli.ts",
+    "commercial:dispatch:manual-recovery": "tsx --tsconfig ../../tsconfig.runtime.json src/whatsapp-dispatch-manual-recovery-cli.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

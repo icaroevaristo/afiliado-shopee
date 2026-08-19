@@ -1327,6 +1327,68 @@ export interface WhatsAppGroupDirectoryRepository {
   ): Promise<WhatsAppGroupRecord | null>;
 }
 
+export const WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION =
+  'CONFIRMAR_NAO_ENTREGA_E_RETRY_UNICO' as const;
+
+export type WhatsAppDispatchManualRecoveryRecord = {
+  id: string;
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+  candidateId: string;
+  campaignId: string;
+  jobId: string;
+  decision: 'CONFIRMED_NON_DELIVERY';
+  confirmation: string;
+  attemptCountObserved: number;
+  authorizedAt: Date;
+  rearmedAt: Date | null;
+  requeuedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type WhatsAppDispatchManualRecoveryInput = {
+  dispatchId: string;
+  expectedRunId: string;
+  expectedExecutionId: string;
+  confirmation: typeof WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION;
+};
+
+export type WhatsAppDispatchManualRecoveryAuthorization = {
+  kind: 'AUTHORIZED' | 'ALREADY_AUTHORIZED';
+  recovery: WhatsAppDispatchManualRecoveryRecord;
+  jobId: string;
+  campaignId: string;
+  candidateId: string;
+};
+
+export type WhatsAppDispatchManualRecoveryRequeueContext = {
+  recovery: WhatsAppDispatchManualRecoveryRecord;
+  jobId: string;
+  campaignId: string;
+  candidateId: string;
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+};
+
+export interface WhatsAppDispatchManualRecoveryRepository {
+  rearmAfterConfirmedNonDelivery(
+    input: WhatsAppDispatchManualRecoveryInput & { authorizedAt: Date },
+  ): Promise<WhatsAppDispatchManualRecoveryAuthorization>;
+  prepareManualRecoveryRequeue(
+    input: WhatsAppDispatchManualRecoveryInput & {
+      leaseExpiresAt: Date;
+      checkedAt: Date;
+    },
+  ): Promise<WhatsAppDispatchManualRecoveryRequeueContext>;
+  markManualRecoveryRequeued(input: {
+    dispatchId: string;
+    requeuedAt: Date;
+  }): Promise<WhatsAppDispatchManualRecoveryRecord>;
+}
+
 export interface WhatsAppDispatchRepository {
   createPending(
     data: WhatsAppDispatchCreateData,

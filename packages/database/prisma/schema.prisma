@@ -273,6 +273,7 @@ model WhatsAppDispatch {
   updatedAt             DateTime                  @updatedAt
   commercialPipelineRun CommercialPipelineRun?
   commercialOutbox      CommercialDispatchOutbox?
+  manualRecovery        WhatsAppDispatchManualRecovery?
 
   @@unique([generatedCopyId, destinationId])
   @@index([productId])
@@ -280,6 +281,30 @@ model WhatsAppDispatch {
   @@index([status])
   @@index([status, sentAt])
   @@index([destinationId, status, sentAt])
+}
+
+model WhatsAppDispatchManualRecovery {
+  id                   String                                  @id @default(cuid())
+  dispatchId           String                                  @unique
+  dispatch             WhatsAppDispatch                        @relation(fields: [dispatchId], references: [id], onDelete: Restrict)
+  runId                String
+  executionId          String
+  candidateId          String
+  campaignId           String
+  jobId                String
+  decision             WhatsAppDispatchManualRecoveryDecision
+  confirmation         String
+  attemptCountObserved Int
+  authorizedAt         DateTime
+  rearmedAt            DateTime?
+  requeuedAt           DateTime?
+  createdAt            DateTime                                @default(now())
+  updatedAt            DateTime                                @updatedAt
+
+  @@index([runId])
+  @@index([executionId])
+  @@index([candidateId])
+  @@index([campaignId])
 }
 
 model Coupon {
@@ -402,6 +427,10 @@ enum WhatsAppDispatchStatus {
   PROCESSING
   SENT
   FAILED
+}
+
+enum WhatsAppDispatchManualRecoveryDecision {
+  CONFIRMED_NON_DELIVERY
 }
 
 enum WhatsAppDestinationType {
