@@ -53,6 +53,55 @@ const mapRecovery = (record: {
   decision: 'CONFIRMED_NON_DELIVERY',
 });
 
+const buildRecoveryTarget = (
+  campaign: {
+    id: string;
+    logicalGroupFingerprint: string;
+    nicheId: string;
+    dailyLimit: number;
+    active: boolean;
+    niche: { active: boolean };
+    failureCount: number;
+    nextEligibleAt: Date | null;
+    anchorDestinationId: string | null;
+    anchorDestination: {
+      id: string;
+      name: string;
+      fingerprint: string | null;
+      active: boolean;
+      available: boolean;
+    } | null;
+  },
+  destinationId: string,
+) => {
+  const destination = campaign.anchorDestination;
+  if (
+    !campaign.active ||
+    !campaign.niche.active ||
+    !destination ||
+    campaign.anchorDestinationId !== destinationId ||
+    destination.id !== destinationId ||
+    !destination.fingerprint ||
+    destination.fingerprint !== campaign.logicalGroupFingerprint
+  ) {
+    fail(
+      'Target persistido diverge do dispatch/campaign do recovery',
+      'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH',
+    );
+  }
+  const verifiedDestination = destination!;
+  return {
+    groupId: verifiedDestination.id,
+    groupName: verifiedDestination.name,
+    logicalGroupFingerprint: campaign.logicalGroupFingerprint,
+    campaignId: campaign.id,
+    nicheId: campaign.nicheId,
+    dailyLimit: campaign.dailyLimit,
+    failureCount: campaign.failureCount,
+    nextEligibleAt: campaign.nextEligibleAt,
+  };
+};
+
 const loadLifecycle = async (
   db: RecoveryDb,
   input: WhatsAppDispatchManualRecoveryInput,
@@ -75,6 +124,7 @@ const loadLifecycle = async (
       sentAt: true,
       generatedCopyId: true,
       productId: true,
+      destinationId: true,
     },
   });
   if (!dispatch) {
@@ -235,6 +285,17 @@ const loadLifecycle = async (
     where: { id: candidate.campaignId },
     select: {
       id: true,
+      logicalGroupFingerprint: true,
+      nicheId: true,
+      dailyLimit: true,
+      active: true,
+      niche: { select: { active: true } },
+      failureCount: true,
+      nextEligibleAt: true,
+      anchorDestinationId: true,
+      anchorDestination: {
+        select: { id: true, name: true, fingerprint: true, active: true, available: true },
+      },
       attemptExecutionId: true,
       attemptReservedAt: true,
       attemptLeaseExpiresAt: true,
@@ -252,6 +313,7 @@ const loadLifecycle = async (
     );
   }
 
+  const target = buildRecoveryTarget(campaign!, dispatch.destinationId);
   return {
     dispatch,
     run,
@@ -260,6 +322,7 @@ const loadLifecycle = async (
     candidate,
     execution,
     campaign: campaign!,
+    target,
   };
 };
 
@@ -336,7 +399,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
     const recovery = mapRecovery(recoveryRaw!);
     assertExistingRecoveryMatches(recovery, input);
     const dispatch = await this.prisma.whatsAppDispatch.findUnique({ where: { id: input.dispatchId }, select: {
-      id: true, status: true, attemptCount: true, externalMessageId: true, sentAt: true, generatedCopyId: true, productId: true,
+      id: true, status: true, attemptCount: true, externalMessageId: true, sentAt: true, generatedCopyId: true, productId: true, destinationId: true,
     }});
     if (!dispatch) fail('Dispatch nao encontrado', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_DISPATCH_NOT_FOUND');
     const runs = await this.prisma.commercialPipelineRun.findMany({ where: { dispatchId: input.dispatchId }, select: {
@@ -360,11 +423,28 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
     const candidate = candidates[0]!;
     const execution = await this.prisma.commercialAutomationExecution.findUnique({ where: { id: input.expectedExecutionId }, select: { commercialRunId: true } });
     if (!execution || execution.commercialRunId !== run.id) fail('Execution nao corresponde ao run', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_EXECUTION_INVALID');
+    const campaign = await this.prisma.commercialGroupCampaign.findUnique({
+      where: { id: candidate.campaignId },
+      select: {
+        id: true,
+        logicalGroupFingerprint: true,
+        nicheId: true,
+        dailyLimit: true,
+        active: true,
+        niche: { select: { active: true } },
+        failureCount: true,
+        nextEligibleAt: true,
+        anchorDestinationId: true,
+        anchorDestination: { select: { id: true, name: true, fingerprint: true, active: true, available: true } },
+      },
+    });
+    if (!campaign || campaign.id !== recovery.campaignId) fail('Campaign do recovery divergiu', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH');
+    const target = buildRecoveryTarget(campaign!, dispatch!.destinationId);
     if (recovery.jobId !== run.jobId! || recovery.campaignId !== candidate.campaignId || recovery.candidateId !== candidate.id) fail('Audit trail divergiu do lifecycle atual', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_AUDIT_MISMATCH');
     return { recovery, jobId: run.jobId!, campaignId: candidate.campaignId, candidateId: candidate.id, dispatchId: input.dispatchId,
       runId: run.id, executionId: input.expectedExecutionId, dispatchStatus: dispatch!.status, attemptCount: dispatch!.attemptCount,
       externalMessageId: dispatch!.externalMessageId, sentAt: dispatch!.sentAt, runStatus: run.status, runFinalStatus: run.finalStatus,
-      investigationRequired: run.investigationRequired };
+      investigationRequired: run.investigationRequired, target };
   }
 
   async rearmAuthorizedRetry(
@@ -400,6 +480,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         candidateId: lifecycle.candidate.id, dispatchId: input.dispatchId, runId: lifecycle.run.id,
         executionId: input.expectedExecutionId, dispatchStatus: 'PENDING', attemptCount: 1, externalMessageId: null, sentAt: null,
         runStatus: lifecycle.run.status, runFinalStatus: lifecycle.run.finalStatus, investigationRequired: lifecycle.run.investigationRequired,
+        target: lifecycle.target,
       };
     }, { isolationLevel: 'Serializable' });
   }

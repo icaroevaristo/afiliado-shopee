@@ -365,10 +365,11 @@ export interface CommercialAutomationHistoryRepository {
     dayStartsAt: Date;
     dayEndsAt: Date;
   }): Promise<CommercialAutomationHistorySnapshot>;
-  hasAmbiguousCommercialExecution(): Promise<boolean>;
+  hasAmbiguousCommercialExecution(excludedRunId?: string): Promise<boolean>;
   hasActiveCommercialExecution(
     now: Date,
     excludedExecutionId?: string,
+    excludedRunId?: string,
   ): Promise<boolean>;
   hasStaleCommercialExecution(now: Date): Promise<boolean>;
 }
@@ -1378,6 +1379,7 @@ export type WhatsAppDispatchManualRecoveryInspection = {
   runStatus: CommercialPipelineRunStatus;
   runFinalStatus: CommercialPipelineFinalStatus | null;
   investigationRequired: boolean;
+  target: CommercialAutomationTarget;
 };
 
 export type WhatsAppDispatchManualRecoveryRequeueContext =

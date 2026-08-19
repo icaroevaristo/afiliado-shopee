@@ -1,6 +1,7 @@
 ﻿import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+  type CommercialAutomationTarget,
   type WhatsAppDispatchManualRecoveryInput,
   type WhatsAppDispatchManualRecoveryInspection,
   type WhatsAppDispatchManualRecoveryRepository,
@@ -25,6 +26,14 @@ export type ManualRecoveryQueueJob = {
 export type ManualRecoveryQueue = {
   getJob(jobId: string): Promise<ManualRecoveryQueueJob | null>;
   findEquivalentJobIds(dispatchId: string): Promise<string[]>;
+};
+
+export type ManualRecoveryCommercialPolicy = {
+  evaluateAutomationReadiness(input: {
+    excludedExecutionId?: string;
+    excludedAmbiguousRunId?: string;
+    target: CommercialAutomationTarget;
+  }): Promise<{ allowed: boolean; reasons: string[] }>;
 };
 
 const assertConfirmation = (confirmation: string) => {
@@ -89,6 +98,24 @@ const assertRetryProgressIsProven = (
   return false;
 };
 
+
+const assertCommercialPolicyAllowsRetry = async (
+  policy: ManualRecoveryCommercialPolicy,
+  inspection: WhatsAppDispatchManualRecoveryInspection,
+) => {
+  const status = await policy.evaluateAutomationReadiness({
+    excludedExecutionId: inspection.executionId,
+    excludedAmbiguousRunId: inspection.runId,
+    target: inspection.target,
+  });
+  if (!status.allowed) {
+    throw new AppError(
+      `Policy comercial bloqueou manual recovery: ${status.reasons.join(',')}`,
+      'WHATSAPP_DISPATCH_MANUAL_RECOVERY_POLICY_BLOCKED',
+    );
+  }
+};
+
 const assertInitialRetryLifecycle = (
   inspection: WhatsAppDispatchManualRecoveryInspection,
 ) => {
@@ -111,6 +138,7 @@ export class WhatsAppDispatchManualRecoveryService {
     private readonly repository: WhatsAppDispatchManualRecoveryRepository,
     private readonly queue?: ManualRecoveryQueue,
     private readonly options: { clock?: () => Date; reservationLeaseMs?: number } = {},
+    private readonly policy?: ManualRecoveryCommercialPolicy,
   ) {}
 
   async authorize(input: WhatsAppDispatchManualRecoveryInput) {
@@ -125,6 +153,12 @@ export class WhatsAppDispatchManualRecoveryService {
       throw new AppError(
         'BullMQ e obrigatorio somente para a etapa de requeue',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_QUEUE_REQUIRED',
+      );
+    }
+    if (!this.policy) {
+      throw new AppError(
+        'Policy comercial e obrigatoria para a etapa de requeue',
+        'WHATSAPP_DISPATCH_MANUAL_RECOVERY_POLICY_REQUIRED',
       );
     }
     const now = this.options.clock?.() ?? new Date();
@@ -187,13 +221,16 @@ export class WhatsAppDispatchManualRecoveryService {
       );
     }
 
+    await assertCommercialPolicyAllowsRetry(this.policy, inspection);
+
     if (!inspection.recovery.rearmedAt) {
       assertInitialRetryLifecycle(inspection);
-      inspection = await this.repository.rearmAuthorizedRetry({
+      await this.repository.rearmAuthorizedRetry({
         ...input,
         checkedAt: now,
         leaseExpiresAt: new Date(now.getTime() + leaseMs),
       });
+      inspection = await this.repository.inspectAuthorizedRecovery(input);
     } else if (
       inspection.dispatchStatus !== 'PENDING' ||
       inspection.attemptCount !== 1 ||
@@ -204,6 +241,8 @@ export class WhatsAppDispatchManualRecoveryService {
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_REARM_STATE_CONFLICT',
       );
     }
+
+    await assertCommercialPolicyAllowsRetry(this.policy, inspection);
 
     try {
       await job.retry();

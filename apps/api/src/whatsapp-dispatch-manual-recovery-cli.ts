@@ -6,6 +6,10 @@ import {
 } from '@shopee-auto-affiliate-ai/queue';
 import { PrismaWhatsAppDispatchManualRecoveryRepository } from './prisma-whatsapp-dispatch-manual-recovery-repository';
 import {
+  createCommercialAutomationPolicyService,
+  createPrismaRepositories,
+} from './application-services';
+import {
   WhatsAppDispatchManualRecoveryService,
   type ManualRecoveryJobState,
 } from './whatsapp-dispatch-manual-recovery-service';
@@ -58,6 +62,23 @@ const main = async () => {
   }
 
   const config = loadConfig();
+  if (!config.EVOLUTION_INSTANCE_NAME) {
+    throw new Error('EVOLUTION_INSTANCE_NAME is required for manual recovery requeue');
+  }
+  const applicationRepositories = createPrismaRepositories(prisma);
+  const policy = createCommercialAutomationPolicyService({
+    repositories: applicationRepositories,
+    instanceName: config.EVOLUTION_INSTANCE_NAME,
+    config: {
+      enabled: config.COMMERCIAL_AUTOMATION_ENABLED,
+      timezone: config.COMMERCIAL_TIMEZONE,
+      allowedStartTime: config.COMMERCIAL_ALLOWED_START_TIME,
+      allowedEndTime: config.COMMERCIAL_ALLOWED_END_TIME,
+      dailyGlobalLimit: config.COMMERCIAL_DAILY_GLOBAL_LIMIT,
+      dailyGroupLimit: config.COMMERCIAL_DAILY_GROUP_LIMIT,
+      minimumIntervalMinutes: config.COMMERCIAL_MIN_INTERVAL_MINUTES,
+    },
+  });
   const connection = createRedisConnection(config.REDIS_URL);
   const queue = createWhatsAppDispatchQueue(connection);
   try {
@@ -110,6 +131,7 @@ const main = async () => {
         },
       },
       { reservationLeaseMs: config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000 },
+      policy,
     );
     const result = await service.requeueAuthorizedRetry(input);
     console.log(JSON.stringify(result, null, 2));

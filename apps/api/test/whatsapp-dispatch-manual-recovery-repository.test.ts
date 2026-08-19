@@ -38,6 +38,7 @@ const makeState = () => ({
     sentAt: null as Date | null,
     generatedCopyId: 'copy-1',
     productId: 'product-1',
+    destinationId: 'destination-1',
   },
   run: {
     id: 'run-1',
@@ -76,6 +77,21 @@ const makeState = () => ({
   },
   campaign: {
     id: 'campaign-1',
+    logicalGroupFingerprint: 'group-fp-1',
+    nicheId: 'niche-1',
+    dailyLimit: 10,
+    active: true,
+    niche: { active: true },
+    failureCount: 0,
+    nextEligibleAt: null as Date | null,
+    anchorDestinationId: 'destination-1',
+    anchorDestination: {
+      id: 'destination-1',
+      name: 'Group 1',
+      fingerprint: 'group-fp-1',
+      active: true,
+      available: true,
+    },
     attemptExecutionId: 'execution-1',
     attemptReservedAt: new Date(now.getTime() - 60_000),
     attemptLeaseExpiresAt: new Date(now.getTime() - 1_000),
@@ -169,6 +185,10 @@ const fakeDb = (s: State) => {
 };
 const repoFor = (s: State) =>
   new PrismaWhatsAppDispatchManualRecoveryRepository(fakeDb(s) as never);
+const allowedPolicy = () => ({
+  evaluateAutomationReadiness: vi.fn(async () => ({ allowed: true, reasons: [] as string[] })),
+});
+
 const codeOf = async (p: Promise<unknown>) => {
   try {
     await p;
@@ -322,6 +342,17 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
       ),
     ).toBe('WHATSAPP_DISPATCH_MANUAL_RECOVERY_CANDIDATE_LINK_INVALID');
   });
+  it('blocks target persisted with destination/fingerprint mismatch', async () => {
+    const s = makeState();
+    s.campaign.anchorDestinationId = 'other-destination';
+    expect(
+      await codeOf(
+        repoFor(s).authorizeConfirmedNonDelivery({ ...input, authorizedAt: now }),
+      ),
+    ).toBe('WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH');
+    expect(s.dispatchRearms).toBe(0);
+  });
+
   it('blocks reservation owner mismatch', async () => {
     const s = makeState();
     s.campaign.attemptExecutionId = 'other';
@@ -430,7 +461,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const { job, queue } = integratedQueue('waiting', 1);
     const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
       clock: () => new Date(now.getTime() + 1_000),
-    });
+    }, allowedPolicy());
 
     const result = await service.requeueAuthorizedRetry(input);
 
@@ -447,7 +478,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const { job, queue } = integratedQueue('active', 2);
     const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
       clock: () => new Date(now.getTime() + 1_000),
-    });
+    }, allowedPolicy());
 
     const result = await service.requeueAuthorizedRetry(input);
 
@@ -468,7 +499,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const { job, queue } = integratedQueue('completed', 2);
     const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
       clock: () => new Date(now.getTime() + 1_000),
-    });
+    }, allowedPolicy());
 
     const result = await service.requeueAuthorizedRetry(input);
 
@@ -484,7 +515,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const { job, queue } = integratedQueue('failed', 2);
     const service = new WhatsAppDispatchManualRecoveryService(repo, queue, {
       clock: () => new Date(now.getTime() + 1_000),
-    });
+    }, allowedPolicy());
 
     const result = await service.requeueAuthorizedRetry(input);
 
@@ -520,6 +551,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
         findEquivalentJobIds: vi.fn(async () => ['job-1']),
       },
       { clock: () => new Date(now.getTime() + 1_000) },
+      allowedPolicy(),
     );
 
     const result = await service.requeueAuthorizedRetry(input);
@@ -554,6 +586,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
         findEquivalentJobIds: vi.fn(async () => equivalents),
       },
       { clock: () => new Date(now.getTime() + 1_000) },
+      allowedPolicy(),
     );
 
     await expect(service.requeueAuthorizedRetry(input)).rejects.toBeDefined();
