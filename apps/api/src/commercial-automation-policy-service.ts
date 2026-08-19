@@ -219,6 +219,7 @@ export class CommercialAutomationPolicyService {
 
   async evaluateAutomationReadiness(input?: {
     excludedExecutionId?: string;
+    excludedAmbiguousRunId?: string;
     target?: CommercialAutomationTarget;
   }): Promise<CommercialAutomationStatus> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
@@ -227,6 +228,7 @@ export class CommercialAutomationPolicyService {
       this.loadOperationalContext(
         now,
         input?.excludedExecutionId,
+        input?.excludedAmbiguousRunId,
         input?.target,
       ),
     ]);
@@ -237,6 +239,7 @@ export class CommercialAutomationPolicyService {
   private async loadOperationalContext(
     now: Date,
     excludedExecutionId?: string,
+    excludedAmbiguousRunId?: string,
     target?: CommercialAutomationTarget,
   ) {
     const dayRange = getLocalDayRange(now, this.dependencies.config.timezone);
@@ -246,10 +249,11 @@ export class CommercialAutomationPolicyService {
           active: true,
           available: true,
         }),
-        this.dependencies.history.hasAmbiguousCommercialExecution(),
+        this.dependencies.history.hasAmbiguousCommercialExecution(excludedAmbiguousRunId),
         this.dependencies.history.hasActiveCommercialExecution(
           now,
           excludedExecutionId,
+          excludedAmbiguousRunId,
         ),
         this.dependencies.history.hasStaleCommercialExecution(now),
       ]);

@@ -365,10 +365,11 @@ export interface CommercialAutomationHistoryRepository {
     dayStartsAt: Date;
     dayEndsAt: Date;
   }): Promise<CommercialAutomationHistorySnapshot>;
-  hasAmbiguousCommercialExecution(): Promise<boolean>;
+  hasAmbiguousCommercialExecution(excludedRunId?: string): Promise<boolean>;
   hasActiveCommercialExecution(
     now: Date,
     excludedExecutionId?: string,
+    excludedRunId?: string,
   ): Promise<boolean>;
   hasStaleCommercialExecution(now: Date): Promise<boolean>;
 }
@@ -1325,6 +1326,82 @@ export interface WhatsAppGroupDirectoryRepository {
     id: string,
     data: WhatsAppGroupUpdate,
   ): Promise<WhatsAppGroupRecord | null>;
+}
+
+export const WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION =
+  'CONFIRMAR_NAO_ENTREGA_E_RETRY_UNICO' as const;
+
+export type WhatsAppDispatchManualRecoveryRecord = {
+  id: string;
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+  candidateId: string;
+  campaignId: string;
+  jobId: string;
+  decision: 'CONFIRMED_NON_DELIVERY';
+  confirmation: string;
+  attemptCountObserved: number;
+  authorizedAt: Date;
+  rearmedAt: Date | null;
+  requeuedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type WhatsAppDispatchManualRecoveryInput = {
+  dispatchId: string;
+  expectedRunId: string;
+  expectedExecutionId: string;
+  confirmation: typeof WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION;
+};
+
+export type WhatsAppDispatchManualRecoveryAuthorization = {
+  kind: 'AUTHORIZED' | 'ALREADY_AUTHORIZED';
+  recovery: WhatsAppDispatchManualRecoveryRecord;
+  jobId: string;
+  campaignId: string;
+  candidateId: string;
+};
+
+export type WhatsAppDispatchManualRecoveryInspection = {
+  recovery: WhatsAppDispatchManualRecoveryRecord;
+  jobId: string;
+  campaignId: string;
+  candidateId: string;
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+  dispatchStatus: WhatsAppDispatchStatus;
+  attemptCount: number;
+  externalMessageId: string | null;
+  sentAt: Date | null;
+  runStatus: CommercialPipelineRunStatus;
+  runFinalStatus: CommercialPipelineFinalStatus | null;
+  investigationRequired: boolean;
+  target: CommercialAutomationTarget;
+};
+
+export type WhatsAppDispatchManualRecoveryRequeueContext =
+  WhatsAppDispatchManualRecoveryInspection;
+
+export interface WhatsAppDispatchManualRecoveryRepository {
+  authorizeConfirmedNonDelivery(
+    input: WhatsAppDispatchManualRecoveryInput & { authorizedAt: Date },
+  ): Promise<WhatsAppDispatchManualRecoveryAuthorization>;
+  inspectAuthorizedRecovery(
+    input: WhatsAppDispatchManualRecoveryInput,
+  ): Promise<WhatsAppDispatchManualRecoveryInspection>;
+  rearmAuthorizedRetry(
+    input: WhatsAppDispatchManualRecoveryInput & {
+      leaseExpiresAt: Date;
+      checkedAt: Date;
+    },
+  ): Promise<WhatsAppDispatchManualRecoveryRequeueContext>;
+  markManualRecoveryRequeued(input: {
+    dispatchId: string;
+    requeuedAt: Date;
+  }): Promise<WhatsAppDispatchManualRecoveryRecord>;
 }
 
 export interface WhatsAppDispatchRepository {

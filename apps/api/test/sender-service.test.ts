@@ -935,4 +935,53 @@ describe('SenderService', () => {
       });
     });
   });
+  it('envia retry manual rearmado como segunda tentativa sem resetar attemptCount', async () => {
+    const retryDispatch = { ...dispatch, status: 'PENDING' as const, attemptCount: 1 };
+    const prisma = prismaMock(retryDispatch);
+    prisma.whatsAppDispatch.update.mockImplementation(async ({ data }) => ({
+      ...retryDispatch,
+      attemptCount: 2,
+      ...data,
+    }));
+
+    const result = await createService(prisma).sendDispatch('dispatch-1');
+
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'dispatch-1', status: 'PENDING' },
+        data: expect.objectContaining({ attemptCount: { increment: 1 } }),
+      }),
+    );
+    expect(result).toMatchObject({ status: 'SENT', attemptCount: 2 });
+  });
+
+  it('segunda tentativa ambigua preserva PROCESSING e consome attemptCount 2', async () => {
+    const retryDispatch = { ...dispatch, status: 'PENDING' as const, attemptCount: 1 };
+    const prisma = prismaMock(retryDispatch);
+    const provider = {
+      sendMessage: vi.fn(async () => {
+        throw new Error('resultado externo incerto');
+      }),
+    };
+
+    await expect(
+      createService(prisma, provider).sendDispatch('dispatch-1'),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+    });
+
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'dispatch-1', status: 'PENDING' },
+        data: expect.objectContaining({ attemptCount: { increment: 1 } }),
+      }),
+    );
+    expect(prisma.whatsAppDispatch.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'FAILED' }),
+      }),
+    );
+    expect(provider.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
 });

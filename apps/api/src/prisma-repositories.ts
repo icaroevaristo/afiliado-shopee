@@ -3456,16 +3456,20 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
     };
   }
 
-  async hasAmbiguousCommercialExecution(): Promise<boolean> {
+  async hasAmbiguousCommercialExecution(excludedRunId?: string): Promise<boolean> {
     const [run, execution] = await Promise.all([
       this.prisma.commercialPipelineRun.findFirst({
         where: {
           OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+          ...(excludedRunId ? { id: { not: excludedRunId } } : {}),
         },
         select: { id: true },
       }),
       this.prisma.commercialAutomationExecution.findFirst({
-        where: { status: 'AMBIGUOUS' },
+        where: {
+          status: 'AMBIGUOUS',
+          ...(excludedRunId ? { commercialRunId: { not: excludedRunId } } : {}),
+        },
         select: { id: true },
       }),
     ]);
@@ -3475,6 +3479,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
   async hasActiveCommercialExecution(
     now: Date,
     excludedExecutionId?: string,
+    excludedRunId?: string,
   ): Promise<boolean> {
     const [run, execution] = await Promise.all([
       this.prisma.commercialPipelineRun.findFirst({
@@ -3484,6 +3489,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
             { finalStatus: 'PENDING' },
             { dispatch: { status: { in: ['PENDING', 'PROCESSING'] } } },
           ],
+          ...(excludedRunId ? { id: { not: excludedRunId } } : {}),
         },
         select: { id: true },
       }),

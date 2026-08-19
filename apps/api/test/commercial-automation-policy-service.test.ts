@@ -91,7 +91,9 @@ class MemoryHistory implements CommercialAutomationHistoryRepository {
   lastSentAt: Date | null = null;
   groupLastSentAtById = new Map<string, Date>();
   ambiguous = false;
+  ambiguousRunIds = new Set<string>();
   active = false;
+  activeRunIds = new Set<string>();
   stale = false;
   lastRange?: { dayStartsAt: Date; dayEndsAt: Date; groupId?: string };
 
@@ -114,12 +116,18 @@ class MemoryHistory implements CommercialAutomationHistoryRepository {
     };
   }
 
-  async hasAmbiguousCommercialExecution() {
-    return this.ambiguous;
+  async hasAmbiguousCommercialExecution(excludedRunId?: string) {
+    if (this.ambiguous) return true;
+    return [...this.ambiguousRunIds].some((runId) => runId !== excludedRunId);
   }
 
-  async hasActiveCommercialExecution() {
-    return this.active;
+  async hasActiveCommercialExecution(
+    _now: Date,
+    _excludedExecutionId?: string,
+    excludedRunId?: string,
+  ) {
+    if (this.active) return true;
+    return [...this.activeRunIds].some((runId) => runId !== excludedRunId);
   }
 
   async hasStaleCommercialExecution() {
@@ -531,6 +539,66 @@ describe('CommercialAutomationPolicyService', () => {
     await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
       reasons: ['AMBIGUOUS_COMMERCIAL_RUN_EXISTS'],
       nextAllowedAt: null,
+    });
+  });
+
+  it('permite excluir somente o proprio run ambiguo por id explicito', async () => {
+    const { service, history } = createSubject();
+    history.ambiguousRunIds.add('run-recovery');
+
+    await expect(
+      service.evaluateAutomationReadiness({ excludedAmbiguousRunId: 'run-recovery' }),
+    ).resolves.toMatchObject({ allowed: true, reasons: [] });
+  });
+
+  it('outro run ambiguo continua bloqueando mesmo com exclusao explicita', async () => {
+    const { service, history } = createSubject();
+    history.ambiguousRunIds.add('run-recovery');
+    history.ambiguousRunIds.add('run-other');
+
+    await expect(
+      service.evaluateAutomationReadiness({ excludedAmbiguousRunId: 'run-recovery' }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['AMBIGUOUS_COMMERCIAL_RUN_EXISTS'],
+    });
+  });
+
+  it('mantem comportamento fail-closed quando nenhuma exclusao de run e informada', async () => {
+    const { service, history } = createSubject();
+    history.ambiguousRunIds.add('run-recovery');
+
+    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['AMBIGUOUS_COMMERCIAL_RUN_EXISTS'],
+    });
+  });
+
+  it('o proprio run excluido nao se auto-bloqueia como in progress', async () => {
+    const { service, history } = createSubject();
+    history.activeRunIds.add('run-recovery');
+
+    await expect(
+      service.evaluateAutomationReadiness({
+        excludedExecutionId: 'execution-recovery',
+        excludedAmbiguousRunId: 'run-recovery',
+      }),
+    ).resolves.toMatchObject({ allowed: true, reasons: [] });
+  });
+
+  it('outro run ativo continua bloqueando mesmo ao excluir o run recuperado', async () => {
+    const { service, history } = createSubject();
+    history.activeRunIds.add('run-recovery');
+    history.activeRunIds.add('run-other');
+
+    await expect(
+      service.evaluateAutomationReadiness({
+        excludedExecutionId: 'execution-recovery',
+        excludedAmbiguousRunId: 'run-recovery',
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['COMMERCIAL_EXECUTION_IN_PROGRESS'],
     });
   });
 
