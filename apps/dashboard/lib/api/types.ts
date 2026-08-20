@@ -102,6 +102,161 @@ export type CommercialAutomationExecutionPage = {
   totalPages: number;
 };
 
+export type CommercialLifecycleJob = {
+  queue: 'whatsapp-dispatch' | 'commercial-automation';
+  jobId: string;
+  state: string;
+  attemptsMade: number | null;
+  processedOn: string | null;
+  finishedOn: string | null;
+  failedReason: string | null;
+};
+
+export type CommercialLifecycle = {
+  lifecycleId: string;
+  createdAt: string;
+  execution: {
+    id: string;
+    bullMqJobId: string | null;
+    mode: string;
+    status: string;
+    externalStage: string;
+    commercialRunId: string | null;
+    failureCode: string | null;
+    leaseExpiresAt: string | null;
+    startedAt: string;
+    completedAt: string | null;
+  } | null;
+  run: {
+    id: string;
+    executionId: string | null;
+    mode: string;
+    status: string;
+    productId: string | null;
+    productName: string | null;
+    productPrice: string | null;
+    groupDestinationId: string | null;
+    groupName: string | null;
+    groupFingerprint: string | null;
+    score: number | null;
+    candidateCount: number;
+    eligibleCount: number;
+    rejectedCount: number;
+    dispatchId: string | null;
+    jobId: string | null;
+    confirmedAt: string | null;
+    finalStatus: string | null;
+    investigationRequired: boolean;
+    failureCode: string | null;
+    createdAt: string;
+    completedAt: string | null;
+  } | null;
+  candidate: {
+    id: string;
+    campaignId: string;
+    campaignName: string;
+    productId: string;
+    productName: string;
+    providerProductId: string;
+    status: string;
+    rankPosition: number | null;
+    score: number;
+    scorePolicyVersion: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  copy: {
+    id: string;
+    productId: string;
+    snapshotId: string | null;
+    createdFromCandidateId: string | null;
+    source: string;
+    createdAt: string;
+  } | null;
+  copyAttempt: {
+    id: string;
+    status: string;
+    failureCode: string | null;
+    requestMayHaveStarted: boolean;
+    startedAt: string;
+    completedAt: string | null;
+  } | null;
+  dispatch: {
+    id: string;
+    destinationId: string;
+    destinationName: string;
+    destinationFingerprint: string | null;
+    status: string;
+    attemptCount: number;
+    externalMessageId: string | null;
+    errorMessage: string | null;
+    sentAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  outbox: {
+    id: string;
+    dispatchId: string;
+    jobId: string;
+    status: string;
+    failureCode: string | null;
+    createdAt: string;
+    publishedAt: string | null;
+  } | null;
+  reservation: {
+    campaignId: string;
+    campaignName: string;
+    attemptExecutionId: string | null;
+    attemptReservedAt: string | null;
+    attemptLeaseExpiresAt: string | null;
+    state: 'ACTIVE' | 'EXPIRED' | 'ABSENT' | 'CONFLICT' | 'AMBIGUOUS';
+  } | null;
+  recovery: {
+    id: string;
+    dispatchId: string;
+    runId: string;
+    executionId: string;
+    candidateId: string;
+    campaignId: string;
+    jobId: string;
+    decision: string;
+    attemptCountObserved: number;
+    authorizedAt: string;
+    rearmedAt: string | null;
+    requeuedAt: string | null;
+  } | null;
+  bullmq: CommercialLifecycleJob | null;
+  timeline: Array<{
+    type: string;
+    label: string;
+    at: string;
+  }>;
+};
+
+export type CommercialLifecyclePage = {
+  items: CommercialLifecycle[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  summary: {
+    activeExecutions: number;
+    sentToday: number;
+    failed: number;
+    ambiguous: number;
+    investigationRequired: number;
+    activeReservations: number;
+    pendingDispatches: number;
+    pendingOutboxes: number;
+    manualRecoveries: number;
+    jobs: {
+      waiting: number;
+      active: number;
+      failed: number;
+    } | null;
+  };
+};
+
 export type CommercialDispatchOutbox = {
   id: string;
   runId?: string | null;
