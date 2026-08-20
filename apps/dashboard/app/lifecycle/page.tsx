@@ -2,7 +2,10 @@
 
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Copy,
   GitBranch,
@@ -41,6 +44,37 @@ const toneFor = (value: string | null | undefined) => {
 
 const shortId = (value: string | null | undefined) =>
   value ? `${value.slice(0, 8)}...` : 'Nao disponivel';
+
+type LifecycleChainState = 'PRESENTE' | 'AUSENTE' | 'DESCONHECIDO';
+
+const chainTone = (state: LifecycleChainState) => {
+  if (state === 'PRESENTE') return 'ok' as const;
+  if (state === 'DESCONHECIDO') return 'warning' as const;
+  return 'neutral' as const;
+};
+
+const reservationChainState = (
+  reservation: CommercialLifecycle['reservation'],
+): LifecycleChainState => {
+  if (!reservation || reservation.state === 'ABSENT') return 'AUSENTE';
+  if (
+    reservation.state === 'UNKNOWN' ||
+    reservation.state === 'AMBIGUOUS' ||
+    reservation.state === 'CONFLICT'
+  ) {
+    return 'DESCONHECIDO';
+  }
+  return 'PRESENTE';
+};
+
+const recoveryStateLabel = (
+  recovery: CommercialLifecycle['recovery'],
+) => {
+  if (!recovery) return undefined;
+  if (recovery.requeuedAt) return 'Reenfileirado';
+  if (recovery.rearmedAt) return 'Rearmado';
+  return 'Autorizado';
+};
 
 function Summary({ summary }: { summary: CommercialLifecyclePage['summary'] }) {
   const cards = [
@@ -120,6 +154,11 @@ function LifecycleList({
           item.run?.finalStatus ??
           item.dispatch?.status ??
           item.execution?.status;
+        const executionStatus = item.execution?.status?.toUpperCase();
+        const showExecutionStatus =
+          executionStatus &&
+          executionStatus !== status?.toUpperCase() &&
+          ['AMBIGUOUS', 'PROCESSING', 'FAILED'].includes(executionStatus);
         const title =
           item.candidate?.productName ??
           item.run?.productName ??
@@ -150,8 +189,23 @@ function LifecycleList({
                   <StatusBadge tone={toneFor(status)}>
                     {status ?? 'SEM ESTADO'}
                   </StatusBadge>
+                  {showExecutionStatus ? (
+                    <StatusBadge tone={toneFor(executionStatus)}>
+                      {executionStatus}
+                    </StatusBadge>
+                  ) : null}
                   {item.run?.investigationRequired ? (
                     <StatusBadge tone="warning">INVESTIGACAO</StatusBadge>
+                  ) : null}
+                  {item.recovery ? (
+                    <StatusBadge tone="warning">RECOVERY</StatusBadge>
+                  ) : null}
+                  {item.reservation?.state === 'ACTIVE' ? (
+                    <StatusBadge tone="warning">RESERVA ATIVA</StatusBadge>
+                  ) : null}
+                  {item.reservation?.state === 'UNKNOWN' ||
+                  item.reservation?.state === 'AMBIGUOUS' ? (
+                    <StatusBadge tone="warning">RESERVA DESCONHECIDA</StatusBadge>
                   ) : null}
                 </div>
                 <p className="mt-3 truncate font-medium text-slate-950">
@@ -173,6 +227,54 @@ function LifecycleList({
           </button>
         );
       })}
+    </section>
+  );
+}
+
+function LifecycleChain({ item }: { item: CommercialLifecycle }) {
+  const stages: Array<{ label: string; state: LifecycleChainState }> = [
+    { label: 'Execution', state: item.execution ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Run', state: item.run ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Candidato', state: item.candidate ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Copy', state: item.copy ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Dispatch', state: item.dispatch ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Outbox', state: item.outbox ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'BullMQ', state: item.bullmq ? 'PRESENTE' : 'AUSENTE' },
+    { label: 'Reserva', state: reservationChainState(item.reservation) },
+  ];
+
+  return (
+    <section
+      aria-label="Cadeia do lifecycle"
+      className="rounded-lg border border-slate-200 bg-white p-5"
+    >
+      <div className="flex items-center gap-2">
+        <GitBranch className="h-4 w-4 text-slate-500" aria-hidden="true" />
+        <h3 className="font-semibold text-slate-950">Cadeia do lifecycle</h3>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-8">
+        {stages.map((stage, index) => (
+          <div
+            key={stage.label}
+            className="relative rounded-md border border-slate-200 bg-slate-50 p-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-slate-700">
+                {stage.label}
+              </span>
+              {index < stages.length - 1 ? (
+                <ArrowRight
+                  className="h-3.5 w-3.5 shrink-0 text-slate-400 xl:absolute xl:-right-3 xl:top-5 xl:z-10"
+                  aria-hidden="true"
+                />
+              ) : null}
+            </div>
+            <StatusBadge tone={chainTone(stage.state)}>
+              {stage.state}
+            </StatusBadge>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -231,6 +333,8 @@ function Detail({ item }: { item: CommercialLifecycle }) {
           />
         </dl>
       </div>
+
+      <LifecycleChain item={item} />
 
       <div className="rounded-lg border border-slate-200 bg-white p-5">
         <div className="flex items-center gap-2">
@@ -332,6 +436,16 @@ function Detail({ item }: { item: CommercialLifecycle }) {
             value={formatDate(item.reservation?.attemptLeaseExpiresAt)}
           />
           <Info label="Recovery" value={item.recovery?.id} mono />
+          <Info label="Decisao" value={item.recovery?.decision} />
+          <Info
+            label="Tentativas observadas"
+            value={
+              item.recovery
+                ? String(item.recovery.attemptCountObserved)
+                : undefined
+            }
+          />
+          <Info label="Estado do recovery" value={recoveryStateLabel(item.recovery)} />
           <Info
             label="Autorizado"
             value={formatDate(item.recovery?.authorizedAt)}
@@ -362,6 +476,55 @@ function Detail({ item }: { item: CommercialLifecycle }) {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function Pagination({
+  page,
+  total,
+  totalPages,
+  loading,
+  onPageChange,
+}: {
+  page: number;
+  total: number;
+  totalPages: number;
+  loading: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalPages <= 1) return null;
+
+  return (
+    <nav
+      aria-label="Paginação de lifecycles"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3"
+    >
+      <span className="text-sm text-slate-600" aria-live="polite">
+        Página {page} de {totalPages} · {total} lifecycles
+      </span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="ops-icon-button disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onPageChange(page - 1)}
+          disabled={loading || page <= 1}
+          aria-label="Página anterior"
+          title="Página anterior"
+        >
+          <ChevronLeft size={16} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="ops-icon-button disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onPageChange(page + 1)}
+          disabled={loading || page >= totalPages}
+          aria-label="Próxima página"
+          title="Próxima página"
+        >
+          <ChevronRight size={16} aria-hidden="true" />
+        </button>
+      </div>
+    </nav>
   );
 }
 
@@ -407,16 +570,23 @@ function DetailBlock({
 }
 
 export default function LifecyclePage() {
+  const pageLimit = 25;
   const [data, setData] = useState<CommercialLifecyclePage | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (requestedPage = page) => {
+    setLoading(true);
     setError(null);
     try {
-      const response = await listCommercialLifecycles(1, 25);
+      const response = await listCommercialLifecycles(
+        requestedPage,
+        pageLimit,
+      );
       setData(response);
+      setPage(response.page);
       setSelectedId((current) =>
         current && response.items.some((item) => item.lifecycleId === current)
           ? current
@@ -430,7 +600,7 @@ export default function LifecyclePage() {
   };
 
   useEffect(() => {
-    void load();
+    void load(1);
   }, []);
 
   const selected =
@@ -445,7 +615,7 @@ export default function LifecyclePage() {
           <button
             type="button"
             className="ops-icon-button"
-            onClick={() => void load()}
+            onClick={() => void load(page)}
             aria-label="Atualizar lifecycles"
             title="Atualizar lifecycles"
           >
@@ -463,8 +633,12 @@ export default function LifecyclePage() {
       {!loading && !error && data ? <Summary summary={data.summary} /> : null}
       {!loading && !error && data?.items.length === 0 ? (
         <EmptyState
-          title="Nenhum lifecycle encontrado"
-          description="Ainda não existem execuções comerciais persistidas para consulta."
+          title={data.total > 0 ? 'Nenhum lifecycle nesta página' : 'Nenhum lifecycle encontrado'}
+          description={
+            data.total > 0
+              ? 'Não há registros nesta página. Use a paginação para consultar outra página.'
+              : 'Ainda não existem execuções comerciais persistidas para consulta.'
+          }
         />
       ) : null}
       {!loading && !error && data && data.items.length > 0 ? (
@@ -476,6 +650,15 @@ export default function LifecyclePage() {
           />
           {selected ? <Detail item={selected} /> : null}
         </div>
+      ) : null}
+      {!loading && !error && data ? (
+        <Pagination
+          page={data.page}
+          total={data.total}
+          totalPages={data.totalPages}
+          loading={loading}
+          onPageChange={(requestedPage) => void load(requestedPage)}
+        />
       ) : null}
     </div>
   );

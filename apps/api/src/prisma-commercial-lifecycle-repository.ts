@@ -164,10 +164,8 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
   async list(
     input: CommercialLifecycleListInput,
   ): Promise<CommercialLifecycleListResult> {
-    const take = Math.min(
-      Math.max(input.page * input.limit * 2, input.limit),
-      200,
-    );
+    const offset = (input.page - 1) * input.limit;
+    const take = offset + input.limit;
     const [runs, executions, summary] = await Promise.all([
       this.prisma.commercialPipelineRun.findMany({
         orderBy: { createdAt: 'desc' },
@@ -234,7 +232,6 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
     );
 
-    const offset = (input.page - 1) * input.limit;
     const pageRoots = roots.slice(offset, offset + input.limit);
     const items = await Promise.all(
       pageRoots.map((root) =>

@@ -173,6 +173,36 @@ describe('CommercialLifecycleService', () => {
     );
   });
 
+  it('mantem totalPages coerente com o total do repositorio', async () => {
+    const repository: CommercialLifecycleRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [],
+        total: 250,
+        summary: {
+          activeExecutions: 0,
+          sentToday: 0,
+          failed: 0,
+          ambiguous: 0,
+          investigationRequired: 0,
+          activeReservations: 0,
+          pendingDispatches: 0,
+          pendingOutboxes: 0,
+          manualRecoveries: 0,
+        },
+      }),
+    };
+    const service = new CommercialLifecycleService(
+      repository,
+      createQueue(),
+      () => now,
+    );
+
+    const response = await service.list({ page: 11, limit: 20 });
+
+    expect(response.total).toBe(250);
+    expect(response.totalPages).toBe(13);
+  });
+
   it('nao cria evento quando a reservation tem estado desconhecido', async () => {
     const repository: CommercialLifecycleRepository = {
       list: vi.fn().mockResolvedValue({
@@ -253,6 +283,16 @@ describe('CommercialLifecycleService', () => {
     });
     expect(item.reservation?.attemptExecutionId).toBe('execution-sent');
     expect(item.timeline.map((event) => event.type)).toContain('FINALIZED');
+    expect(item.timeline).toContainEqual(
+      expect.objectContaining({
+        type: 'CANDIDATE_CREATED',
+        label: 'Candidato materializado',
+        at: '2026-08-20T13:50:00.000Z',
+      }),
+    );
+    expect(item.timeline).not.toContainEqual(
+      expect.objectContaining({ type: 'CANDIDATE_LINKED' }),
+    );
     expect(queues.getJob).toHaveBeenCalledWith('whatsapp-dispatch', 'job-1');
     expect(response.summary.jobs).toEqual({ waiting: 1, active: 0, failed: 2 });
   });

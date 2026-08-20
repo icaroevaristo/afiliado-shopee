@@ -143,7 +143,11 @@ type DoubleOptions = {
 
 const createPrismaDouble = (options: DoubleOptions = {}) => {
   const runs = options.runs ?? [baseRun()];
-  const runFindMany = vi.fn().mockResolvedValue(runs);
+  const runFindMany = vi
+    .fn()
+    .mockImplementation((input: { take?: number } = {}) =>
+      Promise.resolve(runs.slice(0, input.take ?? runs.length)),
+    );
   const runCount = vi
     .fn()
     .mockImplementation((input: { where?: Record<string, unknown> } = {}) => {
@@ -158,7 +162,12 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
       }
       return Promise.resolve(options.runTotal ?? runs.length);
     });
-  const executionFindMany = vi.fn().mockResolvedValue(options.executions ?? []);
+  const executions = options.executions ?? [];
+  const executionFindMany = vi
+    .fn()
+    .mockImplementation((input: { take?: number } = {}) =>
+      Promise.resolve(executions.slice(0, input.take ?? executions.length)),
+    );
   const executionFindUnique = vi
     .fn()
     .mockResolvedValue(options.execution ?? baseExecution());
@@ -401,5 +410,110 @@ describe('PrismaCommercialLifecycleRepository', () => {
     expect(result.total).toBe(3);
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.run?.id).toBe('run-1');
+  });
+
+  it('busca dados suficientes para paginas profundas sem cap silencioso', async () => {
+    const runs = Array.from({ length: 250 }, (_, index) =>
+      baseRun({
+        id: `run-${String(index + 1).padStart(3, '0')}`,
+        executionId: null,
+        createdAt: new Date(
+          Date.parse('2026-08-20T00:00:00.000Z') +
+            (250 - index) * 60_000,
+        ),
+        dispatchId: null,
+        jobId: null,
+      }),
+    );
+    const { prisma } = createPrismaDouble({ runs, runTotal: 250 });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput({ page: 11, limit: 20 }));
+
+    expect(result.total).toBe(250);
+    expect(result.items).toHaveLength(20);
+    expect(result.items[0]?.run?.id).toBe('run-201');
+    expect(result.items.at(-1)?.run?.id).toBe('run-220');
+  });
+
+  it('mescla runs e executions sem run pela ordenacao global', async () => {
+    const runs = [
+      baseRun({
+        id: 'run-late',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:03:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+      baseRun({
+        id: 'run-early',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:01:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+    ];
+    const executions = [
+      baseExecution({
+        id: 'execution-middle',
+        commercialRunId: null,
+        startedAt: new Date('2026-08-20T14:02:00.000Z'),
+      }),
+    ];
+    const { prisma } = createPrismaDouble({
+      runs,
+      executions,
+      campaigns: [],
+      runTotal: 2,
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput({ page: 1, limit: 3 }));
+
+    expect(result.total).toBe(3);
+    expect(result.items.map((item) => item.lifecycleId)).toEqual([
+      'run-late',
+      'execution-middle',
+      'run-early',
+    ]);
+  });
+
+  it('retorna pagina parcial e pagina vazia alem do total', async () => {
+    const runs = [
+      baseRun({
+        id: 'run-3',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:03:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+      baseRun({
+        id: 'run-2',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:02:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+      baseRun({
+        id: 'run-1',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:01:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+    ];
+    const { prisma } = createPrismaDouble({ runs, runTotal: 3 });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const partial = await repository.list(listInput({ page: 2, limit: 2 }));
+    const beyondTotal = await repository.list(
+      listInput({ page: 3, limit: 2 }),
+    );
+
+    expect(partial.total).toBe(3);
+    expect(partial.items).toHaveLength(1);
+    expect(partial.items[0]?.run?.id).toBe('run-1');
+    expect(beyondTotal.total).toBe(3);
+    expect(beyondTotal.items).toEqual([]);
   });
 });

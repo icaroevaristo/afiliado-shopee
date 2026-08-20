@@ -34,7 +34,7 @@ export type CommercialLifecycleQueueReader = {
 export type CommercialLifecycleTimelineEvent = {
   type:
     | 'EXECUTION_CREATED'
-    | 'CANDIDATE_LINKED'
+    | 'CANDIDATE_CREATED'
     | 'COPY_CREATED'
     | 'COPY_ATTEMPT'
     | 'RESERVATION_RECORDED'
@@ -85,7 +85,11 @@ const toTimeline = (
   };
 
   add('EXECUTION_CREATED', 'Execucao criada', record.execution?.startedAt);
-  add('CANDIDATE_LINKED', 'Candidato vinculado', record.candidate?.createdAt);
+  add(
+    'CANDIDATE_CREATED',
+    'Candidato materializado',
+    record.candidate?.createdAt,
+  );
   add('COPY_CREATED', 'GeneratedCopy criada', record.copy?.createdAt);
   add(
     'COPY_ATTEMPT',

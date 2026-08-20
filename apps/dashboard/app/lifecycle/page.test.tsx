@@ -1,7 +1,7 @@
 import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { render } from '../../test/render';
+import { click, render } from '../../test/render';
 import LifecyclePage from './page';
 
 const listMock = vi.fn();
@@ -158,6 +158,49 @@ const page = {
   },
 };
 
+const ambiguousPartialLifecycle = {
+  ...lifecycle,
+  lifecycleId: 'run-ambiguous',
+  createdAt: '2026-08-20T15:00:00.000Z',
+  execution: {
+    ...lifecycle.execution,
+    id: 'execution-ambiguous',
+    status: 'PROCESSING',
+    commercialRunId: 'run-ambiguous',
+    completedAt: null,
+  },
+  run: {
+    ...lifecycle.run,
+    id: 'run-ambiguous',
+    executionId: 'execution-ambiguous',
+    finalStatus: 'AMBIGUOUS',
+    investigationRequired: true,
+  },
+  copy: null,
+  dispatch: null,
+  outbox: null,
+  reservation: {
+    ...lifecycle.reservation,
+    attemptExecutionId: 'execution-ambiguous',
+    state: 'UNKNOWN',
+  },
+  recovery: {
+    id: 'recovery-1',
+    dispatchId: 'dispatch-ambiguous',
+    runId: 'run-ambiguous',
+    executionId: 'execution-ambiguous',
+    candidateId: 'candidate-ambiguous',
+    campaignId: 'campaign-1',
+    jobId: 'job-ambiguous',
+    decision: 'MANUAL_REARM',
+    attemptCountObserved: 2,
+    authorizedAt: '2026-08-20T15:01:00.000Z',
+    rearmedAt: '2026-08-20T15:02:00.000Z',
+    requeuedAt: null,
+  },
+  bullmq: null,
+};
+
 beforeEach(() => {
   listMock.mockReset().mockResolvedValue(page);
 });
@@ -171,12 +214,108 @@ describe('LifecyclePage', () => {
     expect(screen.container.textContent).toContain('Outbox');
     expect(screen.container.textContent).toContain('whatsapp-dispatch');
     expect(screen.container.textContent).toContain('SENT hoje');
+    expect(screen.container.textContent).toContain('Cadeia do lifecycle');
+    expect(screen.container.textContent).toContain('RESERVA ATIVA');
+    expect(screen.container.textContent).toContain('PRESENTE');
     expect(screen.container.textContent).not.toMatch(
       /autorizar|requeue|enviar mensagem|retry/iu,
     );
     expect(listMock).toHaveBeenCalledWith(1, 25);
 
     await act(async () => undefined);
+    await screen.unmount();
+  });
+
+  it('destaca sinais críticos, recovery e presença parcial da cadeia', async () => {
+    listMock.mockResolvedValueOnce({
+      ...page,
+      items: [ambiguousPartialLifecycle],
+      summary: {
+        ...page.summary,
+        ambiguous: 1,
+        investigationRequired: 1,
+        manualRecoveries: 1,
+        activeReservations: 0,
+      },
+    });
+    const screen = await render(<LifecyclePage />);
+
+    expect(screen.container.textContent).toContain('AMBIGUOUS');
+    expect(screen.container.textContent).toContain('PROCESSING');
+    expect(screen.container.textContent).toContain('INVESTIGACAO NECESSARIA');
+    expect(screen.container.textContent).toContain('RECOVERY');
+    expect(screen.container.textContent).toContain('RESERVA DESCONHECIDA');
+    expect(screen.container.textContent).toContain('DESCONHECIDO');
+    expect(screen.container.textContent).toContain('Decisao');
+    expect(screen.container.textContent).toContain('MANUAL_REARM');
+    expect(screen.container.textContent).toContain('Tentativas observadas');
+    expect(screen.container.textContent).toContain('Rearmado');
+    expect(screen.container.textContent).toContain('Copy');
+    expect(screen.container.textContent).toContain('AUSENTE');
+    expect(screen.container.textContent).not.toMatch(
+      /autorizar|requeue|enviar mensagem|retry/iu,
+    );
+
+    await screen.unmount();
+  });
+
+  it('navega entre páginas usando somente a consulta GET da lista', async () => {
+    const firstPage = {
+      ...page,
+      total: 26,
+      totalPages: 2,
+    };
+    const secondPage = {
+      ...page,
+      page: 2,
+      total: 26,
+      totalPages: 2,
+      items: [
+        {
+          ...lifecycle,
+          lifecycleId: 'run-page-2',
+          run: {
+            ...lifecycle.run,
+            id: 'run-page-2',
+            productName: 'Produto Lifecycle pagina 2',
+          },
+          candidate: {
+            ...lifecycle.candidate,
+            productName: 'Produto Lifecycle pagina 2',
+          },
+        },
+      ],
+    };
+    listMock.mockImplementation((requestedPage: number) =>
+      Promise.resolve(requestedPage === 2 ? secondPage : firstPage),
+    );
+    const screen = await render(<LifecyclePage />);
+
+    expect(screen.container.textContent).toContain('Página 1 de 2');
+    const next = screen.container.querySelector(
+      'button[aria-label="Próxima página"]',
+    );
+    expect(next).not.toBeNull();
+    if (!next) throw new Error('Botão de próxima página não encontrado.');
+
+    await click(next);
+
+    expect(listMock).toHaveBeenLastCalledWith(2, 25);
+    expect(screen.container.textContent).toContain('Página 2 de 2');
+    expect(screen.container.textContent).toContain(
+      'Produto Lifecycle pagina 2',
+    );
+
+    const previous = screen.container.querySelector(
+      'button[aria-label="Página anterior"]',
+    );
+    expect(previous).not.toBeNull();
+    if (!previous) throw new Error('Botão de página anterior não encontrado.');
+
+    await click(previous);
+
+    expect(listMock).toHaveBeenLastCalledWith(1, 25);
+    expect(screen.container.textContent).toContain('Página 1 de 2');
     await screen.unmount();
   });
 
