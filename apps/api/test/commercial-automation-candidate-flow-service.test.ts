@@ -293,6 +293,15 @@ const createSubject = (input: {
       leaseExpiresAt: input.leaseExpiresAt,
       acquired: true,
     })),
+    releaseAttempt: vi.fn(async (input: {
+      campaignId: string;
+      executionId: string;
+    }) => ({
+      kind: 'RELEASED' as const,
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+      released: true,
+    })),
   };
   campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
   const candidates = {
@@ -1030,6 +1039,25 @@ describe('CommercialAutomationCandidateFlowService', () => {
       executionId: 'execution-1',
       reservedAt,
       leaseExpiresAt,
+    });
+  });
+
+  it('delegates a liberacao da reserva pelo contrato tipado do candidate flow', async () => {
+    const subject = createSubject();
+    await expect(
+      subject.service.releaseAttempt({
+        campaignId: 'campaign-1',
+        executionId: 'execution-1',
+      }),
+    ).resolves.toEqual({
+      kind: 'RELEASED',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      released: true,
+    });
+    expect(subject.campaigns.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
     });
   });
 

@@ -8,6 +8,7 @@ import {
 } from '../src/commercial-automation-orchestrator';
 import {
   CommercialAutomationCandidateFlowService,
+  type CommercialAutomationCandidateAttemptReleaseResult,
   type CommercialAutomationCandidateAttemptReservationResult,
   type CommercialAutomationCandidateSelection,
   type CommercialAutomationCandidatePreflight,
@@ -307,6 +308,17 @@ const createSubject = ({
         acquired: true,
       }),
     ),
+    releaseAttempt: vi.fn(
+      async (input: {
+        campaignId: string;
+        executionId: string;
+      }): Promise<CommercialAutomationCandidateAttemptReleaseResult> => ({
+        kind: 'RELEASED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: true,
+      }),
+    ),
   };
   const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
   const commercialRuns = {
@@ -346,6 +358,7 @@ const createSubject = ({
     candidateFlow,
     confirmation,
     commercialRuns,
+    logger,
   };
 };
 
@@ -519,6 +532,15 @@ const createRealCandidateFlowForIntegration = () => {
         reservedAt: input.reservedAt,
         leaseExpiresAt: input.leaseExpiresAt,
         acquired: true,
+      })),
+      releaseAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+      }) => ({
+        kind: 'RELEASED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: true,
       })),
     } as never,
     candidates: {
@@ -771,6 +793,15 @@ const createStatefulCrossTickCandidateFlow = () => {
         reservedAt: input.reservedAt,
         leaseExpiresAt: input.leaseExpiresAt,
         acquired: true,
+      })),
+      releaseAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+      }) => ({
+        kind: 'RELEASED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        released: true,
       })),
     } as never,
     candidates: {
@@ -1075,6 +1106,7 @@ describe('CommercialAutomationOrchestrator', () => {
       { existingGeneratedCopyId: 'ai-copy-1' },
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.releaseAttempt).not.toHaveBeenCalled();
   });
 
   it('nao duplica execucao nem efeitos para a mesma job ID', async () => {
@@ -2160,6 +2192,144 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('libera a reserva quando prepare rejeita output invalido antes da confirmacao', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.prepare.mockRejectedValue(
+      new AppError('Output rejeitado', 'COMMERCIAL_AI_COPY_OUTPUT_INVALID'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledTimes(1);
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+    expect(subject.executions.records[0].status).toBe('FAILED');
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('libera a reserva quando a readiness bloqueia depois do prepare', async () => {
+    const subject = createSubject();
+    subject.policy.evaluateAutomationReadiness
+      .mockResolvedValueOnce({ allowed: true, reasons: [] })
+      .mockResolvedValueOnce({ allowed: true, reasons: [] })
+      .mockResolvedValueOnce({
+        allowed: false,
+        reasons: ['AUTOMATION_PAUSED'],
+      });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'blocked' });
+
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledTimes(1);
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('libera a reserva quando revalidate falha antes da confirmacao', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.revalidate.mockRejectedValue(
+      new AppError('Grupo mudou', 'COMMERCIAL_GROUP_CHANGED'),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledTimes(1);
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
+  it('nao libera a reserva quando confirmation ja foi tentada e falha', async () => {
+    const subject = createSubject();
+    subject.confirmation.confirm.mockRejectedValue(new Error('timeout'));
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('trata release ja concluido como idempotente', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.prepare.mockRejectedValue(new Error('prepare failed'));
+    subject.candidateFlow.releaseAttempt.mockResolvedValue({
+      kind: 'RELEASED',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      released: false,
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledOnce();
+  });
+
+  it('trata conflito de release fail-closed sem tocar owner alheio', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.prepare.mockRejectedValue(new Error('prepare failed'));
+    subject.candidateFlow.releaseAttempt.mockResolvedValue({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+    expect(subject.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-automation.attempt-release.blocked',
+        reason: 'RESERVATION_OWNER_MISMATCH',
+      }),
+      expect.any(String),
+    );
   });
 
   it('passa um unico target deterministico ao preview sem confirmar', async () => {

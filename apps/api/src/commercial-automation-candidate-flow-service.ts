@@ -26,6 +26,7 @@ import type {
   CommercialAutomationTarget,
   CommercialGroupCampaignAttemptReservation,
   CommercialGroupCampaignAttemptReservationInput,
+  CommercialGroupCampaignAttemptRelease,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
@@ -106,6 +107,9 @@ export type CommercialAutomationCandidateAttemptReservationResult =
   | CommercialGroupCampaignAttemptReservation
   | { kind: 'INELIGIBLE'; campaignId: string };
 
+export type CommercialAutomationCandidateAttemptReleaseResult =
+  CommercialGroupCampaignAttemptRelease;
+
 export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_AI_COPY_OFFER_EXPIRED',
   'COMMERCIAL_AI_COPY_OFFER_UNAVAILABLE',
@@ -128,7 +132,12 @@ type CandidateFlowOptions = {
     CommercialGroupCampaignRepository,
     'list' | 'findByLogicalGroupFingerprint'
   > &
-    Partial<Pick<CommercialGroupCampaignRepository, 'reserveAttempt'>>;
+    Partial<
+      Pick<
+        CommercialGroupCampaignRepository,
+        'reserveAttempt' | 'releaseAttempt'
+      >
+    >;
   candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'>;
   deliveryHistory: Pick<
     CommercialDeliveryHistoryRepository,
@@ -377,6 +386,19 @@ export class CommercialAutomationCandidateFlowService {
       ...input,
       campaignId: campaign.id,
     });
+  }
+
+  async releaseAttempt(input: {
+    campaignId: string;
+    executionId: string;
+  }): Promise<CommercialAutomationCandidateAttemptReleaseResult> {
+    if (!this.options.campaigns.releaseAttempt) {
+      throw appError(
+        'Liberacao de reserva de tentativa comercial indisponivel',
+        'COMMERCIAL_AUTOMATION_ATTEMPT_RELEASE_UNAVAILABLE',
+      );
+    }
+    return this.options.campaigns.releaseAttempt(input);
   }
 
   private async resolveCampaign(
