@@ -370,45 +370,27 @@ export class CommercialAutomationOrchestrator {
             });
           if (targetReadiness.allowed) {
             if (input.mode === 'send') {
-              const preflight = await this.dependencies.candidateFlow.preflight(
-                target,
-              );
-              if (preflight.outcome === 'NO_CANDIDATE') {
-                await syncOffers();
-                const replenishmentReport =
-                  await this.dependencies.candidateFlow.replenish(target);
-                await heartbeat.checkpoint();
-                const replenishedPreflight =
-                  await this.dependencies.candidateFlow.preflight(target);
-                if (replenishedPreflight.outcome === 'NO_CANDIDATE') {
-                  targetReasons.add(COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE);
-                  continue;
-                }
-                selectedMiningReport = replenishmentReport;
-                selectedCandidateSelection = {
-                  target,
-                  candidateId: replenishedPreflight.candidateId,
-                  candidateStatus: replenishedPreflight.candidateStatus,
-                  queue: replenishedPreflight.queue ?? {
-                    candidateCount: 1,
-                    eligibleCount: 1,
-                    rejectedCount: 0,
-                  },
-                };
-              } else {
-                selectedCandidateSelection = {
-                  target,
-                  candidateId: preflight.candidateId,
-                  candidateStatus: preflight.candidateStatus,
-                  queue: preflight.queue ?? {
-                    candidateCount: 1,
-                    eligibleCount: 1,
-                    rejectedCount: 0,
-                  },
-                };
+              await syncOffers();
+              const replenishmentReport =
+                await this.dependencies.candidateFlow.replenish(target);
+              await heartbeat.checkpoint();
+              const postSyncPreflight =
+                await this.dependencies.candidateFlow.preflight(target);
+              if (postSyncPreflight.outcome === 'NO_CANDIDATE') {
+                targetReasons.add(COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE);
+                continue;
               }
-            }
-            if (input.mode === 'send') {
+              selectedMiningReport = replenishmentReport;
+              selectedCandidateSelection = {
+                target,
+                candidateId: postSyncPreflight.candidateId,
+                candidateStatus: postSyncPreflight.candidateStatus,
+                queue: postSyncPreflight.queue ?? {
+                  candidateCount: 1,
+                  eligibleCount: 1,
+                  rejectedCount: 0,
+                },
+              };
               const reservedAt = this.clock();
               const leaseExpiresAt = execution.leaseExpiresAt;
               if (!leaseExpiresAt || leaseExpiresAt.getTime() <= reservedAt.getTime()) {
