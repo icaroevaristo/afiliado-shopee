@@ -30,6 +30,7 @@ import type { CommercialPromotionMiningReport } from './commercial-promotion-min
 import type { CommercialPipelineService } from './commercial-pipeline-service';
 import type {
   CommercialAutomationTarget,
+  CommercialGroupCampaignAttemptRelease,
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRepository,
@@ -195,6 +196,10 @@ export class CommercialAutomationOrchestrator {
             leaseExpiresAt: Date;
           },
         ): Promise<CommercialAutomationCandidateAttemptReservationResult>;
+        releaseAttempt(input: {
+          campaignId: string;
+          executionId: string;
+        }): Promise<CommercialGroupCampaignAttemptRelease>;
       };
       confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
       commercialRuns: Pick<CommercialPipelineRunRepository, 'findById'>;
@@ -272,9 +277,44 @@ export class CommercialAutomationOrchestrator {
       leaseMilliseconds: this.dependencies.leaseSeconds * 1000,
       heartbeatMilliseconds: this.dependencies.heartbeatSeconds * 1000,
     });
+    let confirmationAttempted = false;
+    let reservationAcquired = false;
+    let acquiredReservation:
+      | { campaignId: string; executionId: string }
+      | undefined;
+    let reservationReleaseAttempted = false;
+    const releaseReservationBeforeConfirmation = async () => {
+      if (
+        !reservationAcquired ||
+        !acquiredReservation ||
+        confirmationAttempted ||
+        reservationReleaseAttempted
+      ) {
+        return;
+      }
+      reservationReleaseAttempted = true;
+      const release = await this.dependencies.candidateFlow!.releaseAttempt(
+        acquiredReservation,
+      );
+      if (release.kind === 'CONFLICT') {
+        this.dependencies.logger.error(
+          {
+            event: 'commercial-automation.attempt-release.blocked',
+            executionId: acquiredReservation.executionId,
+            campaignId: acquiredReservation.campaignId,
+            reason: 'RESERVATION_OWNER_MISMATCH',
+          },
+          'Commercial automation attempt release blocked',
+        );
+        return;
+      }
+      reservationAcquired = false;
+      acquiredReservation = undefined;
+    };
     const finish = async (
       data: Parameters<CommercialAutomationExecutionRepository['finish']>[1],
     ) => {
+      await releaseReservationBeforeConfirmation();
       await heartbeat.stop();
       return this.dependencies.executions.finish(ownership, data);
     };
@@ -297,7 +337,6 @@ export class CommercialAutomationOrchestrator {
     let selectedMiningReport:
       | Pick<CommercialPromotionMiningReport, 'rejectionSummary'>
       | undefined;
-    let confirmationAttempted = false;
     try {
       const readiness =
         await this.dependencies.policy.evaluateAutomationReadiness({
@@ -421,6 +460,11 @@ export class CommercialAutomationOrchestrator {
                 targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED);
                 continue;
               }
+              acquiredReservation = {
+                campaignId: reservation.campaignId,
+                executionId: execution.id,
+              };
+              reservationAcquired = true;
             }
             selectedTarget = target;
             break;
