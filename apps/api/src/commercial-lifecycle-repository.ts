@@ -106,7 +106,7 @@ export type CommercialLifecycleReservationRecord = {
   attemptExecutionId: string | null;
   attemptReservedAt: Date | null;
   attemptLeaseExpiresAt: Date | null;
-  state: 'ACTIVE' | 'EXPIRED' | 'ABSENT' | 'CONFLICT' | 'AMBIGUOUS';
+  state: 'ACTIVE' | 'EXPIRED' | 'ABSENT' | 'CONFLICT' | 'AMBIGUOUS' | 'UNKNOWN';
 };
 
 export type CommercialLifecycleRecoveryRecord = {

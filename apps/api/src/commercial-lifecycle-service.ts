@@ -2,6 +2,7 @@ import type {
   CommercialLifecycleRecord,
   CommercialLifecycleRepository,
 } from './commercial-lifecycle-repository';
+import { getLocalDayRange } from './commercial-automation-policy-service';
 
 export type CommercialLifecycleQueueName =
   'whatsapp-dispatch' | 'commercial-automation';
@@ -211,12 +212,12 @@ export class CommercialLifecycleService {
     private readonly repository: CommercialLifecycleRepository,
     private readonly queues: CommercialLifecycleQueueReader,
     private readonly clock: () => Date = () => new Date(),
+    private readonly timezone = 'America/Sao_Paulo',
   ) {}
 
   async list(input: { page: number; limit: number }) {
     const now = this.clock();
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = getLocalDayRange(now, this.timezone).dayStartsAt;
     const result = await this.repository.list({
       page: input.page,
       limit: input.limit,

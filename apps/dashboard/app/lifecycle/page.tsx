@@ -183,7 +183,9 @@ function Detail({ item }: { item: CommercialLifecycle }) {
   const reservationLabel = item.reservation
     ? item.reservation.state === 'ABSENT'
       ? 'Sem evidencia de reserva'
-      : item.reservation.state
+      : item.reservation.state === 'UNKNOWN'
+        ? 'Estado da reserva desconhecido'
+        : item.reservation.state
     : 'Sem evidencia de reserva';
 
   return (

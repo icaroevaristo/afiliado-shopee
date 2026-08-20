@@ -265,7 +265,14 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       manualRecoveries,
     ] = await Promise.all([
       this.prisma.commercialAutomationExecution.count({
-        where: { status: { in: ['STARTED', 'PREVIEW_READY', 'QUEUED'] } },
+        where: {
+          status: 'STARTED',
+          activeKey: { not: null },
+          ownerId: { not: null },
+          heartbeatAt: { not: null },
+          leaseExpiresAt: { gt: now },
+          completedAt: null,
+        },
       }),
       this.prisma.whatsAppDispatch.count({
         where: { status: 'SENT', sentAt: { gte: todayStart } },
@@ -523,20 +530,31 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       return {
         campaignId: first.id,
         campaignName: first.name,
-        attemptExecutionId: first.attemptExecutionId,
-        attemptReservedAt: first.attemptReservedAt,
-        attemptLeaseExpiresAt: first.attemptLeaseExpiresAt,
-        state: 'AMBIGUOUS',
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+        state: 'UNKNOWN',
       };
     }
     const record = records[0]!;
+    if (
+      record.attemptExecutionId &&
+      record.attemptExecutionId !== executionId
+    ) {
+      return {
+        campaignId: record.id,
+        campaignName: record.name,
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+        state: 'UNKNOWN',
+      };
+    }
     const state = !record.attemptExecutionId
       ? 'ABSENT'
-      : executionId && record.attemptExecutionId !== executionId
-        ? 'CONFLICT'
-        : record.attemptLeaseExpiresAt && record.attemptLeaseExpiresAt > now
-          ? 'ACTIVE'
-          : 'EXPIRED';
+      : record.attemptLeaseExpiresAt && record.attemptLeaseExpiresAt > now
+        ? 'ACTIVE'
+        : 'EXPIRED';
     return {
       campaignId: record.id,
       campaignName: record.name,

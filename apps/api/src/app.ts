@@ -592,6 +592,9 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
           };
         },
       },
+      undefined,
+      options.commercialAutomationConfig?.timezone ??
+        COMMERCIAL_AUTOMATION_DEFAULTS.timezone,
     );
   let pipelineScheduler:
     ReturnType<typeof createBullMqPipelineScheduler> | undefined;

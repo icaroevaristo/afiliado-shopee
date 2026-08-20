@@ -127,6 +127,95 @@ const createQueue = () => {
 };
 
 describe('CommercialLifecycleService', () => {
+  it('calcula SENT hoje pelo dia civil de America/Sao_Paulo', async () => {
+    const repository: CommercialLifecycleRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [],
+        total: 0,
+        summary: {
+          activeExecutions: 0,
+          sentToday: 0,
+          failed: 0,
+          ambiguous: 0,
+          investigationRequired: 0,
+          activeReservations: 0,
+          pendingDispatches: 0,
+          pendingOutboxes: 0,
+          manualRecoveries: 0,
+        },
+      }),
+    };
+    const queues = createQueue();
+    const serviceBeforeMidnight = new CommercialLifecycleService(
+      repository,
+      queues,
+      () => new Date('2026-08-20T02:59:59.999Z'),
+      'America/Sao_Paulo',
+    );
+    await serviceBeforeMidnight.list({ page: 1, limit: 20 });
+    expect(repository.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        todayStart: new Date('2026-08-19T03:00:00.000Z'),
+      }),
+    );
+
+    const serviceAtMidnight = new CommercialLifecycleService(
+      repository,
+      queues,
+      () => new Date('2026-08-20T03:00:00.000Z'),
+      'America/Sao_Paulo',
+    );
+    await serviceAtMidnight.list({ page: 1, limit: 20 });
+    expect(repository.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        todayStart: new Date('2026-08-20T03:00:00.000Z'),
+      }),
+    );
+  });
+
+  it('nao cria evento quando a reservation tem estado desconhecido', async () => {
+    const repository: CommercialLifecycleRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          baseRecord({
+            reservation: {
+              campaignId: 'campaign-1',
+              campaignName: 'Casa e cozinha',
+              attemptExecutionId: null,
+              attemptReservedAt: null,
+              attemptLeaseExpiresAt: null,
+              state: 'UNKNOWN',
+            },
+          }),
+        ],
+        total: 1,
+        summary: {
+          activeExecutions: 0,
+          sentToday: 0,
+          failed: 0,
+          ambiguous: 0,
+          investigationRequired: 0,
+          activeReservations: 0,
+          pendingDispatches: 0,
+          pendingOutboxes: 0,
+          manualRecoveries: 0,
+        },
+      }),
+    };
+    const service = new CommercialLifecycleService(
+      repository,
+      createQueue(),
+      () => now,
+    );
+
+    const response = await service.list({ page: 1, limit: 20 });
+
+    expect(response.items[0]?.reservation?.state).toBe('UNKNOWN');
+    expect(response.items[0]?.timeline).not.toContainEqual(
+      expect.objectContaining({ type: 'RESERVATION_RECORDED' }),
+    );
+  });
+
   it('serializa o lifecycle SENT completo e resolve o job da fila', async () => {
     const repository: CommercialLifecycleRepository = {
       list: vi.fn().mockResolvedValue({

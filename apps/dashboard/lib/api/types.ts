@@ -209,7 +209,13 @@ export type CommercialLifecycle = {
     attemptExecutionId: string | null;
     attemptReservedAt: string | null;
     attemptLeaseExpiresAt: string | null;
-    state: 'ACTIVE' | 'EXPIRED' | 'ABSENT' | 'CONFLICT' | 'AMBIGUOUS';
+    state:
+      | 'ACTIVE'
+      | 'EXPIRED'
+      | 'ABSENT'
+      | 'CONFLICT'
+      | 'AMBIGUOUS'
+      | 'UNKNOWN';
   } | null;
   recovery: {
     id: string;
