@@ -1179,7 +1179,8 @@ type CommercialGroupCampaignAttemptPrismaDelegate = {
     where: {
       id: string;
       attemptExecutionId: string | null;
-      attemptLeaseExpiresAt?: { gt?: Date; lt?: Date };
+      attemptReservedAt?: Date | null;
+      attemptLeaseExpiresAt?: Date | null | { gt?: Date; lt?: Date };
     };
     data:
       | CommercialGroupCampaignAttemptState
@@ -1289,14 +1290,38 @@ export class PrismaCommercialGroupCampaignAttemptRepository
       );
     }
 
+    const current = await this.findAttempt(input.campaignId);
+    if (
+      !current?.attemptExecutionId ||
+      current.attemptExecutionId !== input.executionId ||
+      !current.attemptReservedAt ||
+      !current.attemptLeaseExpiresAt
+    ) {
+      return {
+        kind: 'CONFLICT',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+      };
+    }
+    if (
+      current.attemptLeaseExpiresAt.getTime() >=
+      input.leaseExpiresAt.getTime()
+    ) {
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: current.attemptLeaseExpiresAt,
+        renewed: false,
+      };
+    }
+
     const renewed = await this.campaigns.updateMany({
       where: {
         id: input.campaignId,
         attemptExecutionId: input.executionId,
-        attemptLeaseExpiresAt: {
-          gt: input.renewedAt,
-          lt: input.leaseExpiresAt,
-        },
+        attemptReservedAt: current.attemptReservedAt,
+        attemptLeaseExpiresAt: current.attemptLeaseExpiresAt,
       },
       data: { attemptLeaseExpiresAt: input.leaseExpiresAt },
     });
@@ -1310,19 +1335,19 @@ export class PrismaCommercialGroupCampaignAttemptRepository
       };
     }
 
-    const current = await this.findAttempt(input.campaignId);
+    const afterRace = await this.findAttempt(input.campaignId);
     if (
-      current?.attemptExecutionId === input.executionId &&
-      current.attemptLeaseExpiresAt &&
-      current.attemptLeaseExpiresAt.getTime() > input.renewedAt.getTime() &&
-      current.attemptLeaseExpiresAt.getTime() >=
+      afterRace?.attemptExecutionId === input.executionId &&
+      afterRace.attemptReservedAt &&
+      afterRace.attemptLeaseExpiresAt &&
+      afterRace.attemptLeaseExpiresAt.getTime() >=
         input.leaseExpiresAt.getTime()
     ) {
       return {
         kind: 'RENEWED',
         campaignId: input.campaignId,
         executionId: input.executionId,
-        leaseExpiresAt: current.attemptLeaseExpiresAt,
+        leaseExpiresAt: afterRace.attemptLeaseExpiresAt,
         renewed: false,
       };
     }

@@ -302,6 +302,18 @@ const createSubject = (input: {
       executionId: input.executionId,
       released: true,
     })),
+    renewAttempt: vi.fn(async (input: {
+      campaignId: string;
+      executionId: string;
+      renewedAt: Date;
+      leaseExpiresAt: Date;
+    }) => ({
+      kind: 'RENEWED' as const,
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+      leaseExpiresAt: input.leaseExpiresAt,
+      renewed: true,
+    })),
   };
   campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
   const candidates = {
@@ -1058,6 +1070,33 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.campaigns.releaseAttempt).toHaveBeenCalledWith({
       campaignId: 'campaign-1',
       executionId: 'execution-1',
+    });
+  });
+
+  it('delegates a renovacao da reserva pelo contrato tipado do candidate flow', async () => {
+    const subject = createSubject();
+    const renewedAt = new Date('2026-08-08T12:05:00.000Z');
+    const leaseExpiresAt = new Date('2026-08-08T12:07:00.000Z');
+
+    await expect(
+      subject.service.renewAttempt({
+        campaignId: 'campaign-1',
+        executionId: 'execution-1',
+        renewedAt,
+        leaseExpiresAt,
+      }),
+    ).resolves.toEqual({
+      kind: 'RENEWED',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      leaseExpiresAt,
+      renewed: true,
+    });
+    expect(subject.campaigns.renewAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      renewedAt,
+      leaseExpiresAt,
     });
   });
 

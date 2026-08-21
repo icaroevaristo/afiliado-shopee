@@ -14,12 +14,14 @@ type AttemptState = {
 
 class InMemoryCampaignAttempts {
   readonly records = new Map<string, AttemptState>();
+  beforeUpdateMany?: () => void;
 
   async updateMany(input: {
     where: {
       id: string;
       attemptExecutionId: string | null;
-      attemptLeaseExpiresAt?: { gt?: Date; lt?: Date };
+      attemptReservedAt?: Date | null;
+      attemptLeaseExpiresAt?: Date | null | { gt?: Date; lt?: Date };
     };
     data: Partial<
       Pick<
@@ -28,18 +30,35 @@ class InMemoryCampaignAttempts {
       >
     >;
   }) {
+    this.beforeUpdateMany?.();
+    this.beforeUpdateMany = undefined;
     const record = this.records.get(input.where.id);
+    const reservedAtMatches =
+      input.where.attemptReservedAt === undefined ||
+      record?.attemptReservedAt?.getTime() ===
+        input.where.attemptReservedAt?.getTime();
+    const leaseFilter = input.where.attemptLeaseExpiresAt;
+    const leaseMatches =
+      leaseFilter === undefined ||
+      (leaseFilter instanceof Date
+        ? record?.attemptLeaseExpiresAt?.getTime() === leaseFilter.getTime()
+        : leaseFilter === null
+          ? record?.attemptLeaseExpiresAt === null
+          : (!leaseFilter.gt ||
+              (record?.attemptLeaseExpiresAt !== null &&
+                record?.attemptLeaseExpiresAt !== undefined &&
+                record.attemptLeaseExpiresAt.getTime() >
+                  leaseFilter.gt.getTime())) &&
+            (!leaseFilter.lt ||
+              (record?.attemptLeaseExpiresAt !== null &&
+                record?.attemptLeaseExpiresAt !== undefined &&
+                record.attemptLeaseExpiresAt.getTime() <
+                  leaseFilter.lt.getTime())));
     if (
       !record ||
       record.attemptExecutionId !== input.where.attemptExecutionId ||
-      (input.where.attemptLeaseExpiresAt?.gt &&
-        (!record.attemptLeaseExpiresAt ||
-          record.attemptLeaseExpiresAt.getTime() <=
-            input.where.attemptLeaseExpiresAt.gt.getTime())) ||
-      (input.where.attemptLeaseExpiresAt?.lt &&
-        record.attemptLeaseExpiresAt &&
-        record.attemptLeaseExpiresAt.getTime() >=
-          input.where.attemptLeaseExpiresAt.lt.getTime())
+      !reservedAtMatches ||
+      !leaseMatches
     ) {
       return { count: 0 };
     }
@@ -298,9 +317,60 @@ describe('PrismaCommercialGroupCampaignAttemptRepository', () => {
       leaseExpiresAt: renewedLeaseExpiresAt,
       renewed: false,
     });
+
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:03:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-14T12:08:00.000Z'),
+      }),
+    ).resolves.toEqual({
+      kind: 'RENEWED',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+      leaseExpiresAt: renewedLeaseExpiresAt,
+      renewed: false,
+    });
+    expect(campaigns.records.get('campaign-a')?.attemptLeaseExpiresAt).toEqual(
+      renewedLeaseExpiresAt,
+    );
   });
 
-  it('fails closed for another owner or an already expired reservation', async () => {
+  it('renews an expired reservation for the same owner and preserves reservedAt', async () => {
+    const { campaigns, repository } = subject();
+    campaigns.records.set(
+      'campaign-a',
+      state({
+        attemptExecutionId: 'execution-a',
+        attemptReservedAt: reservedAt,
+        attemptLeaseExpiresAt: expiredLeaseExpiresAt,
+      }),
+    );
+
+    const renewedLeaseExpiresAt = new Date('2026-08-14T12:10:00.000Z');
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:00:00.000Z'),
+        leaseExpiresAt: renewedLeaseExpiresAt,
+      }),
+    ).resolves.toEqual({
+      kind: 'RENEWED',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+      leaseExpiresAt: renewedLeaseExpiresAt,
+      renewed: true,
+    });
+    expect(campaigns.records.get('campaign-a')).toMatchObject({
+      attemptExecutionId: 'execution-a',
+      attemptReservedAt: reservedAt,
+      attemptLeaseExpiresAt: renewedLeaseExpiresAt,
+    });
+  });
+
+  it('fails closed for another owner or a released reservation', async () => {
     const { campaigns, repository } = subject();
     campaigns.records.set(
       'campaign-a',
@@ -324,6 +394,23 @@ describe('PrismaCommercialGroupCampaignAttemptRepository', () => {
       executionId: 'execution-b',
     });
 
+    campaigns.records.set('campaign-a', state());
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:00:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-14T12:10:00.000Z'),
+      }),
+    ).resolves.toEqual({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+    });
+  });
+
+  it('fails closed when the owner changes between read and CAS', async () => {
+    const { campaigns, repository } = subject();
     campaigns.records.set(
       'campaign-a',
       state({
@@ -332,6 +419,17 @@ describe('PrismaCommercialGroupCampaignAttemptRepository', () => {
         attemptLeaseExpiresAt: expiredLeaseExpiresAt,
       }),
     );
+    campaigns.beforeUpdateMany = () => {
+      campaigns.records.set(
+        'campaign-a',
+        state({
+          attemptExecutionId: 'execution-b',
+          attemptReservedAt: new Date('2026-08-14T12:01:00.000Z'),
+          attemptLeaseExpiresAt: leaseExpiresAt,
+        }),
+      );
+    };
+
     await expect(
       repository.renew({
         campaignId: 'campaign-a',
@@ -345,8 +443,9 @@ describe('PrismaCommercialGroupCampaignAttemptRepository', () => {
       executionId: 'execution-a',
     });
     expect(campaigns.records.get('campaign-a')).toMatchObject({
-      attemptExecutionId: 'execution-a',
-      attemptLeaseExpiresAt: expiredLeaseExpiresAt,
+      attemptExecutionId: 'execution-b',
+      attemptReservedAt: new Date('2026-08-14T12:01:00.000Z'),
+      attemptLeaseExpiresAt: leaseExpiresAt,
     });
   });
 });

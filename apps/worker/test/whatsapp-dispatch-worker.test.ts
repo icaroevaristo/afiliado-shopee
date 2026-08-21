@@ -257,6 +257,12 @@ const createHandoffRepositories = (input: {
     kind: 'RENEWED' | 'CONFLICT';
     renewed?: boolean;
   };
+  context?: {
+    kind: 'FOUND';
+    candidateId: string;
+    campaignId: string;
+    attemptExecutionId: string;
+  };
   events?: string[];
 }) => {
   const events = input.events ?? [];
@@ -318,12 +324,16 @@ const createHandoffRepositories = (input: {
     },
     commercialGroupCampaigns: { renewAttempt },
     commercialPromotions: {
-      findAttemptContextByGeneratedCopyId: vi.fn().mockResolvedValue({
-        kind: 'FOUND',
-        candidateId: 'candidate-123',
-        campaignId: 'campaign-1',
-        attemptExecutionId: 'execution-handoff',
-      }),
+      findAttemptContextByGeneratedCopyId: vi
+        .fn()
+        .mockResolvedValue(
+          input.context ?? {
+            kind: 'FOUND',
+            candidateId: 'candidate-123',
+            campaignId: 'campaign-1',
+            attemptExecutionId: 'execution-handoff',
+          },
+        ),
       markDispatchedByGeneratedCopyId: vi.fn().mockResolvedValue({
         kind: 'DISPATCHED',
         candidateId: 'candidate-123',
@@ -839,7 +849,7 @@ describe('processWhatsAppDispatchJob', () => {
     expect(conflict.markAttemptPending).not.toHaveBeenCalled();
   });
 
-  it('bloqueia handoff quando a lease da execution ja expirou', async () => {
+  it('renova e envia quando a execution e a reservation expiraram com o mesmo owner', async () => {
     const dispatch = {
       ...commercialDispatch,
       id: 'dispatch-handoff',
@@ -848,12 +858,68 @@ describe('processWhatsAppDispatchJob', () => {
         createdFromCandidateId: 'candidate-123',
       },
     };
+    const { repositories, renewAttempt, markAttemptPending } =
+      createHandoffRepositories({
+        dispatch,
+        execution: {
+          ...executionForHandoff(),
+          leaseExpiresAt: new Date(handoffNow.getTime() - 1),
+        },
+      });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue({
+        status: 'sent' as const,
+        externalMessageId: 'external-handoff',
+        sentAt: handoffNow,
+      }),
+    };
+
+    await processWhatsAppDispatchJob(
+      {
+        id: 'job-handoff',
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: 'dispatch-handoff' },
+      },
+      {
+        repositories,
+        whatsAppProvider: provider,
+        logger: { info: vi.fn(), error: vi.fn() },
+        clock: () => handoffNow,
+        reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+        groupSendPolicy: commercialGroupSendPolicy(),
+        draftService: {
+          createDraft: vi.fn().mockReturnValue({
+            candidateId: 'candidate-123',
+            generatedCopyId: 'copy-123',
+            caption: 'draft text',
+            deliveryMode: 'TEXT',
+            warnings: [],
+          }),
+        },
+      },
+    );
+    expect(renewAttempt).toHaveBeenCalledOnce();
+    expect(markAttemptPending).toHaveBeenCalledOnce();
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('bloqueia sem renovar quando execution e run nao estao vinculados', async () => {
+    const dispatch = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      generatedCopy: {
+        ...commercialDispatch.generatedCopy,
+        createdFromCandidateId: 'candidate-123',
+      },
+    };
+    const run = {
+      ...commercialRunForHandoff(),
+      executionId: 'execution-other',
+    };
     const { repositories, renewAttempt } = createHandoffRepositories({
       dispatch,
-      execution: {
-        ...executionForHandoff(),
-        leaseExpiresAt: new Date(handoffNow.getTime() - 1),
-      },
+      run,
     });
     const provider: WhatsAppProvider = {
       beginRun: vi.fn(),
@@ -877,6 +943,52 @@ describe('processWhatsAppDispatchJob', () => {
       ),
     ).rejects.toMatchObject({
       code: 'COMMERCIAL_DISPATCH_EXECUTION_OWNERSHIP_INVALID',
+    });
+    expect(renewAttempt).not.toHaveBeenCalled();
+    expect(provider.beginRun).not.toHaveBeenCalled();
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia quando o candidate/copy nao pertence a mesma execution', async () => {
+    const dispatch = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      generatedCopy: {
+        ...commercialDispatch.generatedCopy,
+        createdFromCandidateId: 'candidate-123',
+      },
+    };
+    const { repositories, renewAttempt } = createHandoffRepositories({
+      dispatch,
+      context: {
+        kind: 'FOUND',
+        candidateId: 'candidate-123',
+        campaignId: 'campaign-1',
+        attemptExecutionId: 'execution-other',
+      },
+    });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-handoff',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'dispatch-handoff' },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          logger: { info: vi.fn(), error: vi.fn() },
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_DISPATCH_RESERVATION_OWNERSHIP_CONFLICT',
     });
     expect(renewAttempt).not.toHaveBeenCalled();
     expect(provider.beginRun).not.toHaveBeenCalled();

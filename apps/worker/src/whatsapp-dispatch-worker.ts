@@ -184,9 +184,7 @@ const renewCommercialReservationForDispatch = async (input: {
     execution.id !== run.executionId ||
     execution.mode !== 'SEND' ||
     execution.status !== 'QUEUED' ||
-    execution.commercialRunId !== run.id ||
-    !execution.leaseExpiresAt ||
-    execution.leaseExpiresAt.getTime() <= now.getTime()
+    execution.commercialRunId !== run.id
   ) {
     throw reservationHandoffError(
       'Ownership da execution comercial nao esta valido para handoff',
