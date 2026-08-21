@@ -300,10 +300,16 @@ export class CommercialPromotionCopyGenerationService {
     return sanitizeCommercialPromotionCopy(copy, context.product.affiliateLink);
   }
 
-  private currentAttemptBlocker(
+  private attemptBlocker(
     attempt: CommercialCopyGenerationAttemptRecord | null,
+    scope: 'current' | 'historical',
   ): string | null {
-    if (!attempt || attempt.status === 'SUCCEEDED') return null;
+    if (!attempt) return null;
+    if (attempt.status === 'SUCCEEDED') {
+      return scope === 'historical'
+        ? 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'
+        : null;
+    }
     if (attempt.status === 'STARTED') {
       return 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS';
     }
@@ -311,33 +317,59 @@ export class CommercialPromotionCopyGenerationService {
       return 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS';
     }
     if (attempt.failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID') {
-      return COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED;
+      return scope === 'current'
+        ? COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
+        : null;
     }
     return 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED';
+  }
+
+  private async findHistoricalAttempt(
+    context: CommercialPromotionCopyContext,
+    fingerprint: string,
+  ) {
+    const { model } = this.options.config;
+    if (!model) return null;
+    return this.options.repository.findAttemptByGenerationContract({
+      candidateId: context.candidate.id,
+      snapshotId: context.snapshot.id,
+      inputFingerprint: fingerprint,
+      provider: this.options.config.provider,
+      model,
+      promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+    });
   }
 
   async preview(candidateId: string) {
     const context = await this.context(candidateId);
     const validationFacts = this.validationFacts(context);
     const fingerprint = this.fingerprint(context);
-    const [cache, attempt] = fingerprint
-      ? await Promise.all([
-          this.options.repository.findCopyByInputFingerprint(fingerprint),
-          this.options.repository.findAttemptByInputFingerprint(fingerprint),
-        ])
-      : [null, null];
-    const attemptBlocker = this.currentAttemptBlocker(attempt);
-    const blockers = [
-      ...candidateBlockers(context, this.clock()),
-      ...(attemptBlocker ? [attemptBlocker] : []),
-    ];
+    const cache = fingerprint
+      ? await this.options.repository.findCopyByInputFingerprint(fingerprint)
+      : null;
+    const cacheAvailable = Boolean(
+      fingerprint && this.validCache(cache, context, fingerprint),
+    );
+    const blockers = [...candidateBlockers(context, this.clock())];
+    if (!cacheAvailable && fingerprint) {
+      const [attempt, historicalAttempt] = await Promise.all([
+        this.options.repository.findAttemptByInputFingerprint(fingerprint),
+        this.findHistoricalAttempt(context, fingerprint),
+      ]);
+      const attemptBlocker = this.attemptBlocker(attempt, 'current');
+      const historicalAttemptBlocker = this.attemptBlocker(
+        historicalAttempt,
+        'historical',
+      );
+      if (attemptBlocker) blockers.push(attemptBlocker);
+      if (historicalAttemptBlocker) blockers.push(historicalAttemptBlocker);
+    }
     return {
       candidateId: context.candidate.id,
       status: context.candidate.status,
       eligible: blockers.length === 0,
-      cacheAvailable: Boolean(
-        fingerprint && this.validCache(cache, context, fingerprint),
-      ),
+      cacheAvailable,
       providerConfigured: this.providerConfigured(),
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
@@ -477,13 +509,17 @@ export class CommercialPromotionCopyGenerationService {
         'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
       );
     }
-    if (attempt.status === 'FAILED') {
-      fail('Tentativa anterior falhou', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED');
-    }
-    if (attempt.status === 'AMBIGUOUS') {
+    const blocker = this.attemptBlocker(attempt, 'current');
+    if (blocker) {
       fail(
-        'Resultado anterior e ambiguo',
-        'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+        blocker === COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
+          ? 'Output anterior da IA foi rejeitado'
+          : blocker === 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'
+            ? 'Resultado anterior e ambiguo'
+            : blocker === 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'
+              ? 'Geracao ja esta em andamento'
+              : 'Tentativa anterior falhou',
+        blocker,
       );
     }
     const copy = attempt.generatedCopyId
@@ -500,26 +536,20 @@ export class CommercialPromotionCopyGenerationService {
 
   private classifyHistoricalAttempt(
     attempt: CommercialCopyGenerationAttemptRecord,
-  ): never {
-    if (attempt.status === 'STARTED') {
+  ): void {
+    const blocker = this.attemptBlocker(attempt, 'historical');
+    if (blocker) {
       fail(
-        'Geracao historica ainda esta em andamento',
-        'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
+        blocker === 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'
+          ? 'Copy historica nao pode ser reutilizada com fingerprint diferente'
+          : blocker === 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'
+          ? 'Resultado historico e ambiguo'
+          : blocker === 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'
+            ? 'Geracao historica ainda esta em andamento'
+            : 'Tentativa historica falhou',
+        blocker,
       );
     }
-    if (attempt.status === 'FAILED') {
-      fail('Tentativa historica falhou', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED');
-    }
-    if (attempt.status === 'AMBIGUOUS') {
-      fail(
-        'Resultado historico e ambiguo',
-        'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
-      );
-    }
-    return fail(
-      'Copy historica nao pode ser reutilizada com fingerprint diferente',
-      'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
-    );
   }
 
   private async terminalFailure(
@@ -595,16 +625,10 @@ export class CommercialPromotionCopyGenerationService {
       return this.useCache(context, fingerprint, cached as GeneratedCopyRecord);
     }
     if (!cached) {
-      const historicalAttempt =
-        await this.options.repository.findAttemptByGenerationContract({
-          candidateId: context.candidate.id,
-          snapshotId: context.snapshot.id,
-          inputFingerprint: fingerprint,
-          provider: this.options.config.provider,
-          model: this.options.config.model as string,
-          promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
-          validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
-        });
+      const historicalAttempt = await this.findHistoricalAttempt(
+        context,
+        fingerprint,
+      );
       if (historicalAttempt) this.classifyHistoricalAttempt(historicalAttempt);
     }
     const provider = this.assertProvider();

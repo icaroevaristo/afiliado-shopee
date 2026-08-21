@@ -618,6 +618,47 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect([...repository.copies.values()][0]?.mensagem).not.toContain('HOKON.br');
   });
 
+  it.each([
+    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED'],
+    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+  ] as const)(
+    'prioriza cache atual válido sobre histórico %s',
+    async (status, failureCode) => {
+      const repository = new MemoryCopyRepository();
+      const provider = validProvider();
+      const copyService = service(repository, provider);
+
+      await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+      repository.context!.candidate.status = 'QUEUED';
+      repository.context!.candidate.generatedCopyId = null;
+      const historicalFingerprint = `historical-cache-${status.toLowerCase()}`;
+      repository.attempts.set(historicalFingerprint, {
+        ...legacyAttempt(status, historicalFingerprint),
+        promptVersion: 'commercial-promotion-copy-v10',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        failureCode,
+      });
+
+      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+        eligible: true,
+        cacheAvailable: true,
+        blockers: [],
+      });
+      await expect(
+        copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+      ).resolves.toMatchObject({
+        status: 'COPY_READY',
+        cacheHit: true,
+      });
+
+      expect(provider.generate).toHaveBeenCalledOnce();
+      expect(repository.attempts.get(historicalFingerprint)).toMatchObject({
+        status,
+        failureCode,
+      });
+    },
+  );
+
   it('limpa faixa de tamanho de copy cacheada sem uma segunda chamada ao provider', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.product.productName =
@@ -864,6 +905,128 @@ describe('CommercialPromotionCopyGenerationService', () => {
       expect(provider.generate).not.toHaveBeenCalled();
       expect(repository.attempts.size).toBe(1);
       expect(repository.context?.candidate.status).toBe('QUEUED');
+    },
+  );
+
+  it('mantem output invalid terminal no fingerprint atual sem chamar provider', async () => {
+    const repository = new MemoryCopyRepository();
+    let currentFingerprint: string | null = null;
+    repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => {
+      currentFingerprint ??= fingerprint;
+      return {
+        ...legacyAttempt('FAILED', fingerprint),
+        failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+      };
+    });
+    repository.claim = vi.fn().mockResolvedValue(false);
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: false,
+      blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
+    });
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+    });
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+    });
+
+    expect(currentFingerprint).toBeTruthy();
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+
+  it('ignora output invalid historico de fingerprint diferente e gera o fingerprint novo', async () => {
+    const repository = new MemoryCopyRepository();
+    const historicalFingerprint = 'historical-output-invalid-fingerprint';
+    repository.attempts.set(historicalFingerprint, {
+      ...legacyAttempt('FAILED', historicalFingerprint),
+      promptVersion: 'commercial-promotion-copy-v10',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+      failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+      validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
+      requestMayHaveStarted: true,
+    });
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: true,
+      blockers: [],
+    });
+    const result = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(result.status).toBe('COPY_READY');
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(repository.attempts.get(historicalFingerprint)).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+      inputFingerprint: historicalFingerprint,
+    });
+    expect(repository.attempts.size).toBe(2);
+  });
+
+  it('alinha preview e generate para copy historica SUCCEEDED com fingerprint diferente', async () => {
+    const repository = new MemoryCopyRepository();
+    const historicalFingerprint = 'historical-succeeded-fingerprint';
+    repository.attempts.set(historicalFingerprint, {
+      ...legacyAttempt('SUCCEEDED', historicalFingerprint),
+      promptVersion: 'commercial-promotion-copy-v10',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+    });
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      eligible: false,
+      blockers: ['COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'],
+    });
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+    });
+
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.attempts.size).toBe(1);
+  });
+
+  it.each([
+    ['STARTED', null, 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
+    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
+  ] as const)(
+    'mantem preview e generate coerentes para tentativa historica %s',
+    async (status, failureCode, expectedCode) => {
+      const repository = new MemoryCopyRepository();
+      const historicalFingerprint = `historical-${status.toLowerCase()}-fingerprint`;
+      repository.attempts.set(historicalFingerprint, {
+        ...legacyAttempt(status, historicalFingerprint),
+        promptVersion: 'commercial-promotion-copy-v10',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        failureCode,
+      });
+      const provider = validProvider();
+      const copyService = service(repository, provider);
+
+      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+        eligible: false,
+        blockers: [expectedCode],
+      });
+      await expect(
+        copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+      ).rejects.toMatchObject({ code: expectedCode });
+
+      expect(provider.generate).not.toHaveBeenCalled();
+      expect(repository.attempts.size).toBe(1);
     },
   );
 
