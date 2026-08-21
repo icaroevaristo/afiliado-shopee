@@ -9,6 +9,7 @@ import {
 import {
   CommercialAutomationCandidateFlowService,
   type CommercialAutomationCandidateAttemptReleaseResult,
+  type CommercialAutomationCandidateAttemptRenewalResult,
   type CommercialAutomationCandidateAttemptReservationResult,
   type CommercialAutomationCandidateSelection,
   type CommercialAutomationCandidatePreflight,
@@ -207,6 +208,7 @@ const createSubject = ({
   targets,
   candidateFlowOverride,
   policyOverride,
+  clock,
 }: {
   withCandidateFlow?: boolean;
   targets?: CommercialAutomationTarget[];
@@ -217,6 +219,7 @@ const createSubject = ({
     CommercialAutomationPolicyService,
     'evaluateAutomationReadiness'
   >;
+  clock?: () => Date;
 } = {}) => {
   const resolvedTargets: CommercialAutomationTarget[] = targets ?? [
     {
@@ -319,6 +322,18 @@ const createSubject = ({
         released: true,
       }),
     ),
+    renewAttempt: vi.fn(async (input: {
+      campaignId: string;
+      executionId: string;
+      renewedAt: Date;
+      leaseExpiresAt: Date;
+    }): Promise<CommercialAutomationCandidateAttemptRenewalResult> => ({
+      kind: 'RENEWED' as const,
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+      leaseExpiresAt: input.leaseExpiresAt,
+      renewed: true,
+    })),
   };
   const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
   const commercialRuns = {
@@ -344,7 +359,7 @@ const createSubject = ({
     commercialRuns: commercialRuns as never,
     executions,
     logger,
-    clock: () => NOW,
+    clock: clock ?? (() => NOW),
     leaseSeconds: 120,
     heartbeatSeconds: 30,
     ownerIdFactory: () => 'owner-1',
@@ -541,6 +556,18 @@ const createRealCandidateFlowForIntegration = () => {
         campaignId: input.campaignId,
         executionId: input.executionId,
         released: true,
+      })),
+      renewAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+        renewedAt: Date;
+        leaseExpiresAt: Date;
+      }) => ({
+        kind: 'RENEWED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        renewed: true,
       })),
     } as never,
     candidates: {
@@ -802,6 +829,18 @@ const createStatefulCrossTickCandidateFlow = () => {
         campaignId: input.campaignId,
         executionId: input.executionId,
         released: true,
+      })),
+      renewAttempt: vi.fn(async (input: {
+        campaignId: string;
+        executionId: string;
+        renewedAt: Date;
+        leaseExpiresAt: Date;
+      }) => ({
+        kind: 'RENEWED' as const,
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        renewed: true,
       })),
     } as never,
     candidates: {
@@ -1100,6 +1139,13 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.revalidate).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.renewAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+      renewedAt: NOW,
+      leaseExpiresAt: new Date(NOW.getTime() + 120_000),
+    });
+    expect(subject.candidateFlow.renewAttempt).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).toHaveBeenCalledWith(
       'run-1',
       expect.any(String),
@@ -1107,6 +1153,90 @@ describe('CommercialAutomationOrchestrator', () => {
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.releaseAttempt).not.toHaveBeenCalled();
+  });
+
+  it('usa uma lease fresca no reserve mesmo quando a lease inicial ficou stale', async () => {
+    let now = NOW;
+    const subject = createSubject({ clock: () => now });
+    subject.candidateFlow.replenish.mockImplementation(async () => {
+      now = new Date(NOW.getTime() + 60_000);
+      return { rejectionSummary: {} };
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        executionId: 'execution-1',
+        reservedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 120_000),
+      },
+    );
+    expect(
+      subject.candidateFlow.reserveAttempt.mock.calls[0]?.[1].leaseExpiresAt,
+    ).not.toEqual(new Date(NOW.getTime() + 120_000));
+  });
+
+  it('renova a reservation imediatamente antes da confirmacao', async () => {
+    const subject = createSubject();
+    const order: string[] = [];
+    subject.candidateFlow.revalidate.mockImplementation(async () => {
+      order.push('revalidate');
+    });
+    subject.candidateFlow.renewAttempt.mockImplementation(async (input) => {
+      order.push('renew');
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        renewed: true,
+      };
+    });
+    subject.confirmation.confirm.mockImplementation(async () => {
+      order.push('confirm');
+      return { status: 'queued' };
+    });
+
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(order).toEqual(['revalidate', 'renew', 'confirm']);
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('bloqueia a confirmacao quando a renovacao pre-confirmacao perde ownership', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.renewAttempt.mockResolvedValue({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({ status: 'blocked' });
+
+    expect(subject.candidateFlow.renewAttempt).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
   });
 
   it('nao duplica execucao nem efeitos para a mesma job ID', async () => {

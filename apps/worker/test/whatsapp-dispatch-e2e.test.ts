@@ -530,6 +530,7 @@ describe('controlled BullMQ job and isolated worker', () => {
         mensagem: WHATSAPP_DISPATCH_E2E_MESSAGE,
         cta: '',
         hashtags: '',
+        promotionCandidates: [],
       },
       destination: { destination: DESTINATION },
       product: { comissao: 0 },

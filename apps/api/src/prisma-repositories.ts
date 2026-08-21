@@ -20,6 +20,8 @@ import type {
   CommercialGroupCampaignAttemptRepository,
   CommercialGroupCampaignAttemptReservation,
   CommercialGroupCampaignAttemptReservationInput,
+  CommercialGroupCampaignAttemptRenewal,
+  CommercialGroupCampaignAttemptRenewalInput,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialGroupCampaignUpdateData,
@@ -1160,6 +1162,10 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
   }) {
     return this.attemptRepository.release(input);
   }
+
+  async renewAttempt(input: CommercialGroupCampaignAttemptRenewalInput) {
+    return this.attemptRepository.renew(input);
+  }
 }
 
 type CommercialGroupCampaignAttemptState = {
@@ -1170,8 +1176,15 @@ type CommercialGroupCampaignAttemptState = {
 
 type CommercialGroupCampaignAttemptPrismaDelegate = {
   updateMany(input: {
-    where: { id: string; attemptExecutionId: string | null };
-    data: CommercialGroupCampaignAttemptState;
+    where: {
+      id: string;
+      attemptExecutionId: string | null;
+      attemptReservedAt?: Date | null;
+      attemptLeaseExpiresAt?: Date | null | { gt?: Date; lt?: Date };
+    };
+    data:
+      | CommercialGroupCampaignAttemptState
+      | Pick<CommercialGroupCampaignAttemptState, 'attemptLeaseExpiresAt'>;
   }): Promise<{ count: number }>;
   findUnique(input: {
     where: { id: string };
@@ -1260,6 +1273,85 @@ export class PrismaCommercialGroupCampaignAttemptRepository
         released: false,
       };
     }
+    return {
+      kind: 'CONFLICT',
+      campaignId: input.campaignId,
+      executionId: input.executionId,
+    };
+  }
+
+  async renew(
+    input: CommercialGroupCampaignAttemptRenewalInput,
+  ): Promise<CommercialGroupCampaignAttemptRenewal> {
+    if (input.leaseExpiresAt.getTime() <= input.renewedAt.getTime()) {
+      throw new AppError(
+        'A nova expiracao da reserva deve estar no futuro',
+        'COMMERCIAL_GROUP_CAMPAIGN_ATTEMPT_RENEWAL_LEASE_INVALID',
+      );
+    }
+
+    const current = await this.findAttempt(input.campaignId);
+    if (
+      !current?.attemptExecutionId ||
+      current.attemptExecutionId !== input.executionId ||
+      !current.attemptReservedAt ||
+      !current.attemptLeaseExpiresAt
+    ) {
+      return {
+        kind: 'CONFLICT',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+      };
+    }
+    if (
+      current.attemptLeaseExpiresAt.getTime() >=
+      input.leaseExpiresAt.getTime()
+    ) {
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: current.attemptLeaseExpiresAt,
+        renewed: false,
+      };
+    }
+
+    const renewed = await this.campaigns.updateMany({
+      where: {
+        id: input.campaignId,
+        attemptExecutionId: input.executionId,
+        attemptReservedAt: current.attemptReservedAt,
+        attemptLeaseExpiresAt: current.attemptLeaseExpiresAt,
+      },
+      data: { attemptLeaseExpiresAt: input.leaseExpiresAt },
+    });
+    if (renewed.count === 1) {
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        renewed: true,
+      };
+    }
+
+    const afterRace = await this.findAttempt(input.campaignId);
+    if (
+      afterRace?.attemptExecutionId === input.executionId &&
+      afterRace.attemptReservedAt &&
+      afterRace.attemptLeaseExpiresAt &&
+      afterRace.attemptLeaseExpiresAt.getTime() >=
+        input.leaseExpiresAt.getTime()
+    ) {
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: afterRace.attemptLeaseExpiresAt,
+        renewed: false,
+      };
+    }
+
     return {
       kind: 'CONFLICT',
       campaignId: input.campaignId,

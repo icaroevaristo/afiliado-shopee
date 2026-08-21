@@ -27,6 +27,8 @@ import type {
   CommercialGroupCampaignAttemptReservation,
   CommercialGroupCampaignAttemptReservationInput,
   CommercialGroupCampaignAttemptRelease,
+  CommercialGroupCampaignAttemptRenewal,
+  CommercialGroupCampaignAttemptRenewalInput,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
@@ -110,6 +112,9 @@ export type CommercialAutomationCandidateAttemptReservationResult =
 export type CommercialAutomationCandidateAttemptReleaseResult =
   CommercialGroupCampaignAttemptRelease;
 
+export type CommercialAutomationCandidateAttemptRenewalResult =
+  CommercialGroupCampaignAttemptRenewal;
+
 export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_AI_COPY_OFFER_EXPIRED',
   'COMMERCIAL_AI_COPY_OFFER_UNAVAILABLE',
@@ -135,7 +140,7 @@ type CandidateFlowOptions = {
     Partial<
       Pick<
         CommercialGroupCampaignRepository,
-        'reserveAttempt' | 'releaseAttempt'
+        'reserveAttempt' | 'releaseAttempt' | 'renewAttempt'
       >
     >;
   candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'>;
@@ -399,6 +404,18 @@ export class CommercialAutomationCandidateFlowService {
       );
     }
     return this.options.campaigns.releaseAttempt(input);
+  }
+
+  async renewAttempt(
+    input: CommercialGroupCampaignAttemptRenewalInput,
+  ): Promise<CommercialAutomationCandidateAttemptRenewalResult> {
+    if (!this.options.campaigns.renewAttempt) {
+      throw appError(
+        'Renovacao de reserva de tentativa comercial indisponivel',
+        'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_UNAVAILABLE',
+      );
+    }
+    return this.options.campaigns.renewAttempt(input);
   }
 
   private async resolveCampaign(

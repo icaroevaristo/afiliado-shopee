@@ -31,6 +31,7 @@ import type { CommercialPipelineService } from './commercial-pipeline-service';
 import type {
   CommercialAutomationTarget,
   CommercialGroupCampaignAttemptRelease,
+  CommercialGroupCampaignAttemptRenewal,
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRepository,
@@ -200,6 +201,12 @@ export class CommercialAutomationOrchestrator {
           campaignId: string;
           executionId: string;
         }): Promise<CommercialGroupCampaignAttemptRelease>;
+        renewAttempt(input: {
+          campaignId: string;
+          executionId: string;
+          renewedAt: Date;
+          leaseExpiresAt: Date;
+        }): Promise<CommercialGroupCampaignAttemptRenewal>;
       };
       confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
       commercialRuns: Pick<CommercialPipelineRunRepository, 'findById'>;
@@ -431,17 +438,10 @@ export class CommercialAutomationOrchestrator {
                 },
               };
               const reservedAt = this.clock();
-              const leaseExpiresAt = execution.leaseExpiresAt;
-              if (!leaseExpiresAt || leaseExpiresAt.getTime() <= reservedAt.getTime()) {
-                return publicResult(
-                  await finish({
-                    status: 'BLOCKED',
-                    reasons: [COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID],
-                    failureCode: COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID,
-                    completedAt: reservedAt,
-                  }),
-                );
-              }
+              const leaseExpiresAt = addMilliseconds(
+                reservedAt,
+                this.dependencies.leaseSeconds * 1000,
+              );
               const reservation =
                 await this.dependencies.candidateFlow.reserveAttempt(target, {
                   executionId: execution.id,
@@ -570,8 +570,36 @@ export class CommercialAutomationOrchestrator {
       }
 
       await heartbeat.checkpoint();
-      if (candidatePreparation) {
-        await this.dependencies.candidateFlow!.revalidate(candidatePreparation);
+      if (!candidatePreparation) {
+        throw new AppError(
+          'Preparacao comercial ausente antes da confirmacao',
+          'COMMERCIAL_AUTOMATION_CANDIDATE_PREPARATION_MISSING',
+        );
+      }
+      await this.dependencies.candidateFlow!.revalidate(candidatePreparation);
+      const renewedAt = this.clock();
+      const reservationRenewal =
+        await this.dependencies.candidateFlow!.renewAttempt({
+          campaignId: candidatePreparation.campaignId,
+          executionId: execution.id,
+          renewedAt,
+          leaseExpiresAt: addMilliseconds(
+            renewedAt,
+            this.dependencies.leaseSeconds * 1000,
+          ),
+        });
+      if (reservationRenewal.kind === 'CONFLICT') {
+        const failureCode =
+          'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT';
+        return publicResult(
+          await finish({
+            status: 'BLOCKED',
+            reasons: [failureCode],
+            commercialRunId,
+            failureCode,
+            completedAt: renewedAt,
+          }),
+        );
       }
       confirmationAttempted = true;
       await this.dependencies.confirmation.confirm(

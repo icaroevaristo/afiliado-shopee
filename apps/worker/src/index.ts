@@ -43,12 +43,19 @@ type CreatePipelineProductWorkerOptions = {
   logger?: WorkerLogger;
   whatsAppProvider: WhatsAppProvider;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
+  reservationLeaseMilliseconds?: number;
 };
 
 type WorkerProcessorOptions = Required<
-  Omit<CreatePipelineProductWorkerOptions, 'connection' | 'groupSendPolicy'>
+  Omit<
+    CreatePipelineProductWorkerOptions,
+    'connection' | 'groupSendPolicy' | 'reservationLeaseMilliseconds'
+  >
 > &
-  Pick<CreatePipelineProductWorkerOptions, 'groupSendPolicy'>;
+  Pick<
+    CreatePipelineProductWorkerOptions,
+    'groupSendPolicy' | 'reservationLeaseMilliseconds'
+  >;
 
 type WorkerFactory = typeof createPipelineProductWorker;
 
@@ -300,6 +307,8 @@ export const startWorker = async (
       logger,
       whatsAppProvider,
       groupSendPolicy,
+      reservationLeaseMilliseconds:
+        config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
     });
   } catch (error) {
     await infrastructure.close().catch(() => undefined);

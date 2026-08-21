@@ -626,6 +626,8 @@ export const createRealCommercialImageDispatchE2ERuntime = async (
         logger: workerLogger,
         whatsAppProvider: provider,
         groupSendPolicy,
+        reservationLeaseMilliseconds:
+          config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
       });
       await worker.whatsappDispatchWorker.waitUntilReady();
     },

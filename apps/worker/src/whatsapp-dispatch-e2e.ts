@@ -622,6 +622,8 @@ export const createRealWhatsAppDispatchE2ERuntime = async (
         logger: workerLogger,
         whatsAppProvider: provider,
         messageBuilder: () => WHATSAPP_DISPATCH_E2E_MESSAGE,
+        reservationLeaseMilliseconds:
+          config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
       });
       await worker.whatsappDispatchWorker.waitUntilReady();
     },
