@@ -669,6 +669,9 @@ export interface CommercialGroupCampaignRepository {
     campaignId: string;
     executionId: string;
   }): Promise<CommercialGroupCampaignAttemptRelease>;
+  renewAttempt?(
+    input: CommercialGroupCampaignAttemptRenewalInput,
+  ): Promise<CommercialGroupCampaignAttemptRenewal>;
 }
 
 export type CommercialGroupCampaignAttemptReservationInput = {
@@ -698,6 +701,23 @@ export type CommercialGroupCampaignAttemptRelease =
     }
   | { kind: 'CONFLICT'; campaignId: string; executionId: string };
 
+export type CommercialGroupCampaignAttemptRenewalInput = {
+  campaignId: string;
+  executionId: string;
+  renewedAt: Date;
+  leaseExpiresAt: Date;
+};
+
+export type CommercialGroupCampaignAttemptRenewal =
+  | {
+      kind: 'RENEWED';
+      campaignId: string;
+      executionId: string;
+      leaseExpiresAt: Date | null;
+      renewed: boolean;
+    }
+  | { kind: 'CONFLICT'; campaignId: string; executionId: string };
+
 export interface CommercialGroupCampaignAttemptRepository {
   reserve(
     input: CommercialGroupCampaignAttemptReservationInput,
@@ -706,6 +726,9 @@ export interface CommercialGroupCampaignAttemptRepository {
     campaignId: string;
     executionId: string;
   }): Promise<CommercialGroupCampaignAttemptRelease>;
+  renew(
+    input: CommercialGroupCampaignAttemptRenewalInput,
+  ): Promise<CommercialGroupCampaignAttemptRenewal>;
 }
 
 export type CommercialPromotionCandidateStatus =

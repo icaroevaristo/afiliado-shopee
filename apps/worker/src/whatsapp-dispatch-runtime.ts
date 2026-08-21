@@ -49,6 +49,8 @@ export const startIsolatedWhatsAppDispatchWorker = (
       logger,
       whatsAppProvider: provider,
       groupSendPolicy,
+      reservationLeaseMilliseconds:
+        config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
     },
   );
 

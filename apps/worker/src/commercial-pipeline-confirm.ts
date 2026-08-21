@@ -273,6 +273,8 @@ export const createRealCommercialConfirmRuntime = async (
         logger: workerLogger,
         whatsAppProvider: provider,
         groupSendPolicy,
+        reservationLeaseMilliseconds:
+          config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
       });
       await worker.whatsappDispatchWorker.waitUntilReady();
     },

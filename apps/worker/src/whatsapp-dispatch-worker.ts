@@ -15,6 +15,7 @@ import {
   createPrismaRepositories,
   createSenderService,
 } from '../../api/src/application-services';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 import { finalizeCommercialPipelineRun } from '../../api/src/commercial-pipeline-run-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
@@ -37,6 +38,14 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
     | 'findAttemptContextByGeneratedCopyId'
     | 'releaseAttempt'
   >;
+  commercialAutomationExecutions?: Pick<
+    ApplicationRepositories['commercialAutomationExecutions'],
+    'findById'
+  >;
+  commercialGroupCampaigns?: Pick<
+    ApplicationRepositories['commercialGroupCampaigns'],
+    'renewAttempt'
+  >;
 };
 
 type WhatsAppDispatchProcessorBaseOptions = {
@@ -53,6 +62,8 @@ type WhatsAppDispatchProcessorBaseOptions = {
   hunterProvider?: HunterProvider;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
+  clock?: () => Date;
+  reservationLeaseMilliseconds?: number;
 };
 
 export type WhatsAppDispatchProcessorOptions =
@@ -73,6 +84,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   messageBuilder?: WhatsAppDispatchProcessorOptions['messageBuilder'];
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
+  reservationLeaseMilliseconds?: number;
 };
 
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
@@ -101,15 +113,132 @@ const preserveCause = (error: unknown, cause: unknown) => {
   return error;
 };
 
+const reservationHandoffError = (message: string, code: string) =>
+  new AppError(message, code);
+
+const renewCommercialReservationForDispatch = async (input: {
+  dispatchId: string;
+  repositories: WhatsAppDispatchProcessorRepositories;
+  clock: () => Date;
+  reservationLeaseMilliseconds?: number;
+}) => {
+  const run = await input.repositories.commercialRuns.findByDispatchId(
+    input.dispatchId,
+  );
+  if (!run?.executionId) return;
+
+  const dispatch =
+    await input.repositories.whatsappDispatches.findByIdWithDetails(
+      input.dispatchId,
+    );
+  if (!dispatch) {
+    throw reservationHandoffError(
+      'Dispatch comercial nao encontrado para o handoff da reserva',
+      'COMMERCIAL_DISPATCH_RESERVATION_CONTEXT_UNAVAILABLE',
+    );
+  }
+  if (
+    run.mode !== 'CONFIRMED' ||
+    run.status !== 'STARTED' ||
+    run.finalStatus !== 'PENDING' ||
+    dispatch.status !== 'PENDING' ||
+    dispatch.attemptCount !== 0 ||
+    dispatch.externalMessageId !== null
+  ) {
+    throw reservationHandoffError(
+      'Lifecycle comercial nao esta no estado seguro para handoff da reserva',
+      'COMMERCIAL_DISPATCH_RESERVATION_LIFECYCLE_INVALID',
+    );
+  }
+
+  const executions = input.repositories.commercialAutomationExecutions;
+  const campaigns = input.repositories.commercialGroupCampaigns;
+  const promotions = input.repositories.commercialPromotions;
+  if (!executions?.findById || !campaigns?.renewAttempt) {
+    throw reservationHandoffError(
+      'Repositorios de ownership e reserva indisponiveis para dispatch comercial',
+      'COMMERCIAL_DISPATCH_RESERVATION_HANDOFF_UNAVAILABLE',
+    );
+  }
+  if (!promotions?.findAttemptContextByGeneratedCopyId) {
+    throw reservationHandoffError(
+      'Contexto do candidato comercial indisponivel para dispatch',
+      'COMMERCIAL_DISPATCH_RESERVATION_CONTEXT_UNAVAILABLE',
+    );
+  }
+  const reservationLeaseMilliseconds = input.reservationLeaseMilliseconds;
+  if (
+    typeof reservationLeaseMilliseconds !== 'number' ||
+    !Number.isSafeInteger(reservationLeaseMilliseconds) ||
+    reservationLeaseMilliseconds <= 0
+  ) {
+    throw reservationHandoffError(
+      'Lease de handoff da reserva invalido',
+      'COMMERCIAL_DISPATCH_RESERVATION_LEASE_INVALID',
+    );
+  }
+  const now = input.clock();
+  const execution = await executions.findById(run.executionId);
+  if (
+    !execution ||
+    execution.id !== run.executionId ||
+    execution.mode !== 'SEND' ||
+    execution.status !== 'QUEUED' ||
+    execution.commercialRunId !== run.id ||
+    !execution.leaseExpiresAt ||
+    execution.leaseExpiresAt.getTime() <= now.getTime()
+  ) {
+    throw reservationHandoffError(
+      'Ownership da execution comercial nao esta valido para handoff',
+      'COMMERCIAL_DISPATCH_EXECUTION_OWNERSHIP_INVALID',
+    );
+  }
+
+  const context = await promotions.findAttemptContextByGeneratedCopyId(
+    dispatch.generatedCopyId,
+  );
+  if (
+    context.kind !== 'FOUND' ||
+    context.attemptExecutionId !== run.executionId ||
+    (dispatch.generatedCopy.createdFromCandidateId !== null &&
+      dispatch.generatedCopy.createdFromCandidateId !== context.candidateId)
+  ) {
+    throw reservationHandoffError(
+      'Reserva comercial nao corresponde inequivocamente ao dispatch',
+      'COMMERCIAL_DISPATCH_RESERVATION_OWNERSHIP_CONFLICT',
+    );
+  }
+
+  const leaseExpiresAt = new Date(now.getTime() + reservationLeaseMilliseconds);
+  const renewal = await campaigns.renewAttempt({
+    campaignId: context.campaignId,
+    executionId: run.executionId,
+    renewedAt: now,
+    leaseExpiresAt,
+  });
+  if (renewal.kind === 'CONFLICT') {
+    throw reservationHandoffError(
+      'Reserva comercial pertence a outro owner ou nao esta mais valida',
+      'COMMERCIAL_DISPATCH_RESERVATION_CONFLICT',
+    );
+  }
+};
+
 export const processWhatsAppDispatchJob = async (
   job: Pick<Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
   options: WhatsAppDispatchProcessorOptions,
 ) => {
   if (job.name !== JOB_NAMES.whatsappDispatch) return { skipped: true };
 
-  options.whatsAppProvider.beginRun?.(job.id ?? job.data.dispatchId);
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  await renewCommercialReservationForDispatch({
+    dispatchId: job.data.dispatchId,
+    repositories,
+    clock: options.clock ?? (() => new Date()),
+    reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
+  });
+  options.whatsAppProvider.beginRun?.(job.id ?? job.data.dispatchId);
   const sender = createSenderService({
     repositories,
     whatsAppProvider: options.whatsAppProvider,
@@ -177,6 +306,7 @@ export const createWhatsAppDispatchWorker = (
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService,
+    reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
   };
   const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,

@@ -16,14 +16,31 @@ class InMemoryCampaignAttempts {
   readonly records = new Map<string, AttemptState>();
 
   async updateMany(input: {
-    where: { id: string; attemptExecutionId: string | null };
-    data: Pick<
-      AttemptState,
-      'attemptExecutionId' | 'attemptReservedAt' | 'attemptLeaseExpiresAt'
+    where: {
+      id: string;
+      attemptExecutionId: string | null;
+      attemptLeaseExpiresAt?: { gt?: Date; lt?: Date };
+    };
+    data: Partial<
+      Pick<
+        AttemptState,
+        'attemptExecutionId' | 'attemptReservedAt' | 'attemptLeaseExpiresAt'
+      >
     >;
   }) {
     const record = this.records.get(input.where.id);
-    if (!record || record.attemptExecutionId !== input.where.attemptExecutionId) {
+    if (
+      !record ||
+      record.attemptExecutionId !== input.where.attemptExecutionId ||
+      (input.where.attemptLeaseExpiresAt?.gt &&
+        (!record.attemptLeaseExpiresAt ||
+          record.attemptLeaseExpiresAt.getTime() <=
+            input.where.attemptLeaseExpiresAt.gt.getTime())) ||
+      (input.where.attemptLeaseExpiresAt?.lt &&
+        record.attemptLeaseExpiresAt &&
+        record.attemptLeaseExpiresAt.getTime() >=
+          input.where.attemptLeaseExpiresAt.lt.getTime())
+    ) {
       return { count: 0 };
     }
     Object.assign(record, input.data);
@@ -228,6 +245,108 @@ describe('PrismaCommercialGroupCampaignAttemptRepository', () => {
       campaignId: 'campaign-a',
       executionId: 'execution-a',
       released: false,
+    });
+  });
+
+  it('renews a live reservation by owner without changing its origin timestamp', async () => {
+    const { campaigns, repository } = subject();
+    campaigns.records.set(
+      'campaign-a',
+      state({
+        attemptExecutionId: 'execution-a',
+        attemptReservedAt: reservedAt,
+        attemptLeaseExpiresAt: leaseExpiresAt,
+      }),
+    );
+    const renewedLeaseExpiresAt = new Date('2026-08-14T12:10:00.000Z');
+
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:02:00.000Z'),
+        leaseExpiresAt: renewedLeaseExpiresAt,
+      }),
+    ).resolves.toEqual({
+      kind: 'RENEWED',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+      leaseExpiresAt: renewedLeaseExpiresAt,
+      renewed: true,
+    });
+    expect(campaigns.records.get('campaign-a')).toMatchObject({
+      attemptExecutionId: 'execution-a',
+      attemptReservedAt: reservedAt,
+      attemptLeaseExpiresAt: renewedLeaseExpiresAt,
+      failureCount: 3,
+      nextEligibleAt: futureEligibleAt,
+      lastSentAt: new Date('2026-08-14T11:00:00.000Z'),
+      dispatchId: 'dispatch-preserved',
+    });
+
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:02:00.000Z'),
+        leaseExpiresAt: renewedLeaseExpiresAt,
+      }),
+    ).resolves.toEqual({
+      kind: 'RENEWED',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+      leaseExpiresAt: renewedLeaseExpiresAt,
+      renewed: false,
+    });
+  });
+
+  it('fails closed for another owner or an already expired reservation', async () => {
+    const { campaigns, repository } = subject();
+    campaigns.records.set(
+      'campaign-a',
+      state({
+        attemptExecutionId: 'execution-a',
+        attemptReservedAt: reservedAt,
+        attemptLeaseExpiresAt: leaseExpiresAt,
+      }),
+    );
+
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-b',
+        renewedAt: new Date('2026-08-14T12:02:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-14T12:10:00.000Z'),
+      }),
+    ).resolves.toEqual({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-a',
+      executionId: 'execution-b',
+    });
+
+    campaigns.records.set(
+      'campaign-a',
+      state({
+        attemptExecutionId: 'execution-a',
+        attemptReservedAt: reservedAt,
+        attemptLeaseExpiresAt: expiredLeaseExpiresAt,
+      }),
+    );
+    await expect(
+      repository.renew({
+        campaignId: 'campaign-a',
+        executionId: 'execution-a',
+        renewedAt: new Date('2026-08-14T12:00:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-14T12:10:00.000Z'),
+      }),
+    ).resolves.toEqual({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-a',
+      executionId: 'execution-a',
+    });
+    expect(campaigns.records.get('campaign-a')).toMatchObject({
+      attemptExecutionId: 'execution-a',
+      attemptLeaseExpiresAt: expiredLeaseExpiresAt,
     });
   });
 });
