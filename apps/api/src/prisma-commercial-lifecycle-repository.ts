@@ -181,7 +181,7 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
   ): Promise<CommercialLifecycleListResult> {
     const offset = (input.page - 1) * input.limit;
     const take = offset + input.limit;
-    const [runs, linkedExecutionRows, summary] = await Promise.all([
+    const [runs, linkedExecutionRows] = await Promise.all([
       this.prisma.commercialPipelineRun.findMany({
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
@@ -216,7 +216,6 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
         where: { executionId: { not: null } },
         select: { executionId: true },
       }),
-      this.loadSummary(input.todayStart, input.now),
     ]);
     const linkedExecutionIds = linkedExecutionRows.flatMap((run) =>
       run.executionId ? [run.executionId] : [],
@@ -228,7 +227,8 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
             id: { notIn: linkedExecutionIds },
           }
         : { commercialRunId: null };
-    const [executions, unlinkedExecutionTotal] = await Promise.all([
+    const [summary, executions, unlinkedExecutionTotal] = await Promise.all([
+      this.loadSummary(input.todayStart, input.now, linkedExecutionIds),
       this.prisma.commercialAutomationExecution.findMany({
         where: unlinkedExecutionWhere,
         orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
@@ -280,11 +280,16 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
     return { items, total: runTotal + unlinkedExecutionTotal, summary };
   }
 
-  private async loadSummary(todayStart: Date, now: Date) {
+  private async loadSummary(
+    todayStart: Date,
+    now: Date,
+    linkedExecutionIds: string[],
+  ) {
     const [
       activeExecutions,
       sentToday,
-      failed,
+      failedRuns,
+      failedUnlinkedExecutions,
       ambiguous,
       investigationRequired,
       activeReservations,
@@ -308,6 +313,17 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       this.prisma.commercialPipelineRun.count({
         where: { finalStatus: 'FAILED' },
       }),
+      linkedExecutionIds.length > 0
+        ? this.prisma.commercialAutomationExecution.count({
+            where: {
+              status: 'FAILED',
+              commercialRunId: null,
+              id: { notIn: linkedExecutionIds },
+            },
+          })
+        : this.prisma.commercialAutomationExecution.count({
+            where: { status: 'FAILED', commercialRunId: null },
+          }),
       this.prisma.commercialPipelineRun.count({
         where: { finalStatus: 'AMBIGUOUS' },
       }),
@@ -332,7 +348,7 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
     return {
       activeExecutions,
       sentToday,
-      failed,
+      failed: failedRuns + failedUnlinkedExecutions,
       ambiguous,
       investigationRequired,
       activeReservations,

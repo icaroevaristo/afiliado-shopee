@@ -161,7 +161,10 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
     .fn()
     .mockImplementation((input: { where?: Record<string, unknown> } = {}) => {
       if (input.where?.finalStatus === 'FAILED') {
-        return Promise.resolve(options.failed ?? 0);
+        return Promise.resolve(
+          options.failed ??
+            runs.filter((run) => run.finalStatus === 'FAILED').length,
+        );
       }
       if (input.where?.finalStatus === 'AMBIGUOUS') {
         return Promise.resolve(options.ambiguous ?? 0);
@@ -178,12 +181,18 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
       (
         input: {
           take?: number;
-          where?: { id?: { notIn?: string[] } };
+          where?: {
+            commercialRunId?: string | null;
+            id?: { notIn?: string[] };
+          };
         } = {},
       ) => {
         const excludedIds = input.where?.id?.notIn ?? [];
         const matchingExecutions = executions.filter(
-          (execution) => !excludedIds.includes(execution.id),
+          (execution) =>
+            !excludedIds.includes(execution.id) &&
+            (input.where?.commercialRunId === undefined ||
+              execution.commercialRunId === input.where.commercialRunId),
         );
         return Promise.resolve(
           matchingExecutions.slice(0, input.take ?? matchingExecutions.length),
@@ -200,17 +209,28 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
         input: {
           where?: {
             completedAt?: null;
+            status?: string;
+            commercialRunId?: string | null;
             id?: { notIn?: string[] };
           };
         } = {},
       ) => {
-        if (input.where?.completedAt === null) {
+        if (
+          input.where?.completedAt === null &&
+          input.where.status === 'STARTED'
+        ) {
           return Promise.resolve(options.activeExecutions ?? 0);
         }
         const excludedIds = input.where?.id?.notIn ?? [];
         return Promise.resolve(
-          executions.filter((execution) => !excludedIds.includes(execution.id))
-            .length,
+          executions.filter(
+            (execution) =>
+              !excludedIds.includes(execution.id) &&
+              (input.where?.status === undefined ||
+                execution.status === input.where.status) &&
+              (input.where?.commercialRunId === undefined ||
+                execution.commercialRunId === input.where.commercialRunId),
+          ).length,
         );
       },
     );
@@ -415,6 +435,175 @@ describe('PrismaCommercialLifecycleRepository', () => {
     expect(spies.whatsAppDispatchCount).toHaveBeenCalledWith({
       where: { status: 'SENT', sentAt: { gte: dayStart } },
     });
+  });
+
+  it('conta run FAILED como uma raiz de falha', async () => {
+    const { prisma } = createPrismaDouble({
+      runs: [
+        baseRun({
+          id: 'run-failed',
+          executionId: null,
+          finalStatus: 'FAILED',
+          dispatchId: null,
+          jobId: null,
+        }),
+      ],
+      executions: [],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(1);
+  });
+
+  it('conta execution FAILED sem run', async () => {
+    const { prisma } = createPrismaDouble({
+      runs: [],
+      executions: [
+        baseExecution({
+          id: 'execution-failed',
+          commercialRunId: null,
+          status: 'FAILED',
+        }),
+      ],
+      campaigns: [],
+      runTotal: 0,
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(1);
+    expect(result.items.map((item) => item.lifecycleId)).toEqual([
+      'execution-failed',
+    ]);
+  });
+
+  it('nao duplica run e execution FAILED associados', async () => {
+    const execution = baseExecution({
+      id: 'execution-linked',
+      commercialRunId: 'run-linked',
+      status: 'FAILED',
+    });
+    const { prisma } = createPrismaDouble({
+      runs: [
+        baseRun({
+          id: 'run-linked',
+          executionId: 'execution-linked',
+          finalStatus: 'FAILED',
+          dispatchId: null,
+          jobId: null,
+        }),
+      ],
+      executions: [execution],
+      execution,
+      campaigns: [],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(1);
+    expect(result.total).toBe(1);
+    expect(result.items.map((item) => item.lifecycleId)).toEqual([
+      'run-linked',
+    ]);
+  });
+
+  it('usa o run como raiz durante o vinculo transitional da execution', async () => {
+    const execution = baseExecution({
+      id: 'execution-transitional',
+      commercialRunId: null,
+      status: 'FAILED',
+    });
+    const { prisma } = createPrismaDouble({
+      runs: [
+        baseRun({
+          id: 'run-transitional',
+          executionId: 'execution-transitional',
+          finalStatus: 'FAILED',
+          dispatchId: null,
+          jobId: null,
+        }),
+      ],
+      executions: [execution],
+      execution,
+      campaigns: [],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(1);
+    expect(result.total).toBe(1);
+    expect(result.items.map((item) => item.lifecycleId)).toEqual([
+      'run-transitional',
+    ]);
+  });
+
+  it('soma falhas mistas sem contar a mesma raiz duas vezes', async () => {
+    const { prisma } = createPrismaDouble({
+      runs: [
+        baseRun({
+          id: 'run-failed',
+          executionId: 'execution-linked-failed',
+          finalStatus: 'FAILED',
+          dispatchId: null,
+          jobId: null,
+        }),
+        baseRun({
+          id: 'run-sent',
+          executionId: null,
+          finalStatus: 'SENT',
+          dispatchId: null,
+          jobId: null,
+        }),
+      ],
+      executions: [
+        baseExecution({
+          id: 'execution-linked-failed',
+          commercialRunId: 'run-failed',
+          status: 'FAILED',
+        }),
+        baseExecution({
+          id: 'execution-failed',
+          commercialRunId: null,
+          status: 'FAILED',
+        }),
+        baseExecution({
+          id: 'execution-sent',
+          commercialRunId: null,
+          status: 'QUEUED',
+        }),
+      ],
+      campaigns: [],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(2);
+  });
+
+  it('ignora execution sem run que nao esta FAILED', async () => {
+    const { prisma } = createPrismaDouble({
+      runs: [],
+      executions: [
+        baseExecution({
+          id: 'execution-queued',
+          commercialRunId: null,
+          status: 'QUEUED',
+        }),
+      ],
+      campaigns: [],
+      runTotal: 0,
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.summary.failed).toBe(0);
   });
 
   it('preserva a paginacao sobre a uniao de runs recentes', async () => {
