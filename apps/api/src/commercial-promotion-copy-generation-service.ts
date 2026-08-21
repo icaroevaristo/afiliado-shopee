@@ -345,30 +345,31 @@ export class CommercialPromotionCopyGenerationService {
     const context = await this.context(candidateId);
     const validationFacts = this.validationFacts(context);
     const fingerprint = this.fingerprint(context);
-    const [cache, attempt, historicalAttempt] = fingerprint
-      ? await Promise.all([
-          this.options.repository.findCopyByInputFingerprint(fingerprint),
-          this.options.repository.findAttemptByInputFingerprint(fingerprint),
-          this.findHistoricalAttempt(context, fingerprint),
-        ])
-      : [null, null, null];
-    const attemptBlocker = this.attemptBlocker(attempt, 'current');
-    const historicalAttemptBlocker = this.attemptBlocker(
-      historicalAttempt,
-      'historical',
+    const cache = fingerprint
+      ? await this.options.repository.findCopyByInputFingerprint(fingerprint)
+      : null;
+    const cacheAvailable = Boolean(
+      fingerprint && this.validCache(cache, context, fingerprint),
     );
-    const blockers = [
-      ...candidateBlockers(context, this.clock()),
-      ...(attemptBlocker ? [attemptBlocker] : []),
-      ...(historicalAttemptBlocker ? [historicalAttemptBlocker] : []),
-    ];
+    const blockers = [...candidateBlockers(context, this.clock())];
+    if (!cacheAvailable && fingerprint) {
+      const [attempt, historicalAttempt] = await Promise.all([
+        this.options.repository.findAttemptByInputFingerprint(fingerprint),
+        this.findHistoricalAttempt(context, fingerprint),
+      ]);
+      const attemptBlocker = this.attemptBlocker(attempt, 'current');
+      const historicalAttemptBlocker = this.attemptBlocker(
+        historicalAttempt,
+        'historical',
+      );
+      if (attemptBlocker) blockers.push(attemptBlocker);
+      if (historicalAttemptBlocker) blockers.push(historicalAttemptBlocker);
+    }
     return {
       candidateId: context.candidate.id,
       status: context.candidate.status,
       eligible: blockers.length === 0,
-      cacheAvailable: Boolean(
-        fingerprint && this.validCache(cache, context, fingerprint),
-      ),
+      cacheAvailable,
       providerConfigured: this.providerConfigured(),
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,

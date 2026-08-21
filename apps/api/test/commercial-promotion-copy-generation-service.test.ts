@@ -618,6 +618,47 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect([...repository.copies.values()][0]?.mensagem).not.toContain('HOKON.br');
   });
 
+  it.each([
+    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED'],
+    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+  ] as const)(
+    'prioriza cache atual válido sobre histórico %s',
+    async (status, failureCode) => {
+      const repository = new MemoryCopyRepository();
+      const provider = validProvider();
+      const copyService = service(repository, provider);
+
+      await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+      repository.context!.candidate.status = 'QUEUED';
+      repository.context!.candidate.generatedCopyId = null;
+      const historicalFingerprint = `historical-cache-${status.toLowerCase()}`;
+      repository.attempts.set(historicalFingerprint, {
+        ...legacyAttempt(status, historicalFingerprint),
+        promptVersion: 'commercial-promotion-copy-v10',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        failureCode,
+      });
+
+      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+        eligible: true,
+        cacheAvailable: true,
+        blockers: [],
+      });
+      await expect(
+        copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+      ).resolves.toMatchObject({
+        status: 'COPY_READY',
+        cacheHit: true,
+      });
+
+      expect(provider.generate).toHaveBeenCalledOnce();
+      expect(repository.attempts.get(historicalFingerprint)).toMatchObject({
+        status,
+        failureCode,
+      });
+    },
+  );
+
   it('limpa faixa de tamanho de copy cacheada sem uma segunda chamada ao provider', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.product.productName =
