@@ -181,6 +181,7 @@ export type CommercialLifecycle = {
     startedAt: string;
     completedAt: string | null;
   } | null;
+  copyAttemptState: 'PRESENT' | 'ABSENT' | 'UNKNOWN';
   dispatch: {
     id: string;
     destinationId: string;
@@ -297,6 +298,83 @@ export type CopyResponse = {
   productId?: string;
   snapshotId?: string | null;
   createdFromCandidateId?: string | null;
+};
+
+export type CommercialCopyHistoryAttempt = {
+  id: string;
+  candidateId: string;
+  snapshotId: string;
+  inputFingerprint: string;
+  provider: string;
+  model: string;
+  promptVersion: string;
+  validationVersion: string;
+  status: string;
+  generatedCopyId: string | null;
+  failureCode: string | null;
+  validationFailureCodes: string[];
+  requestMayHaveStarted: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
+};
+
+export type CommercialCopyHistoryCandidate = {
+  id: string;
+  campaignId: string;
+  campaignName: string;
+  productId: string;
+  productName: string;
+  status: string;
+};
+
+export type CommercialCopyHistoryDispatch = {
+  id: string;
+  status: string;
+  runId: string | null;
+  runStatus: string | null;
+  finalStatus: string | null;
+};
+
+export type CommercialCopyHistoryCopy = {
+  id: string;
+  productId: string;
+  productName: string;
+  source: string;
+  provider: string | null;
+  model: string | null;
+  promptVersion: string | null;
+  validationVersion: string | null;
+  inputFingerprint: string | null;
+  snapshotId: string | null;
+  createdFromCandidateId: string | null;
+  usageInputTokens: number | null;
+  usageOutputTokens: number | null;
+  usageTotalTokens: number | null;
+  createdAt: string;
+  candidate: CommercialCopyHistoryCandidate | null;
+  attempts: CommercialCopyHistoryAttempt[];
+  dispatches: CommercialCopyHistoryDispatch[];
+};
+
+export type CommercialCopyHistoryItem = {
+  kind: 'COPY' | 'ATTEMPT';
+  id: string;
+  createdAt: string;
+  copy: CommercialCopyHistoryCopy | null;
+  attempt: CommercialCopyHistoryAttempt | null;
+  candidate: CommercialCopyHistoryCandidate | null;
+};
+
+export type CommercialCopyHistoryPage = {
+  items: CommercialCopyHistoryItem[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
 };
 
 export type PipelineRunResponse = {

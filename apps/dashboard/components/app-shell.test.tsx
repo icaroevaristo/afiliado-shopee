@@ -28,7 +28,7 @@ vi.mock('../lib/api', () => ({
 }));
 
 describe('AppShell', () => {
-  it('inclui a superficie de lifecycle na navegacao principal', async () => {
+  it('inclui lifecycle e copies na navegacao principal', async () => {
     const screen = await render(
       <AppShell>
         <div>conteudo</div>
@@ -40,6 +40,9 @@ describe('AppShell', () => {
     );
     expect(lifecycleLink?.textContent).toContain('Lifecycle');
     expect(lifecycleLink?.getAttribute('data-active')).toBe('true');
+
+    const copiesLink = screen.container.querySelector('a[href="/copies"]');
+    expect(copiesLink?.textContent).toContain('Copies');
 
     await screen.unmount();
   });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { listCommercialLifecycles } from './commercial-lifecycle';
+import { listCommercialCopyHistory } from './copy';
 
 const response = (body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -18,6 +19,15 @@ describe('commercial lifecycle API', () => {
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/commercial-automation/lifecycles?page=2&limit=10',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('consulta o historico de copies somente por GET', async () => {
+    await listCommercialCopyHistory(2, 10);
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/commercial-automation/copies?page=2&limit=10',
       expect.objectContaining({ method: 'GET' }),
     );
   });

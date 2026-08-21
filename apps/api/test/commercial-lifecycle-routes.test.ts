@@ -55,4 +55,39 @@ describe('commercial lifecycle route', () => {
     expect(writeResponse.statusCode).toBe(404);
     expect(list).toHaveBeenCalledOnce();
   });
+
+  it('consulta historico de copies por GET sem expor superficie de escrita', async () => {
+    const list = vi.fn().mockResolvedValue({
+      items: [],
+      page: 2,
+      limit: 10,
+      total: 0,
+      totalPages: 1,
+    });
+    const app = await buildAuthenticatedTestApp({
+      logger: false,
+      prisma: {} as never,
+      commercialCopyHistoryService: { list },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/commercial-automation/copies?page=2&limit=10',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(list).toHaveBeenCalledWith({ page: 2, limit: 10 });
+    expect(JSON.stringify(response.json())).not.toMatch(
+      /secret|authorization|apikey|prompt\s*:/iu,
+    );
+
+    const writeResponse = await app.inject({
+      method: 'POST',
+      url: '/commercial-automation/copies',
+      payload: {},
+    });
+    expect(writeResponse.statusCode).toBe(404);
+    expect(list).toHaveBeenCalledOnce();
+  });
 });
