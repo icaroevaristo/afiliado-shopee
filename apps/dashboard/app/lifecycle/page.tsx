@@ -35,11 +35,119 @@ const formatDate = (value: string | null | undefined) =>
 const toneFor = (value: string | null | undefined) => {
   const normalized = value?.toUpperCase();
   if (normalized === 'SENT' || normalized === 'COMPLETED') return 'ok' as const;
-  if (normalized === 'AMBIGUOUS' || normalized === 'PROCESSING') {
+  if (
+    normalized === 'AMBIGUOUS' ||
+    normalized === 'PROCESSING' ||
+    normalized === 'PENDING'
+  ) {
     return 'warning' as const;
   }
   if (normalized === 'FAILED') return 'error' as const;
   return 'neutral' as const;
+};
+
+type StatusEvidence = {
+  source: 'RUN' | 'RUN STATUS' | 'EXECUTION' | 'DISPATCH' | 'OUTBOX';
+  status: string;
+  priority: number;
+  sourcePriority: number;
+};
+
+const criticalStatusPriority: Record<string, number> = {
+  AMBIGUOUS: 0,
+  PROCESSING: 1,
+  FAILED: 2,
+  PENDING: 3,
+};
+
+const criticalStatusEvidenceFor = (
+  item: CommercialLifecycle,
+): StatusEvidence[] => {
+  const records = [
+    {
+      source: 'RUN' as const,
+      status: item.run?.finalStatus,
+      sourcePriority: 0,
+    },
+    {
+      source: 'RUN STATUS' as const,
+      status:
+        item.run?.status?.toUpperCase() === item.run?.finalStatus?.toUpperCase()
+          ? undefined
+          : item.run?.status,
+      sourcePriority: 1,
+    },
+    {
+      source: 'EXECUTION' as const,
+      status: item.execution?.status,
+      sourcePriority: 2,
+    },
+    {
+      source: 'DISPATCH' as const,
+      status: item.dispatch?.status,
+      sourcePriority: 3,
+    },
+    {
+      source: 'OUTBOX' as const,
+      status: item.outbox?.status,
+      sourcePriority: 4,
+    },
+  ];
+
+  const evidence: StatusEvidence[] = [];
+  for (const record of records) {
+    if (!record.status) continue;
+    const priority = criticalStatusPriority[record.status.toUpperCase()];
+    if (priority === undefined) continue;
+    evidence.push({ ...record, status: record.status, priority });
+  }
+  return evidence.sort(
+    (left, right) =>
+      left.priority - right.priority ||
+      left.sourcePriority - right.sourcePriority,
+  );
+};
+
+const primaryStatus = (item: CommercialLifecycle) => {
+  const criticalStatus = criticalStatusEvidenceFor(item)[0]?.status;
+  return (
+    criticalStatus ??
+    item.run?.finalStatus ??
+    item.run?.status ??
+    item.dispatch?.status ??
+    item.execution?.status ??
+    item.outbox?.status
+  );
+};
+
+const copyAttemptLabel = (item: CommercialLifecycle) => {
+  if (item.copyAttemptState === 'UNKNOWN') return 'Vinculo desconhecido';
+  if (item.copyAttemptState === 'ABSENT') return 'Sem tentativa registrada';
+  return item.copyAttempt?.status ?? 'Vinculo desconhecido';
+};
+
+type FailureEvidence = {
+  source: string;
+  state: string | null | undefined;
+  failureCode: string;
+};
+
+const failureEvidenceFor = (item: CommercialLifecycle): FailureEvidence[] => {
+  const evidence: FailureEvidence[] = [];
+  const add = (
+    source: string,
+    state: string | null | undefined,
+    failureCode: string | null | undefined,
+  ) => {
+    if (failureCode) evidence.push({ source, state, failureCode });
+  };
+
+  add('Run', item.run?.finalStatus ?? item.run?.status, item.run?.failureCode);
+  add('Execution', item.execution?.status, item.execution?.failureCode);
+  add('Dispatch', item.dispatch?.status, item.dispatch?.errorMessage);
+  add('Outbox', item.outbox?.status, item.outbox?.failureCode);
+  add('Tentativa de copy', item.copyAttempt?.status, item.copyAttempt?.failureCode);
+  return evidence;
 };
 
 const shortId = (value: string | null | undefined) =>
@@ -150,15 +258,8 @@ function LifecycleList({
   return (
     <section aria-label="Lifecycles recentes" className="grid gap-3">
       {items.map((item) => {
-        const status =
-          item.run?.finalStatus ??
-          item.dispatch?.status ??
-          item.execution?.status;
-        const executionStatus = item.execution?.status?.toUpperCase();
-        const showExecutionStatus =
-          executionStatus &&
-          executionStatus !== status?.toUpperCase() &&
-          ['AMBIGUOUS', 'PROCESSING', 'FAILED'].includes(executionStatus);
+        const status = primaryStatus(item);
+        const secondaryCriticalStatuses = criticalStatusEvidenceFor(item).slice(1);
         const title =
           item.candidate?.productName ??
           item.run?.productName ??
@@ -189,11 +290,14 @@ function LifecycleList({
                   <StatusBadge tone={toneFor(status)}>
                     {status ?? 'SEM ESTADO'}
                   </StatusBadge>
-                  {showExecutionStatus ? (
-                    <StatusBadge tone={toneFor(executionStatus)}>
-                      {executionStatus}
+                  {secondaryCriticalStatuses.map((evidence) => (
+                    <StatusBadge
+                      key={`${evidence.source}-${evidence.status}`}
+                      tone={toneFor(evidence.status)}
+                    >
+                      {evidence.source} {evidence.status}
                     </StatusBadge>
-                  ) : null}
+                  ))}
                   {item.run?.investigationRequired ? (
                     <StatusBadge tone="warning">INVESTIGACAO</StatusBadge>
                   ) : null}
@@ -280,8 +384,9 @@ function LifecycleChain({ item }: { item: CommercialLifecycle }) {
 }
 
 function Detail({ item }: { item: CommercialLifecycle }) {
-  const status =
-    item.run?.finalStatus ?? item.dispatch?.status ?? item.execution?.status;
+  const status = primaryStatus(item);
+  const secondaryCriticalStatuses = criticalStatusEvidenceFor(item).slice(1);
+  const failureEvidence = failureEvidenceFor(item);
   const reservationLabel = item.reservation
     ? item.reservation.state === 'ABSENT'
       ? 'Sem evidencia de reserva'
@@ -297,6 +402,14 @@ function Detail({ item }: { item: CommercialLifecycle }) {
           <StatusBadge tone={toneFor(status)}>
             {status ?? 'SEM ESTADO'}
           </StatusBadge>
+          {secondaryCriticalStatuses.map((evidence) => (
+            <StatusBadge
+              key={`${evidence.source}-${evidence.status}`}
+              tone={toneFor(evidence.status)}
+            >
+              {evidence.source} {evidence.status}
+            </StatusBadge>
+          ))}
           {item.run?.investigationRequired ? (
             <StatusBadge tone="warning">INVESTIGACAO NECESSARIA</StatusBadge>
           ) : null}
@@ -374,7 +487,7 @@ function Detail({ item }: { item: CommercialLifecycle }) {
           <Info label="Origem" value={item.copy?.source} />
           <Info
             label="Tentativa"
-            value={item.copyAttempt?.status ?? 'Sem tentativa registrada'}
+            value={copyAttemptLabel(item)}
           />
           <Info
             label="Request pode ter iniciado"
@@ -461,17 +574,27 @@ function Detail({ item }: { item: CommercialLifecycle }) {
         </DetailBlock>
       </div>
 
-      {item.run?.failureCode || item.dispatch?.errorMessage ? (
+      {failureEvidence.length > 0 ? (
         <div className="flex gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
           <AlertTriangle
             className="mt-0.5 h-4 w-4 shrink-0"
             aria-hidden="true"
           />
           <div>
-            <strong>Falha registrada</strong>
-            <p className="mt-1">
-              {item.run?.failureCode ?? item.dispatch?.errorMessage}
-            </p>
+            <strong>Falhas registradas</strong>
+            <dl className="mt-2 grid gap-2">
+              {failureEvidence.map((evidence) => (
+                <div key={evidence.source}>
+                  <dt className="font-medium">
+                    {evidence.source}
+                    {evidence.state ? ` (${evidence.state})` : ''}
+                  </dt>
+                  <dd className="mt-0.5 break-words font-mono text-xs">
+                    {evidence.failureCode}
+                  </dd>
+                </div>
+              ))}
+            </dl>
           </div>
         </div>
       ) : null}

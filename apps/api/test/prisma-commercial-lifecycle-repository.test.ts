@@ -1,6 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DatabaseClient } from '@shopee-auto-affiliate-ai/database';
-
 import { getLocalDayRange } from '../src/commercial-automation-policy-service';
 import { PrismaCommercialLifecycleRepository } from '../src/prisma-commercial-lifecycle-repository';
 
@@ -83,6 +81,17 @@ const baseCandidate = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const baseCopyAttempt = (overrides: Record<string, unknown> = {}) => ({
+  id: 'attempt-1',
+  status: 'SUCCEEDED',
+  failureCode: null,
+  requestMayHaveStarted: true,
+  startedAt: new Date('2026-08-20T13:54:00.000Z'),
+  completedAt: new Date('2026-08-20T13:55:00.000Z'),
+  createdAt: new Date('2026-08-20T13:54:00.000Z'),
+  ...overrides,
+});
+
 const baseOutbox = (overrides: Record<string, unknown> = {}) => ({
   id: 'outbox-1',
   dispatchId: 'dispatch-1',
@@ -120,12 +129,12 @@ const baseCampaign = (overrides: Record<string, unknown> = {}) => ({
 });
 
 type DoubleOptions = {
-  runs?: unknown[];
-  executions?: unknown[];
+  runs?: Array<ReturnType<typeof baseRun>>;
+  executions?: Array<ReturnType<typeof baseExecution>>;
   execution?: unknown | null;
   dispatch?: unknown | null;
   candidate?: unknown | null;
-  copyAttempt?: unknown | null;
+  copyAttempts?: Array<ReturnType<typeof baseCopyAttempt>>;
   outbox?: unknown | null;
   recovery?: unknown | null;
   campaigns?: unknown[];
@@ -165,18 +174,45 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
   const executions = options.executions ?? [];
   const executionFindMany = vi
     .fn()
-    .mockImplementation((input: { take?: number } = {}) =>
-      Promise.resolve(executions.slice(0, input.take ?? executions.length)),
+    .mockImplementation(
+      (
+        input: {
+          take?: number;
+          where?: { id?: { notIn?: string[] } };
+        } = {},
+      ) => {
+        const excludedIds = input.where?.id?.notIn ?? [];
+        const matchingExecutions = executions.filter(
+          (execution) => !excludedIds.includes(execution.id),
+        );
+        return Promise.resolve(
+          matchingExecutions.slice(0, input.take ?? matchingExecutions.length),
+        );
+      },
     );
   const executionFindUnique = vi
     .fn()
     .mockResolvedValue(options.execution ?? baseExecution());
   const executionCount = vi
     .fn()
-    .mockImplementation((input: { where?: Record<string, unknown> } = {}) =>
-      input.where?.completedAt === null
-        ? Promise.resolve(options.activeExecutions ?? 0)
-        : Promise.resolve(options.executions?.length ?? 0),
+    .mockImplementation(
+      (
+        input: {
+          where?: {
+            completedAt?: null;
+            id?: { notIn?: string[] };
+          };
+        } = {},
+      ) => {
+        if (input.where?.completedAt === null) {
+          return Promise.resolve(options.activeExecutions ?? 0);
+        }
+        const excludedIds = input.where?.id?.notIn ?? [];
+        return Promise.resolve(
+          executions.filter((execution) => !excludedIds.includes(execution.id))
+            .length,
+        );
+      },
     );
   const dispatchFindUnique = vi
     .fn()
@@ -184,9 +220,9 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
   const candidateFindUnique = vi
     .fn()
     .mockResolvedValue(options.candidate ?? baseCandidate());
-  const copyAttemptFindFirst = vi
+  const copyAttemptFindMany = vi
     .fn()
-    .mockResolvedValue(options.copyAttempt ?? null);
+    .mockResolvedValue(options.copyAttempts ?? []);
   const outboxFindUnique = vi
     .fn()
     .mockResolvedValue(options.outbox ?? baseOutbox());
@@ -215,7 +251,7 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
       count: executionCount,
     },
     commercialPromotionCandidate: { findUnique: candidateFindUnique },
-    commercialCopyGenerationAttempt: { findFirst: copyAttemptFindFirst },
+    commercialCopyGenerationAttempt: { findMany: copyAttemptFindMany },
     whatsAppDispatch: {
       findUnique: dispatchFindUnique,
       count: whatsAppDispatchCount,
@@ -235,11 +271,14 @@ const createPrismaDouble = (options: DoubleOptions = {}) => {
   };
 
   return {
-    prisma: prisma as unknown as DatabaseClient,
+    prisma: prisma as never,
     spies: {
       executionCount,
       whatsAppDispatchCount,
       campaignFindMany,
+      copyAttemptFindMany,
+      runFindMany,
+      executionFindMany,
     },
   };
 };
@@ -476,6 +515,161 @@ describe('PrismaCommercialLifecycleRepository', () => {
       'execution-middle',
       'run-early',
     ]);
+  });
+
+  it('prefere a raiz run quando a execution ainda nao recebeu commercialRunId', async () => {
+    const runs = [
+      baseRun({
+        id: 'run-recent',
+        executionId: null,
+        createdAt: new Date('2026-08-20T14:04:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+      baseRun({
+        id: 'run-linked-outside-take',
+        executionId: 'execution-linked',
+        createdAt: new Date('2026-08-20T14:01:00.000Z'),
+        dispatchId: null,
+        jobId: null,
+      }),
+    ];
+    const executions = [
+      baseExecution({
+        id: 'execution-linked',
+        commercialRunId: null,
+        startedAt: new Date('2026-08-20T14:05:00.000Z'),
+      }),
+      baseExecution({
+        id: 'execution-unlinked',
+        commercialRunId: null,
+        startedAt: new Date('2026-08-20T14:03:00.000Z'),
+      }),
+    ];
+    const { prisma, spies } = createPrismaDouble({ runs, executions });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const firstPage = await repository.list(listInput({ page: 1, limit: 1 }));
+    const secondPage = await repository.list(listInput({ page: 2, limit: 1 }));
+
+    expect(firstPage.total).toBe(3);
+    expect(firstPage.items.map((item) => item.lifecycleId)).toEqual([
+      'run-recent',
+    ]);
+    expect(secondPage.items.map((item) => item.lifecycleId)).toEqual([
+      'execution-unlinked',
+    ]);
+    expect(spies.runFindMany).toHaveBeenCalledWith({
+      where: { executionId: { not: null } },
+      select: { executionId: true },
+    });
+    expect(spies.executionFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          commercialRunId: null,
+          id: { notIn: ['execution-linked'] },
+        },
+      }),
+    );
+  });
+
+  it('usa somente a tentativa vinculada exatamente a GeneratedCopy', async () => {
+    const { prisma, spies } = createPrismaDouble({
+      copyAttempts: [baseCopyAttempt({ id: 'attempt-copy-1' })],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.items[0]?.copyAttempt?.id).toBe('attempt-copy-1');
+    expect(result.items[0]?.copyAttemptState).toBe('PRESENT');
+    expect(spies.copyAttemptFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { generatedCopyId: 'copy-1' },
+        take: 2,
+      }),
+    );
+  });
+
+  it('nao atribui tentativa posterior do candidato quando nao aponta para a copy', async () => {
+    const { prisma, spies } = createPrismaDouble({ copyAttempts: [] });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.items[0]?.copyAttempt).toBeNull();
+    expect(result.items[0]?.copyAttemptState).toBe('ABSENT');
+    expect(spies.copyAttemptFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { generatedCopyId: 'copy-1' } }),
+    );
+  });
+
+  it('marca como ausente quando o dispatch nao tem GeneratedCopy', async () => {
+    const { prisma } = createPrismaDouble({
+      dispatch: { ...baseDispatch(), generatedCopy: null },
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.items[0]?.copy).toBeNull();
+    expect(result.items[0]?.copyAttempt).toBeNull();
+    expect(result.items[0]?.copyAttemptState).toBe('ABSENT');
+  });
+
+  it('representa vinculos multiplos de tentativa como desconhecidos', async () => {
+    const { prisma } = createPrismaDouble({
+      copyAttempts: [
+        baseCopyAttempt({ id: 'attempt-new' }),
+        baseCopyAttempt({ id: 'attempt-old' }),
+      ],
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const result = await repository.list(listInput());
+
+    expect(result.items[0]?.copyAttempt).toBeNull();
+    expect(result.items[0]?.copyAttemptState).toBe('UNKNOWN');
+  });
+
+  it('desempata timestamp por tipo e id de modo repetivel entre paginas', async () => {
+    const timestamp = new Date('2026-08-20T14:00:00.000Z');
+    const { prisma, spies } = createPrismaDouble({
+      runs: [
+        baseRun({ id: 'run-a', createdAt: timestamp, executionId: null }),
+        baseRun({ id: 'run-b', createdAt: timestamp, executionId: null }),
+      ],
+      executions: [
+        baseExecution({
+          id: 'execution-z',
+          commercialRunId: null,
+          startedAt: timestamp,
+        }),
+      ],
+      runTotal: 2,
+    });
+    const repository = new PrismaCommercialLifecycleRepository(prisma);
+
+    const firstPage = await repository.list(listInput({ page: 1, limit: 2 }));
+    const secondPage = await repository.list(listInput({ page: 2, limit: 2 }));
+
+    expect(firstPage.items.map((item) => item.lifecycleId)).toEqual([
+      'run-b',
+      'run-a',
+    ]);
+    expect(secondPage.items.map((item) => item.lifecycleId)).toEqual([
+      'execution-z',
+    ]);
+    expect(spies.runFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      }),
+    );
+    expect(spies.executionFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+      }),
+    );
   });
 
   it('retorna pagina parcial e pagina vazia alem do total', async () => {

@@ -132,6 +132,7 @@ export type CommercialLifecycleRecord = {
   candidate: CommercialLifecycleCandidateRecord | null;
   copy: CommercialLifecycleCopyRecord | null;
   copyAttempt: CommercialLifecycleCopyAttemptRecord | null;
+  copyAttemptState: 'PRESENT' | 'ABSENT' | 'UNKNOWN';
   dispatch: CommercialLifecycleDispatchRecord | null;
   outbox: CommercialLifecycleOutboxRecord | null;
   reservation: CommercialLifecycleReservationRecord | null;

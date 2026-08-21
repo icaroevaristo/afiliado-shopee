@@ -2,7 +2,6 @@ import type { DatabaseClient } from '@shopee-auto-affiliate-ai/database';
 
 import type {
   CommercialLifecycleCandidateRecord,
-  CommercialLifecycleCopyAttemptRecord,
   CommercialLifecycleCopyRecord,
   CommercialLifecycleDispatchRecord,
   CommercialLifecycleExecutionRecord,
@@ -27,6 +26,22 @@ type LifecyclePrisma = Pick<
   | 'commercialGroupCampaign'
   | 'whatsAppDispatchManualRecovery'
 >;
+
+const compareLifecycleRoots = <
+  T extends { kind: 'RUN' | 'EXECUTION'; id: string; createdAt: Date },
+>(
+  left: T,
+  right: T,
+) => {
+  const byTimestamp = right.createdAt.getTime() - left.createdAt.getTime();
+  if (byTimestamp !== 0) return byTimestamp;
+
+  const byKind =
+    (left.kind === 'RUN' ? 0 : 1) - (right.kind === 'RUN' ? 0 : 1);
+  if (byKind !== 0) return byKind;
+
+  return right.id.localeCompare(left.id);
+};
 
 const toDecimalString = (value: { toString(): string } | null) =>
   value === null ? null : value.toString();
@@ -166,9 +181,9 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
   ): Promise<CommercialLifecycleListResult> {
     const offset = (input.page - 1) * input.limit;
     const take = offset + input.limit;
-    const [runs, executions, summary] = await Promise.all([
+    const [runs, linkedExecutionRows, summary] = await Promise.all([
       this.prisma.commercialPipelineRun.findMany({
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
         select: {
           id: true,
@@ -195,9 +210,28 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
           completedAt: true,
         },
       }),
+      // A run e sua execution representam a mesma raiz, mesmo durante a
+      // atualizacao transitória em que execution.commercialRunId ainda e nulo.
+      this.prisma.commercialPipelineRun.findMany({
+        where: { executionId: { not: null } },
+        select: { executionId: true },
+      }),
+      this.loadSummary(input.todayStart, input.now),
+    ]);
+    const linkedExecutionIds = linkedExecutionRows.flatMap((run) =>
+      run.executionId ? [run.executionId] : [],
+    );
+    const unlinkedExecutionWhere =
+      linkedExecutionIds.length > 0
+        ? {
+            commercialRunId: null,
+            id: { notIn: linkedExecutionIds },
+          }
+        : { commercialRunId: null };
+    const [executions, unlinkedExecutionTotal] = await Promise.all([
       this.prisma.commercialAutomationExecution.findMany({
-        where: { commercialRunId: null },
-        orderBy: { startedAt: 'desc' },
+        where: unlinkedExecutionWhere,
+        orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
         take,
         select: {
           id: true,
@@ -212,25 +246,27 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
           completedAt: true,
         },
       }),
-      this.loadSummary(input.todayStart, input.now),
+      this.prisma.commercialAutomationExecution.count({
+        where: unlinkedExecutionWhere,
+      }),
     ]);
 
     const roots = [
       ...runs.map((run) => ({
         kind: 'RUN' as const,
+        id: run.id,
         createdAt: run.createdAt,
         run,
         execution: null,
       })),
       ...executions.map((execution) => ({
         kind: 'EXECUTION' as const,
+        id: execution.id,
         createdAt: execution.startedAt,
         run: null,
         execution,
       })),
-    ].sort(
-      (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
-    );
+    ].sort(compareLifecycleRoots);
 
     const pageRoots = roots.slice(offset, offset + input.limit);
     const items = await Promise.all(
@@ -239,12 +275,7 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       ),
     );
 
-    const [runTotal, unlinkedExecutionTotal] = await Promise.all([
-      this.prisma.commercialPipelineRun.count(),
-      this.prisma.commercialAutomationExecution.count({
-        where: { commercialRunId: null },
-      }),
-    ]);
+    const runTotal = await this.prisma.commercialPipelineRun.count();
 
     return { items, total: runTotal + unlinkedExecutionTotal, summary };
   }
@@ -421,10 +452,11 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
         })
       : null;
     const candidate = candidateRow ? mapCandidate(candidateRow) : null;
-    const copyAttempt = candidate
-      ? await this.prisma.commercialCopyGenerationAttempt.findFirst({
-          where: { candidateId: candidate.id },
+    const exactCopyAttempts = copy
+      ? await this.prisma.commercialCopyGenerationAttempt.findMany({
+          where: { generatedCopyId: copy.id },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: 2,
           select: {
             id: true,
             status: true,
@@ -434,7 +466,15 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
             completedAt: true,
           },
         })
-      : null;
+      : [];
+    const copyAttemptState =
+      exactCopyAttempts.length === 0
+        ? 'ABSENT'
+        : exactCopyAttempts.length === 1
+          ? 'PRESENT'
+          : 'UNKNOWN';
+    const copyAttempt =
+      copyAttemptState === 'PRESENT' ? exactCopyAttempts[0] : null;
     const dispatch = dispatchRow ? mapDispatch(dispatchRow) : null;
     const outbox = run
       ? await this.prisma.commercialDispatchOutbox.findUnique({
@@ -482,7 +522,8 @@ export class PrismaCommercialLifecycleRepository implements CommercialLifecycleR
       run,
       candidate,
       copy,
-      copyAttempt: copyAttempt as CommercialLifecycleCopyAttemptRecord | null,
+      copyAttempt,
+      copyAttemptState,
       dispatch,
       outbox: outbox ? mapOutbox(outbox) : null,
       reservation,

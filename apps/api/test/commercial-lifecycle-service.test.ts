@@ -79,6 +79,7 @@ const baseRecord = (
     startedAt: new Date('2026-08-20T13:54:00.000Z'),
     completedAt: new Date('2026-08-20T13:55:00.000Z'),
   },
+  copyAttemptState: 'PRESENT',
   dispatch: {
     id: 'dispatch-1',
     destinationId: 'destination-1',
@@ -282,6 +283,7 @@ describe('CommercialLifecycleService', () => {
       attemptsMade: 2,
     });
     expect(item.reservation?.attemptExecutionId).toBe('execution-sent');
+    expect(item.copyAttemptState).toBe('PRESENT');
     expect(item.timeline.map((event) => event.type)).toContain('FINALIZED');
     expect(item.timeline).toContainEqual(
       expect.objectContaining({
@@ -313,6 +315,7 @@ describe('CommercialLifecycleService', () => {
       candidate: null,
       copy: null,
       copyAttempt: null,
+      copyAttemptState: 'ABSENT',
       dispatch: {
         ...baseRecord().dispatch!,
         id: 'dispatch-ambiguous',
@@ -391,6 +394,7 @@ describe('CommercialLifecycleService', () => {
       candidate: null,
       copy: null,
       copyAttempt: null,
+      copyAttemptState: 'ABSENT',
       dispatch: null,
       outbox: null,
       reservation: null,

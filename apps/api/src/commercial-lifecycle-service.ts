@@ -177,6 +177,7 @@ const serializeRecord = (
         completedAt: toIso(record.copyAttempt.completedAt),
       }
     : null,
+  copyAttemptState: record.copyAttemptState,
   dispatch: record.dispatch
     ? {
         ...record.dispatch,

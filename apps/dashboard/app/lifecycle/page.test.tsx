@@ -79,6 +79,7 @@ const lifecycle = {
     startedAt: '2026-08-20T13:54:00.000Z',
     completedAt: '2026-08-20T13:55:00.000Z',
   },
+  copyAttemptState: 'PRESENT',
   dispatch: {
     id: 'dispatch-1',
     destinationId: 'destination-1',
@@ -177,6 +178,8 @@ const ambiguousPartialLifecycle = {
     investigationRequired: true,
   },
   copy: null,
+  copyAttempt: null,
+  copyAttemptState: 'ABSENT',
   dispatch: null,
   outbox: null,
   reservation: {
@@ -199,6 +202,36 @@ const ambiguousPartialLifecycle = {
     requeuedAt: null,
   },
   bullmq: null,
+};
+
+const criticalDispatchLifecycle = {
+  ...lifecycle,
+  lifecycleId: 'run-dispatch-failed',
+  execution: {
+    ...lifecycle.execution,
+    status: 'PROCESSING',
+    failureCode: 'EXECUTION_LEASE_EXPIRED',
+  },
+  run: {
+    ...lifecycle.run,
+    finalStatus: 'SENT',
+    failureCode: 'RUN_FINALIZATION_FAILED',
+  },
+  copyAttempt: {
+    ...lifecycle.copyAttempt,
+    failureCode: 'COPY_OUTPUT_INVALID',
+  },
+  copyAttemptState: 'PRESENT',
+  dispatch: {
+    ...lifecycle.dispatch,
+    status: 'FAILED',
+    errorMessage: 'DISPATCH_PROVIDER_FAILED',
+  },
+  outbox: {
+    ...lifecycle.outbox,
+    status: 'AMBIGUOUS',
+    failureCode: 'OUTBOX_PUBLICATION_AMBIGUOUS',
+  },
 };
 
 beforeEach(() => {
@@ -255,6 +288,126 @@ describe('LifecyclePage', () => {
     expect(screen.container.textContent).not.toMatch(
       /autorizar|requeue|enviar mensagem|retry/iu,
     );
+
+    await screen.unmount();
+  });
+
+  it('prioriza AMBIGUOUS e preserva os demais estados críticos persistidos', async () => {
+    listMock.mockResolvedValueOnce({
+      ...page,
+      items: [criticalDispatchLifecycle],
+    });
+    const screen = await render(<LifecyclePage />);
+    const lifecycleButton = screen.container.querySelector(
+      'section[aria-label="Lifecycles recentes"] button',
+    );
+
+    expect(lifecycleButton?.textContent).toContain('AMBIGUOUS');
+    expect(lifecycleButton?.textContent).toContain('EXECUTION PROCESSING');
+    expect(lifecycleButton?.textContent).toContain('DISPATCH FAILED');
+    expect(lifecycleButton?.textContent).not.toContain('SENT');
+    expect(screen.container.textContent).toContain('Falhas registradas');
+    expect(screen.container.textContent).toContain('Run (SENT)');
+    expect(screen.container.textContent).toContain('RUN_FINALIZATION_FAILED');
+    expect(screen.container.textContent).toContain('Execution (PROCESSING)');
+    expect(screen.container.textContent).toContain('EXECUTION_LEASE_EXPIRED');
+    expect(screen.container.textContent).toContain('Dispatch (FAILED)');
+    expect(screen.container.textContent).toContain('DISPATCH_PROVIDER_FAILED');
+    expect(screen.container.textContent).toContain('Outbox (AMBIGUOUS)');
+    expect(screen.container.textContent).toContain('OUTBOX_PUBLICATION_AMBIGUOUS');
+    expect(screen.container.textContent).toContain(
+      'Tentativa de copy (SUCCEEDED)',
+    );
+    expect(screen.container.textContent).toContain('COPY_OUTPUT_INVALID');
+
+    await screen.unmount();
+  });
+
+  it('ordena estados críticos de run e dispatch sem mascarar a fonte secundária', async () => {
+    listMock.mockResolvedValueOnce({
+      ...page,
+      items: [
+        {
+          ...lifecycle,
+          lifecycleId: 'run-ambiguous-dispatch-failed',
+          run: { ...lifecycle.run, finalStatus: 'AMBIGUOUS' },
+          execution: { ...lifecycle.execution, status: 'SENT' },
+          dispatch: { ...lifecycle.dispatch, status: 'FAILED' },
+          outbox: { ...lifecycle.outbox, status: 'PUBLISHED' },
+        },
+        {
+          ...lifecycle,
+          lifecycleId: 'run-failed-dispatch-processing',
+          run: { ...lifecycle.run, finalStatus: 'FAILED' },
+          execution: { ...lifecycle.execution, status: 'SENT' },
+          dispatch: { ...lifecycle.dispatch, status: 'PROCESSING' },
+          outbox: { ...lifecycle.outbox, status: 'PUBLISHED' },
+        },
+      ],
+    });
+    const screen = await render(<LifecyclePage />);
+    const lifecycleButtons = screen.container.querySelectorAll(
+      'section[aria-label="Lifecycles recentes"] button',
+    );
+
+    expect(lifecycleButtons[0]?.textContent).toContain('AMBIGUOUS');
+    expect(lifecycleButtons[0]?.textContent).toContain('DISPATCH FAILED');
+    expect(lifecycleButtons[1]?.textContent).toContain('PROCESSING');
+    expect(lifecycleButtons[1]?.textContent).toContain('RUN FAILED');
+
+    await screen.unmount();
+  });
+
+  it('distingue tentativa ausente de vínculo de tentativa desconhecido', async () => {
+    listMock.mockResolvedValueOnce({
+      ...page,
+      items: [
+        ambiguousPartialLifecycle,
+        {
+          ...lifecycle,
+          lifecycleId: 'run-copy-attempt-unknown',
+          copyAttempt: null,
+          copyAttemptState: 'UNKNOWN',
+        },
+      ],
+    });
+    const screen = await render(<LifecyclePage />);
+
+    expect(screen.container.textContent).toContain('Sem tentativa registrada');
+    const lifecycleButtons = screen.container.querySelectorAll(
+      'section[aria-label="Lifecycles recentes"] button',
+    );
+    const unknownAttempt = lifecycleButtons[1];
+    expect(unknownAttempt).toBeDefined();
+    if (!unknownAttempt) {
+      throw new Error('Lifecycle com vinculo de tentativa desconhecido nao encontrado.');
+    }
+
+    await click(unknownAttempt);
+
+    expect(screen.container.textContent).toContain('Vinculo desconhecido');
+    await screen.unmount();
+  });
+
+  it('prioriza PROCESSING do dispatch sobre o final status do run', async () => {
+    listMock.mockResolvedValueOnce({
+      ...page,
+      items: [
+        {
+          ...lifecycle,
+          lifecycleId: 'run-dispatch-processing',
+          run: { ...lifecycle.run, finalStatus: 'SENT' },
+          dispatch: { ...lifecycle.dispatch, status: 'PROCESSING' },
+        },
+      ],
+    });
+    const screen = await render(<LifecyclePage />);
+    const lifecycleButton = screen.container.querySelector(
+      'section[aria-label="Lifecycles recentes"] button',
+    );
+
+    expect(lifecycleButton?.textContent).toContain('PROCESSING');
+    expect(lifecycleButton?.textContent).not.toContain('SENT');
 
     await screen.unmount();
   });
