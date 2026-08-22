@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `e37b6816e85dfca7117bc3d56019d716aa978159` e evidências operacionais certificadas até a conclusão da Fase 12 em 2026-08-22.
+> Estado auditado contra `main` em `2171297b8ad8dd09bde99648f6515b4ad24e4920` e evidências operacionais certificadas até a conclusão da Fase 13 em 2026-08-22.
 
 ## 1. Objetivo final
 
@@ -338,24 +338,28 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** Fase 11.
 - **Critério objetivo:** corrigir por contrato a reconciliação de queued candidate stale sem skip oportunista; concluir pelo menos dois novos ciclos reais; todos dispatches SENT/attemptCount=1; candidates DISPATCHED; outboxes PUBLISHED; reservations liberadas; `duplicateSend=0`; `ambiguousState=0`; quotas e minimum interval preservados.
 
-**A Fase 12 está certificada como concluída.** As fases seguintes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+### Fase 13 — Reconciliação de catálogo/candidate e fechamento multiciclo
+- **Estado:** `DONE`
+- **Objetivo:** reconciliar candidates queued quando `ProductLead` avança snapshot/revision/fingerprint, preservando ranking e sem usar candidate stale.
+- **Evidência de conclusão auditada em 2026-08-22:** classificação `PHASE_13_ALREADY_SATISFIED`, `SOL_REVIEW=APPROVED`, P0/P1/P2 = 0 e 10/10 critérios PASS.
+- **Reconciliação stale:** ProductLead/snapshot/revision/fingerprint são atualizados em transações coerentes; a materialização atualiza candidates válidos, bloqueia `QUEUED` não selecionados com `QUEUE_NOT_SELECTED`, expira indisponíveis/expirados, reativa `BLOCKED/QUEUE_NOT_SELECTED` somente quando retornam ao ranking, preserva `COPY_READY/RESERVED` e mantém o histórico terminal. O candidate histórico `cmsmhccp1000bfjofyoo56298` terminou `BLOCKED`, `rankPosition=null`, `blockedReason=QUEUE_NOT_SELECTED` e `generatedCopyId=null`.
+- **Call graph comprovado:** `target policy -> markExternalMayHaveStarted -> sync único -> replenish/materialize -> checkpoint -> preflight pós-sync -> reserve -> prepare`; `preSyncEntitlement=false`, `manualRank2Promotion=false` e `staleCandidateReuse=false`.
+- **Provenance/ranking:** preflight valida product/candidate/campaign/group, snapshotId, revision, fingerprints, affiliateLink, source/provider e fingerprint do grupo; divergência falha fechado. O rank-1 é pós-sync e determinístico; `OUTPUT_INVALID` é terminal apenas no fingerprint atual, enquanto fingerprint novo pode ser elegível sem apagar histórico.
+- **Evidência de implementação:** `958de84` (seleção determinística pós-sync), `8374ca5` (rejeição de snapshot stale) e `bd13d7c` (skip de candidate com rejeição terminal), conforme auditado no código.
+- **Regressão:** 249 testes offline passaram, sem falhas; API typecheck passou. A evidência operacional dos dois ciclos exigidos permanece certificada na Fase 12: `CLEAN_CYCLE_1_CERTIFIED=true` e `CLEAN_CYCLE_2_CERTIFIED=true`.
+- **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
+- **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
+
+**As Fases 12 e 13 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
-
-### Fase 13 — Reconciliação de catálogo/candidate e fechamento multiciclo
-- **Estado:** `NOT_STARTED` como hardening específico; dependência imediata da Fase 12.
-- **Objetivo:** reconciliar candidates queued quando `ProductLead` avança snapshot/revision/fingerprint, preservando ranking e sem usar candidate stale.
-- **Evidência principal:** blocker real da Fase 12 após refresh oficial.
-- **Nota de transição:** parte da mitigação de stale candidate que motivou esta fase foi incorporada durante o hardening da Fase 12; o status permanece `NOT_STARTED` e o escopo deve ser revalidado antes da execução.
-- **Dependências:** contratos de snapshot/provenance das Fases 1 e 4.
-- **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
 ### Fase 14 — Multi-instância e multi-grupo real
 - **Estado:** `NOT_STARTED`
 - **Objetivo:** remover a premissa operacional de uma única `EVOLUTION_INSTANCE_NAME` e operar N instâncias/grupos com assignments persistidos.
 - **Evidência principal:** destino possui `sourceInstanceName`, mas runtime/config principal é singular e não há certificação real multi-número.
-- **Dependências:** Fase 13 estável; lifecycle atual preservado.
+- **Dependências:** Fase 13 concluída; lifecycle atual preservado.
 - **Critério objetivo:** pelo menos duas instâncias em teste/integração real controlada; assignments persistidos; pausa/falha de uma não redireciona silenciosamente outra; nicho/dedupe corretos por grupo; múltiplos grupos reais recebem candidates compatíveis.
 
 ### Fase 15 — Scheduler multi-instância, cadence e stagger
