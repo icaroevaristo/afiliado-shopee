@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `c049af3568480aa2f78970f72f65ddd0320f73b5` e evidências operacionais certificadas até a Fase 12 em 2026-08-18.
+> Estado auditado contra `main` em `e37b6816e85dfca7117bc3d56019d716aa978159` e evidências operacionais certificadas até a conclusão da Fase 12 em 2026-08-22.
 
 ## 1. Objetivo final
 
@@ -316,22 +316,29 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** Fases 1–10.
 - **Critério objetivo:** exatamente um SEND real sem duplicidade, estado final consistente, runtime quiescente e hardening mergeado.
 
-## 11. Fase atual
+## 11. Fases concluídas recentemente
 
 ### Fase 12 — Estabilidade controlada multiciclo
-- **Estado:** `IN_PROGRESS`
+- **Estado:** `DONE`
 - **Objetivo:** provar múltiplos ciclos reais sucessivos respeitando ranking, provenance, cooldown, quota, dedupe e recovery.
-- **Evidência principal:** tentativa operacional de 2026-08-18 encerrou `SAFETY_STOP` antes de novo SEND ao encontrar o próximo candidate determinístico stale:
+- **Evidência histórica:** a tentativa operacional de 2026-08-18 encerrou `SAFETY_STOP` antes de novo SEND ao encontrar o próximo candidate determinístico stale:
   - candidate `cmsmhccp1000bfjofyoo56298`;
   - blocker `COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH`;
   - refresh oficial Shopee executado porque havia drift real, mas mining normal reportou `queuedUpdated=0` e `queuedExpired=0`;
   - o mesmo candidate permaneceu bloqueado no preflight;
   - novos SENDs da Fase 12: `0`;
   - ambiguity `0`, reservations `0`, runtime quiescente.
+- **Evidência final certificada em 2026-08-22:**
+  - `CLEAN_CYCLE_1_CERTIFIED=true`, execution `cmt4cn72d0000tolk6fpqvehr`, run `cmt4cnag6000dtolkus9h6g4x`, dispatch `SENT`/`attemptCount=1`, candidate `DISPATCHED`/`rankPosition=1`, outbox `PUBLISHED`, job `completed`/`attemptsMade=1`, reservation liberada, retry/requeue/manualRecovery `0` e duplicidade `0`;
+  - `CLEAN_CYCLE_2_CERTIFIED=true`, execution `cmt4k4z6700002d9qtm420aai`, run `cmt4k52ef000d2d9q2c2b9foi`, candidate `cmsz7ly6a0004wddavartw3zj` `DISPATCHED`/`rankPosition=1`, dispatch `SENT`/`attemptCount=1`, outbox `PUBLISHED`, job `completed`/`attemptsMade=1`, reservation liberada, retry/requeue/manualRecovery `0` e duplicidade `0`;
+  - os dois ciclos foram independentes e one-shot, com ranking pós-sync, provenance, quotas e minimum interval preservados;
+  - a reconciliação stale foi incorporada por contrato na `main` por `958de84` (seleção determinística pós-sync), `8374ca5` (rejeição de snapshot stale) e `bd13d7c` (skip de candidate com rejeição terminal), preservando histórico terminal; o candidate histórico `cmsmhccp1000bfjofyoo56298` terminou `BLOCKED`, `rankPosition=null`, `blockedReason=QUEUE_NOT_SELECTED` e `generatedCopyId=null`.
+- **Cooldown fail-closed certificado:** a execution `cmt4jgck00000146ypj9rewmz` terminou `BLOCKED` por `MINIMUM_INTERVAL_NOT_REACHED`, com `externalStage=NOT_REACHED` e `commercialRunId=null`; esse tick não criou run, dispatch, outbox ou BullMQ SEND job e teve `Shopee=0`, `OpenAI=0`, `Evolution SEND=0` e `WhatsApp SEND=0`. O `minimumIntervalMinutes` observado foi `14`, bloqueando antes da fronteira externa.
+- **Estado global final certificado:** `activeExecutions=0`, `activeReservations=0`, `ambiguousRuns=0`, `investigationRequired=0`, `pendingDispatches=0` e `pendingOutboxes=0`; as filas `whatsapp-dispatch` e `commercial-automation` ficaram com `waiting=0`, `active=0` e `delayed=0`. Jobs históricos terminalizados podem permanecer retidos e não são blockers quando não estão nesses estados.
 - **Dependências:** Fase 11.
 - **Critério objetivo:** corrigir por contrato a reconciliação de queued candidate stale sem skip oportunista; concluir pelo menos dois novos ciclos reais; todos dispatches SENT/attemptCount=1; candidates DISPATCHED; outboxes PUBLISHED; reservations liberadas; `duplicateSend=0`; `ambiguousState=0`; quotas e minimum interval preservados.
 
-**A Fase 12 é a evidência mais recente do estado real.** Documentação anterior que implique “automação contínua já pronta” deve ser tratada como otimista/desatualizada.
+**A Fase 12 está certificada como concluída.** As fases seguintes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
@@ -340,6 +347,7 @@ As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdi
 - **Estado:** `NOT_STARTED` como hardening específico; dependência imediata da Fase 12.
 - **Objetivo:** reconciliar candidates queued quando `ProductLead` avança snapshot/revision/fingerprint, preservando ranking e sem usar candidate stale.
 - **Evidência principal:** blocker real da Fase 12 após refresh oficial.
+- **Nota de transição:** parte da mitigação de stale candidate que motivou esta fase foi incorporada durante o hardening da Fase 12; o status permanece `NOT_STARTED` e o escopo deve ser revalidado antes da execução.
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
@@ -446,7 +454,7 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | E2E no-SEND | DONE | Regressão preservada |
 | Runtime/recovery base | DONE | Ainda falta autonomia contínua final |
 | Primeiro SEND real | DONE | Fase 11 certificada |
-| Estabilidade multiciclo | IN_PROGRESS | Bloqueada por stale candidate reconciliation |
+| Estabilidade multiciclo | DONE | Dois ciclos reais certificados; stale candidate reconciliado sem bypass |
 | Multi-instância real | NOT_STARTED | Requisito de MVP |
 | Multi-grupo real completo | NOT_STARTED | Core existe; operação/configuração não certificada |
 | Scheduler/stagger final | NOT_STARTED | Cooldown existe; stagger/N-instâncias não |
