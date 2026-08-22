@@ -1,9 +1,11 @@
 import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from './commercial-ai-copy-policy';
 
 export const COMMERCIAL_AI_COPY_PROMPT_VERSION =
-  'commercial-promotion-copy-v12' as const;
+  'commercial-promotion-copy-v13' as const;
 export const COMMERCIAL_AI_COPY_VALIDATION_VERSION =
   'commercial-promotion-copy-validation-v4' as const;
+export const COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION =
+  'commercial-promotion-copy-input-sanitization-v1' as const;
 
 // The remote schema intentionally contains only the strict Structured Outputs
 // subset proven for the configured model family. Length and policy constraints
@@ -52,6 +54,7 @@ export const buildCommercialAiCopyInstructions = () =>
     'Exemplos somente de transformação do body, nunca de headline: "Nova Placa De Carbono Profissional Tênis De Corrida Sapatos De Moda Para Homens E Mulheres 33-44" vira "Tênis de Corrida com Placa de Carbono"; "Dove Sérum Hidratante Corporal 380ml" preserva "Dove Sérum Hidratante Corporal 380ml"; "Air Fryer 6,5L 1700W 127V" preserva "Air Fryer 6,5L 1700W 127V"; "Kit Ferramentas 46 Peças" preserva "Kit Ferramentas 46 Peças".',
     'Use productName como única fonte factual para o body. Não invente informação, benefício, preço, desconto ou URL.',
     'VALORES COMERCIAIS PROIBIDOS: nunca escreva R$, moeda, preço, valor monetário, percentual ou o caractere %. Essa proibição vale mesmo quando esses valores aparecem no productName. Ao encontrar percentual ou moeda no productName, omita o fragmento factual completo relacionado, sem apenas remover o símbolo ou deixar o número desacoplado. Preço e desconto serão acrescentados depois por uma camada confiável do sistema.',
+    'O productName recebido pode já ter fragmentos comerciais proibidos removidos. Nunca reconstrua esses fragmentos nem tente inferir o texto original.',
     `ALEGAÇÕES PROIBIDAS: headline e body não podem usar nenhuma destas expressões ou alegações: ${COMMERCIAL_AI_COPY_PROHIBITED_PHRASES.join(', ')}. Não crie urgência artificial nem alegue autenticidade, garantia, liderança de vendas, exclusividade, estoque, frete, cupom ou condição comercial não fornecida. A palavra imperdível também é proibida quando combinada com urgência temporal. Humor e hipérbole não autorizam essas alegações factuais.`,
     'DÍGITOS: a headline deve conter zero dígitos: nenhum caractere de 0 a 9 sob qualquer hipótese. No body, um número só pode aparecer se for uma especificação técnica literalmente sustentada pelo productName, como 380ml, 1700W, 127V, 46 Peças, 6,5L e FR 102. Números inventados, quantidades inferidas, ranking, posição, benefício quantificado, percentual, preço, desconto e número promocional são proibidos. Se houver qualquer dúvida, omita o número e o fragmento dependente dele. Não converta, arredonde, estime, altere unidade ou crie números.',
     'CHECKLIST FINAL: antes do JSON, confira internamente e corrija a saída: headline sem qualquer dígito; headline e body sem alegações proibidas; sem % ou moeda/preço; body sem número não literalmente sustentado; URL, CTA e fato inventado removidos. Não mostre esse checklist nem raciocínio; retorne somente o JSON.',

@@ -7,6 +7,8 @@ export type CommercialAiCopyFingerprintInput = {
   // isolation. Operational timestamps are intentionally excluded.
   promptVersion: string;
   validationVersion: string;
+  inputSanitizationVersion: string;
+  modelProductName: string;
   provider: string;
   model: string;
   campaignId: string;
@@ -46,6 +48,8 @@ export const commercialAiCopyInputFingerprint = (
     JSON.stringify([
       input.promptVersion,
       input.validationVersion,
+      input.inputSanitizationVersion,
+      input.modelProductName,
       input.provider,
       input.model,
       input.campaignId,

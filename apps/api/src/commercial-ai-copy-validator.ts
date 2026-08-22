@@ -1,5 +1,9 @@
 import type { CommercialAiCopyOutput } from './commercial-ai-copy-provider';
-import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from './commercial-ai-copy-policy';
+import {
+  containsCommercialAiCopyPolicyPhrase,
+  hasCommercialAiCopyProhibitedClaim,
+  normalizeCommercialAiCopyPolicyText,
+} from './commercial-ai-copy-policy';
 
 export type CommercialAiCopyValidationResult = {
   valid: boolean;
@@ -64,38 +68,10 @@ const NUMERIC_SPACED_UNIT =
 const normalize = (value: string) =>
   value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
 
-const normalizedForPolicy = (value: string) =>
-  normalize(value)
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLocaleLowerCase('pt-BR');
-
-const containsPhrase = (text: string, phrase: string) => {
-  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  return new RegExp(`(?:^|[^\\p{L}])${escaped}(?:$|[^\\p{L}])`, 'u').test(
-    text,
-  );
-};
-
-const hasProhibitedClaim = (value: string) => {
-  const text = normalizedForPolicy(value);
-  if (
-    COMMERCIAL_AI_COPY_PROHIBITED_PHRASES.some((phrase) =>
-      containsPhrase(text, normalizedForPolicy(phrase)),
-    )
-  ) {
-    return true;
-  }
-  return (
-    containsPhrase(text, 'imperdivel') &&
-    ['so hoje', 'tempo limitado', 'acaba hoje', 'antes que acabe'].some(
-      (phrase) => containsPhrase(text, phrase),
-    )
-  );
-};
-
 const repeatedWords = (value: string) =>
-  /\b([\p{L}]{3,})(?:\s+\1){2,}\b/iu.test(normalizedForPolicy(value));
+  /\b([\p{L}]{3,})(?:\s+\1){2,}\b/iu.test(
+    normalizeCommercialAiCopyPolicyText(value),
+  );
 
 const normalizeNumericSpecification = (value: string) =>
   value
@@ -219,17 +195,16 @@ export class CommercialAiCopyValidator {
       textual.some((value) => MONEY_OR_PERCENT.test(value)),
       'AI_FACTUAL_VALUE_FORBIDDEN',
     );
-    add(failures, textual.some(hasProhibitedClaim), 'AI_PROHIBITED_CLAIM');
+    add(
+      failures,
+      textual.some(hasCommercialAiCopyProhibitedClaim),
+      'AI_PROHIBITED_CLAIM',
+    );
     add(failures, textual.some(repeatedWords), 'AI_REPETITION_INVALID');
-    const normalizedText = normalizedForPolicy(textual.join(' '));
     add(
       failures,
       trustedFacts.some((fact) => {
-        const normalizedFact = normalizedForPolicy(fact);
-        return (
-          Boolean(normalizedFact) &&
-          containsPhrase(normalizedText, normalizedFact)
-        );
+        return containsCommercialAiCopyPolicyPhrase(textual.join(' '), fact);
       }),
       'AI_CATALOG_FACT_REPEATED',
     );
