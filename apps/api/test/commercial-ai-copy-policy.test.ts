@@ -9,9 +9,13 @@ import {
 describe('commercial AI copy policy and model input sanitization', () => {
   it.each([
     ['Nike Original', 'Nike'],
-    ['MEDICUBE zero pore pad 2.0,zero pore pad mild 3types(original pad/refill)', 'MEDICUBE zero pore pad 2.0,zero pore pad mild 3types(pad/refill)'],
-    ['Kit com frete grátis e loja oficial', 'Kit com e'],
-    ['Produto exclusivo, Autêntico e FRETE GRATIS', 'Produto, e'],
+    [
+      'MEDICUBE zero pore pad 2.0,zero pore pad mild 3types(original pad/refill)',
+      'MEDICUBE zero pore pad 2.0,zero pore pad mild 3types(pad/refill)',
+    ],
+    ['Kit com frete grátis e loja oficial', 'Kit'],
+    ['Produto exclusivo, Autêntico e FRETE GRATIS', 'Produto'],
+    ['Air Fryer 6,5L 1700W 127V Original', 'Air Fryer 6,5L 1700W 127V'],
   ])('remove claims without rewriting identity: %s', (source, expected) => {
     const sanitized = sanitizeCommercialAiCopyProductNameForModel(source);
     expect(sanitized).toBe(expected);
@@ -36,9 +40,7 @@ describe('commercial AI copy policy and model input sanitization', () => {
     const source = 'Produto imperdível só hoje';
     expect(hasCommercialAiCopyProhibitedClaim(source)).toBe(true);
     const sanitized = sanitizeCommercialAiCopyProductNameForModel(source);
-    expect(sanitized).toBe(
-      'Produto imperdível',
-    );
+    expect(sanitized).toBe('Produto imperdível');
     expect(hasCommercialAiCopyProhibitedClaim(sanitized)).toBe(false);
   });
 
@@ -48,6 +50,14 @@ describe('commercial AI copy policy and model input sanitization', () => {
     const second = sanitizeCommercialAiCopyProductNameForModel(first);
     expect(first).toBe('Air Fryer 6,5L 1700W 127V');
     expect(second).toBe(first);
+  });
+
+  it.each([
+    ['Shampoo e Condicionador', 'Shampoo e Condicionador'],
+    ['Kit com 3 Peças', 'Kit com 3 Peças'],
+    ['Creme para Cabelos', 'Creme para Cabelos'],
+  ])('preserves legitimate connectors: %s', (source, expected) => {
+    expect(sanitizeCommercialAiCopyProductNameForModel(source)).toBe(expected);
   });
 
   it('fails closed when sanitization removes the whole identity', () => {
