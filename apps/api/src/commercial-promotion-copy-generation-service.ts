@@ -16,8 +16,10 @@ import {
 import {
   COMMERCIAL_AI_COPY_PROMPT_VERSION,
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+  COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION,
   normalizeUntrustedCommercialText,
 } from './commercial-ai-copy-prompt';
+import { sanitizeCommercialAiCopyProductNameForModel } from './commercial-ai-copy-policy';
 import {
   CommercialAiCopyValidator,
   sanitizeCommercialAiCopyValidationFailureCodes,
@@ -152,6 +154,7 @@ export class CommercialPromotionCopyGenerationService {
       apiKeyConfigured: this.options.config.apiKeyConfigured,
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+      inputSanitizationVersion: COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION,
       timeoutMs: this.options.config.timeoutMs,
       maxOutputTokens: this.options.config.maxOutputTokens,
       reasoningEffort: this.options.config.reasoningEffort,
@@ -184,6 +187,8 @@ export class CommercialPromotionCopyGenerationService {
     return commercialAiCopyInputFingerprint({
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+      inputSanitizationVersion: COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION,
+      modelProductName: this.modelProductName(context),
       provider: configuration.provider,
       model,
       campaignId: context.campaign.id,
@@ -404,13 +409,15 @@ export class CommercialPromotionCopyGenerationService {
   }
 
   private providerFacts(context: CommercialPromotionCopyContext) {
+    return { productName: this.modelProductName(context) };
+  }
+
+  private sourceProductName(context: CommercialPromotionCopyContext) {
     try {
-      return {
-        productName: normalizeUntrustedCommercialText(
-          context.product.productName,
-          250,
-        ),
-      };
+      return normalizeUntrustedCommercialText(
+        context.product.productName,
+        250,
+      );
     } catch {
       throw new AppError(
         'Fatos comerciais invalidos',
@@ -419,13 +426,22 @@ export class CommercialPromotionCopyGenerationService {
     }
   }
 
+  private modelProductName(context: CommercialPromotionCopyContext) {
+    const sourceProductName = this.sourceProductName(context);
+    try {
+      return sanitizeCommercialAiCopyProductNameForModel(sourceProductName);
+    } catch {
+      throw new AppError(
+        'Nome do produto sem identidade segura para a IA',
+        'COMMERCIAL_AI_COPY_MODEL_PRODUCT_NAME_INVALID',
+      );
+    }
+  }
+
   private validationFacts(context: CommercialPromotionCopyContext) {
     try {
       return {
-        productName: normalizeUntrustedCommercialText(
-          context.product.productName,
-          250,
-        ),
+        productName: this.sourceProductName(context),
         shopName: normalizeUntrustedCommercialText(
           context.product.shopName,
           120,

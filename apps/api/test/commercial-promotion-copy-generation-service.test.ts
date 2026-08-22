@@ -4,6 +4,7 @@ import {
   CommercialAiCopyProviderError,
   type CommercialAiCopyProvider,
 } from '../src/commercial-ai-copy-provider';
+import { commercialAiCopyInputFingerprint } from '../src/commercial-ai-copy-fingerprint';
 import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   CommercialPromotionCopyGenerationService,
@@ -155,6 +156,7 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
   context: CommercialPromotionCopyContext | null = contextFixture();
   copies = new Map<string, GeneratedCopyRecord>();
   attempts = new Map<string, CommercialCopyGenerationAttemptRecord>();
+  claimInputs: CommercialAiCopyClaimInput[] = [];
   completionFailure: string | null = null;
 
   constructor(private readonly copyId = 'copy-internal') {}
@@ -192,6 +194,7 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
     );
   }
   async claim(input: CommercialAiCopyClaimInput) {
+    this.claimInputs.push(input);
     if (this.attempts.has(input.inputFingerprint)) return false;
     this.attempts.set(input.inputFingerprint, {
       id: 'attempt-internal',
@@ -392,6 +395,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       enabled: true,
       modelConfigured: true,
       apiKeyConfigured: true,
+      inputSanitizationVersion:
+        'commercial-promotion-copy-input-sanitization-v1',
       reasoningEffort: 'minimal',
     });
   });
@@ -404,6 +409,77 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(report)).not.toContain(affiliateLink);
     expect(JSON.stringify(report)).toContain('[LINK_AFILIADO]');
     expect(JSON.stringify(repository.context)).toBe(before);
+    expect(repository.attempts.size).toBe(0);
+  });
+
+  it('envia ao provider o nome sanitizado e preserva a fonte original no contexto', async () => {
+    const repository = new MemoryCopyRepository();
+    const originalProductName = 'Air Fryer 6,5L 1700W 127V Original';
+    repository.context!.product.productName = originalProductName;
+    const provider = validProvider();
+    const validator = new CommercialAiCopyValidator();
+    const validate = vi.spyOn(validator, 'validate');
+
+    await service(repository, provider, validator).generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+    const affiliateLink = repository.context!.product.affiliateLink;
+    if (!affiliateLink) throw new Error('test fixture affiliate link missing');
+
+    expect(provider.generate).toHaveBeenCalledWith({
+      productName: 'Air Fryer 6,5L 1700W 127V',
+    });
+    expect(validate).toHaveBeenCalledWith(
+      expect.anything(),
+      originalProductName,
+      ['Loja verificada'],
+    );
+    expect(repository.context!.product.productName).toBe(originalProductName);
+    expect(repository.claimInputs[0]?.inputFingerprint).toBe(
+      commercialAiCopyInputFingerprint({
+        promptVersion: 'commercial-promotion-copy-v13',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        inputSanitizationVersion:
+          'commercial-promotion-copy-input-sanitization-v1',
+        modelProductName: 'Air Fryer 6,5L 1700W 127V',
+        provider: 'openai',
+        model: 'selected-model',
+        campaignId: repository.context!.campaign.id,
+        nicheId: repository.context!.niche.id,
+        candidateId: repository.context!.candidate.id,
+        productId: repository.context!.product.id,
+        snapshotId: repository.context!.snapshot.id,
+        snapshotRevision: repository.context!.snapshot.revision,
+        snapshotFingerprint: repository.context!.snapshot.fingerprint,
+        promotionSignals: repository.context!.candidate.promotionSignals,
+        priceDropPercent: repository.context!.candidate.priceDropPercent,
+        productName: originalProductName,
+        shopName: repository.context!.product.shopName,
+        price: repository.context!.product.price,
+        discountRate: repository.context!.product.discountRate,
+        affiliateLink,
+        maximumLength: 1000,
+      }),
+    );
+  });
+
+  it('falha fechado antes do provider quando a sanitização remove toda a identidade', async () => {
+    const repository = new MemoryCopyRepository();
+    repository.context!.product.productName = 'Original';
+    const provider = validProvider();
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_MODEL_PRODUCT_NAME_INVALID',
+    });
+
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.claimInputs).toHaveLength(0);
     expect(repository.attempts.size).toBe(0);
   });
 
@@ -504,7 +580,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
     expect(first).toMatchObject({ status: 'COPY_READY', cacheHit: false });
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
-    expect(first.promptVersion).toBe('commercial-promotion-copy-v12');
+    expect(first.promptVersion).toBe('commercial-promotion-copy-v13');
+    expect(repository.claimInputs[0]?.inputFingerprint).toBeTruthy();
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
@@ -890,7 +967,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const fingerprint = `legacy-hash-${status.toLowerCase()}`;
       repository.attempts.set(fingerprint, {
         ...legacyAttempt(status, fingerprint),
-        promptVersion: 'commercial-promotion-copy-v12',
+        promptVersion: 'commercial-promotion-copy-v13',
         validationVersion: 'commercial-promotion-copy-validation-v4',
       });
       const provider = validProvider();
@@ -915,7 +992,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       currentFingerprint ??= fingerprint;
       return {
         ...legacyAttempt('FAILED', fingerprint),
-        promptVersion: 'commercial-promotion-copy-v12',
+        promptVersion: 'commercial-promotion-copy-v13',
         validationVersion: 'commercial-promotion-copy-validation-v4',
         failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       };
@@ -948,7 +1025,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const historicalFingerprint = 'historical-output-invalid-fingerprint';
     repository.attempts.set(historicalFingerprint, {
       ...legacyAttempt('FAILED', historicalFingerprint),
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v12',
       validationVersion: 'commercial-promotion-copy-validation-v4',
       failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
@@ -977,7 +1054,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       (attempt) => attempt.inputFingerprint !== historicalFingerprint,
     );
     expect(currentAttempt).toMatchObject({
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
       validationVersion: 'commercial-promotion-copy-validation-v4',
       status: 'SUCCEEDED',
     });
@@ -990,7 +1067,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const historicalFingerprint = 'historical-succeeded-fingerprint';
     repository.attempts.set(historicalFingerprint, {
       ...legacyAttempt('SUCCEEDED', historicalFingerprint),
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     const provider = validProvider();
@@ -1021,7 +1098,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const historicalFingerprint = `historical-${status.toLowerCase()}-fingerprint`;
       repository.attempts.set(historicalFingerprint, {
         ...legacyAttempt(status, historicalFingerprint),
-        promptVersion: 'commercial-promotion-copy-v12',
+        promptVersion: 'commercial-promotion-copy-v13',
         validationVersion: 'commercial-promotion-copy-validation-v4',
         failureCode,
       });
@@ -1041,7 +1118,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     },
   );
 
-  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v12/v4', async () => {
+  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v13/v4', async () => {
     const repository = new MemoryCopyRepository();
     const v9Fingerprint = 'v9-fingerprint-mock-hash';
     repository.attempts.set(v9Fingerprint, {
@@ -1058,7 +1135,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
@@ -1087,7 +1164,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(result).toMatchObject({
       status: 'COPY_READY',
       cacheHit: false,
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.copies.size).toBe(2);
@@ -1097,7 +1174,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v3 bloqueie a geração v12', async () => {
+  it('não permite que uma tentativa FAILED v3 bloqueie a geração v13', async () => {
     const repository = new MemoryCopyRepository();
     const v3Fingerprint = 'v3-fingerprint-mock-hash';
     repository.attempts.set(v3Fingerprint, legacyAttempt('FAILED', v3Fingerprint));
@@ -1110,7 +1187,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.attempts.size).toBe(2);
@@ -1119,7 +1196,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v12/v4', async () => {
+  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v13/v4', async () => {
     const repository = new MemoryCopyRepository();
     const v6Fingerprint = 'v6-fingerprint-mock-hash';
     repository.attempts.set(v6Fingerprint, {
@@ -1136,7 +1213,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v12',
+      promptVersion: 'commercial-promotion-copy-v13',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
@@ -1147,7 +1224,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('não permite que um attempt FAILED v1 bloqueie a geração v12, gerando um fingerprint diferente e não o apagando', async () => {
+  it('não permite que um attempt FAILED v1 bloqueie a geração v13, gerando um fingerprint diferente e não o apagando', async () => {
     const repository = new MemoryCopyRepository();
     // Simulate a failed attempt from v1
     const v1Fingerprint = 'v1-fingerprint-mock-hash';
@@ -1182,18 +1259,18 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository, provider);
 
     const report = await copyService.preview('candidate-internal');
-    expect(report.cacheAvailable).toBe(false); // v12 preview não encontra cache de v1
+    expect(report.cacheAvailable).toBe(false); // v13 preview não encontra cache de v1
 
     const result = await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
     expect(result.status).toBe('COPY_READY');
-    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v12
+    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v13
 
     const attempts = [...repository.attempts.values()];
-    expect(attempts.length).toBe(2); // v1 and v12 attempts
+    expect(attempts.length).toBe(2); // v1 and v13 attempts
     expect(attempts.find(a => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
 
     const newAttempt = attempts.find(a => a.id !== 'attempt-v1-failed')!;
-    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v12');
+    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v13');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
   });

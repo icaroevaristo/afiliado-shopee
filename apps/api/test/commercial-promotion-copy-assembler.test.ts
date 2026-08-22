@@ -338,6 +338,8 @@ describe('commercialAiCopyInputFingerprint', () => {
   const input = {
     promptVersion: 'commercial-promotion-copy-v1',
     validationVersion: 'commercial-promotion-copy-validation-v1',
+    inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v1',
+    modelProductName: 'Produto',
     provider: 'openai',
     model: 'selected-model',
     campaignId: 'campaign-internal',
@@ -490,6 +492,11 @@ describe('commercialAiCopyInputFingerprint', () => {
       'validationVersion',
       { validationVersion: 'commercial-promotion-copy-validation-v2' },
     ],
+    [
+      'inputSanitizationVersion',
+      { inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v2' },
+    ],
+    ['modelProductName', { modelProductName: 'Produto sanitizado' }],
     ['provider', { provider: 'other-provider' }],
     ['model', { model: 'other-model' }],
     ['campaignId', { campaignId: 'campaign-changed' }],
@@ -652,5 +659,32 @@ describe('commercialAiCopyInputFingerprint', () => {
         promotionSignals: [...input.promotionSignals],
       }),
     ).toBe(promptV11);
+  });
+
+  it('separa V12 de V13 e inclui a versão/texto efetivo enviados ao modelo', () => {
+    const v12 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v12',
+      inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v0',
+      modelProductName: 'Produto original',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const v13 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v13',
+      inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v1',
+      modelProductName: 'Produto',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const changedModelText = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v13',
+      inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v1',
+      modelProductName: 'Produto com especificação diferente',
+      promotionSignals: [...input.promotionSignals],
+    });
+
+    expect(v13).not.toBe(v12);
+    expect(changedModelText).not.toBe(v13);
   });
 });

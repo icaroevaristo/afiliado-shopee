@@ -15,6 +15,7 @@ import {
   buildCommercialAiCopyInput,
   buildCommercialAiCopyInstructions,
   COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION,
   COMMERCIAL_AI_COPY_REMOTE_SCHEMA,
   COMMERCIAL_AI_COPY_SCHEMA,
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
@@ -66,7 +67,10 @@ const sampleFakeOutputs = [
 describe('commercial AI copy prompt', () => {
   it('mantem schema remoto estrito e prompt versionado', () => {
     expect(COMMERCIAL_AI_COPY_PROMPT_VERSION).toBe(
-      'commercial-promotion-copy-v12',
+      'commercial-promotion-copy-v13',
+    );
+    expect(COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION).toBe(
+      'commercial-promotion-copy-input-sanitization-v1',
     );
     expect(COMMERCIAL_AI_COPY_SCHEMA.additionalProperties).toBe(false);
     expect(COMMERCIAL_AI_COPY_SCHEMA.required).toEqual([
@@ -102,6 +106,9 @@ describe('commercial AI copy prompt', () => {
     expect(instructions).toContain('Não invente informação, benefício, preço, desconto ou URL');
     expect(instructions).toContain('nunca escreva R$, moeda, preço, valor monetário, percentual ou o caractere %');
     expect(instructions).toContain('Essa proibição vale mesmo quando esses valores aparecem no productName');
+    expect(instructions).toContain(
+      'fragmentos comerciais proibidos removidos',
+    );
     expect(instructions).toContain('omita o fragmento factual completo relacionado');
     expect(instructions).toContain('sem apenas remover o símbolo ou deixar o número desacoplado');
     expect(instructions).toContain('Preço e desconto serão acrescentados depois por uma camada confiável do sistema');
