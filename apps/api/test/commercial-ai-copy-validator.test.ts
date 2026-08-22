@@ -5,6 +5,7 @@ import {
   CommercialAiCopyValidator,
   sanitizeCommercialAiCopyValidationFailureCodes,
 } from '../src/commercial-ai-copy-validator';
+import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from '../src/commercial-ai-copy-policy';
 
 const valid = {
   headline: 'ACHADO PARA O DIA',
@@ -29,6 +30,16 @@ describe('CommercialAiCopyValidator V4', () => {
       sanitizedOutput: valid,
       publicFailureCodes: [],
     });
+  });
+
+  it('mantém cada claim proibida da política compartilhada como bloqueio', () => {
+    for (const phrase of COMMERCIAL_AI_COPY_PROHIBITED_PHRASES) {
+      const result = validator.validate({
+        ...valid,
+        body: `Mensagem com ${phrase} em destaque.`,
+      });
+      expect(result.publicFailureCodes).toContain('AI_PROHIBITED_CLAIM');
+    }
   });
 
   it.each([

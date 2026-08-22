@@ -1,4 +1,5 @@
 import type { CommercialAiCopyOutput } from './commercial-ai-copy-provider';
+import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from './commercial-ai-copy-policy';
 
 export type CommercialAiCopyValidationResult = {
   valid: boolean;
@@ -69,34 +70,6 @@ const normalizedForPolicy = (value: string) =>
     .replace(/\p{M}/gu, '')
     .toLocaleLowerCase('pt-BR');
 
-const prohibitedPhrases = [
-  'frete gratis',
-  'cupom',
-  'estoque',
-  'ultimas unidades',
-  'so hoje',
-  'corre',
-  'acaba hoje',
-  'tempo limitado',
-  'menor preco',
-  'preco historico',
-  'garantia',
-  'garantido',
-  'original',
-  'autentico',
-  'loja oficial',
-  'vendedor oficial',
-  'cashback',
-  'desconto extra',
-  'entrega hoje',
-  'entrega garantida',
-  'mais vendido',
-  'numero um',
-  'exclusivo',
-  'aproveite antes que acabe',
-  'oportunidade unica',
-] as const;
-
 const containsPhrase = (text: string, phrase: string) => {
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   return new RegExp(`(?:^|[^\\p{L}])${escaped}(?:$|[^\\p{L}])`, 'u').test(
@@ -106,7 +79,11 @@ const containsPhrase = (text: string, phrase: string) => {
 
 const hasProhibitedClaim = (value: string) => {
   const text = normalizedForPolicy(value);
-  if (prohibitedPhrases.some((phrase) => containsPhrase(text, phrase))) {
+  if (
+    COMMERCIAL_AI_COPY_PROHIBITED_PHRASES.some((phrase) =>
+      containsPhrase(text, normalizedForPolicy(phrase)),
+    )
+  ) {
     return true;
   }
   return (
