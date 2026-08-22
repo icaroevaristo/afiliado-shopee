@@ -13,7 +13,9 @@ describe('commercial AI copy policy and model input sanitization', () => {
     ['Kit com frete grátis e loja oficial', 'Kit com e'],
     ['Produto exclusivo, Autêntico e FRETE GRATIS', 'Produto, e'],
   ])('remove claims without rewriting identity: %s', (source, expected) => {
-    expect(sanitizeCommercialAiCopyProductNameForModel(source)).toBe(expected);
+    const sanitized = sanitizeCommercialAiCopyProductNameForModel(source);
+    expect(sanitized).toBe(expected);
+    expect(hasCommercialAiCopyProhibitedClaim(sanitized)).toBe(false);
   });
 
   it('uses the same accent-insensitive, case-insensitive policy matcher', () => {
