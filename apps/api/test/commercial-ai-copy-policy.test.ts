@@ -17,6 +17,9 @@ describe('commercial AI copy policy and model input sanitization', () => {
   });
 
   it('uses the same accent-insensitive, case-insensitive policy matcher', () => {
+    expect(sanitizeCommercialAiCopyProductNameForModel('Produto limpo')).toBe(
+      'Produto limpo',
+    );
     expect(normalizeCommercialAiCopyPolicyText(' ORIGINAL  Autêntico ')).toBe(
       'original autentico',
     );
@@ -30,9 +33,11 @@ describe('commercial AI copy policy and model input sanitization', () => {
   it('keeps the special imperdível plus urgency rule aligned with validation', () => {
     const source = 'Produto imperdível só hoje';
     expect(hasCommercialAiCopyProhibitedClaim(source)).toBe(true);
-    expect(sanitizeCommercialAiCopyProductNameForModel(source)).toBe(
+    const sanitized = sanitizeCommercialAiCopyProductNameForModel(source);
+    expect(sanitized).toBe(
       'Produto imperdível',
     );
+    expect(hasCommercialAiCopyProhibitedClaim(sanitized)).toBe(false);
   });
 
   it('is deterministic and idempotent', () => {

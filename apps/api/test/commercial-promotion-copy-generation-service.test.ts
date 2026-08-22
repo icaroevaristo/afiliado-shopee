@@ -4,6 +4,7 @@ import {
   CommercialAiCopyProviderError,
   type CommercialAiCopyProvider,
 } from '../src/commercial-ai-copy-provider';
+import { commercialAiCopyInputFingerprint } from '../src/commercial-ai-copy-fingerprint';
 import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   CommercialPromotionCopyGenerationService,
@@ -423,6 +424,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       'candidate-internal',
       'GERAR_COPY_COM_IA',
     );
+    const affiliateLink = repository.context!.product.affiliateLink;
+    if (!affiliateLink) throw new Error('test fixture affiliate link missing');
 
     expect(provider.generate).toHaveBeenCalledWith({
       productName: 'Air Fryer 6,5L 1700W 127V',
@@ -433,7 +436,32 @@ describe('CommercialPromotionCopyGenerationService', () => {
       ['Loja verificada'],
     );
     expect(repository.context!.product.productName).toBe(originalProductName);
-    expect(repository.claimInputs[0]?.inputFingerprint).toBeTruthy();
+    expect(repository.claimInputs[0]?.inputFingerprint).toBe(
+      commercialAiCopyInputFingerprint({
+        promptVersion: 'commercial-promotion-copy-v13',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        inputSanitizationVersion:
+          'commercial-promotion-copy-input-sanitization-v1',
+        modelProductName: 'Air Fryer 6,5L 1700W 127V',
+        provider: 'openai',
+        model: 'selected-model',
+        campaignId: repository.context!.campaign.id,
+        nicheId: repository.context!.niche.id,
+        candidateId: repository.context!.candidate.id,
+        productId: repository.context!.product.id,
+        snapshotId: repository.context!.snapshot.id,
+        snapshotRevision: repository.context!.snapshot.revision,
+        snapshotFingerprint: repository.context!.snapshot.fingerprint,
+        promotionSignals: repository.context!.candidate.promotionSignals,
+        priceDropPercent: repository.context!.candidate.priceDropPercent,
+        productName: originalProductName,
+        shopName: repository.context!.product.shopName,
+        price: repository.context!.product.price,
+        discountRate: repository.context!.product.discountRate,
+        affiliateLink,
+        maximumLength: 1000,
+      }),
+    );
   });
 
   it('falha fechado antes do provider quando a sanitização remove toda a identidade', async () => {
