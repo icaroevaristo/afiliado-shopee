@@ -78,7 +78,10 @@ export const createCommercialAutomationQueue = (connection: IORedis) =>
   });
 
 export type PipelineProductJob = { filters?: ProductFilters };
-export type WhatsAppDispatchJob = { dispatchId: string };
+export type WhatsAppDispatchJob = {
+  dispatchId: string;
+  instanceName?: string;
+};
 export type CommercialAutomationJob = { mode: CommercialAutomationMode };
 
 export const enqueuePipelineProduct = (

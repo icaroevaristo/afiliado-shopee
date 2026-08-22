@@ -2,6 +2,7 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
   duplicateLogicalGroupFingerprints,
+  isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
 import type {
@@ -210,7 +211,8 @@ export class CommercialAutomationPolicyService {
     private readonly dependencies: {
       settings: CommercialAutomationSettingsRepository;
       history: CommercialAutomationHistoryRepository;
-      groups: Pick<WhatsAppGroupDirectoryRepository, 'list'>;
+      groups: Pick<WhatsAppGroupDirectoryRepository, 'list'> &
+        Partial<Pick<WhatsAppGroupDirectoryRepository, 'listAll'>>;
       instanceName: string;
       config: CommercialAutomationPolicyConfig;
       clock?: () => Date;
@@ -245,10 +247,12 @@ export class CommercialAutomationPolicyService {
     const dayRange = getLocalDayRange(now, this.dependencies.config.timezone);
     const [groups, ambiguousExecution, activeExecution, staleExecution] =
       await Promise.all([
-        this.dependencies.groups.list(this.dependencies.instanceName, {
-          active: true,
-          available: true,
-        }),
+        this.dependencies.groups.listAll
+          ? this.dependencies.groups.listAll({ active: true, available: true })
+          : this.dependencies.groups.list(this.dependencies.instanceName, {
+              active: true,
+              available: true,
+            }),
         this.dependencies.history.hasAmbiguousCommercialExecution(excludedAmbiguousRunId),
         this.dependencies.history.hasActiveCommercialExecution(
           now,
@@ -258,7 +262,10 @@ export class CommercialAutomationPolicyService {
         this.dependencies.history.hasStaleCommercialExecution(now),
       ]);
     const authorizedGroups = groups.filter((group) =>
-      isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
+      this.dependencies.groups.listAll
+        ? typeof group.assignedInstanceName === 'string' &&
+          isCommercialAssignedGroup(group, group.assignedInstanceName)
+        : isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
     );
     const duplicateFingerprints = duplicateLogicalGroupFingerprints(
       authorizedGroups,

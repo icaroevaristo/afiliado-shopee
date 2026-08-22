@@ -949,8 +949,9 @@ describe('Phase 9 E2E local sem SEND', () => {
           commercialRunId: input.runId,
           dispatchId: input.dispatch.id,
           jobId: input.jobId,
-          status: 'PENDING',
-          failureCode: null,
+      status: 'PENDING',
+      instanceName: null,
+      failureCode: null,
           createdAt: input.confirmedAt,
           publishedAt: null,
         };

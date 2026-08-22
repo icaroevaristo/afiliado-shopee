@@ -87,6 +87,10 @@ const createTransactionalPrisma = (failure?: Stage) => {
             draft.run.status = 'STARTED';
             return { count: 1 };
           },
+          findUnique: async () => ({
+            executionId: null,
+            instanceName: null,
+          }),
           update: async ({ data }: { data: { dispatchId: string } }) => {
             fail('run');
             draft.run.dispatchId = data.dispatchId;
@@ -154,12 +158,71 @@ describe('PrismaCommercialDispatchOutboxRepository transaction', () => {
     });
   });
 
+  it('persiste a mesma instancia no dispatch e no outbox do run automatizado', async () => {
+    const dispatchCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => data);
+    const outboxCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+      ...data,
+      status: 'PENDING',
+      failureCode: null,
+      createdAt: confirmedAt,
+      publishedAt: null,
+    }));
+    const transaction = {
+      commercialPipelineRun: {
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        findUnique: vi.fn(async () => ({
+          executionId: 'execution-1',
+          instanceName: 'instance-a',
+        })),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+      },
+      generatedCopy: {
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+      },
+      whatsAppDispatch: { create: dispatchCreate },
+      commercialDispatchOutbox: { create: outboxCreate },
+    };
+    const repository = new PrismaCommercialDispatchOutboxRepository({
+      $transaction: async (callback: (value: unknown) => Promise<unknown>) =>
+        callback(transaction),
+    } as never);
+
+    await expect(
+      repository.createPendingConfirmation({
+        ...input,
+        instanceName: 'instance-a',
+      }),
+    ).resolves.toMatchObject({
+      id: 'outbox-id',
+      status: 'PENDING',
+    });
+    expect(dispatchCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        instanceName: 'instance-a',
+        status: 'PENDING',
+        attemptCount: 0,
+      }),
+    });
+    expect(outboxCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        instanceName: 'instance-a',
+        commercialRunId: 'run-id',
+        dispatchId: 'dispatch-id',
+        jobId: 'job-id',
+      }),
+    });
+  });
+
   it('reserva copy candidate-scoped sem criar GeneratedCopy legacy', async () => {
     const generatedCopyCreate = vi.fn();
     const candidateUpdateMany = vi.fn(async () => ({ count: 1 }));
     const transaction = {
       commercialPipelineRun: {
         updateMany: vi.fn(async () => ({ count: 1 })),
+        findUnique: vi.fn(async () => ({
+          executionId: null,
+          instanceName: null,
+        })),
         update: vi.fn(async ({ data }: { data: { dispatchId: string } }) => ({
           dispatchId: data.dispatchId,
         })),

@@ -120,6 +120,8 @@ model WhatsAppDestination {
   available              Boolean                 @default(true)
   fingerprint            String?
   sourceInstanceName     String?
+  assignedInstanceName   String?
+  assignedInstance       WhatsAppInstance?       @relation(fields: [assignedInstanceName], references: [name], onDelete: Restrict)
   memberCount            Int?
   ownerIsParticipant     Boolean?
   discoveredAt           DateTime?
@@ -131,7 +133,19 @@ model WhatsAppDestination {
   updatedAt              DateTime                @updatedAt
 
   @@unique([destination, sourceInstanceName])
+  @@index([assignedInstanceName])
   @@index([type, active, available])
+}
+
+model WhatsAppInstance {
+  name                      String                       @id
+  active                    Boolean                      @default(true)
+  destinations              WhatsAppDestination[]
+  commercialPipelineRuns    CommercialPipelineRun[]
+  whatsappDispatches        WhatsAppDispatch[]
+  commercialDispatchOutboxes CommercialDispatchOutbox[]
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
 }
 
 model CommercialNiche {
@@ -264,6 +278,8 @@ model WhatsAppDispatch {
   generatedCopy         GeneratedCopy             @relation(fields: [generatedCopyId], references: [id], onDelete: Cascade)
   destinationId         String
   destination           WhatsAppDestination       @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  instanceName          String?
+  instance               WhatsAppInstance?        @relation(fields: [instanceName], references: [name], onDelete: Restrict)
   externalMessageId     String?
   status                WhatsAppDispatchStatus    @default(PENDING)
   attemptCount          Int                       @default(0)
@@ -281,6 +297,7 @@ model WhatsAppDispatch {
   @@index([status])
   @@index([status, sentAt])
   @@index([destinationId, status, sentAt])
+  @@index([instanceName])
 }
 
 model WhatsAppDispatchManualRecovery {
@@ -335,6 +352,8 @@ model Coupon {
 model CommercialPipelineRun {
   id                    String                         @id @default(cuid())
   executionId           String?                        @unique
+  instanceName          String?
+  instance               WhatsAppInstance?             @relation(fields: [instanceName], references: [name], onDelete: Restrict)
   mode                  CommercialPipelineRunMode
   status                CommercialPipelineRunStatus
   productId             String?
@@ -374,6 +393,7 @@ model CommercialPipelineRun {
   @@index([groupDestinationId])
   @@index([finalStatus])
   @@index([investigationRequired])
+  @@index([instanceName])
 }
 
 model CommercialDispatchOutbox {
@@ -383,12 +403,15 @@ model CommercialDispatchOutbox {
   dispatchId      String                         @unique
   dispatch        WhatsAppDispatch               @relation(fields: [dispatchId], references: [id], onDelete: Restrict)
   jobId           String                         @unique
+  instanceName    String?
+  instance       WhatsAppInstance?              @relation(fields: [instanceName], references: [name], onDelete: Restrict)
   status          CommercialDispatchOutboxStatus @default(PENDING)
   failureCode     String?
   createdAt       DateTime                       @default(now())
   publishedAt     DateTime?
 
   @@index([status, createdAt])
+  @@index([instanceName])
 }
 
 model CommercialAutomationSettings {

@@ -4,6 +4,7 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { CommercialCopyGenerator } from './commercial-copy-service';
 import {
   duplicateLogicalGroupFingerprints,
+  isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
 import { commercialProductRejections } from './commercial-offer-eligibility';
@@ -12,6 +13,7 @@ import type {
   CommercialDispatchOutboxRepository,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
+  WhatsAppInstanceRepository,
   ShopeeOfferRepository,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupRecord,
@@ -58,6 +60,7 @@ export type CommercialPipelineConfirmationServiceOptions = {
   runs: CommercialPipelineRunRepository;
   offers: ShopeeOfferRepository;
   groups: WhatsAppGroupDirectoryRepository;
+  instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   outboxes: CommercialDispatchOutboxRepository;
   deliveryHistory: CommercialDeliveryHistoryRepository;
   copy: CommercialCopyGenerator;
@@ -218,12 +221,17 @@ export class CommercialPipelineConfirmationService {
       }
 
       const groups = (
-        await this.options.groups.list(this.options.instanceName, {
-          active: true,
-          available: true,
-        })
+        this.options.groups.listAll
+          ? await this.options.groups.listAll({ active: true, available: true })
+          : await this.options.groups.list(this.options.instanceName, {
+              active: true,
+              available: true,
+            })
       ).filter((group): group is WhatsAppGroupRecord =>
-        isCommercialAuthorizedGroup(group, this.options.instanceName),
+        this.options.groups.listAll
+          ? typeof group.assignedInstanceName === 'string' &&
+            isCommercialAssignedGroup(group, group.assignedInstanceName)
+          : isCommercialAuthorizedGroup(group, this.options.instanceName),
       );
       if (duplicateLogicalGroupFingerprints(groups).length > 0) {
         return changed(
@@ -246,6 +254,29 @@ export class CommercialPipelineConfirmationService {
         );
       }
       if (
+        run.executionId &&
+        (!run.instanceName ||
+          group.assignedInstanceName !== run.instanceName ||
+          !this.options.instances)
+      ) {
+        return changed(
+          'Lifecycle comercial nao possui assignment sticky valida',
+          'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
+        );
+      }
+      if (run.instanceName) {
+        const instance = await this.options.instances?.findByName(
+          run.instanceName,
+        );
+        if (!instance || !instance.active) {
+          return changed(
+            'Instancia do lifecycle comercial esta indisponivel',
+            'COMMERCIAL_INSTANCE_INACTIVE',
+          );
+        }
+      }
+      const stickyInstanceName = run.instanceName ?? null;
+      if (
         await this.options.deliveryHistory.wasProductSentToGroup(
           run.productId,
           group.id,
@@ -263,12 +294,14 @@ export class CommercialPipelineConfirmationService {
               outboxId: ids.outboxId,
               runId: run.id,
               confirmedAt,
+              instanceName: stickyInstanceName,
               existingGeneratedCopyId,
               dispatch: {
                 id: ids.dispatchId,
                 productId: run.productId,
                 generatedCopyId: existingGeneratedCopyId,
                 destinationId: group.id,
+                instanceName: stickyInstanceName,
               },
               jobId: ids.jobId,
             }
@@ -276,6 +309,7 @@ export class CommercialPipelineConfirmationService {
               outboxId: ids.outboxId,
               runId: run.id,
               confirmedAt,
+              instanceName: stickyInstanceName,
               copy: {
                 id: ids.copyId,
                 productId: run.productId,
@@ -289,6 +323,7 @@ export class CommercialPipelineConfirmationService {
                 productId: run.productId,
                 generatedCopyId: ids.copyId,
                 destinationId: group.id,
+                instanceName: stickyInstanceName,
               },
               jobId: ids.jobId,
             },

@@ -61,6 +61,8 @@ import type {
   WhatsAppDestinationRecord,
   WhatsAppDestinationRepository,
   WhatsAppDestinationUpdate,
+  WhatsAppInstanceRecord,
+  WhatsAppInstanceRepository,
   WhatsAppDispatchCreateData,
   WhatsAppDispatchDetails,
   WhatsAppDispatchFilters,
@@ -852,6 +854,7 @@ const commercialCampaignInclude = {
       fingerprint: true,
       active: true,
       available: true,
+      assignedInstanceName: true,
     },
   },
 };
@@ -892,6 +895,7 @@ const mapCommercialGroupCampaign = (
           fingerprint: anchor.fingerprint,
           active: anchor.active,
           available: anchor.available,
+          assignedInstanceName: anchor.assignedInstanceName,
         }
       : null,
   };
@@ -1090,6 +1094,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
         active: true,
         available: true,
         sourceInstanceName: { not: null },
+        assignedInstanceName: { not: null },
       },
       select: { id: true },
     });
@@ -1123,6 +1128,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
               active: true,
               available: true,
               sourceInstanceName: { not: null },
+              assignedInstanceName: { not: null },
             },
             select: { id: true },
           });
@@ -3160,6 +3166,25 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
           throw new CommercialConfirmationNotClaimedError();
         }
 
+        const currentRun = await transaction.commercialPipelineRun.findUnique({
+          where: { id: input.runId },
+          select: { executionId: true, instanceName: true },
+        });
+        const requestedInstanceName = input.instanceName ?? null;
+        if (
+          !currentRun ||
+          (currentRun.executionId !== null &&
+            (!currentRun.instanceName ||
+              currentRun.instanceName !== requestedInstanceName)) ||
+          (currentRun.executionId === null &&
+            currentRun.instanceName !== requestedInstanceName)
+        ) {
+          throw new AppError(
+            'Identidade da instancia do lifecycle comercial e inconsistente',
+            'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+          );
+        }
+
         if ('existingGeneratedCopyId' in input) {
           const existingCopy = await transaction.generatedCopy.findUnique({
             where: { id: input.existingGeneratedCopyId },
@@ -3220,7 +3245,12 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
           await transaction.generatedCopy.create({ data: input.copy });
         }
         await transaction.whatsAppDispatch.create({
-          data: { ...input.dispatch, status: 'PENDING', attemptCount: 0 },
+          data: {
+            ...input.dispatch,
+            instanceName: requestedInstanceName,
+            status: 'PENDING',
+            attemptCount: 0,
+          },
         });
         const outbox = await transaction.commercialDispatchOutbox.create({
           data: {
@@ -3228,6 +3258,7 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
             commercialRunId: input.runId,
             dispatchId: input.dispatch.id,
             jobId: input.jobId,
+            instanceName: requestedInstanceName,
             status: 'PENDING',
           },
         });
@@ -3286,6 +3317,15 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
       : null;
   }
 
+  async findByDispatchId(
+    dispatchId: string,
+  ): Promise<CommercialDispatchOutboxRecord | null> {
+    const record = await this.prisma.commercialDispatchOutbox.findUnique({
+      where: { dispatchId },
+    });
+    return record ? { ...record } : null;
+  }
+
   async findPublicationContext(
     id: string,
   ): Promise<CommercialDispatchOutboxPublicationContext | null> {
@@ -3301,9 +3341,12 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
             jobId: true,
             finalStatus: true,
             investigationRequired: true,
+            instanceName: true,
           },
         },
-        dispatch: { select: { id: true, status: true, attemptCount: true } },
+        dispatch: {
+          select: { id: true, status: true, attemptCount: true, instanceName: true },
+        },
       },
     });
     if (!record) return null;
@@ -4334,7 +4377,8 @@ export class PrismaGeneratedCopyRepository implements GeneratedCopyRepository {
 
 export class PrismaWhatsAppDestinationRepository implements WhatsAppDestinationRepository {
   constructor(
-    private readonly prisma: Pick<DatabaseClient, 'whatsAppDestination'>,
+    private readonly prisma: Pick<DatabaseClient, 'whatsAppDestination'> &
+      Partial<Pick<DatabaseClient, 'whatsAppInstance'>>,
   ) {}
 
   async findById(id: string): Promise<WhatsAppDestinationRecord | null> {
@@ -4383,11 +4427,76 @@ export class PrismaWhatsAppDestinationRepository implements WhatsAppDestinationR
       return null;
     }
   }
+
+  async assignToInstance(
+    destinationId: string,
+    instanceName: string,
+  ): Promise<WhatsAppDestinationRecord | null> {
+    if (!this.prisma.whatsAppInstance) return null;
+    const instance = await this.prisma.whatsAppInstance.findUnique({
+      where: { name: instanceName },
+      select: { name: true },
+    });
+    if (!instance) return null;
+    const destination = await this.prisma.whatsAppDestination.findFirst({
+      where: { id: destinationId },
+      select: { id: true, type: true },
+    });
+    if (!destination || destination.type !== 'GROUP') return null;
+    return (await this.prisma.whatsAppDestination.update({
+      where: { id: destinationId },
+      data: { assignedInstanceName: instanceName },
+    })) as WhatsAppDestinationRecord;
+  }
+}
+
+export class PrismaWhatsAppInstanceRepository
+  implements WhatsAppInstanceRepository
+{
+  constructor(
+    private readonly prisma: Pick<DatabaseClient, 'whatsAppInstance'>,
+  ) {}
+
+  async list(): Promise<WhatsAppInstanceRecord[]> {
+    return (await this.prisma.whatsAppInstance.findMany({
+      orderBy: { name: 'asc' },
+    })) as WhatsAppInstanceRecord[];
+  }
+
+  async findByName(name: string): Promise<WhatsAppInstanceRecord | null> {
+    return (await this.prisma.whatsAppInstance.findUnique({
+      where: { name },
+    })) as WhatsAppInstanceRecord | null;
+  }
+
+  async upsert(name: string): Promise<WhatsAppInstanceRecord> {
+    return (await this.prisma.whatsAppInstance.upsert({
+      where: { name },
+      create: { name },
+      update: {},
+    })) as WhatsAppInstanceRecord;
+  }
+
+  async setActive(
+    name: string,
+    active: boolean,
+  ): Promise<WhatsAppInstanceRecord | null> {
+    try {
+      return (await this.prisma.whatsAppInstance.update({
+        where: { name },
+        data: { active },
+      })) as WhatsAppInstanceRecord;
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      throw error;
+    }
+  }
 }
 
 export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDirectoryRepository {
   constructor(
-    private readonly prisma: Pick<DatabaseClient, 'whatsAppDestination'>,
+    private readonly prisma: Pick<DatabaseClient, 'whatsAppDestination'> &
+      Partial<Pick<DatabaseClient, 'whatsAppInstance'>>,
   ) {}
 
   async findById(id: string): Promise<WhatsAppGroupRecord | null> {
@@ -4433,9 +4542,31 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
     })) as WhatsAppGroupRecord[];
   }
 
+  async listAll(
+    filters: WhatsAppGroupFilters = {},
+  ): Promise<WhatsAppGroupRecord[]> {
+    return (await this.prisma.whatsAppDestination.findMany({
+      where: {
+        type: 'GROUP',
+        active: filters.active,
+        available: filters.available,
+      },
+      orderBy: { name: 'asc' },
+    })) as WhatsAppGroupRecord[];
+  }
+
   async create(data: WhatsAppGroupCreateData): Promise<WhatsAppGroupRecord> {
+    const assignedInstanceName =
+      data.assignedInstanceName ?? data.sourceInstanceName ?? null;
+    if (assignedInstanceName && this.prisma.whatsAppInstance) {
+      await this.prisma.whatsAppInstance.upsert({
+        where: { name: assignedInstanceName },
+        create: { name: assignedInstanceName },
+        update: {},
+      });
+    }
     return (await this.prisma.whatsAppDestination.create({
-      data,
+      data: { ...data, assignedInstanceName },
     })) as WhatsAppGroupRecord;
   }
 
@@ -4480,6 +4611,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         productId: true,
         generatedCopyId: true,
         destinationId: true,
+        instanceName: true,
         externalMessageId: true,
         status: true,
         attemptCount: true,
@@ -4496,6 +4628,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
             available: true,
             fingerprint: true,
             sourceInstanceName: true,
+            assignedInstanceName: true,
           },
         },
         product: {
@@ -4579,11 +4712,12 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       return null;
     }
 
+    const promotionCandidates = record.generatedCopy.promotionCandidates ?? [];
     return {
       ...record,
       generatedCopy: {
         ...record.generatedCopy,
-        promotionCandidates: record.generatedCopy.promotionCandidates.map(
+        promotionCandidates: promotionCandidates.map(
           (candidate) => ({
             ...candidate,
             product: {

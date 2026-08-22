@@ -268,8 +268,9 @@ describe('commercial candidate dispatch integration', () => {
           commercialRunId: input.runId,
           dispatchId: input.dispatch.id,
           jobId: input.jobId,
-          status: 'PENDING',
-          failureCode: null,
+      status: 'PENDING',
+      instanceName: null,
+      failureCode: null,
           createdAt: input.confirmedAt,
           publishedAt: null,
         };

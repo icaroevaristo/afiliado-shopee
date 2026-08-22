@@ -45,6 +45,7 @@ import {
   PrismaProductRepository,
   PrismaShopeeOfferRepository,
   PrismaWhatsAppDestinationRepository,
+  PrismaWhatsAppInstanceRepository,
   PrismaWhatsAppDispatchRepository,
   PrismaWhatsAppGroupDirectoryRepository,
 } from './prisma-repositories';
@@ -67,6 +68,7 @@ import type {
   ProductRepository,
   ShopeeOfferRepository,
   WhatsAppDestinationRepository,
+  WhatsAppInstanceRepository,
   WhatsAppDispatchRepository,
   WhatsAppGroupDirectoryRepository,
 } from './repositories';
@@ -94,6 +96,7 @@ export type ApplicationRepositories = {
   products: ProductRepository;
   generatedCopies: GeneratedCopyRepository;
   whatsappDestinations: WhatsAppDestinationRepository;
+  whatsappInstances: WhatsAppInstanceRepository;
   whatsappDispatches: WhatsAppDispatchRepository;
   whatsappGroups: WhatsAppGroupDirectoryRepository;
   shopeeOffers: ShopeeOfferRepository;
@@ -176,6 +179,7 @@ export const createCommercialPipelineConfirmationService = ({
     | 'commercialRuns'
     | 'commercialDeliveryHistory'
     | 'commercialDispatchOutboxes'
+    | 'whatsappInstances'
   >;
   queue: CommercialDispatchOutboxQueue;
   instanceName: string;
@@ -186,6 +190,7 @@ export const createCommercialPipelineConfirmationService = ({
   new CommercialPipelineConfirmationService({
     offers: repositories.shopeeOffers,
     groups: repositories.whatsappGroups,
+    instances: repositories.whatsappInstances,
     outboxes: repositories.commercialDispatchOutboxes,
     runs: repositories.commercialRuns,
     deliveryHistory: repositories.commercialDeliveryHistory,
@@ -276,6 +281,7 @@ export const createSenderService = ({
   messageBuilder,
   draftService,
   groupSendPolicy,
+  instanceName,
 }: {
   repositories: Pick<ApplicationRepositories, 'whatsappDispatches'>;
   whatsAppProvider: WhatsAppProvider;
@@ -285,6 +291,7 @@ export const createSenderService = ({
   >[0]['messageBuilder'];
   draftService?: CommercialMessageDraftService;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
+  instanceName?: string;
 }) =>
   new SenderService({
     dispatches: repositories.whatsappDispatches,
@@ -293,6 +300,7 @@ export const createSenderService = ({
     messageBuilder,
     draftService,
     groupSendPolicy,
+    instanceName,
   });
 
 export const createPrismaRepositories = (
@@ -304,6 +312,7 @@ export const createPrismaRepositories = (
     products: new PrismaProductRepository(prisma),
     generatedCopies: new PrismaGeneratedCopyRepository(prisma),
     whatsappDestinations: new PrismaWhatsAppDestinationRepository(prisma),
+    whatsappInstances: new PrismaWhatsAppInstanceRepository(prisma),
     whatsappDispatches: new PrismaWhatsAppDispatchRepository(prisma),
     whatsappGroups: new PrismaWhatsAppGroupDirectoryRepository(prisma),
     shopeeOffers: new PrismaShopeeOfferRepository(prisma),

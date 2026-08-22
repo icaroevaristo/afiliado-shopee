@@ -28,6 +28,9 @@ const group = (
 describe('commercial group selection identity', () => {
   it('autoriza somente GROUP ativo, disponivel, da instancia e com fingerprint valido', () => {
     expect(isCommercialAuthorizedGroup(group(), INSTANCE)).toBe(true);
+    expect(
+      isCommercialAuthorizedGroup(group({ assignedInstanceName: null }), INSTANCE),
+    ).toBe(true);
     expect(isCommercialAuthorizedGroup(group({ active: false }), INSTANCE)).toBe(false);
     expect(isCommercialAuthorizedGroup(group({ available: false }), INSTANCE)).toBe(false);
     expect(

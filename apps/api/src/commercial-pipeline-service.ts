@@ -39,6 +39,7 @@ import type { ScoreService } from './score-service';
 
 export type CommercialPipelineInput = {
   executionId?: string | null;
+  instanceName?: string | null;
   source?: 'MOCK' | 'MANUAL' | 'OFFICIAL';
   categoryId?: string;
   minPrice?: number;
@@ -99,6 +100,7 @@ export type CommercialPipelineDryRunResult = {
 
 export type CommercialPromotionCandidatePipelineSelection = {
   executionId: string;
+  instanceName?: string | null;
   candidate: Pick<
     CommercialPromotionCandidateRecord,
     | 'id'
@@ -112,7 +114,10 @@ export type CommercialPromotionCandidatePipelineSelection = {
     productName: string;
     price: string;
   };
-  group: Pick<WhatsAppGroupRecord, 'id' | 'name' | 'fingerprint'>;
+  group: Pick<
+    WhatsAppGroupRecord,
+    'id' | 'name' | 'fingerprint' | 'assignedInstanceName'
+  >;
   campaign: string;
   copyPreview: string;
   candidateCount: number;
@@ -288,6 +293,7 @@ export class CommercialPipelineService {
       mode: 'DRY_RUN',
       status: 'STARTED',
       executionId: input.executionId ?? null,
+      instanceName: input.instanceName ?? null,
       candidateCount: 0,
       eligibleCount: 0,
       rejectedCount: 0,
@@ -636,10 +642,21 @@ export class CommercialPipelineService {
       `Score minimo: ${input.candidate.minimumScoreUsed}`,
       `Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`,
     ];
+    const instanceName =
+      input.instanceName ??
+      input.group.assignedInstanceName ??
+      this.options.instanceName;
+    if (!instanceName) {
+      throw new AppError(
+        'Campanha comercial nao possui instancia atribuida',
+        'COMMERCIAL_INSTANCE_ASSIGNMENT_REQUIRED',
+      );
+    }
     const run = await this.options.runs.create({
       mode: 'DRY_RUN',
       status: 'STARTED',
       executionId: input.executionId,
+      instanceName,
       candidateCount: input.candidateCount,
       eligibleCount: input.eligibleCount,
       rejectedCount: input.rejectedCount,

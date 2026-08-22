@@ -143,6 +143,7 @@ describe('commercial reservation lease handoff integration', () => {
     let run: CommercialPipelineRunRecord = {
       id: runId,
       executionId,
+      instanceName: 'affiliate-bot',
       mode: 'CONFIRMED',
       status: 'STARTED',
       productId: 'product-handoff-integration',
@@ -168,6 +169,7 @@ describe('commercial reservation lease handoff integration', () => {
     };
     let dispatch: WhatsAppDispatchRecord = {
       id: dispatchId,
+      instanceName: 'affiliate-bot',
       productId: 'product-handoff-integration',
       generatedCopyId: copyId,
       destinationId: 'destination-handoff-integration',
@@ -248,6 +250,7 @@ describe('commercial reservation lease handoff integration', () => {
         available: true,
         fingerprint: 'fingerprint-handoff-integration',
         sourceInstanceName: 'affiliate-bot',
+        assignedInstanceName: 'affiliate-bot',
       },
       product: {
         comissao: 10,
@@ -356,6 +359,33 @@ describe('commercial reservation lease handoff integration', () => {
       commercialGroupCampaigns: {
         renewAttempt: (input) => attempt.repository.renew(input),
       },
+      commercialDispatchOutboxes: {
+        findByDispatchId: async (id) =>
+          id === dispatchId
+            ? {
+                id: 'outbox-handoff-integration',
+                commercialRunId: runId,
+                dispatchId,
+                jobId,
+                instanceName: 'affiliate-bot',
+                status: 'PUBLISHED' as const,
+                failureCode: null,
+                createdAt: startedAt,
+                publishedAt: now,
+              }
+            : null,
+      },
+      whatsappInstances: {
+        findByName: async (name) =>
+          name === 'affiliate-bot'
+            ? {
+                name,
+                active: true,
+                createdAt: startedAt,
+                updatedAt: startedAt,
+              }
+            : null,
+      },
       commercialPromotions: promotions,
     };
     const groupSendPolicy = new WhatsAppGroupSendPolicy({
@@ -373,11 +403,12 @@ describe('commercial reservation lease handoff integration', () => {
       {
         id: jobId,
         name: JOB_NAMES.whatsappDispatch,
-        data: { dispatchId },
+        data: { dispatchId, instanceName: 'affiliate-bot' },
       } satisfies Pick<import('bullmq').Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
       {
         repositories,
         whatsAppProvider: provider,
+        whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
         groupSendPolicy,
         draftService: {
           createDraft: vi.fn().mockReturnValue({

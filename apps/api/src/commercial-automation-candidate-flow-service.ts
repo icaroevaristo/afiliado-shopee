@@ -20,6 +20,7 @@ import {
 } from './commercial-message-draft-service';
 import {
   duplicateLogicalGroupFingerprints,
+  isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
 import type {
@@ -132,7 +133,8 @@ export type CommercialAutomationBenignNoCandidateCode =
   (typeof COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES)[number];
 
 type CandidateFlowOptions = {
-  groups: Pick<WhatsAppGroupDirectoryRepository, 'list'>;
+  groups: Pick<WhatsAppGroupDirectoryRepository, 'list'> &
+    Partial<Pick<WhatsAppGroupDirectoryRepository, 'listAll'>>;
   campaigns: Pick<
     CommercialGroupCampaignRepository,
     'list' | 'findByLogicalGroupFingerprint'
@@ -233,12 +235,18 @@ export class CommercialAutomationCandidateFlowService {
   }
 
   private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
-    const groups = (await this.options.groups.list(this.options.instanceName, {
-      active: true,
-      available: true,
-    })).filter((group) =>
-      isCommercialAuthorizedGroup(group, this.options.instanceName),
-    );
+    const groups = this.options.groups.listAll
+      ? (await this.options.groups.listAll({ active: true, available: true })).filter(
+        (group) =>
+            typeof group.assignedInstanceName === 'string' &&
+            isCommercialAssignedGroup(group, group.assignedInstanceName),
+        )
+      : (await this.options.groups.list(this.options.instanceName, {
+          active: true,
+          available: true,
+        })).filter((group) =>
+          isCommercialAuthorizedGroup(group, this.options.instanceName),
+        );
     if (groups.length === 0) {
       throw appError(
         'Nenhum grupo autorizado disponivel',
@@ -267,8 +275,12 @@ export class CommercialAutomationCandidateFlowService {
     const groups = await this.listAuthorizedGroups();
     const group = groups.find(
       (candidate) =>
-        candidate.id === target.groupId &&
-        candidate.fingerprint === target.logicalGroupFingerprint,
+      candidate.id === target.groupId &&
+        candidate.fingerprint === target.logicalGroupFingerprint &&
+        (!target.instanceName ||
+          candidate.assignedInstanceName === target.instanceName ||
+          (candidate.assignedInstanceName === undefined &&
+            candidate.sourceInstanceName === target.instanceName)),
     );
     if (!group) {
       throw appError(
@@ -304,6 +316,8 @@ export class CommercialAutomationCandidateFlowService {
         targets.push({
           groupId: group.id,
           groupName: group.name,
+          instanceName:
+            group.assignedInstanceName ?? group.sourceInstanceName,
           logicalGroupFingerprint: group.fingerprint,
           campaignId: campaign.id,
           nicheId: campaign.nicheId,
@@ -908,6 +922,7 @@ export class CommercialAutomationCandidateFlowService {
       },
       group,
       executionId: options.executionId,
+      instanceName: group.assignedInstanceName ?? group.sourceInstanceName,
       campaign: 'commercial-automation',
       copyPreview: draft.caption,
       candidateCount: selection.queue.candidateCount,

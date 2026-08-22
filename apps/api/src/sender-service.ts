@@ -28,6 +28,7 @@ export type SenderServiceOptions = {
   messageBuilder?: (copy: WhatsAppDispatchDetails['generatedCopy']) => string;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
+  instanceName?: string;
 };
 
 
@@ -250,7 +251,10 @@ export class SenderService {
           'WHATSAPP_GROUP_POLICY_REQUIRED',
         );
       }
-      this.options.groupSendPolicy.assertAuthorized(dispatch.destination);
+      this.options.groupSendPolicy.assertAuthorized(
+        dispatch.destination,
+        this.options.instanceName,
+      );
     }
 
     const claimed = await this.options.dispatches.markAttemptPending(

@@ -28,7 +28,11 @@ type CommercialWorkerInfrastructure = {
   scheduler: CommercialAutomationScheduler;
   confirmationQueue?: {
     hasJob(jobId: string): Promise<boolean>;
-    enqueue(dispatchId: string, jobId: string): Promise<void>;
+    enqueue(
+      dispatchId: string,
+      jobId: string,
+      instanceName?: string | null,
+    ): Promise<void>;
   };
   close(): Promise<void>;
 };
@@ -149,10 +153,10 @@ export const createCommercialWorkerInfrastructure = (
           async hasJob(jobId) {
             return Boolean(await whatsappQueue.getJob(jobId));
           },
-          async enqueue(dispatchId, jobId) {
+          async enqueue(dispatchId, jobId, instanceName) {
             await enqueueControlledWhatsAppDispatch(
               whatsappQueue,
-              { dispatchId },
+              { dispatchId, ...(instanceName ? { instanceName } : {}) },
               jobId,
             );
           },

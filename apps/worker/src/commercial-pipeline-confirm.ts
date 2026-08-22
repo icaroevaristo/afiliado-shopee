@@ -209,10 +209,10 @@ export const createRealCommercialConfirmRuntime = async (
     repositories,
     queue: {
       hasJob: async (jobId) => Boolean(await whatsappQueue.getJob(jobId)),
-      enqueue: async (dispatchId, jobId) => {
+      enqueue: async (dispatchId, jobId, instanceName) => {
         await enqueueControlledWhatsAppDispatch(
           whatsappQueue,
-          { dispatchId },
+          { dispatchId, ...(instanceName ? { instanceName } : {}) },
           jobId,
         );
       },

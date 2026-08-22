@@ -55,6 +55,7 @@ const confirmedContext = (
       dispatchId: 'dispatch-1',
       jobId: 'job-dispatch-1',
       status: 'PUBLISHED',
+      instanceName: null,
       failureCode: null,
       createdAt: NOW,
       publishedAt: NOW,

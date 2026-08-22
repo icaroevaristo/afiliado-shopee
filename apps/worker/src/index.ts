@@ -42,6 +42,9 @@ type CreatePipelineProductWorkerOptions = {
   hunterProvider?: HunterProvider;
   logger?: WorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  whatsAppProviderResolver?: (
+    instanceName: string,
+  ) => WhatsAppProvider | Promise<WhatsAppProvider>;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   reservationLeaseMilliseconds?: number;
 };
@@ -49,12 +52,17 @@ type CreatePipelineProductWorkerOptions = {
 type WorkerProcessorOptions = Required<
   Omit<
     CreatePipelineProductWorkerOptions,
-    'connection' | 'groupSendPolicy' | 'reservationLeaseMilliseconds'
+    | 'connection'
+    | 'groupSendPolicy'
+    | 'reservationLeaseMilliseconds'
+    | 'whatsAppProviderResolver'
   >
 > &
   Pick<
     CreatePipelineProductWorkerOptions,
-    'groupSendPolicy' | 'reservationLeaseMilliseconds'
+    | 'whatsAppProviderResolver'
+    | 'groupSendPolicy'
+    | 'reservationLeaseMilliseconds'
   >;
 
 type WorkerFactory = typeof createPipelineProductWorker;
@@ -132,6 +140,7 @@ export const createPipelineProductWorker = (
     hunterProvider: options.hunterProvider ?? new MockShopeeProvider(),
     logger: options.logger ?? consoleLogger,
     whatsAppProvider: options.whatsAppProvider,
+    whatsAppProviderResolver: options.whatsAppProviderResolver,
     groupSendPolicy: options.groupSendPolicy,
   };
 
@@ -223,6 +232,14 @@ export const startWorker = async (
     safeMode: config.EVOLUTION_SAFE_MODE,
     instanceName: config.EVOLUTION_INSTANCE_NAME,
   });
+  const providerResolver = (instanceName: string) =>
+    providerFactory(
+      { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
+      {
+        ...options.providerFactoryOptions,
+        logger,
+      },
+    );
 
   logger.info(
     {
@@ -306,6 +323,7 @@ export const startWorker = async (
       hunterProvider: options.hunterProvider,
       logger,
       whatsAppProvider,
+      whatsAppProviderResolver: providerResolver,
       groupSendPolicy,
       reservationLeaseMilliseconds:
         config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,

@@ -54,6 +54,7 @@ const queueJob = (state: string, attemptsMade: number, afterRetry = 'waiting') =
   let current = state;
   return {
     id: 'job-1', attemptsMade,
+    data: { dispatchId: 'dispatch-1', instanceName: 'instance-a' },
     getState: vi.fn(async () => current as never),
     retry: vi.fn(async () => { current = afterRetry; }),
   };
@@ -110,6 +111,7 @@ describe('WhatsAppDispatchManualRecoveryService review boundaries', () => {
     );
     expect(job.retry).toHaveBeenCalledTimes(1);
     expect(repo.markManualRecoveryRequeued).toHaveBeenCalledTimes(1);
+    expect(job.data).toEqual({ dispatchId: 'dispatch-1', instanceName: 'instance-a' });
   });
 
   it('restart after retry accepted with waiting PENDING/1 converges without another retry', async () => {

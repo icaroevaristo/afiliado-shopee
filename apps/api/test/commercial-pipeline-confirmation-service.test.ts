@@ -148,6 +148,7 @@ class MemoryOutboxes implements CommercialDispatchOutboxRepository {
       dispatchId: input.dispatch.id,
       jobId: input.jobId,
       status: 'PENDING',
+      instanceName: null,
       failureCode: null,
       createdAt: input.confirmedAt,
       publishedAt: null,
