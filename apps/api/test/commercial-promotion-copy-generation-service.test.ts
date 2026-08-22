@@ -504,7 +504,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
     expect(first).toMatchObject({ status: 'COPY_READY', cacheHit: false });
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
-    expect(first.promptVersion).toBe('commercial-promotion-copy-v10');
+    expect(first.promptVersion).toBe('commercial-promotion-copy-v11');
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
     expect(repository.attempts.size).toBe(1);
@@ -634,7 +634,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const historicalFingerprint = `historical-cache-${status.toLowerCase()}`;
       repository.attempts.set(historicalFingerprint, {
         ...legacyAttempt(status, historicalFingerprint),
-        promptVersion: 'commercial-promotion-copy-v10',
+        promptVersion: 'commercial-promotion-copy-v11',
         validationVersion: 'commercial-promotion-copy-validation-v4',
         failureCode,
       });
@@ -890,7 +890,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const fingerprint = `legacy-hash-${status.toLowerCase()}`;
       repository.attempts.set(fingerprint, {
         ...legacyAttempt(status, fingerprint),
-        promptVersion: 'commercial-promotion-copy-v10',
+        promptVersion: 'commercial-promotion-copy-v11',
         validationVersion: 'commercial-promotion-copy-validation-v4',
       });
       const provider = validProvider();
@@ -915,6 +915,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       currentFingerprint ??= fingerprint;
       return {
         ...legacyAttempt('FAILED', fingerprint),
+        promptVersion: 'commercial-promotion-copy-v11',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
         failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       };
     });
@@ -971,6 +973,15 @@ describe('CommercialPromotionCopyGenerationService', () => {
       failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       inputFingerprint: historicalFingerprint,
     });
+    const currentAttempt = [...repository.attempts.values()].find(
+      (attempt) => attempt.inputFingerprint !== historicalFingerprint,
+    );
+    expect(currentAttempt).toMatchObject({
+      promptVersion: 'commercial-promotion-copy-v11',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+      status: 'SUCCEEDED',
+    });
+    expect(currentAttempt?.inputFingerprint).not.toBe(historicalFingerprint);
     expect(repository.attempts.size).toBe(2);
   });
 
@@ -979,7 +990,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const historicalFingerprint = 'historical-succeeded-fingerprint';
     repository.attempts.set(historicalFingerprint, {
       ...legacyAttempt('SUCCEEDED', historicalFingerprint),
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v11',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     const provider = validProvider();
@@ -1010,7 +1021,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const historicalFingerprint = `historical-${status.toLowerCase()}-fingerprint`;
       repository.attempts.set(historicalFingerprint, {
         ...legacyAttempt(status, historicalFingerprint),
-        promptVersion: 'commercial-promotion-copy-v10',
+        promptVersion: 'commercial-promotion-copy-v11',
         validationVersion: 'commercial-promotion-copy-validation-v4',
         failureCode,
       });
@@ -1030,7 +1041,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     },
   );
 
-  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v10/v4', async () => {
+  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v11/v4', async () => {
     const repository = new MemoryCopyRepository();
     const v9Fingerprint = 'v9-fingerprint-mock-hash';
     repository.attempts.set(v9Fingerprint, {
@@ -1047,7 +1058,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v11',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
@@ -1076,7 +1087,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(result).toMatchObject({
       status: 'COPY_READY',
       cacheHit: false,
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v11',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.copies.size).toBe(2);
@@ -1086,7 +1097,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v3 bloqueie a geração v10', async () => {
+  it('não permite que uma tentativa FAILED v3 bloqueie a geração v11', async () => {
     const repository = new MemoryCopyRepository();
     const v3Fingerprint = 'v3-fingerprint-mock-hash';
     repository.attempts.set(v3Fingerprint, legacyAttempt('FAILED', v3Fingerprint));
@@ -1099,7 +1110,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v11',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.attempts.size).toBe(2);
@@ -1108,7 +1119,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v10/v4', async () => {
+  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v11/v4', async () => {
     const repository = new MemoryCopyRepository();
     const v6Fingerprint = 'v6-fingerprint-mock-hash';
     repository.attempts.set(v6Fingerprint, {
@@ -1125,7 +1136,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v10',
+      promptVersion: 'commercial-promotion-copy-v11',
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
@@ -1136,7 +1147,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('não permite que um attempt FAILED v1 bloqueie a geração v10, gerando um fingerprint diferente e não o apagando', async () => {
+  it('não permite que um attempt FAILED v1 bloqueie a geração v11, gerando um fingerprint diferente e não o apagando', async () => {
     const repository = new MemoryCopyRepository();
     // Simulate a failed attempt from v1
     const v1Fingerprint = 'v1-fingerprint-mock-hash';
@@ -1171,18 +1182,18 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository, provider);
 
     const report = await copyService.preview('candidate-internal');
-    expect(report.cacheAvailable).toBe(false); // v10 preview não encontra cache de v1
+    expect(report.cacheAvailable).toBe(false); // v11 preview não encontra cache de v1
 
     const result = await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
     expect(result.status).toBe('COPY_READY');
-    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v10
+    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v11
 
     const attempts = [...repository.attempts.values()];
-    expect(attempts.length).toBe(2); // v1 and v10 attempts
+    expect(attempts.length).toBe(2); // v1 and v11 attempts
     expect(attempts.find(a => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
 
     const newAttempt = attempts.find(a => a.id !== 'attempt-v1-failed')!;
-    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v10');
+    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v11');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
   });

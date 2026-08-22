@@ -628,4 +628,29 @@ describe('commercialAiCopyInputFingerprint', () => {
       }),
     ).toBe(promptV8);
   });
+
+  it('separa o fingerprint histórico V10 do contrato V11', () => {
+    const promptV10 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v10',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promotionSignals: [...input.promotionSignals],
+    });
+    const promptV11 = commercialAiCopyInputFingerprint({
+      ...input,
+      promptVersion: 'commercial-promotion-copy-v11',
+      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promotionSignals: [...input.promotionSignals],
+    });
+
+    expect(promptV11).not.toBe(promptV10);
+    expect(
+      commercialAiCopyInputFingerprint({
+        ...input,
+        promptVersion: 'commercial-promotion-copy-v11',
+        validationVersion: 'commercial-promotion-copy-validation-v4',
+        promotionSignals: [...input.promotionSignals],
+      }),
+    ).toBe(promptV11);
+  });
 });
