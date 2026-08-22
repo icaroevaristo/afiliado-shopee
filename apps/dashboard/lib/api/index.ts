@@ -1,6 +1,7 @@
 export * from './analytics';
 export * from './client';
 export * from './commercial-automation';
+export * from './commercial-lifecycle';
 export * from './commercial-campaigns';
 export * from './commercial-pipeline';
 export * from './copy';
