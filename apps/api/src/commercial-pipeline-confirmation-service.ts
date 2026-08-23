@@ -7,6 +7,10 @@ import {
   isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
+import {
+  assertActiveCommercialInstance,
+  requireAssignedInstanceName,
+} from './commercial-instance-stickiness';
 import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
   CommercialDeliveryHistoryRepository,
@@ -253,29 +257,29 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_GROUP_CHANGED',
         );
       }
-      if (
-        run.executionId &&
-        (!run.instanceName ||
-          group.assignedInstanceName !== run.instanceName ||
-          !this.options.instances)
-      ) {
+      const assignedInstanceName = requireAssignedInstanceName(group);
+      if (!run.instanceName || group.assignedInstanceName !== run.instanceName) {
         return changed(
           'Lifecycle comercial nao possui assignment sticky valida',
           'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
         );
       }
-      if (run.instanceName) {
-        const instance = await this.options.instances?.findByName(
-          run.instanceName,
+      if (assignedInstanceName !== run.instanceName) {
+        return changed(
+          'Lifecycle comercial possui instancia atribuida divergente',
+          'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
         );
-        if (!instance || !instance.active) {
-          return changed(
-            'Instancia do lifecycle comercial esta indisponivel',
-            'COMMERCIAL_INSTANCE_INACTIVE',
-          );
-        }
       }
-      const stickyInstanceName = run.instanceName ?? null;
+      try {
+        await assertActiveCommercialInstance(
+          this.options.instances,
+          assignedInstanceName,
+        );
+      } catch (error) {
+        if (error instanceof AppError) return changed(error.message, error.code);
+        throw error;
+      }
+      const stickyInstanceName = assignedInstanceName;
       if (
         await this.options.deliveryHistory.wasProductSentToGroup(
           run.productId,

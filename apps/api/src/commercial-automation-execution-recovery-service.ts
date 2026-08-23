@@ -3,10 +3,15 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
 import { sanitizeCommercialAutomationExecution } from './commercial-automation-execution-service';
+import {
+  assertActiveCommercialInstance,
+  assertCommercialStickyIdentity,
+} from './commercial-instance-stickiness';
 import type {
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRecoveryContext,
   CommercialAutomationExecutionRepository,
+  WhatsAppInstanceRepository,
 } from './repositories';
 
 export const COMMERCIAL_EXECUTION_ABANDONED_SAFE =
@@ -28,6 +33,7 @@ type RecoveryDecision = {
 type CommercialDispatchJobEvidence = {
   id: string;
   dispatchId: string;
+  instanceName?: string | null;
 };
 
 const baseIdentitiesAreConsistent = (
@@ -54,6 +60,7 @@ export class CommercialAutomationExecutionRecoveryService {
       jobs: {
         findJob(jobId: string): Promise<CommercialDispatchJobEvidence | null>;
       };
+      instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
       clock?: () => Date;
       minimumIntervalMinutes?: number;
     },
@@ -127,7 +134,8 @@ export class CommercialAutomationExecutionRecoveryService {
       };
     }
 
-    const decision = await this.classify(context);
+    const stickyJob = await this.validateStickyIdentity(context);
+    const decision = await this.classify(context, stickyJob);
     const recovered = await this.dependencies.executions.recoverStale(
       executionId,
       { ...decision, completedAt: now },
@@ -137,6 +145,7 @@ export class CommercialAutomationExecutionRecoveryService {
 
   private async classify(
     context: CommercialAutomationExecutionRecoveryContext,
+    stickyJob?: CommercialDispatchJobEvidence | null,
   ): Promise<RecoveryDecision> {
     const { execution, run } = context;
     if (!execution.commercialRunId) {
@@ -180,9 +189,9 @@ export class CommercialAutomationExecutionRecoveryService {
       return this.ambiguous();
     }
 
-    let job: CommercialDispatchJobEvidence | null;
+    let job: CommercialDispatchJobEvidence | null = stickyJob ?? null;
     try {
-      job = await this.dependencies.jobs.findJob(run.outbox!.jobId);
+      job ??= await this.dependencies.jobs.findJob(run.outbox!.jobId);
     } catch {
       return this.ambiguous();
     }
@@ -197,6 +206,58 @@ export class CommercialAutomationExecutionRecoveryService {
       );
     }
     return jobMatches ? { status: 'QUEUED' } : this.ambiguous();
+  }
+
+  private async validateStickyIdentity(
+    context: CommercialAutomationExecutionRecoveryContext,
+  ) {
+    const run = context.run;
+    if (!run) return null;
+    const persistedIdentity = assertCommercialStickyIdentity({
+      runInstanceName: run.instanceName,
+      dispatchInstanceName: run.dispatch?.instanceName,
+      outboxInstanceName: run.outbox?.instanceName,
+      destinationAssignedInstanceName:
+        run.dispatch?.destinationAssignedInstanceName,
+    });
+    if (persistedIdentity === null) return null;
+    if (!run.dispatch || !run.outbox || !run.jobId) {
+      throw new AppError(
+        'Lifecycle comercial sticky esta incompleto para recovery',
+        'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+      );
+    }
+    let job: CommercialDispatchJobEvidence | null;
+    try {
+      job = await this.dependencies.jobs.findJob(run.outbox.jobId);
+    } catch {
+      throw new AppError(
+        'Job comercial nao pode validar identidade sticky',
+        'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+      );
+    }
+    const identity = assertCommercialStickyIdentity({
+      runInstanceName: run.instanceName,
+      dispatchInstanceName: run.dispatch.instanceName,
+      outboxInstanceName: run.outbox.instanceName,
+      jobInstanceName: job?.instanceName,
+      destinationAssignedInstanceName:
+        run.dispatch.destinationAssignedInstanceName,
+    });
+    if (!identity) return null;
+    await assertActiveCommercialInstance(this.dependencies.instances, identity);
+    if (
+      !job ||
+      job.id !== run.outbox.jobId ||
+      job.dispatchId !== run.outbox.dispatchId ||
+      (job.instanceName ?? null) !== identity
+    ) {
+      throw new AppError(
+        'Job comercial diverge da identidade sticky persistida',
+        'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+      );
+    }
+    return job;
   }
 
   private ambiguous(): RecoveryDecision {

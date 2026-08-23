@@ -424,13 +424,18 @@ export type CommercialAutomationExecutionRecoveryContext = {
         | 'mode'
         | 'dispatchId'
         | 'jobId'
+        | 'instanceName'
         | 'finalStatus'
         | 'investigationRequired'
       > & {
         dispatch: Pick<
           WhatsAppDispatchRecord,
-          'id' | 'status' | 'attemptCount'
-        > | null;
+          'id' | 'status' | 'attemptCount' | 'instanceName'
+        > & {
+          destinationId?: string;
+          destinationType?: 'INDIVIDUAL' | 'GROUP';
+          destinationAssignedInstanceName?: string | null;
+        } | null;
         outbox: CommercialDispatchOutboxRecord | null;
       })
     | null;
@@ -1440,6 +1445,7 @@ export type WhatsAppDispatchManualRecoveryInspection = {
   runStatus: CommercialPipelineRunStatus;
   runFinalStatus: CommercialPipelineFinalStatus | null;
   investigationRequired: boolean;
+  instanceName: string | null;
   target: CommercialAutomationTarget;
 };
 

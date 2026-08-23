@@ -96,8 +96,7 @@ const main = async () => {
           ]);
           return jobs
             .filter((job) => {
-              const data = job.data as { dispatchId?: unknown };
-              return data.dispatchId === dispatchId;
+              return job.data.dispatchId === dispatchId;
             })
             .map((job) => String(job.id));
         },
@@ -106,6 +105,7 @@ const main = async () => {
           if (!job) return null;
           return {
             id: String(job.id),
+            instanceName: job.data.instanceName ?? null,
             get attemptsMade() {
               return job.attemptsMade;
             },

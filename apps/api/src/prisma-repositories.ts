@@ -3336,12 +3336,12 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
           select: {
             id: true,
             mode: true,
+            instanceName: true,
             status: true,
             dispatchId: true,
             jobId: true,
             finalStatus: true,
             investigationRequired: true,
-            instanceName: true,
           },
         },
         dispatch: {
@@ -3910,7 +3910,10 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     if (!execution.commercialRunId) return { execution, run: null };
     const run = await this.prisma.commercialPipelineRun.findUnique({
       where: { id: execution.commercialRunId },
-      include: { dispatch: true, dispatchOutbox: true },
+      include: {
+        dispatch: { include: { destination: true } },
+        dispatchOutbox: true,
+      },
     });
     if (!run) return { execution, run: null };
     return {
@@ -3927,6 +3930,11 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
               id: run.dispatch.id,
               status: run.dispatch.status,
               attemptCount: run.dispatch.attemptCount,
+              instanceName: run.dispatch.instanceName,
+              destinationId: run.dispatch.destinationId,
+              destinationType: run.dispatch.destination.type,
+              destinationAssignedInstanceName:
+                run.dispatch.destination.assignedInstanceName,
             }
           : null,
         outbox: run.dispatchOutbox

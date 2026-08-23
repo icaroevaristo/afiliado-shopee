@@ -178,8 +178,8 @@ export const createCommercialPipelineConfirmationService = ({
     | 'whatsappGroups'
     | 'commercialRuns'
     | 'commercialDeliveryHistory'
-    | 'commercialDispatchOutboxes'
     | 'whatsappInstances'
+    | 'commercialDispatchOutboxes'
   >;
   queue: CommercialDispatchOutboxQueue;
   instanceName: string;
@@ -260,6 +260,7 @@ export const createCommercialAutomationPolicyService = ({
     | 'commercialAutomationSettings'
     | 'commercialAutomationHistory'
     | 'whatsappGroups'
+    | 'whatsappInstances'
   >;
   instanceName: string;
   config: CommercialAutomationPolicyConfig;
@@ -269,6 +270,7 @@ export const createCommercialAutomationPolicyService = ({
     settings: repositories.commercialAutomationSettings,
     history: repositories.commercialAutomationHistory,
     groups: repositories.whatsappGroups,
+    instances: repositories.whatsappInstances,
     instanceName,
     config,
     clock,
@@ -283,7 +285,10 @@ export const createSenderService = ({
   groupSendPolicy,
   instanceName,
 }: {
-  repositories: Pick<ApplicationRepositories, 'whatsappDispatches'>;
+  repositories: Pick<ApplicationRepositories, 'whatsappDispatches'> &
+    Partial<{
+      whatsappInstances: Pick<WhatsAppInstanceRepository, 'findByName'>;
+    }>;
   whatsAppProvider: WhatsAppProvider;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
   messageBuilder?: ConstructorParameters<
@@ -295,6 +300,7 @@ export const createSenderService = ({
 }) =>
   new SenderService({
     dispatches: repositories.whatsappDispatches,
+    instances: repositories.whatsappInstances,
     provider: whatsAppProvider,
     logger,
     messageBuilder,

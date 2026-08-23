@@ -5,12 +5,14 @@ import {
   isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
+import { filterExecutableCommercialGroups } from './commercial-instance-stickiness';
 import type {
   CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
   WhatsAppGroupDirectoryRepository,
+  WhatsAppInstanceRepository,
 } from './repositories';
 
 export const COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION =
@@ -213,6 +215,7 @@ export class CommercialAutomationPolicyService {
       history: CommercialAutomationHistoryRepository;
       groups: Pick<WhatsAppGroupDirectoryRepository, 'list'> &
         Partial<Pick<WhatsAppGroupDirectoryRepository, 'listAll'>>;
+      instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
       instanceName: string;
       config: CommercialAutomationPolicyConfig;
       clock?: () => Date;
@@ -261,11 +264,15 @@ export class CommercialAutomationPolicyService {
         ),
         this.dependencies.history.hasStaleCommercialExecution(now),
       ]);
-    const authorizedGroups = groups.filter((group) =>
+    const authorizedCandidates = groups.filter((group) =>
       this.dependencies.groups.listAll
         ? typeof group.assignedInstanceName === 'string' &&
           isCommercialAssignedGroup(group, group.assignedInstanceName)
         : isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
+    );
+    const authorizedGroups = await filterExecutableCommercialGroups(
+      authorizedCandidates,
+      this.dependencies.instances,
     );
     const duplicateFingerprints = duplicateLogicalGroupFingerprints(
       authorizedGroups,
@@ -274,7 +281,8 @@ export class CommercialAutomationPolicyService {
       ? authorizedGroups.find(
           (group) =>
             group.id === target.groupId &&
-            group.fingerprint === target.logicalGroupFingerprint,
+            group.fingerprint === target.logicalGroupFingerprint &&
+            group.assignedInstanceName === target.instanceName,
         )
       : undefined;
     const history = await this.dependencies.history.getSnapshot({

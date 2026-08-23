@@ -17,6 +17,11 @@ import {
   CommercialOfferScorePolicyResolver,
   sanitizeCommercialScoreBreakdown,
 } from './commercial-offer-score-policy';
+import {
+  assertActiveCommercialInstance,
+  filterExecutableCommercialGroups,
+  requireAssignedInstanceName,
+} from './commercial-instance-stickiness';
 import type {
   CommercialDeliveryHistoryRepository,
   CommercialAutomationTarget,
@@ -34,6 +39,7 @@ import type {
   WhatsAppDispatchRepository,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupRecord,
+  WhatsAppInstanceRepository,
 } from './repositories';
 import type { ScoreService } from './score-service';
 
@@ -137,6 +143,7 @@ export type CommercialPipelineServiceOptions = {
   runs: CommercialPipelineRunRepository;
   deliveryHistory: CommercialDeliveryHistoryRepository;
   dispatches?: Pick<WhatsAppDispatchRepository, 'findByIdWithDetails'>;
+  instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   instanceName: string;
   subIdPrefix: string;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
@@ -289,20 +296,25 @@ export class CommercialPipelineService {
     const startedAt = this.clock();
     const scorePolicy = this.scorePolicies.forSource(input.source);
     let maximumScoreObserved = 0;
-    const run = await this.options.runs.create({
-      mode: 'DRY_RUN',
-      status: 'STARTED',
-      executionId: input.executionId ?? null,
-      instanceName: input.instanceName ?? null,
-      candidateCount: 0,
-      eligibleCount: 0,
-      rejectedCount: 0,
-      rejectionSummary: {},
-      selectionReasons: [],
-      plannedSubIds: [],
-      createdAt: startedAt,
-      completedAt: null,
-    });
+    let run: CommercialPipelineRunRecord | null = null;
+    const ensureRun = async (instanceName: string | null) => {
+      if (run) return run;
+      run = await this.options.runs.create({
+        mode: 'DRY_RUN',
+        status: 'STARTED',
+        executionId: input.executionId ?? null,
+        instanceName,
+        candidateCount: 0,
+        eligibleCount: 0,
+        rejectedCount: 0,
+        rejectionSummary: {},
+        selectionReasons: [],
+        plannedSubIds: [],
+        createdAt: startedAt,
+        completedAt: null,
+      });
+      return run;
+    };
     let failureRecorded = false;
 
     const block = async (
@@ -322,7 +334,8 @@ export class CommercialPipelineService {
         >;
       },
     ): Promise<never> => {
-      await this.options.runs.update(run.id, {
+      const currentRun = await ensureRun(input.instanceName ?? null);
+      await this.options.runs.update(currentRun.id, {
         status: 'BLOCKED',
         ...state,
         scorePolicyVersion: scorePolicy.policyVersion,
@@ -398,13 +411,15 @@ export class CommercialPipelineService {
         });
       }
 
-      const groups = (
-        await this.options.groups.list(this.options.instanceName, {
+      const groups = await filterExecutableCommercialGroups(
+        (await this.options.groups.list(this.options.instanceName, {
           active: true,
           available: true,
-        })
-      ).filter((group): group is WhatsAppGroupRecord =>
-        isCommercialAuthorizedGroup(group, this.options.instanceName),
+        }))
+        .filter((group): group is WhatsAppGroupRecord =>
+          isCommercialAuthorizedGroup(group, this.options.instanceName),
+        ),
+        this.options.instances,
       );
       if (groups.length === 0) {
         return await block('NO_AUTHORIZED_GROUP', {
@@ -434,7 +449,8 @@ export class CommercialPipelineService {
             (candidate) =>
               candidate.id === target.groupId &&
               candidate.name === target.groupName &&
-              candidate.fingerprint === target.logicalGroupFingerprint,
+              candidate.fingerprint === target.logicalGroupFingerprint &&
+              candidate.assignedInstanceName === target.instanceName,
           )
         : orderedGroups.length === 1
           ? orderedGroups[0]
@@ -471,6 +487,8 @@ export class CommercialPipelineService {
           });
         }
       }
+      const assignedInstanceName = requireAssignedInstanceName(group);
+      await ensureRun(assignedInstanceName);
       const sentChecks = await Promise.all(
         ranked.map(({ product }) =>
           this.options.deliveryHistory.wasProductSentToGroup(
@@ -528,7 +546,8 @@ export class CommercialPipelineService {
       ];
       const rejectedCount = initialRejectedCount + alreadySentCount;
 
-      await this.options.runs.update(run.id, {
+      const currentRun = await ensureRun(assignedInstanceName);
+      await this.options.runs.update(currentRun.id, {
         status: 'COMPLETED',
         productId: selected.product.id,
         groupDestinationId: group.id,
@@ -536,6 +555,7 @@ export class CommercialPipelineService {
         productPrice: selected.product.price,
         groupName: group.name,
         groupFingerprint: group.fingerprint,
+        instanceName: assignedInstanceName,
         score: selected.score.finalScore,
         scorePolicyVersion: scorePolicy.policyVersion,
         minimumScoreUsed: input.minimumScore,
@@ -554,7 +574,7 @@ export class CommercialPipelineService {
       this.options.logger.info(
         {
           event: 'commercial-pipeline.dry-run.completed',
-          runId: run.id,
+          runId: currentRun.id,
           candidateCount: candidates.length,
           rejectedCount,
         },
@@ -562,7 +582,7 @@ export class CommercialPipelineService {
       );
 
       return {
-        runId: run.id,
+        runId: currentRun.id,
         mode: 'dry-run',
         status: 'ready',
         provider: input.source.toLocaleLowerCase() as
@@ -600,7 +620,8 @@ export class CommercialPipelineService {
           error instanceof AppError && error.code === 'INVALID_PIPELINE_FILTERS'
             ? error.code
             : 'COMMERCIAL_PIPELINE_FAILED';
-        await this.options.runs.update(run.id, {
+        const currentRun = await ensureRun(input.instanceName ?? null);
+        await this.options.runs.update(currentRun.id, {
           status: 'FAILED',
           failureCode,
           completedAt: this.clock(),
@@ -608,7 +629,7 @@ export class CommercialPipelineService {
         this.options.logger.error(
           {
             event: 'commercial-pipeline.dry-run.failed',
-            runId: run.id,
+            runId: currentRun.id,
             code: failureCode,
           },
           'Commercial pipeline dry-run failed',
@@ -642,21 +663,22 @@ export class CommercialPipelineService {
       `Score minimo: ${input.candidate.minimumScoreUsed}`,
       `Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`,
     ];
-    const instanceName =
-      input.instanceName ??
-      input.group.assignedInstanceName ??
-      this.options.instanceName;
-    if (!instanceName) {
+    const assignedInstanceName = requireAssignedInstanceName(input.group);
+    if (input.instanceName && input.instanceName !== assignedInstanceName) {
       throw new AppError(
-        'Campanha comercial nao possui instancia atribuida',
-        'COMMERCIAL_INSTANCE_ASSIGNMENT_REQUIRED',
+        'Campanha comercial mudou de instancia atribuida',
+        'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
       );
     }
+    await assertActiveCommercialInstance(
+      this.options.instances,
+      assignedInstanceName,
+    );
     const run = await this.options.runs.create({
       mode: 'DRY_RUN',
       status: 'STARTED',
       executionId: input.executionId,
-      instanceName,
+      instanceName: assignedInstanceName,
       candidateCount: input.candidateCount,
       eligibleCount: input.eligibleCount,
       rejectedCount: input.rejectedCount,

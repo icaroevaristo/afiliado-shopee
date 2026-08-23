@@ -123,13 +123,18 @@ export const createCommercialExecutionCliRuntime = (
   let queue: ReturnType<typeof createWhatsAppDispatchQueue> | undefined;
   const recoveryService = new CommercialAutomationExecutionRecoveryService({
     executions: repositories.commercialAutomationExecutions,
+    instances: repositories.whatsappInstances,
     jobs: {
       async findJob(jobId) {
         redis ??= createRedisConnection(config.REDIS_URL);
         queue ??= createWhatsAppDispatchQueue(redis);
         const job = await queue.getJob(jobId);
         return job
-          ? { id: job.id ?? jobId, dispatchId: job.data.dispatchId }
+          ? {
+              id: job.id ?? jobId,
+              dispatchId: job.data.dispatchId,
+              instanceName: job.data.instanceName ?? null,
+            }
           : null;
       },
     },

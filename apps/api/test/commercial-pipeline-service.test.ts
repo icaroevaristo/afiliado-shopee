@@ -58,6 +58,7 @@ const group = (
   available: true,
   fingerprint: 'grp_123456789abc',
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
   ...overrides,
@@ -65,6 +66,7 @@ const group = (
 
 class MemoryRuns implements CommercialPipelineRunRepository {
   records: CommercialPipelineRunRecord[] = [];
+  createdSnapshots: CommercialPipelineRunRecord[] = [];
 
   async create(data: CommercialPipelineRunData) {
     const record = {
@@ -73,6 +75,7 @@ class MemoryRuns implements CommercialPipelineRunRepository {
       createdAt: data.createdAt ?? now,
     };
     this.records.push(record);
+    this.createdSnapshots.push({ ...record });
     return record;
   }
 
@@ -180,6 +183,14 @@ const build = ({
       wasProductSentToGroup: async (productId, groupId) =>
         sent.has(`${productId}:${groupId}`),
       findLastSentAtByGroup: async () => null,
+    },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
     },
     instanceName: 'affiliate-bot',
     subIdPrefix: 'whatsapp',
@@ -296,6 +307,7 @@ describe('CommercialPipelineService', () => {
         id: 'group-1',
         name: 'Grupo ficticio autorizado',
         fingerprint: 'grp_123456789abc',
+        assignedInstanceName: 'affiliate-bot',
       },
       campaign: 'commercial-automation',
       copyPreview: 'copy pronta',
@@ -529,6 +541,7 @@ describe('CommercialPipelineService', () => {
       target: {
         groupId: 'two',
         groupName: secondGroup.name,
+        instanceName: 'affiliate-bot',
         logicalGroupFingerprint: secondGroup.fingerprint,
         campaignId: 'campaign-two',
         nicheId: 'niche-two',
@@ -668,6 +681,9 @@ describe('CommercialPipelineService', () => {
       productId: 'product-a',
       groupFingerprint: 'grp_123456789abc',
       failureCode: null,
+    });
+    expect(runs.createdSnapshots[0]).toMatchObject({
+      instanceName: 'affiliate-bot',
     });
   });
 

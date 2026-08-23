@@ -45,6 +45,7 @@ const group: WhatsAppGroupRecord = {
   available: true,
   fingerprint: fingerprintWhatsAppGroupId(groupDestination),
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
 };
@@ -81,6 +82,7 @@ const createRun = (copyPreview: string): CommercialPipelineRunRecord => ({
   status: 'COMPLETED',
   productId: offer.id,
   groupDestinationId: group.id,
+  instanceName: 'affiliate-bot',
   productName: offer.productName,
   productPrice: offer.price,
   groupName: group.name,
@@ -192,6 +194,7 @@ describe('commercial candidate dispatch integration', () => {
       productId: offer.id,
       generatedCopyId: 'copy-1',
       destinationId: group.id,
+      instanceName: 'affiliate-bot',
       status: dispatch?.status ?? 'PENDING',
       attemptCount: dispatch?.attemptCount ?? 0,
       errorMessage: dispatch?.errorMessage ?? null,
@@ -218,7 +221,7 @@ describe('commercial candidate dispatch integration', () => {
       list: vi.fn(),
       findById: vi.fn(async (id) => (id === run.id ? run : null)),
       findByDispatchId: vi.fn(async (id) =>
-        id === dispatch?.id ? run : null,
+        id === (dispatch?.id ?? 'dispatch-1') ? run : null,
       ),
       finalizeByDispatchId: vi.fn(async (_dispatchId, completedAt) => {
         if (!dispatch || dispatch.status !== 'SENT') {
@@ -269,7 +272,7 @@ describe('commercial candidate dispatch integration', () => {
           dispatchId: input.dispatch.id,
           jobId: input.jobId,
       status: 'PENDING',
-      instanceName: null,
+      instanceName: input.instanceName,
       failureCode: null,
           createdAt: input.confirmedAt,
           publishedAt: null,
@@ -293,6 +296,9 @@ describe('commercial candidate dispatch integration', () => {
         total: outbox ? 1 : 0,
       })),
       findById: vi.fn(async (id) => (outbox?.id === id ? outbox : null)),
+      findByDispatchId: vi.fn(async (id) =>
+        outbox?.dispatchId === id ? outbox : null,
+      ),
       findPublicationContext: vi.fn(async () =>
         outbox && dispatch
           ? { outbox, run, dispatch }
@@ -317,6 +323,14 @@ describe('commercial candidate dispatch integration', () => {
       runs,
       offers: { findOfferById: vi.fn(async () => offer) } as never,
       groups: { list: vi.fn(async () => [group]) } as never,
+      instances: {
+        findByName: vi.fn(async (name: string) => ({
+          name,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      },
       outboxes,
       deliveryHistory: {
         wasProductSentToGroup: vi.fn(async () => false),
@@ -402,6 +416,15 @@ describe('commercial candidate dispatch integration', () => {
     const repositories: WhatsAppDispatchProcessorRepositories = {
       whatsappDispatches,
       commercialRuns: runs,
+      commercialDispatchOutboxes: outboxes,
+      whatsappInstances: {
+        findByName: vi.fn(async (name: string) => ({
+          name,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      },
       commercialPromotions: {
         markDispatchedByGeneratedCopyId,
         markBlockedByGeneratedCopyId,
@@ -423,12 +446,16 @@ describe('commercial candidate dispatch integration', () => {
     > = {
       id: 'job-1',
       name: JOB_NAMES.whatsappDispatch,
-      data: { dispatchId: 'dispatch-1' },
+      data: {
+        dispatchId: 'commercial-run-1-dispatch',
+        instanceName: 'affiliate-bot',
+      },
     };
 
     await processWhatsAppDispatchJob(job, {
       repositories,
       whatsAppProvider: provider,
+      whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
       groupSendPolicy,
       logger: { info: vi.fn(), error: vi.fn() },
     });

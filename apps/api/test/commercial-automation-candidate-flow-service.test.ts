@@ -118,6 +118,7 @@ const group = (
   available: true,
   fingerprint: GROUP_FINGERPRINT,
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: NOW,
   lastSyncedAt: NOW,
   ...overrides,
@@ -386,6 +387,14 @@ const createSubject = (input: {
     copyGeneration,
     draft: new CommercialMessageDraftService(),
     pipeline,
+    instances: {
+      findByName: vi.fn(async (name: string) => ({
+        name,
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
+    },
     instanceName: 'affiliate-bot',
     clock: () => NOW,
   });

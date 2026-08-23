@@ -63,6 +63,7 @@ const group = (
   available: true,
   fingerprint: 'grp_123456789abc',
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
   ...overrides,
@@ -88,6 +89,7 @@ const readyRun = (
   selectionReasons: ['Maior score'],
   copyPreview: preview,
   plannedSubIds: ['whatsapp', 'grp_123456789abc'],
+  instanceName: 'affiliate-bot',
   createdAt: now,
   completedAt: now,
   ...overrides,
@@ -148,7 +150,7 @@ class MemoryOutboxes implements CommercialDispatchOutboxRepository {
       dispatchId: input.dispatch.id,
       jobId: input.jobId,
       status: 'PENDING',
-      instanceName: null,
+      instanceName: input.instanceName ?? null,
       failureCode: null,
       createdAt: input.confirmedAt,
       publishedAt: null,
@@ -256,6 +258,14 @@ const build = ({
     runs,
     offers: { findOfferById: async () => currentOffer } as never,
     groups: { list: async () => groups } as never,
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    },
     outboxes,
     deliveryHistory: {
       wasProductSentToGroup: async () => alreadySent,
@@ -385,6 +395,16 @@ describe('CommercialPipelineConfirmationService', () => {
       state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
     ).rejects.toMatchObject({ code });
     expect(state.outboxes.records).toHaveLength(0);
+  });
+
+  it('rejeita run novo sem identidade sticky antes de confirmar', async () => {
+    const state = build({ run: readyRun({ instanceName: null }) });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID' });
+    expect(state.outboxes.records).toHaveLength(0);
+    expect(state.enqueue).not.toHaveBeenCalled();
   });
 
   it('uma corrida concorrente confirma e publica somente uma vez', async () => {

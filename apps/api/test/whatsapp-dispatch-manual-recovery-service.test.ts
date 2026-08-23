@@ -28,7 +28,7 @@ const inspection = (
   recovery: recovery(), jobId: 'job-1', campaignId: 'campaign-1', candidateId: 'candidate-1',
   dispatchId: 'dispatch-1', runId: 'run-1', executionId: 'execution-1', dispatchStatus: 'PROCESSING',
   attemptCount: 1, externalMessageId: null, sentAt: null, runStatus: 'FAILED', runFinalStatus: 'AMBIGUOUS',
-  investigationRequired: true,
+  investigationRequired: true, instanceName: 'instance-a',
   target: { groupId: 'destination-1', groupName: 'Group 1', logicalGroupFingerprint: 'group-fp-1', campaignId: 'campaign-1', nicheId: 'niche-1', dailyLimit: 10, failureCount: 0, nextEligibleAt: null },
   ...overrides,
 });
@@ -50,11 +50,16 @@ const repository = (initial = inspection()) => {
     setInspection(value: WhatsAppDispatchManualRecoveryInspection) { current = value; },
   } satisfies WhatsAppDispatchManualRecoveryRepository & { setInspection(value: WhatsAppDispatchManualRecoveryInspection): void };
 };
-const queueJob = (state: string, attemptsMade: number, afterRetry = 'waiting') => {
+const queueJob = (
+  state: string,
+  attemptsMade: number,
+  afterRetry = 'waiting',
+  instanceName: string | null = 'instance-a',
+) => {
   let current = state;
   return {
-    id: 'job-1', attemptsMade,
-    data: { dispatchId: 'dispatch-1', instanceName: 'instance-a' },
+    id: 'job-1', attemptsMade, instanceName,
+    data: { dispatchId: 'dispatch-1', ...(instanceName ? { instanceName } : {}) },
     getState: vi.fn(async () => current as never),
     retry: vi.fn(async () => { current = afterRetry; }),
   };
@@ -112,6 +117,22 @@ describe('WhatsAppDispatchManualRecoveryService review boundaries', () => {
     expect(job.retry).toHaveBeenCalledTimes(1);
     expect(repo.markManualRecoveryRequeued).toHaveBeenCalledTimes(1);
     expect(job.data).toEqual({ dispatchId: 'dispatch-1', instanceName: 'instance-a' });
+  });
+
+  it('keeps a full-null legacy recovery readable without inventing sticky identity', async () => {
+    const repo = repository(inspection({ instanceName: null }));
+    const job = queueJob('failed', 1, 'waiting', null);
+    const service = new WhatsAppDispatchManualRecoveryService(
+      repo,
+      queue(job),
+      { clock: () => now },
+      policy(),
+    );
+
+    const result = await service.requeueAuthorizedRetry(input);
+
+    expect(result.kind).toBe('REQUEUED');
+    expect(job.retry).toHaveBeenCalledTimes(1);
   });
 
   it('restart after retry accepted with waiting PENDING/1 converges without another retry', async () => {

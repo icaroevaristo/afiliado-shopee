@@ -34,6 +34,7 @@ const group = (id = 'group-1'): WhatsAppGroupRecord => ({
   available: true,
   fingerprint: id.endsWith('2') ? 'grp_bbbbbbbbbbbb' : 'grp_aaaaaaaaaaaa',
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: NOW,
   lastSyncedAt: NOW,
 });
@@ -44,6 +45,7 @@ const target = (
 ): CommercialAutomationTarget => ({
   groupId: id,
   groupName: `Grupo ${id}`,
+  instanceName: 'affiliate-bot',
   logicalGroupFingerprint: id.endsWith('2')
     ? 'grp_bbbbbbbbbbbb'
     : 'grp_aaaaaaaaaaaa',
@@ -152,6 +154,14 @@ const createSubject = ({
     settings,
     history,
     groups: { list: async () => groups },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    },
     instanceName: 'affiliate-bot',
     config: { ...baseConfig, ...config },
     clock: () => now,

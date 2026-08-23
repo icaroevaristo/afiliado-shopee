@@ -20,6 +20,7 @@ import type { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-
 import { finalizeCommercialPipelineRun } from '../../api/src/commercial-pipeline-run-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { ApplicationRepositories } from '../../api/src/application-services';
+import { assertCommercialStickyIdentity } from '../../api/src/commercial-instance-stickiness';
 
 export type WhatsAppDispatchWorkerLogger = {
   info: (obj: unknown, msg?: string) => void;
@@ -269,24 +270,20 @@ const resolveCommercialDispatchProvider = async (input: {
   const outbox = await input.repositories.commercialDispatchOutboxes?.findByDispatchId?.(
     dispatch.id,
   );
-  const instanceNames = [
-    run.instanceName,
-    dispatch.instanceName ?? null,
-    outbox?.instanceName ?? null,
-    input.job.data.instanceName ?? null,
-  ];
-  if (
-    !run.instanceName ||
-    !outbox ||
-    instanceNames.some((name) => name !== run.instanceName)
-  ) {
-    if (run.executionId || instanceNames.some((name) => name !== null)) {
-      throw reservationHandoffError(
-        'Identidade sticky da instancia comercial esta ausente ou divergente',
-        'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
-      );
-    }
+  const stickyInstanceName = assertCommercialStickyIdentity({
+    runInstanceName: run.instanceName,
+    dispatchInstanceName: dispatch.instanceName,
+    outboxInstanceName: outbox?.instanceName,
+    jobInstanceName: input.job.data.instanceName,
+  });
+  if (!stickyInstanceName) {
     return { provider: input.defaultProvider, instanceName: undefined };
+  }
+  if (!outbox) {
+    throw reservationHandoffError(
+      'Outbox comercial ausente para lifecycle sticky',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
   }
   if (
     outbox.commercialRunId !== run.id ||
@@ -299,16 +296,14 @@ const resolveCommercialDispatchProvider = async (input: {
   }
   if (
     run.groupDestinationId !== dispatch.destinationId ||
-    dispatch.destination.assignedInstanceName !== run.instanceName
+    dispatch.destination.assignedInstanceName !== stickyInstanceName
   ) {
     throw reservationHandoffError(
       'Assignment da instancia mudou durante o lifecycle comercial',
       'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
     );
   }
-  const instance = await input.repositories.whatsappInstances?.findByName(
-    run.instanceName,
-  );
+  const instance = await input.repositories.whatsappInstances?.findByName(stickyInstanceName);
   if (!instance || !instance.active) {
     throw reservationHandoffError(
       'Instancia do lifecycle comercial esta ausente ou inativa',
@@ -322,9 +317,41 @@ const resolveCommercialDispatchProvider = async (input: {
     );
   }
   return {
-    provider: await input.providerResolver(run.instanceName),
-    instanceName: run.instanceName,
+    provider: await input.providerResolver(stickyInstanceName),
+    instanceName: stickyInstanceName,
   };
+};
+
+const revalidateCommercialDispatchBeforeSend = async (input: {
+  job: Pick<Job<WhatsAppDispatchJob>, 'data'>;
+  repositories: WhatsAppDispatchProcessorRepositories;
+  resolvedProvider: {
+    provider: WhatsAppProvider;
+    instanceName: string | undefined;
+  };
+}) => {
+  const revalidated = await resolveCommercialDispatchProvider({
+    job: input.job,
+    repositories: input.repositories,
+    defaultProvider: input.resolvedProvider.provider,
+    providerResolver: input.resolvedProvider.instanceName
+      ? (instanceName) => {
+          if (instanceName !== input.resolvedProvider.instanceName) {
+            throw reservationHandoffError(
+              'Instancia do provider mudou antes do envio comercial',
+              'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
+            );
+          }
+          return input.resolvedProvider.provider;
+        }
+      : undefined,
+  });
+  if (revalidated.instanceName !== input.resolvedProvider.instanceName) {
+    throw reservationHandoffError(
+      'Identidade sticky mudou antes do envio comercial',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
+  }
 };
 
 export const processWhatsAppDispatchJob = async (
@@ -347,7 +374,6 @@ export const processWhatsAppDispatchJob = async (
     clock: options.clock ?? (() => new Date()),
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
   });
-  resolvedProvider.provider.beginRun?.(job.id ?? job.data.dispatchId);
   const sender = createSenderService({
     repositories,
     whatsAppProvider: resolvedProvider.provider,
@@ -357,6 +383,12 @@ export const processWhatsAppDispatchJob = async (
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService ?? new CommercialMessageDraftService(),
   });
+  await revalidateCommercialDispatchBeforeSend({
+    job,
+    repositories,
+    resolvedProvider,
+  });
+  resolvedProvider.provider.beginRun?.(job.id ?? job.data.dispatchId);
   let dispatch;
   try {
     dispatch = await sender.sendDispatch(job.data.dispatchId);
