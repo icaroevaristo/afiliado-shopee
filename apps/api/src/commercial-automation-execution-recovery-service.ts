@@ -134,6 +134,43 @@ export class CommercialAutomationExecutionRecoveryService {
       };
     }
 
+    if (this.isSafeDryRunWithoutExternalEvidence(context)) {
+      const recoverPreConfirmationReservation =
+        this.dependencies.executions.recoverStalePreConfirmationReservation;
+      if (!recoverPreConfirmationReservation) {
+        return {
+          outcome: 'investigation-required' as const,
+          reason: 'PRECONFIRMATION_RECOVERY_CONTRACT_UNAVAILABLE' as const,
+          execution: sanitizeCommercialAutomationExecution(
+            context.execution,
+            now,
+          ),
+        };
+      }
+      const safeRecovery = await recoverPreConfirmationReservation.call(
+        this.dependencies.executions,
+        executionId,
+        {
+          completedAt: now,
+          failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+        },
+      );
+      if (safeRecovery.outcome === 'RECOVERED') {
+        return this.result('recovered', safeRecovery.execution, now);
+      }
+      if (safeRecovery.outcome === 'ALREADY_RECOVERED') {
+        return this.result('already-terminal', safeRecovery.execution, now);
+      }
+      return {
+        outcome: 'investigation-required' as const,
+        reason: safeRecovery.reason,
+        execution: sanitizeCommercialAutomationExecution(
+          context.execution,
+          now,
+        ),
+      };
+    }
+
     const stickyJob = await this.validateStickyIdentity(context);
     const decision = await this.classify(context, stickyJob);
     const recovered = await this.dependencies.executions.recoverStale(
@@ -188,7 +225,6 @@ export class CommercialAutomationExecutionRecoveryService {
     if (run.outbox!.status === 'PUBLISHED' && run.jobId !== run.outbox!.jobId) {
       return this.ambiguous();
     }
-
     let job: CommercialDispatchJobEvidence | null = stickyJob ?? null;
     try {
       job ??= await this.dependencies.jobs.findJob(run.outbox!.jobId);
@@ -197,7 +233,8 @@ export class CommercialAutomationExecutionRecoveryService {
     }
     const jobMatches =
       job?.id === run.outbox!.jobId &&
-      job.dispatchId === run.outbox!.dispatchId;
+      job.dispatchId === run.outbox!.dispatchId &&
+      this.jobHasExpectedStickyInstance(context, job);
     if (run.outbox!.status === 'PENDING') {
       if (job && !jobMatches) return this.ambiguous();
       throw new AppError(
@@ -213,6 +250,45 @@ export class CommercialAutomationExecutionRecoveryService {
   ) {
     const run = context.run;
     if (!run) return null;
+    if (
+      run.mode === 'DRY_RUN' &&
+      !run.dispatchId &&
+      !run.jobId &&
+      !run.dispatch &&
+      !run.outbox
+    ) {
+      return null;
+    }
+    if (run.outbox?.status === 'PENDING' && !run.jobId) {
+      const identity = assertCommercialStickyIdentity(
+        {
+          runInstanceName: run.instanceName,
+          dispatchInstanceName: run.dispatch?.instanceName,
+          outboxInstanceName: run.outbox.instanceName,
+          destinationAssignedInstanceName:
+            run.dispatch?.destinationAssignedInstanceName,
+        },
+        { allowMissingJob: true },
+      );
+      if (identity) {
+        let job: CommercialDispatchJobEvidence | null;
+        try {
+          job = await this.dependencies.jobs.findJob(run.outbox.jobId);
+        } catch {
+          throw new AppError(
+            'Job comercial nao pode validar identidade sticky',
+            'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+          );
+        }
+        if (job && (job.instanceName ?? null) !== identity) {
+          throw new AppError(
+            'Job comercial diverge da identidade sticky persistida',
+            'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+          );
+        }
+      }
+      return null;
+    }
     const persistedIdentity = assertCommercialStickyIdentity({
       runInstanceName: run.instanceName,
       dispatchInstanceName: run.dispatch?.instanceName,
@@ -258,6 +334,41 @@ export class CommercialAutomationExecutionRecoveryService {
       );
     }
     return job;
+  }
+
+  private isSafeDryRunWithoutExternalEvidence(
+    context: CommercialAutomationExecutionRecoveryContext,
+  ) {
+    const { execution, run } = context;
+    return Boolean(
+      run &&
+        run.mode === 'DRY_RUN' &&
+        execution.commercialRunId === run.id &&
+        !run.dispatchId &&
+        !run.jobId &&
+        !run.dispatch &&
+        !run.outbox,
+    );
+  }
+
+  private jobHasExpectedStickyInstance(
+    context: CommercialAutomationExecutionRecoveryContext,
+    job: CommercialDispatchJobEvidence,
+  ) {
+    const run = context.run;
+    if (!run) return false;
+    const identity = assertCommercialStickyIdentity(
+      {
+        runInstanceName: run.instanceName,
+        dispatchInstanceName: run.dispatch?.instanceName,
+        outboxInstanceName: run.outbox?.instanceName,
+        destinationAssignedInstanceName:
+          run.dispatch?.destinationAssignedInstanceName,
+        jobInstanceName: job.instanceName,
+      },
+      { allowMissingJob: true },
+    );
+    return identity === null || (job.instanceName ?? null) === identity;
   }
 
   private ambiguous(): RecoveryDecision {

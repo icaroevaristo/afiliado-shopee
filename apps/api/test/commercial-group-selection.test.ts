@@ -4,6 +4,7 @@ import {
   duplicateLogicalGroupFingerprints,
   isCommercialAuthorizedGroup,
 } from '../src/commercial-group-selection';
+import { assertCommercialStickyIdentity } from '../src/commercial-instance-stickiness';
 import type { WhatsAppGroupRecord } from '../src/repositories';
 
 const NOW = new Date('2026-08-16T12:00:00.000Z');
@@ -63,5 +64,17 @@ describe('commercial group selection identity', () => {
     expect(
       duplicateLogicalGroupFingerprints([first, renamedDuplicate]),
     ).toEqual(['grp_aaaaaaaaaaaa']);
+  });
+
+  it('preserva lifecycle legado full-null mesmo com assignment migrado no destino', () => {
+    expect(
+      assertCommercialStickyIdentity({
+        runInstanceName: null,
+        dispatchInstanceName: null,
+        outboxInstanceName: null,
+        jobInstanceName: null,
+        destinationAssignedInstanceName: 'instance-a',
+      }),
+    ).toBeNull();
   });
 });

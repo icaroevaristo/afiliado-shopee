@@ -171,7 +171,11 @@ const build = ({
       listCommercialCandidates,
     } as never,
     groups: {
-      list: async () => groups,
+      list: async (sourceInstanceName: string) =>
+        groups.filter(
+          (candidate) => candidate.sourceInstanceName === sourceInstanceName,
+        ),
+      listAll: async () => groups,
     } as never,
     campaigns,
     score: {
@@ -542,6 +546,32 @@ describe('CommercialPipelineService', () => {
         groupId: 'two',
         groupName: secondGroup.name,
         instanceName: 'affiliate-bot',
+        logicalGroupFingerprint: secondGroup.fingerprint,
+        campaignId: 'campaign-two',
+        nicheId: 'niche-two',
+        dailyLimit: 60,
+      } satisfies CommercialAutomationTarget,
+    });
+
+    expect(result.selectedGroup).toMatchObject({
+      id: 'two',
+      fingerprint: 'grp_abcdef123456',
+    });
+  });
+
+  it('usa a instancia sticky do alvo no preview multi-instancia', async () => {
+    const secondGroup = group('two', {
+      sourceInstanceName: 'instance-a',
+      assignedInstanceName: 'instance-b',
+      fingerprint: 'grp_abcdef123456',
+    });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    const result = await service.dryRun({
+      target: {
+        groupId: 'two',
+        groupName: secondGroup.name,
+        instanceName: 'instance-b',
         logicalGroupFingerprint: secondGroup.fingerprint,
         campaignId: 'campaign-two',
         nicheId: 'niche-two',

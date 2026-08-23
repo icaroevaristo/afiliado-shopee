@@ -377,6 +377,77 @@ describe('commercial automation Prisma repositories', () => {
     );
   });
 
+  it('preserva a identidade da instancia no contexto de recovery sticky', async () => {
+    const execution = {
+      id: 'execution-1',
+      schedulerJobId: 'scheduler',
+      bullMqJobId: 'job-1',
+      activeKey: null,
+      ownerId: 'owner-1',
+      heartbeatAt: new Date('2026-07-26T15:00:00.000Z'),
+      leaseExpiresAt: new Date('2026-07-26T14:59:00.000Z'),
+      mode: 'SEND',
+      status: 'FAILED',
+      externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+      reasons: [],
+      commercialRunId: 'run-1',
+      failureCode: 'COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS',
+      startedAt: new Date('2026-07-26T14:55:00.000Z'),
+      completedAt: new Date('2026-07-26T15:00:00.000Z'),
+    };
+    const run = {
+      id: 'run-1',
+      mode: 'CONFIRMED',
+      dispatchId: 'dispatch-1',
+      jobId: 'job-1',
+      instanceName: 'instance-a',
+      finalStatus: 'AMBIGUOUS',
+      investigationRequired: true,
+      dispatch: {
+        id: 'dispatch-1',
+        status: 'PROCESSING',
+        attemptCount: 1,
+        instanceName: 'instance-a',
+        destinationId: 'destination-1',
+        destination: {
+          type: 'GROUP',
+          assignedInstanceName: 'instance-a',
+        },
+      },
+      dispatchOutbox: {
+        id: 'outbox-1',
+        commercialRunId: 'run-1',
+        dispatchId: 'dispatch-1',
+        jobId: 'job-1',
+        status: 'AMBIGUOUS',
+        instanceName: 'instance-a',
+      },
+    };
+    const findExecution = vi.fn().mockResolvedValue(execution);
+    const findRun = vi.fn().mockResolvedValue(run);
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      commercialAutomationExecution: { findUnique: findExecution },
+      commercialPipelineRun: { findUnique: findRun },
+    } as never);
+
+    await expect(repository.findRecoveryContext('execution-1')).resolves.toMatchObject({
+      execution: { commercialRunId: 'run-1' },
+      run: {
+        id: 'run-1',
+        instanceName: 'instance-a',
+        dispatch: { instanceName: 'instance-a' },
+        outbox: { instanceName: 'instance-a' },
+      },
+    });
+    expect(findRun).toHaveBeenCalledWith({
+      where: { id: 'run-1' },
+      include: {
+        dispatch: { include: { destination: true } },
+        dispatchOutbox: true,
+      },
+    });
+  });
+
 
   it('marca a fronteira externa de forma idempotente e monotona sob concorrencia', async () => {
     const markedAt = new Date('2026-07-26T15:00:30.000Z');
@@ -606,6 +677,193 @@ describe('commercial automation Prisma repositories', () => {
       reservation,
     };
   };
+
+  const createPreConfirmationRecoverySubject = (overrides: {
+    reservation?: Record<string, unknown> | null;
+    campaignUpdateCount?: number;
+    executionUpdateCount?: number;
+    outerExecution?: Record<string, unknown>;
+  } = {}) => {
+    const now = new Date('2026-07-28T15:00:00.000Z');
+    const staleExecution = {
+      id: 'execution-1',
+      schedulerJobId: 'scheduler',
+      bullMqJobId: 'job-1',
+      activeKey: 'commercial-automation',
+      ownerId: 'owner-1',
+      heartbeatAt: new Date('2026-07-28T14:57:00.000Z'),
+      leaseExpiresAt: new Date('2026-07-28T14:59:00.000Z'),
+      mode: 'SEND',
+      status: 'STARTED',
+      externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+      reasons: [],
+      commercialRunId: 'run-1',
+      failureCode: null,
+      startedAt: new Date('2026-07-28T14:55:00.000Z'),
+      completedAt: null,
+    };
+    const terminalExecution = {
+      ...staleExecution,
+      activeKey: null,
+      status: 'FAILED',
+      failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+      completedAt: now,
+    };
+    const reservation =
+      overrides.reservation === undefined
+        ? {
+            id: 'campaign-1',
+            attemptExecutionId: 'execution-1',
+            attemptReservedAt: new Date('2026-07-28T14:50:00.000Z'),
+            attemptLeaseExpiresAt: new Date('2026-07-28T14:58:00.000Z'),
+          }
+        : overrides.reservation;
+    const executionFindUnique = vi
+      .fn()
+      .mockResolvedValueOnce(staleExecution)
+      .mockResolvedValue(terminalExecution);
+    const campaignUpdateMany = vi
+      .fn()
+      .mockResolvedValue({ count: overrides.campaignUpdateCount ?? 1 });
+    const executionUpdateMany = vi
+      .fn()
+      .mockResolvedValue({ count: overrides.executionUpdateCount ?? 1 });
+    const transaction = {
+      commercialAutomationExecution: {
+        findUnique: executionFindUnique,
+        updateMany: executionUpdateMany,
+      },
+      commercialGroupCampaign: {
+        findMany: vi.fn().mockResolvedValue(reservation ? [reservation] : []),
+        updateMany: campaignUpdateMany,
+      },
+      commercialPipelineRun: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'run-1',
+          executionId: 'execution-1',
+          mode: 'DRY_RUN',
+          dispatchId: null,
+          jobId: null,
+          dispatch: null,
+          dispatchOutbox: null,
+        }),
+      },
+    };
+    const prismaTransaction = vi.fn(
+      async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
+    );
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: prismaTransaction,
+      commercialAutomationExecution: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue(overrides.outerExecution ?? staleExecution),
+      },
+      commercialPipelineRun: {},
+      commercialGroupCampaign: {},
+      commercialPromotionCandidate: {},
+      commercialCopyGenerationAttempt: {},
+    } as never);
+    return {
+      repository,
+      transaction,
+      prismaTransaction,
+      campaignUpdateMany,
+      executionUpdateMany,
+      now,
+      reservation,
+    };
+  };
+
+  it('recovery pre-confirmacao libera reservation e execution na mesma transacao', async () => {
+    const subject = createPreConfirmationRecoverySubject();
+
+    await expect(
+      subject.repository.recoverStalePreConfirmationReservation(
+        'execution-1',
+        {
+          completedAt: subject.now,
+          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+        },
+      ),
+    ).resolves.toMatchObject({
+      outcome: 'RECOVERED',
+      execution: { status: 'FAILED' },
+    });
+
+    expect(subject.prismaTransaction).toHaveBeenCalledOnce();
+    expect(subject.campaignUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'campaign-1',
+        attemptExecutionId: 'execution-1',
+        attemptReservedAt: subject.reservation?.attemptReservedAt,
+        attemptLeaseExpiresAt: subject.reservation?.attemptLeaseExpiresAt,
+      },
+      data: {
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+      },
+    });
+    expect(subject.executionUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: 'execution-1',
+        status: 'STARTED',
+        externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+        commercialRunId: 'run-1',
+        ownerId: 'owner-1',
+      }),
+      data: {
+        activeKey: null,
+        status: 'FAILED',
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+        completedAt: subject.now,
+      },
+    });
+    expect(subject.campaignUpdateMany.mock.calls[0][0].data).not.toHaveProperty(
+      'failureCount',
+    );
+  });
+
+  it('recovery pre-confirmacao sem reservation ainda finaliza a execution sem criar ownership', async () => {
+    const subject = createPreConfirmationRecoverySubject({ reservation: null });
+
+    await expect(
+      subject.repository.recoverStalePreConfirmationReservation(
+        'execution-1',
+        {
+          completedAt: subject.now,
+          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+        },
+      ),
+    ).resolves.toMatchObject({ outcome: 'RECOVERED' });
+
+    expect(subject.campaignUpdateMany).not.toHaveBeenCalled();
+    expect(subject.executionUpdateMany).toHaveBeenCalledOnce();
+  });
+
+  it('conflito na liberacao pre-confirmacao permanece fail-closed', async () => {
+    const subject = createPreConfirmationRecoverySubject({
+      campaignUpdateCount: 0,
+      outerExecution: {
+        id: 'execution-1',
+        status: 'STARTED',
+      },
+    });
+
+    await expect(
+      subject.repository.recoverStalePreConfirmationReservation(
+        'execution-1',
+        {
+          completedAt: subject.now,
+          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+        },
+      ),
+    ).resolves.toEqual({ outcome: 'BLOCKED', reason: 'CAS_CONFLICT' });
+
+    expect(subject.executionUpdateMany).not.toHaveBeenCalled();
+  });
 
   it('recovery pre-marker aplica backoff e release na mesma transacao CAS', async () => {
     const subject = createPreMarkerRecoverySubject();

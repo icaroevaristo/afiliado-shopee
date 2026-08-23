@@ -228,12 +228,14 @@ const build = ({
   currentOffer = offer(),
   groups = [group()],
   alreadySent = false,
+  inactiveInstances = new Set<string>(),
   environment = {},
 }: {
   run?: CommercialPipelineRunRecord;
   currentOffer?: ShopeeOfferRecord | null;
   groups?: WhatsAppGroupRecord[];
   alreadySent?: boolean;
+  inactiveInstances?: Set<string>;
   environment?: Partial<{
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -257,11 +259,14 @@ const build = ({
   const service = new CommercialPipelineConfirmationService({
     runs,
     offers: { findOfferById: async () => currentOffer } as never,
-    groups: { list: async () => groups } as never,
+    groups: {
+      list: async () => groups,
+      listAll: async () => groups,
+    } as never,
     instances: {
       findByName: async (name: string) => ({
         name,
-        active: true,
+        active: !inactiveInstances.has(name),
         createdAt: now,
         updatedAt: now,
       }),
@@ -492,5 +497,24 @@ describe('CommercialPipelineConfirmationService', () => {
       code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
     });
     expect(state.outboxes.records).toHaveLength(0);
+  });
+
+  it('ignora duplicidade logica de instancia inativa na confirmacao', async () => {
+    const state = build({
+      groups: [
+        group(),
+        group({
+          id: 'inactive-duplicate-group',
+          sourceInstanceName: 'instance-b',
+          assignedInstanceName: 'instance-b',
+        }),
+      ],
+      inactiveInstances: new Set(['instance-b']),
+    });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).resolves.toMatchObject({ selectedGroup: { name: 'Grupo ficticio autorizado' } });
+    expect(state.outboxes.dispatches[0]?.destinationId).toBe('group-id');
   });
 });

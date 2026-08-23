@@ -9,6 +9,7 @@ import {
 } from './commercial-group-selection';
 import {
   assertActiveCommercialInstance,
+  filterExecutableCommercialGroups,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
 import { commercialProductRejections } from './commercial-offer-eligibility';
@@ -224,7 +225,7 @@ export class CommercialPipelineConfirmationService {
         }
       }
 
-      const groups = (
+      const candidateGroups = (
         this.options.groups.listAll
           ? await this.options.groups.listAll({ active: true, available: true })
           : await this.options.groups.list(this.options.instanceName, {
@@ -236,6 +237,10 @@ export class CommercialPipelineConfirmationService {
           ? typeof group.assignedInstanceName === 'string' &&
             isCommercialAssignedGroup(group, group.assignedInstanceName)
           : isCommercialAuthorizedGroup(group, this.options.instanceName),
+      );
+      const groups = await filterExecutableCommercialGroups(
+        candidateGroups,
+        this.options.instances,
       );
       if (duplicateLogicalGroupFingerprints(groups).length > 0) {
         return changed(

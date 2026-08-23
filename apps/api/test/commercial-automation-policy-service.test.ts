@@ -42,10 +42,11 @@ const group = (id = 'group-1'): WhatsAppGroupRecord => ({
 const target = (
   id = 'group-1',
   dailyLimit = 60,
+  instanceName = 'affiliate-bot',
 ): CommercialAutomationTarget => ({
   groupId: id,
   groupName: `Grupo ${id}`,
-  instanceName: 'affiliate-bot',
+  instanceName,
   logicalGroupFingerprint: id.endsWith('2')
     ? 'grp_bbbbbbbbbbbb'
     : 'grp_aaaaaaaaaaaa',
@@ -142,22 +143,30 @@ const createSubject = ({
   paused = false,
   groups = [group()],
   now = NOW,
+  useListAll = false,
+  instanceStates = {} as Record<string, boolean>,
 }: {
   config?: Partial<CommercialAutomationPolicyConfig>;
   paused?: boolean;
   groups?: WhatsAppGroupRecord[];
   now?: Date;
+  useListAll?: boolean;
+  instanceStates?: Record<string, boolean>;
 } = {}) => {
   const settings = new MemorySettings(paused);
   const history = new MemoryHistory();
+  const listAll = async () => groups;
   const service = new CommercialAutomationPolicyService({
     settings,
     history,
-    groups: { list: async () => groups },
+    groups: {
+      list: async () => groups,
+      listAll: useListAll ? listAll : undefined,
+    },
     instances: {
       findByName: async (name: string) => ({
         name,
-        active: true,
+        active: instanceStates[name] ?? true,
         createdAt: NOW,
         updatedAt: NOW,
       }),
@@ -529,6 +538,50 @@ describe('CommercialAutomationPolicyService', () => {
     await expect(
       service.evaluateAutomationReadiness({ target: target('2') }),
     ).resolves.toMatchObject({ allowed: true, reasons: [] });
+  });
+
+  it('mantem quota e cooldown independentes entre grupos de instancias distintas', async () => {
+    const groups = [
+      {
+        ...group('1'),
+        sourceInstanceName: 'instance-a',
+        assignedInstanceName: 'instance-a',
+      },
+      {
+        ...group('2'),
+        sourceInstanceName: 'instance-b',
+        assignedInstanceName: 'instance-b',
+      },
+    ];
+    const { service, history } = createSubject({
+      groups,
+      useListAll: true,
+      config: { dailyGlobalLimit: 10, dailyGroupLimit: 5 },
+      instanceStates: { 'instance-a': true, 'instance-b': true },
+    });
+    const sentAt = new Date('2026-07-25T14:30:00.000Z');
+    history.groupSentTodayById.set('1', 1);
+    history.groupSentTodayById.set('2', 0);
+    history.groupLastSentAtById.set('1', sentAt);
+
+    await expect(
+      service.evaluateAutomationReadiness({
+        target: target('1', 2, 'instance-a'),
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['MINIMUM_INTERVAL_NOT_REACHED'],
+      groupRemainingToday: 1,
+    });
+    await expect(
+      service.evaluateAutomationReadiness({
+        target: target('2', 2, 'instance-b'),
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      reasons: [],
+      groupRemainingToday: 2,
+    });
   });
 
   it('bloqueia destinos fisicos com a mesma fingerprint logica', async () => {

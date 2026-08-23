@@ -15,13 +15,19 @@ export type CommercialStickyIdentity = {
 
 const normalized = (value: string | null | undefined) => value ?? null;
 
-export const commercialStickyIdentityValues = (
+const commercialLifecycleIdentityValues = (
   identity: CommercialStickyIdentity,
 ) => [
   normalized(identity.runInstanceName),
   normalized(identity.dispatchInstanceName),
   normalized(identity.outboxInstanceName),
   normalized(identity.jobInstanceName),
+];
+
+export const commercialStickyIdentityValues = (
+  identity: CommercialStickyIdentity,
+) => [
+  ...commercialLifecycleIdentityValues(identity),
   ...(identity.destinationAssignedInstanceName !== undefined
     ? [normalized(identity.destinationAssignedInstanceName)]
     : []),
@@ -29,13 +35,29 @@ export const commercialStickyIdentityValues = (
 
 export const isLegacyCommercialStickyIdentity = (
   identity: CommercialStickyIdentity,
-) => commercialStickyIdentityValues(identity).every((value) => value === null);
+) =>
+  commercialLifecycleIdentityValues(identity).every((value) => value === null);
 
 export const assertCommercialStickyIdentity = (
   identity: CommercialStickyIdentity,
-  options: { allowLegacyFullNull?: boolean } = {},
+  options: { allowLegacyFullNull?: boolean; allowMissingJob?: boolean } = {},
 ) => {
-  const values = commercialStickyIdentityValues(identity);
+  const lifecycleValues = options.allowMissingJob
+    ? [
+        normalized(identity.runInstanceName),
+        normalized(identity.dispatchInstanceName),
+        normalized(identity.outboxInstanceName),
+      ]
+    : commercialLifecycleIdentityValues(identity);
+  const hasLifecycleIdentity = lifecycleValues.some((value) => value !== null);
+  const values = hasLifecycleIdentity
+    ? [
+        ...lifecycleValues,
+        ...(identity.destinationAssignedInstanceName !== undefined
+          ? [normalized(identity.destinationAssignedInstanceName)]
+          : []),
+      ]
+    : lifecycleValues;
   const hasNull = values.some((value) => value === null);
   const hasValue = values.some((value) => value !== null);
   if (hasNull && hasValue) {

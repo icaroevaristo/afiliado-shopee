@@ -5,6 +5,7 @@ import type {
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRecoveryContext,
   CommercialAutomationExecutionRepository,
+  CommercialPreConfirmationReservationRecoveryResult,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
@@ -3679,6 +3680,7 @@ const COMMERCIAL_PREMARKER_MAX_FAILURE_COUNT = 2_147_483_647;
 
 class CommercialPreMarkerRecoveryCasConflictError extends Error {}
 class CommercialPreMarkerRecoveryLookupError extends Error {}
+class CommercialPreConfirmationRecoveryCasConflictError extends Error {}
 
 const commercialPreMarkerRecoveryLookup = async <T>(lookup: () => Promise<T>) => {
   try {
@@ -3923,6 +3925,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
         mode: run.mode,
         dispatchId: run.dispatchId,
         jobId: run.jobId,
+        instanceName: run.instanceName,
         finalStatus: run.finalStatus,
         investigationRequired: run.investigationRequired,
         dispatch: run.dispatch
@@ -4234,6 +4237,200 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           outcome: 'BLOCKED' as const,
           reason: 'LOOKUP_FAILED' as const,
         };
+      }
+      throw error;
+    }
+  }
+
+  async recoverStalePreConfirmationReservation(
+    id: string,
+    input: { completedAt: Date; failureCode: string },
+  ): Promise<CommercialPreConfirmationReservationRecoveryResult> {
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const execution = await transaction.commercialAutomationExecution.findUnique({
+            where: { id },
+          });
+          if (!execution) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_FOUND' as const,
+            };
+          }
+          if (execution.status !== 'STARTED') {
+            if (
+              execution.status === 'FAILED' &&
+              execution.failureCode === input.failureCode
+            ) {
+              return {
+                outcome: 'ALREADY_RECOVERED' as const,
+                execution: mapCommercialAutomationExecution(
+                  execution as unknown as Record<string, unknown>,
+                ),
+              };
+            }
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_STARTED' as const,
+            };
+          }
+          if (
+            !execution.ownerId ||
+            !execution.activeKey ||
+            !execution.heartbeatAt ||
+            !execution.leaseExpiresAt
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_OWNERSHIP_INCOMPLETE' as const,
+            };
+          }
+          if (execution.leaseExpiresAt.getTime() > input.completedAt.getTime()) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'EXECUTION_NOT_STALE' as const,
+            };
+          }
+          if (!execution.commercialRunId) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RUN_EVIDENCE' as const,
+            };
+          }
+
+          const run = await transaction.commercialPipelineRun.findUnique({
+            where: { id: execution.commercialRunId },
+            select: {
+              id: true,
+              executionId: true,
+              mode: true,
+              dispatchId: true,
+              jobId: true,
+              dispatch: { select: { id: true } },
+              dispatchOutbox: { select: { id: true } },
+            },
+          });
+          if (
+            !run ||
+            run.executionId !== id ||
+            run.mode !== 'DRY_RUN' ||
+            run.dispatchId ||
+            run.jobId ||
+            run.dispatch ||
+            run.dispatchOutbox
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RUN_EVIDENCE' as const,
+            };
+          }
+
+          const reservations = await transaction.commercialGroupCampaign.findMany({
+            where: { attemptExecutionId: id },
+            take: 2,
+            select: {
+              id: true,
+              attemptExecutionId: true,
+              attemptReservedAt: true,
+              attemptLeaseExpiresAt: true,
+            },
+          });
+          if (reservations.length > 1) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_NOT_UNIQUE' as const,
+            };
+          }
+          const reservation = reservations[0];
+          if (
+            reservation &&
+            (reservation.attemptExecutionId !== id ||
+              !reservation.attemptReservedAt ||
+              !reservation.attemptLeaseExpiresAt)
+          ) {
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RESERVATION_INVALID' as const,
+            };
+          }
+          if (reservation) {
+            const released = await transaction.commercialGroupCampaign.updateMany({
+              where: {
+                id: reservation.id,
+                attemptExecutionId: id,
+                attemptReservedAt: reservation.attemptReservedAt,
+                attemptLeaseExpiresAt: reservation.attemptLeaseExpiresAt,
+              },
+              data: {
+                attemptExecutionId: null,
+                attemptReservedAt: null,
+                attemptLeaseExpiresAt: null,
+              },
+            });
+            if (released.count !== 1) {
+              throw new CommercialPreConfirmationRecoveryCasConflictError();
+            }
+          }
+
+          const updated = await transaction.commercialAutomationExecution.updateMany({
+            where: {
+              id,
+              status: 'STARTED',
+              externalStage: execution.externalStage,
+              commercialRunId: execution.commercialRunId,
+              ownerId: execution.ownerId,
+              activeKey: execution.activeKey,
+              heartbeatAt: execution.heartbeatAt,
+              leaseExpiresAt: execution.leaseExpiresAt,
+            },
+            data: {
+              activeKey: null,
+              status: 'FAILED',
+              failureCode: input.failureCode,
+              completedAt: input.completedAt,
+            },
+          });
+          if (updated.count !== 1) {
+            throw new CommercialPreConfirmationRecoveryCasConflictError();
+          }
+
+          const recovered = await transaction.commercialAutomationExecution.findUnique({
+            where: { id },
+          });
+          if (!recovered) {
+            throw new CommercialPreConfirmationRecoveryCasConflictError();
+          }
+          return {
+            outcome: 'RECOVERED' as const,
+            execution: mapCommercialAutomationExecution(
+              recovered as unknown as Record<string, unknown>,
+            ),
+          };
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        error instanceof CommercialPreConfirmationRecoveryCasConflictError ||
+        isTransactionConflictError(error)
+      ) {
+        try {
+          const current = await this.findById(id);
+          if (
+            current?.status === 'FAILED' &&
+            current.failureCode === input.failureCode
+          ) {
+            return {
+              outcome: 'ALREADY_RECOVERED' as const,
+              execution: current,
+            };
+          }
+        } catch {
+          // A transaction conflict remains authoritative when the
+          // follow-up idempotency lookup is unavailable.
+        }
+        return { outcome: 'BLOCKED' as const, reason: 'CAS_CONFLICT' as const };
       }
       throw error;
     }

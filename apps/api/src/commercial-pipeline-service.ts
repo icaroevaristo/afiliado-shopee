@@ -8,6 +8,7 @@ import type { CommercialCopyGenerator } from './commercial-copy-service';
 import {
   duplicateLogicalGroupFingerprints,
   isCommercialAuthorizedGroup,
+  isCommercialAssignedGroup,
 } from './commercial-group-selection';
 import {
   commercialProductRejections,
@@ -411,13 +412,21 @@ export class CommercialPipelineService {
         });
       }
 
+      const target = input.target;
+      const targetInstanceName = target?.instanceName ?? this.options.instanceName;
+      const availableGroups = target
+        ? this.options.groups.listAll
+          ? await this.options.groups.listAll({ active: true, available: true })
+          : []
+        : await this.options.groups.list(this.options.instanceName, {
+            active: true,
+            available: true,
+          });
       const groups = await filterExecutableCommercialGroups(
-        (await this.options.groups.list(this.options.instanceName, {
-          active: true,
-          available: true,
-        }))
-        .filter((group): group is WhatsAppGroupRecord =>
-          isCommercialAuthorizedGroup(group, this.options.instanceName),
+        availableGroups.filter((group): group is WhatsAppGroupRecord =>
+          target
+            ? isCommercialAssignedGroup(group, targetInstanceName)
+            : isCommercialAuthorizedGroup(group, this.options.instanceName),
         ),
         this.options.instances,
       );
@@ -438,7 +447,6 @@ export class CommercialPipelineService {
           rejectionSummary,
         });
       }
-      const target = input.target;
       const orderedGroups = [...groups].sort(
         (left, right) =>
           left.fingerprint.localeCompare(right.fingerprint) ||

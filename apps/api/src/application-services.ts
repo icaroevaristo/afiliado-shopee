@@ -143,6 +143,7 @@ export const createCommercialPipelineService = ({
     | 'whatsappDispatches'
     | 'commercialRuns'
     | 'commercialDeliveryHistory'
+    | 'whatsappInstances'
   >;
   score: Pick<ScoreService, 'calculate'>;
   instanceName: string;
@@ -159,6 +160,7 @@ export const createCommercialPipelineService = ({
     runs: repositories.commercialRuns,
     deliveryHistory: repositories.commercialDeliveryHistory,
     dispatches: repositories.whatsappDispatches,
+    instances: repositories.whatsappInstances,
     instanceName,
     subIdPrefix,
     logger,

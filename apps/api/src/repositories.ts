@@ -475,6 +475,29 @@ export type CommercialPreMarkerReservationRecoveryResult =
         | 'CAS_CONFLICT'
         | 'LOOKUP_FAILED';
     };
+
+export type CommercialPreConfirmationReservationRecoveryResult =
+  | {
+      outcome: 'RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'ALREADY_RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'BLOCKED';
+      reason:
+        | 'EXECUTION_NOT_FOUND'
+        | 'EXECUTION_NOT_STARTED'
+        | 'EXECUTION_OWNERSHIP_INCOMPLETE'
+        | 'EXECUTION_NOT_STALE'
+        | 'RUN_EVIDENCE'
+        | 'RESERVATION_NOT_UNIQUE'
+        | 'RESERVATION_INVALID'
+        | 'CAS_CONFLICT'
+        | 'LOOKUP_FAILED';
+    };
 export type StartCommercialAutomationExecutionResult =
   | {
       outcome: 'created';
@@ -530,6 +553,10 @@ export interface CommercialAutomationExecutionRepository {
       failureCode: string;
     },
   ): Promise<CommercialPreMarkerReservationRecoveryResult>;
+  recoverStalePreConfirmationReservation?(
+    id: string,
+    input: { completedAt: Date; failureCode: string },
+  ): Promise<CommercialPreConfirmationReservationRecoveryResult>;
   recoverStale(
     id: string,
     input: {

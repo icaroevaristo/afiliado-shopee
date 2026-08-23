@@ -70,12 +70,14 @@ const createSubject = (
     jobExists?: boolean;
     jobError?: boolean;
     jobDispatchId?: string;
+    jobInstanceName?: string | null;
     preMarkerRecovery?: 'RECOVERED' | 'BLOCKED' | 'ALREADY_RECOVERED';
     preMarkerBlockedReason?:
       | 'RESERVATION_NOT_UNIQUE'
       | 'COPY_ATTEMPT_EVIDENCE'
       | 'CAS_CONFLICT'
       | 'LOOKUP_FAILED';
+    preConfirmationRecovery?: 'RECOVERED' | 'BLOCKED' | 'ALREADY_RECOVERED';
   } = {},
 ) => {
   let record = { ...initial.execution };
@@ -134,12 +136,36 @@ const createSubject = (
       nextEligibleAt: new Date('2026-07-28T16:00:00.000Z'),
     };
   });
+  const recoverStalePreConfirmationReservation = vi.fn(async () => {
+    const outcome = options.preConfirmationRecovery ?? 'RECOVERED';
+    if (outcome === 'BLOCKED') {
+      return {
+        outcome: 'BLOCKED' as const,
+        reason: 'RUN_EVIDENCE' as const,
+      };
+    }
+    if (outcome === 'ALREADY_RECOVERED') {
+      return { outcome: 'ALREADY_RECOVERED' as const, execution: { ...record } };
+    }
+    if (record.status === 'STARTED') {
+      mutations += 1;
+      record = {
+        ...record,
+        activeKey: null,
+        status: 'FAILED',
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+        completedAt: NOW,
+      };
+    }
+    return { outcome: 'RECOVERED' as const, execution: { ...record } };
+  });
   const findJob = vi.fn(async (jobId: string) => {
     if (options.jobError) throw new Error('redis unavailable');
     return options.jobExists
       ? {
           id: jobId,
           dispatchId: options.jobDispatchId ?? 'dispatch-1',
+          instanceName: options.jobInstanceName ?? null,
         }
       : null;
   });
@@ -148,6 +174,7 @@ const createSubject = (
       findRecoveryContext,
       recoverStale,
       recoverStalePreMarkerReservation,
+      recoverStalePreConfirmationReservation,
     } as never,
     jobs: { findJob },
     clock: () => NOW,
@@ -157,6 +184,7 @@ const createSubject = (
     service,
     recoverStale,
     recoverStalePreMarkerReservation,
+    recoverStalePreConfirmationReservation,
     findJob,
     getMutations: () => mutations,
   };
@@ -271,6 +299,36 @@ describe('CommercialAutomationExecutionRecoveryService', () => {
     );
   });
 
+  it('recupera DRY_RUN sticky sem dispatch, outbox ou job como FAILED seguro', async () => {
+    const subject = createSubject({
+      execution: execution({
+        commercialRunId: 'run-1',
+        externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+      }),
+      run: {
+        ...confirmedContext().run!,
+        mode: 'DRY_RUN',
+        dispatchId: null,
+        jobId: null,
+        instanceName: 'instance-a',
+        dispatch: null,
+        outbox: null,
+      },
+    });
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      execution: { status: 'failed' },
+    });
+    expect(subject.findJob).not.toHaveBeenCalled();
+    expect(subject.recoverStalePreConfirmationReservation).toHaveBeenCalledWith(
+      'execution-1',
+      {
+        completedAt: NOW,
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+      },
+    );
+  });
+
   it('exige reconcile para outbox PENDING e nao altera a execucao', async () => {
     const context = confirmedContext({
       jobId: null,
@@ -284,6 +342,70 @@ describe('CommercialAutomationExecutionRecoveryService', () => {
 
     await expect(subject.service.recover('execution-1')).rejects.toMatchObject({
       code: COMMERCIAL_OUTBOX_RECONCILIATION_REQUIRED,
+    });
+    expect(subject.recoverStale).not.toHaveBeenCalled();
+  });
+
+  it('exige reconcile para outbox sticky PENDING sem job', async () => {
+    const base = confirmedContext();
+    const subject = createSubject({
+      execution: execution({
+        commercialRunId: 'run-1',
+        externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+      }),
+      run: {
+        ...base.run!,
+        instanceName: 'instance-a',
+        jobId: null,
+        dispatch: {
+          ...base.run!.dispatch!,
+          instanceName: 'instance-a',
+        },
+        outbox: {
+          ...base.run!.outbox!,
+          status: 'PENDING',
+          publishedAt: null,
+          instanceName: 'instance-a',
+        },
+      },
+    });
+
+    await expect(subject.service.recover('execution-1')).rejects.toMatchObject({
+      code: COMMERCIAL_OUTBOX_RECONCILIATION_REQUIRED,
+    });
+    expect(subject.findJob).toHaveBeenCalledWith('job-dispatch-1');
+    expect(subject.recoverStale).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia job PENDING de outra instancia como lifecycle divergente', async () => {
+    const base = confirmedContext();
+    const subject = createSubject(
+      {
+        execution: execution({
+          commercialRunId: 'run-1',
+          externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+        }),
+        run: {
+          ...base.run!,
+          instanceName: 'instance-a',
+          jobId: null,
+          dispatch: {
+            ...base.run!.dispatch!,
+            instanceName: 'instance-a',
+          },
+          outbox: {
+            ...base.run!.outbox!,
+            status: 'PENDING',
+            publishedAt: null,
+            instanceName: 'instance-a',
+          },
+        },
+      },
+      { jobExists: true, jobInstanceName: 'instance-b' },
+    );
+
+    await expect(subject.service.recover('execution-1')).rejects.toMatchObject({
+      code: 'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
     });
     expect(subject.recoverStale).not.toHaveBeenCalled();
   });
