@@ -85,6 +85,7 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import { APPROVED_PRODUCT_MIN_SCORE } from './repositories';
 import {
   COMMERCIAL_EXECUTION_OWNERSHIP_LOST,
+  COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_STALE,
   isCommercialAutomationExecutionStale,
 } from './commercial-automation-execution-domain';
 import {
@@ -3793,6 +3794,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       DatabaseClient,
       | '$transaction'
       | 'commercialAutomationExecution'
+      | 'commercialAutomationSettings'
       | 'commercialPipelineRun'
       | 'commercialGroupCampaign'
       | 'commercialPromotionCandidate'
@@ -3819,9 +3821,12 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     ownerId: string;
     heartbeatAt: Date;
     leaseExpiresAt: Date;
+    expectedScheduleRevision?: number;
   }) {
-    try {
-      const record = await this.prisma.commercialAutomationExecution.create({
+    const createExecution = (
+      client: Pick<DatabaseClient, 'commercialAutomationExecution'>,
+    ) =>
+      client.commercialAutomationExecution.create({
         data: {
           schedulerJobId: input.schedulerJobId,
           bullMqJobId: input.bullMqJobId,
@@ -3836,6 +3841,56 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           startedAt: input.startedAt,
         },
       });
+
+    try {
+      const started =
+        input.expectedScheduleRevision === undefined
+          ? {
+              outcome: 'created' as const,
+              record: await createExecution(this.prisma),
+            }
+          : await this.prisma.$transaction(
+              async (transaction) => {
+                if (input.bullMqJobId) {
+                  const existing =
+                    await transaction.commercialAutomationExecution.findUnique({
+                      where: { bullMqJobId: input.bullMqJobId },
+                    });
+                  if (existing) {
+                    return { outcome: 'existing' as const, record: existing };
+                  }
+                }
+                const settings =
+                  await transaction.commercialAutomationSettings.findUnique({
+                    where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
+                    select: { scheduleRevision: true },
+                  });
+                const currentScheduleRevision =
+                  settings?.scheduleRevision ?? 0;
+                if (
+                  currentScheduleRevision !== input.expectedScheduleRevision
+                ) {
+                  throw new AppError(
+                    'A agenda comercial mudou antes da aceitacao da execucao',
+                    COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_STALE,
+                  );
+                }
+                return {
+                  outcome: 'created' as const,
+                  record: await createExecution(transaction),
+                };
+              },
+              { isolationLevel: 'Serializable' },
+            );
+      if (started.outcome === 'existing') {
+        return {
+          outcome: 'existing' as const,
+          execution: mapCommercialAutomationExecution(
+            started.record as unknown as Record<string, unknown>,
+          ),
+        };
+      }
+      const record = started.record;
       return {
         outcome: 'created' as const,
         execution: mapCommercialAutomationExecution(

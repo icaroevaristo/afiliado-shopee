@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
   JOB_NAMES,
@@ -232,6 +233,62 @@ describe('processCommercialAutomationJob', () => {
       ),
     ).resolves.toEqual({ skipped: true, reason: 'SCHEDULE_REVISION_STALE' });
     expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('mantem o precheck como fast-path e fecha a race na aceitacao atomica', async () => {
+    const revision = { value: 5 };
+    let createdExecutions = 0;
+    const getScheduleRevision = vi.fn(async () => revision.value);
+    const atomicStart = vi.fn(async (expectedScheduleRevision: number) => {
+      if (expectedScheduleRevision !== revision.value) {
+        throw new AppError(
+          'A agenda comercial mudou antes da aceitacao da execucao',
+          'SCHEDULE_REVISION_STALE',
+        );
+      }
+      createdExecutions += 1;
+    });
+    const executeTick = vi.fn(
+      async (input: { targetConstraint?: { scheduleRevision: number } }) => {
+        revision.value = 6;
+        await atomicStart(input.targetConstraint!.scheduleRevision);
+        return { status: 'preview-ready' };
+      },
+    );
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T12:00:00.000Z',
+      slotKey: 'slot-race',
+      scheduleRevision: 5,
+    };
+
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-slot-race',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: { mode: 'preview', kind: 'target', target },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'mock',
+          mode: 'preview',
+          getScheduleRevision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'SCHEDULE_REVISION_STALE' });
+
+    expect(getScheduleRevision).toHaveBeenCalledOnce();
+    expect(executeTick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetConstraint: expect.objectContaining({ scheduleRevision: 5 }),
+      }),
+    );
+    expect(atomicStart).toHaveBeenCalledWith(5);
+    expect(createdExecutions).toBe(0);
   });
 
   it('transporta target constraint no job target atual', async () => {

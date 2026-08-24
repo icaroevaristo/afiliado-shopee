@@ -245,6 +245,11 @@ export class CommercialAutomationOrchestrator {
         startedAt,
         this.dependencies.leaseSeconds * 1000,
       ),
+      // FREEZE_AT_EXECUTION_ACCEPTANCE: this is the sole authoritative
+      // revision check; the worker read above remains only a fast-path.
+      ...(input.targetConstraint
+        ? { expectedScheduleRevision: input.targetConstraint.scheduleRevision }
+        : {}),
     });
     if (started.outcome === 'existing') {
       if (started.execution.status === 'STARTED') {

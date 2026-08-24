@@ -529,6 +529,11 @@ export type StartCommercialAutomationExecutionResult =
   | { outcome: 'concurrent'; stale: boolean };
 
 export interface CommercialAutomationExecutionRepository {
+  /**
+   * FREEZE_AT_EXECUTION_ACCEPTANCE: when supplied, the schedule revision is
+   * checked atomically with execution acceptance. Once accepted, this
+   * revision is not revalidated by the tick lifecycle.
+   */
   start(input: {
     schedulerJobId: string;
     bullMqJobId?: string;
@@ -537,6 +542,7 @@ export interface CommercialAutomationExecutionRepository {
     ownerId: string;
     heartbeatAt: Date;
     leaseExpiresAt: Date;
+    expectedScheduleRevision?: number;
   }): Promise<StartCommercialAutomationExecutionResult>;
   createBlocked(input: {
     schedulerJobId: string;

@@ -6,6 +6,8 @@ import type {
 
 export const COMMERCIAL_EXECUTION_OWNERSHIP_LOST =
   'COMMERCIAL_EXECUTION_OWNERSHIP_LOST';
+export const COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_STALE =
+  'SCHEDULE_REVISION_STALE';
 
 export const isCommercialAutomationExecutionStale = (
   execution: CommercialAutomationExecutionRecord,

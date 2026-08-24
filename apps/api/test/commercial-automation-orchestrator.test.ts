@@ -33,6 +33,7 @@ const NOW = new Date('2026-07-26T15:00:00.000Z');
 
 class MemoryExecutions implements CommercialAutomationExecutionRepository {
   records: CommercialAutomationExecutionRecord[] = [];
+  lastExpectedScheduleRevision: number | undefined;
   concurrent = false;
   concurrentStale = false;
   heartbeatCalls = 0;
@@ -46,7 +47,9 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
     ownerId: string;
     heartbeatAt: Date;
     leaseExpiresAt: Date;
+    expectedScheduleRevision?: number;
   }) {
+    this.lastExpectedScheduleRevision = input.expectedScheduleRevision;
     const existing = this.records.find(
       (record) => input.bullMqJobId && record.bullMqJobId === input.bullMqJobId,
     );
@@ -1513,6 +1516,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[0] }),
     );
+    expect(subject.executions.lastExpectedScheduleRevision).toBe(1);
   });
 
   it('bloqueia target reatribuido sem cair para outro grupo', async () => {
