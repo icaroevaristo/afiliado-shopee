@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
   JOB_NAMES,
@@ -175,6 +176,179 @@ describe('processCommercialAutomationJob', () => {
       ),
     ).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_JOB_MODE_MISMATCH',
+    });
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('usa o planner no tick global quando ele esta composto', async () => {
+    const executeTick = vi.fn();
+    const plan = vi.fn(async () => ({ slots: [] }));
+    const enqueue = vi.fn(async () => undefined);
+    await processCommercialAutomationJob(
+      {
+        id: 'planner-tick-1',
+        name: JOB_NAMES.commercialAutomationTick,
+        data: { mode: 'send' },
+      },
+      {
+        orchestrator: { executeTick } as never,
+        planner: { plan },
+        enqueueTarget: enqueue,
+        provider: 'official',
+        mode: 'send',
+      },
+    );
+
+    expect(plan).toHaveBeenCalledOnce();
+    expect(plan).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'send', enqueue }),
+    );
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia job target stale antes do orchestrator', async () => {
+    const executeTick = vi.fn();
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T12:00:00.000Z',
+      slotKey: 'slot-a',
+      scheduleRevision: 2,
+    };
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-slot-a',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: { mode: 'send', kind: 'target', target },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'official',
+          mode: 'send',
+          getScheduleRevision: vi.fn(async () => 3),
+        },
+      ),
+    ).resolves.toEqual({ skipped: true, reason: 'SCHEDULE_REVISION_STALE' });
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('mantem o precheck como fast-path e fecha a race na aceitacao atomica', async () => {
+    const revision = { value: 5 };
+    let createdExecutions = 0;
+    const getScheduleRevision = vi.fn(async () => revision.value);
+    const atomicStart = vi.fn(async (expectedScheduleRevision: number) => {
+      if (expectedScheduleRevision !== revision.value) {
+        throw new AppError(
+          'A agenda comercial mudou antes da aceitacao da execucao',
+          'SCHEDULE_REVISION_STALE',
+        );
+      }
+      createdExecutions += 1;
+    });
+    const executeTick = vi.fn(
+      async (input: { targetConstraint?: { scheduleRevision: number } }) => {
+        revision.value = 6;
+        await atomicStart(input.targetConstraint!.scheduleRevision);
+        return { status: 'preview-ready' };
+      },
+    );
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T12:00:00.000Z',
+      slotKey: 'slot-race',
+      scheduleRevision: 5,
+    };
+
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-slot-race',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: { mode: 'preview', kind: 'target', target },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'mock',
+          mode: 'preview',
+          getScheduleRevision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'SCHEDULE_REVISION_STALE' });
+
+    expect(getScheduleRevision).toHaveBeenCalledOnce();
+    expect(executeTick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetConstraint: expect.objectContaining({ scheduleRevision: 5 }),
+      }),
+    );
+    expect(atomicStart).toHaveBeenCalledWith(5);
+    expect(createdExecutions).toBe(0);
+  });
+
+  it('transporta target constraint no job target atual', async () => {
+    const executeTick = vi.fn(async () => ({ status: 'preview-ready' }));
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T00:00:00.000Z',
+      slotKey: 'slot-a',
+      scheduleRevision: 2,
+    };
+    await processCommercialAutomationJob(
+      {
+        id: 'commercial-target-slot-a',
+        name: JOB_NAMES.commercialAutomationTarget,
+        data: { mode: 'send', kind: 'target', target },
+      },
+      {
+        orchestrator: { executeTick } as never,
+        provider: 'official',
+        mode: 'send',
+        getScheduleRevision: vi.fn(async () => 2),
+      },
+    );
+    expect(executeTick).toHaveBeenCalledWith(
+      expect.objectContaining({ targetConstraint: target }),
+    );
+  });
+
+  it('rejeita payload target incompleto antes do orchestrator', async () => {
+    const executeTick = vi.fn();
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-invalid',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: '',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'fingerprint-a',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-24T12:00:00.000Z',
+              slotKey: 'slot-invalid',
+              scheduleRevision: 2,
+            },
+          },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'official',
+          mode: 'send',
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_TARGET_CONSTRAINT_INVALID',
     });
     expect(executeTick).not.toHaveBeenCalled();
   });

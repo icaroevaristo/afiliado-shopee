@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import type { CommercialAutomationTargetConstraint } from '@shopee-auto-affiliate-ai/queue';
 
 import {
   COMMERCIAL_CONFIRMATION_TOKEN,
@@ -50,6 +51,8 @@ export const COMMERCIAL_AUTOMATION_TARGET_BACKOFF =
   'COMMERCIAL_AUTOMATION_TARGET_BACKOFF';
 export const COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID =
   'COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID';
+export const COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE =
+  'COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE';
 
 export type { CommercialAutomationMode, CommercialAutomationProvider };
 
@@ -226,6 +229,7 @@ export class CommercialAutomationOrchestrator {
     bullMqJobId?: string;
     mode: CommercialAutomationMode;
     provider: CommercialAutomationProvider;
+    targetConstraint?: CommercialAutomationTargetConstraint;
   }): Promise<CommercialAutomationTickResult> {
     const mode = toPersistedCommercialAutomationMode(input.mode);
     const startedAt = this.clock();
@@ -241,6 +245,11 @@ export class CommercialAutomationOrchestrator {
         startedAt,
         this.dependencies.leaseSeconds * 1000,
       ),
+      // FREEZE_AT_EXECUTION_ACCEPTANCE: this is the sole authoritative
+      // revision check; the worker read above remains only a fast-path.
+      ...(input.targetConstraint
+        ? { expectedScheduleRevision: input.targetConstraint.scheduleRevision }
+        : {}),
     });
     if (started.outcome === 'existing') {
       if (started.execution.status === 'STARTED') {
@@ -397,6 +406,41 @@ export class CommercialAutomationOrchestrator {
           );
         }
         const targetReasons = new Set<string>();
+        if (input.targetConstraint) {
+          const scheduledFor = Date.parse(input.targetConstraint.scheduledFor);
+          const matchingTargets = targets.filter(
+            (target) =>
+              target.campaignId === input.targetConstraint?.campaignId &&
+              target.groupId === input.targetConstraint?.groupId &&
+              target.logicalGroupFingerprint ===
+                input.targetConstraint?.logicalGroupFingerprint &&
+              target.instanceName === input.targetConstraint?.instanceName,
+          );
+          if (
+            !Number.isFinite(scheduledFor) ||
+            scheduledFor > this.clock().getTime()
+          ) {
+            return publicResult(
+              await finish({
+                status: 'BLOCKED',
+                reasons: [COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE],
+                failureCode: COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE,
+                completedAt: this.clock(),
+              }),
+            );
+          }
+          if (matchingTargets.length !== 1) {
+            return publicResult(
+              await finish({
+                status: 'BLOCKED',
+                reasons: ['COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'],
+                failureCode: 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
+                completedAt: this.clock(),
+              }),
+            );
+          }
+          targets = matchingTargets;
+        }
         let synced = false;
         const syncOffers = async () => {
           if (synced) return;

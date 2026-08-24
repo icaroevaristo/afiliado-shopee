@@ -20,6 +20,7 @@ import { CommercialMessageDraftService } from '../../api/src/commercial-message-
 import type { CommercialDispatchOutboxQueue } from '../../api/src/commercial-dispatch-outbox-publisher';
 import { ScoreService } from '../../api/src/score-service';
 import { ShopeeOfferSyncService } from '../../api/src/shopee-offer-sync-service';
+import { CommercialAutomationSchedulerPlanner } from '../../api/src/commercial-automation-scheduler-planner';
 
 export type CommercialAutomationRuntimeLogger = {
   info: (obj: unknown, message?: string) => void;
@@ -113,18 +114,28 @@ export const createCommercialAutomationOrchestratorRuntime = (
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     logger,
   });
+  const commercialPolicyConfig = {
+    enabled: config.COMMERCIAL_AUTOMATION_ENABLED,
+    timezone: config.COMMERCIAL_TIMEZONE,
+    allowedStartTime: config.COMMERCIAL_ALLOWED_START_TIME,
+    allowedEndTime: config.COMMERCIAL_ALLOWED_END_TIME,
+    dailyGlobalLimit: config.COMMERCIAL_DAILY_GLOBAL_LIMIT,
+    dailyGroupLimit: config.COMMERCIAL_DAILY_GROUP_LIMIT,
+    minimumIntervalMinutes: config.COMMERCIAL_MIN_INTERVAL_MINUTES,
+  };
   const policy = createCommercialAutomationPolicyService({
     repositories,
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
-    config: {
-      enabled: config.COMMERCIAL_AUTOMATION_ENABLED,
-      timezone: config.COMMERCIAL_TIMEZONE,
-      allowedStartTime: config.COMMERCIAL_ALLOWED_START_TIME,
-      allowedEndTime: config.COMMERCIAL_ALLOWED_END_TIME,
-      dailyGlobalLimit: config.COMMERCIAL_DAILY_GLOBAL_LIMIT,
-      dailyGroupLimit: config.COMMERCIAL_DAILY_GROUP_LIMIT,
-      minimumIntervalMinutes: config.COMMERCIAL_MIN_INTERVAL_MINUTES,
-    },
+    config: commercialPolicyConfig,
+  });
+  const planner = new CommercialAutomationSchedulerPlanner({
+    settings: repositories.commercialAutomationSettings,
+    campaigns: repositories.commercialGroupCampaigns,
+    groups: repositories.whatsappGroups,
+    instances: repositories.whatsappInstances,
+    history: repositories.commercialAutomationHistory,
+    policy,
+    config: commercialPolicyConfig,
   });
 
   const syncOffers =
@@ -166,6 +177,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
       };
 
   return {
+    planner,
     orchestrator: new CommercialAutomationOrchestrator({
       policy,
       syncOffers,

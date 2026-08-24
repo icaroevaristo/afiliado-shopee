@@ -1,6 +1,8 @@
 import { apiRequest } from './client';
 import type {
   CommercialCampaignPage,
+  CommercialCampaign,
+  CommercialCampaignScheduleUpdate,
   CommercialQueuePage,
   CommercialCandidateStatus,
 } from './types';
@@ -9,6 +11,15 @@ export const listCommercialCampaigns = (page = 1, limit = 50) =>
   apiRequest<CommercialCampaignPage>(
     `/commercial/campaigns?page=${page}&limit=${limit}`,
     { method: 'GET' },
+  );
+
+export const updateCommercialCampaign = (
+  campaignId: string,
+  input: CommercialCampaignScheduleUpdate,
+) =>
+  apiRequest<CommercialCampaign>(
+    `/commercial/campaigns/${encodeURIComponent(campaignId)}`,
+    { method: 'PATCH', body: input },
   );
 
 export const listCommercialCampaignQueue = (

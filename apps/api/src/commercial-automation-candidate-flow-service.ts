@@ -301,6 +301,13 @@ export class CommercialAutomationCandidateFlowService {
       campaign.id !== target.campaignId ||
       campaign.nicheId !== target.nicheId ||
       campaign.dailyLimit !== target.dailyLimit ||
+      (target.cadenceMinutes !== undefined &&
+        campaign.cadenceMinutes !== target.cadenceMinutes) ||
+      (target.timezone !== undefined && campaign.timezone !== target.timezone) ||
+      (target.allowedStartTime !== undefined &&
+        campaign.allowedStartTime !== target.allowedStartTime) ||
+      (target.allowedEndTime !== undefined &&
+        campaign.allowedEndTime !== target.allowedEndTime) ||
       (target.failureCount !== undefined &&
         campaign.failureCount !== target.failureCount) ||
       (target.nextEligibleAt !== undefined &&
@@ -329,6 +336,10 @@ export class CommercialAutomationCandidateFlowService {
           campaignId: campaign.id,
           nicheId: campaign.nicheId,
           dailyLimit: campaign.dailyLimit,
+          cadenceMinutes: campaign.cadenceMinutes,
+          timezone: campaign.timezone,
+          allowedStartTime: campaign.allowedStartTime,
+          allowedEndTime: campaign.allowedEndTime,
           failureCount: campaign.failureCount,
           nextEligibleAt: campaign.nextEligibleAt,
         });

@@ -363,13 +363,17 @@ export const envSchema = z
           message: 'COMMERCIAL_AUTOMATION_GROUP_SEND_REQUIRED',
         });
       }
-      if (env.SCHEDULER_ENABLED) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['SCHEDULER_ENABLED'],
-          message: 'LEGACY_SCHEDULER_MUST_REMAIN_DISABLED',
-        });
-      }
+    }
+    if (
+      env.SCHEDULER_ENABLED &&
+      (env.COMMERCIAL_AUTOMATION_MODE === 'send' ||
+        env.COMMERCIAL_SCHEDULER_ENABLED)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SCHEDULER_ENABLED'],
+        message: 'LEGACY_SCHEDULER_MUST_REMAIN_DISABLED',
+      });
     }
     if (env.SHOPEE_AFFILIATE_PROVIDER === 'official') {
       if (!env.SHOPEE_AFFILIATE_API_ENABLED) {

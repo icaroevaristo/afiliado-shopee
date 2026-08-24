@@ -338,7 +338,20 @@ export type CommercialAutomationSettingsRecord = {
   paused: boolean;
   pausedAt: Date | null;
   resumedAt: Date | null;
+  allowedStartTime: string | null;
+  allowedEndTime: string | null;
+  minimumIntervalMinutes: number | null;
+  staggerMinutes: number | null;
+  scheduleRevision: number;
   updatedAt: Date;
+};
+
+export type CommercialAutomationScheduleUpdate = {
+  allowedStartTime?: string | null;
+  allowedEndTime?: string | null;
+  minimumIntervalMinutes?: number | null;
+  staggerMinutes?: number | null;
+  expectedRevision?: number;
 };
 
 export interface CommercialAutomationSettingsRepository {
@@ -346,6 +359,10 @@ export interface CommercialAutomationSettingsRepository {
   getOrCreate(now: Date): Promise<CommercialAutomationSettingsRecord>;
   setPaused(
     paused: boolean,
+    now: Date,
+  ): Promise<CommercialAutomationSettingsRecord>;
+  updateSchedule(
+    input: CommercialAutomationScheduleUpdate,
     now: Date,
   ): Promise<CommercialAutomationSettingsRecord>;
 }
@@ -366,6 +383,10 @@ export type CommercialAutomationTarget = {
   campaignId: string;
   nicheId: string;
   dailyLimit: number;
+  cadenceMinutes?: number;
+  timezone?: string;
+  allowedStartTime?: string;
+  allowedEndTime?: string;
   failureCount?: number;
   nextEligibleAt?: Date | null;
 };
@@ -508,6 +529,11 @@ export type StartCommercialAutomationExecutionResult =
   | { outcome: 'concurrent'; stale: boolean };
 
 export interface CommercialAutomationExecutionRepository {
+  /**
+   * FREEZE_AT_EXECUTION_ACCEPTANCE: when supplied, the schedule revision is
+   * checked atomically with execution acceptance. Once accepted, this
+   * revision is not revalidated by the tick lifecycle.
+   */
   start(input: {
     schedulerJobId: string;
     bullMqJobId?: string;
@@ -516,6 +542,7 @@ export interface CommercialAutomationExecutionRepository {
     ownerId: string;
     heartbeatAt: Date;
     leaseExpiresAt: Date;
+    expectedScheduleRevision?: number;
   }): Promise<StartCommercialAutomationExecutionResult>;
   createBlocked(input: {
     schedulerJobId: string;

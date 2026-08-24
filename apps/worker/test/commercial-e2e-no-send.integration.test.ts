@@ -200,6 +200,11 @@ const policyStatus = async ({
     paused: false,
     pausedAt: null,
     resumedAt: now,
+    allowedStartTime: null,
+    allowedEndTime: null,
+    minimumIntervalMinutes: null,
+    staggerMinutes: null,
+    scheduleRevision: 0,
     updatedAt: now,
   };
   const policy = new CommercialAutomationPolicyService({
@@ -207,6 +212,7 @@ const policyStatus = async ({
       get: async () => settings,
       getOrCreate: async () => settings,
       setPaused: async () => settings,
+      updateSchedule: async () => settings,
     },
     history: {
       getSnapshot: async () => ({

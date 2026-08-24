@@ -11,9 +11,11 @@ import {
   createWhatsAppDispatchQueue,
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
   enqueueControlledWhatsAppDispatch,
+  enqueueCommercialAutomationTarget,
   JOB_NAMES,
   QUEUE_NAMES,
   type CommercialAutomationJob,
+  type CommercialAutomationTargetConstraint,
   type CommercialAutomationScheduler,
 } from '@shopee-auto-affiliate-ai/queue';
 
@@ -34,6 +36,11 @@ type CommercialWorkerInfrastructure = {
       instanceName?: string | null,
     ): Promise<void>;
   };
+  enqueueTarget?: (
+    data: Extract<CommercialAutomationJob, { kind: 'target' }>,
+    jobId: string,
+    delayMs: number,
+  ) => Promise<void>;
   close(): Promise<void>;
 };
 
@@ -61,6 +68,28 @@ const closeResources = async (cleanups: Array<() => Promise<unknown>>) => {
   if (firstError) throw firstError;
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0;
+
+const isCommercialAutomationTargetConstraint = (
+  value: unknown,
+): value is CommercialAutomationTargetConstraint => {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.campaignId) &&
+    isNonEmptyString(value.groupId) &&
+    isNonEmptyString(value.logicalGroupFingerprint) &&
+    isNonEmptyString(value.instanceName) &&
+    isNonEmptyString(value.scheduledFor) &&
+    Number.isFinite(Date.parse(value.scheduledFor)) &&
+    isNonEmptyString(value.slotKey) &&
+    Number.isSafeInteger(value.scheduleRevision)
+  );
+};
+
 export const processCommercialAutomationJob = async (
   job: Pick<Job<CommercialAutomationJob>, 'id' | 'name' | 'data'>,
   options: {
@@ -70,9 +99,26 @@ export const processCommercialAutomationJob = async (
     >;
     provider: 'mock' | 'manual' | 'official';
     mode: 'preview' | 'send';
+    planner?: {
+      plan(input: {
+        now?: Date;
+        mode: 'preview' | 'send';
+        enqueue: (
+          data: Extract<CommercialAutomationJob, { kind: 'target' }>,
+          jobId: string,
+          delayMs: number,
+        ) => Promise<void>;
+      }): Promise<unknown>;
+    };
+    enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
+    getScheduleRevision?: () => Promise<number>;
+    clock?: () => Date;
   },
 ) => {
-  if (job.name !== JOB_NAMES.commercialAutomationTick) {
+  if (
+    job.name !== JOB_NAMES.commercialAutomationTick &&
+    job.name !== JOB_NAMES.commercialAutomationTarget
+  ) {
     return { skipped: true };
   }
   if (!job.id) {
@@ -81,11 +127,65 @@ export const processCommercialAutomationJob = async (
       'COMMERCIAL_AUTOMATION_JOB_ID_REQUIRED',
     );
   }
-  if (job.data.mode !== options.mode) {
+  const jobData: unknown = job.data;
+  if (!isRecord(jobData) || jobData.mode !== options.mode) {
     throw new AppError(
       'Modo do job comercial diverge da configuracao carregada',
       'COMMERCIAL_AUTOMATION_JOB_MODE_MISMATCH',
     );
+  }
+  if (job.name === JOB_NAMES.commercialAutomationTarget) {
+    if (job.data.kind !== 'target') {
+      throw new AppError(
+        'Job target da automacao comercial sem constraint',
+        'COMMERCIAL_AUTOMATION_TARGET_CONSTRAINT_REQUIRED',
+      );
+    }
+    if (!isCommercialAutomationTargetConstraint(jobData.target)) {
+      throw new AppError(
+        'Job target da automacao comercial com constraint invalida',
+        'COMMERCIAL_AUTOMATION_TARGET_CONSTRAINT_INVALID',
+      );
+    }
+    const target = jobData.target;
+    if (!Number.isSafeInteger(target.scheduleRevision)) {
+      throw new AppError(
+        'Job target da automacao comercial sem revisao valida',
+        'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_REQUIRED',
+      );
+    }
+    if (`commercial-target-${target.slotKey}` !== job.id) {
+      throw new AppError(
+        'Job target da automacao comercial com identidade divergente',
+        'COMMERCIAL_AUTOMATION_TARGET_JOB_ID_MISMATCH',
+      );
+    }
+    if (options.getScheduleRevision) {
+      const currentRevision = await options.getScheduleRevision();
+      if (currentRevision !== target.scheduleRevision) {
+        return { skipped: true, reason: 'SCHEDULE_REVISION_STALE' };
+      }
+    }
+    return options.orchestrator.executeTick({
+      schedulerJobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+      bullMqJobId: job.id,
+      mode: options.mode,
+      provider: options.provider,
+      targetConstraint: target,
+    });
+  }
+  if (options.planner) {
+    if (!options.enqueueTarget) {
+      throw new AppError(
+        'Planner comercial sem destino de enfileiramento',
+        'COMMERCIAL_AUTOMATION_TARGET_ENQUEUE_REQUIRED',
+      );
+    }
+    return options.planner.plan({
+      now: options.clock?.() ?? new Date(),
+      mode: options.mode,
+      enqueue: options.enqueueTarget,
+    });
   }
   return options.orchestrator.executeTick({
     schedulerJobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
@@ -101,6 +201,7 @@ export const createCommercialAutomationWorker = (
     connection: ReturnType<typeof createRedisConnection>;
     prisma?: ReturnType<typeof createPrismaClient>;
     confirmationQueue?: CommercialWorkerInfrastructure['confirmationQueue'];
+    enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
     logger: CommercialAutomationRuntimeLogger;
   },
 ) => {
@@ -114,6 +215,9 @@ export const createCommercialAutomationWorker = (
     (job) =>
       processCommercialAutomationJob(job, {
         orchestrator: runtime.orchestrator,
+        planner: runtime.planner,
+        enqueueTarget: options.enqueueTarget,
+        getScheduleRevision: () => runtime.planner.getScheduleRevision(),
         provider: config.SHOPEE_AFFILIATE_PROVIDER,
         mode: config.COMMERCIAL_AUTOMATION_MODE,
       }),
@@ -162,6 +266,14 @@ export const createCommercialWorkerInfrastructure = (
           },
         }
       : undefined,
+    enqueueTarget: async (data, jobId, delayMs) => {
+      await enqueueCommercialAutomationTarget(
+        commercialQueue,
+        data,
+        jobId,
+        delayMs,
+      );
+    },
     close: () => {
       closePromise ??= closeResources([
         () => commercialQueue.close(),
@@ -208,6 +320,7 @@ export const startCommercialAutomationWorker = async (
       connection: infrastructure.connection,
       prisma: options.prisma,
       confirmationQueue: infrastructure.confirmationQueue,
+      enqueueTarget: infrastructure.enqueueTarget,
       logger,
     });
   } catch (error) {

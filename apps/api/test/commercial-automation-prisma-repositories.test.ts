@@ -7,6 +7,42 @@ import {
 } from '../src/prisma-repositories';
 
 describe('commercial automation Prisma repositories', () => {
+  it('atualiza agenda com CAS de revision e incremento atomico', async () => {
+    const update = vi.fn().mockResolvedValue({
+      paused: true,
+      pausedAt: null,
+      resumedAt: null,
+      allowedStartTime: '08:00',
+      allowedEndTime: '23:00',
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      scheduleRevision: 1,
+      updatedAt: new Date('2026-08-24T12:00:00.000Z'),
+    });
+    const repository = new PrismaCommercialAutomationSettingsRepository({
+      commercialAutomationSettings: { update },
+    } as never);
+
+    await repository.updateSchedule(
+      {
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        expectedRevision: 0,
+      },
+      new Date('2026-08-24T12:00:00.000Z'),
+    );
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: 'commercial-automation', scheduleRevision: 0 },
+      data: {
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        scheduleRevision: { increment: 1 },
+        updatedAt: new Date('2026-08-24T12:00:00.000Z'),
+      },
+    });
+  });
+
   it('inicializa o singleton pausado e persiste pausa/retomada', async () => {
     const upsert = vi
       .fn()
@@ -318,6 +354,167 @@ describe('commercial automation Prisma repositories', () => {
         leaseExpiresAt: record.leaseExpiresAt,
       }),
     });
+  });
+
+  it('fecha a race precheck 5 -> PATCH 6 -> start atomico esperado 5', async () => {
+    let persistedScheduleRevision = 5;
+    const precheck = vi.fn(() => persistedScheduleRevision);
+    const settingsFindUnique = vi.fn(async () => ({
+      scheduleRevision: persistedScheduleRevision,
+    }));
+    const transactionCreate = vi.fn();
+    const rootCreate = vi.fn();
+    const transaction = {
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+      commercialAutomationExecution: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: transactionCreate,
+      },
+    };
+    const transactionRunner = vi.fn(
+      async (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    );
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: transactionRunner,
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+      commercialAutomationExecution: { create: rootCreate },
+    } as never);
+
+    expect(precheck()).toBe(5);
+    persistedScheduleRevision = 6;
+
+    await expect(
+      repository.start({
+        schedulerJobId: 'scheduled-commercial-automation',
+        bullMqJobId: 'job-race',
+        mode: 'PREVIEW',
+        startedAt: new Date('2026-08-24T15:00:00.000Z'),
+        ownerId: 'owner-race',
+        heartbeatAt: new Date('2026-08-24T15:00:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-24T15:02:00.000Z'),
+        expectedScheduleRevision: 5,
+      }),
+    ).rejects.toMatchObject({ code: 'SCHEDULE_REVISION_STALE' });
+
+    expect(transactionRunner).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+    expect(settingsFindUnique).toHaveBeenCalledWith({
+      where: { id: 'commercial-automation' },
+      select: { scheduleRevision: true },
+    });
+    expect(transactionCreate).not.toHaveBeenCalled();
+    expect(rootCreate).not.toHaveBeenCalled();
+  });
+
+  it('trata settings ausente como revision zero na aceitacao atomica', async () => {
+    const record = {
+      id: 'execution-zero-revision',
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'job-zero-revision',
+      activeKey: 'commercial-automation',
+      ownerId: 'owner-zero-revision',
+      heartbeatAt: new Date('2026-08-24T15:00:00.000Z'),
+      leaseExpiresAt: new Date('2026-08-24T15:02:00.000Z'),
+      mode: 'PREVIEW',
+      status: 'STARTED',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: null,
+      failureCode: null,
+      startedAt: new Date('2026-08-24T15:00:00.000Z'),
+      completedAt: null,
+    };
+    const settingsFindUnique = vi.fn().mockResolvedValue(null);
+    const create = vi.fn().mockResolvedValue(record);
+    const transaction = {
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+      commercialAutomationExecution: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create,
+      },
+    };
+    const transactionRunner = vi.fn(
+      async (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    );
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: transactionRunner,
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+      commercialAutomationExecution: { create: vi.fn() },
+    } as never);
+
+    await expect(
+      repository.start({
+        schedulerJobId: record.schedulerJobId,
+        bullMqJobId: record.bullMqJobId,
+        mode: 'PREVIEW',
+        startedAt: record.startedAt,
+        ownerId: record.ownerId,
+        heartbeatAt: record.heartbeatAt,
+        leaseExpiresAt: record.leaseExpiresAt,
+        expectedScheduleRevision: 0,
+      }),
+    ).resolves.toMatchObject({ outcome: 'created' });
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('preserva redelivery idempotente depois que a revision avancou', async () => {
+    const existing = {
+      id: 'execution-frozen',
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'job-frozen',
+      activeKey: null,
+      ownerId: 'owner-frozen',
+      heartbeatAt: new Date('2026-08-24T15:00:00.000Z'),
+      leaseExpiresAt: new Date('2026-08-24T15:02:00.000Z'),
+      mode: 'PREVIEW',
+      status: 'PREVIEW_READY',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: 'run-frozen',
+      failureCode: null,
+      startedAt: new Date('2026-08-24T15:00:00.000Z'),
+      completedAt: new Date('2026-08-24T15:01:00.000Z'),
+    };
+    const findUnique = vi.fn().mockResolvedValue(existing);
+    const settingsFindUnique = vi.fn();
+    const create = vi.fn();
+    const transaction = {
+      commercialAutomationExecution: { findUnique, create },
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+    };
+    const transactionRunner = vi.fn(
+      async (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    );
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: transactionRunner,
+      commercialAutomationExecution: { findUnique: vi.fn(), create },
+      commercialAutomationSettings: { findUnique: settingsFindUnique },
+    } as never);
+
+    await expect(
+      repository.start({
+        schedulerJobId: existing.schedulerJobId,
+        bullMqJobId: existing.bullMqJobId,
+        mode: 'PREVIEW',
+        startedAt: existing.startedAt,
+        ownerId: 'new-owner',
+        heartbeatAt: existing.heartbeatAt,
+        leaseExpiresAt: existing.leaseExpiresAt,
+        expectedScheduleRevision: 5,
+      }),
+    ).resolves.toMatchObject({
+      outcome: 'existing',
+      execution: { id: existing.id },
+    });
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { bullMqJobId: existing.bullMqJobId },
+    });
+    expect(settingsFindUnique).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
   });
 
   it('heartbeat e finish usam compare-and-set de ownership e lease', async () => {

@@ -56,6 +56,7 @@ const POSTERIOR_MIGRATIONS = [
   '20260814150000_commercial_automation_external_stage',
   '20260818213000_whatsapp_dispatch_manual_recovery',
   '20260822120000_phase14_instance_assignment_stickiness',
+  '20260824120000_commercial_scheduler_persisted_settings',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
@@ -107,6 +108,8 @@ const HISTORICAL_HASHES: Record<string, string> = {
     'ebc61617b41bd1409087742146ee5ab40ad1277ea9bd2be041e08a2b2b1980a2',
   '20260822120000_phase14_instance_assignment_stickiness':
     'b51a3477c0f13527937dc2403191de5320a22a2cf82239f229d4d8a1eff5147b',
+  '20260824120000_commercial_scheduler_persisted_settings':
+    '49e1c0432813518548966fe2ba6c0fd31191d64958bb8cd36703264f2da01d03',
 };
 
 const migration = (migrationName: string, finished = true) => ({

@@ -1,6 +1,8 @@
 import { apiRequest } from './client';
 import type {
   CommercialAutomationExecutionPage,
+  CommercialAutomationScheduleSettings,
+  CommercialAutomationSchedulePreview,
   CommercialAutomationSchedulerStatus,
   CommercialAutomationStatus,
   CommercialDispatchOutboxPage,
@@ -16,6 +18,28 @@ export const getCommercialAutomationSchedulerStatus = () =>
     '/commercial-automation/scheduler',
     { method: 'GET' },
   );
+
+export const getCommercialAutomationScheduleSettings = () =>
+  apiRequest<CommercialAutomationScheduleSettings>('/commercial-automation/settings', {
+    method: 'GET',
+  });
+
+export const updateCommercialAutomationScheduleSettings = (input: {
+  allowedStartTime?: string | null;
+  allowedEndTime?: string | null;
+  minimumIntervalMinutes?: number | null;
+  staggerMinutes?: number | null;
+  expectedRevision?: number;
+}) =>
+  apiRequest<CommercialAutomationScheduleSettings>(
+    '/commercial-automation/settings/schedule',
+    { method: 'PATCH', body: input },
+  );
+
+export const getCommercialAutomationSchedulePreview = () =>
+  apiRequest<CommercialAutomationSchedulePreview>('/commercial-automation/schedule/preview', {
+    method: 'GET',
+  });
 
 export const listCommercialAutomationExecutions = (page = 1, limit = 20) =>
   apiRequest<CommercialAutomationExecutionPage>(
