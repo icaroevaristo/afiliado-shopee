@@ -40,13 +40,22 @@ type SnapshotState = Record<string, unknown> & {
   revision: number;
   fingerprint: string;
 };
-type State = { products: ProductState[]; snapshots: SnapshotState[] };
+type CategoryState = {
+  id: string;
+  mappingSource: string;
+  discoveredAt: Date;
+};
+type State = {
+  products: ProductState[];
+  snapshots: SnapshotState[];
+  categories: CategoryState[];
+};
 
 const createTransactionalPrisma = (
   failure?: 'product-create' | 'product-update' | 'snapshot-create',
 ) => {
   let injectedFailure = failure;
-  let state: State = { products: [], snapshots: [] };
+  let state: State = { products: [], snapshots: [], categories: [] };
   let version = 0;
   const productFromData = (data: Record<string, unknown>): ProductState =>
     ({
@@ -167,6 +176,24 @@ const createTransactionalPrisma = (
             return snapshot;
           },
         },
+        shopeeCategory: {
+          createMany: async ({
+            data,
+          }: {
+            data: CategoryState[];
+            skipDuplicates: boolean;
+          }) => {
+            let count = 0;
+            for (const category of data) {
+              if (draft.categories.some((item) => item.id === category.id)) {
+                continue;
+              }
+              draft.categories.push(category);
+              count += 1;
+            }
+            return { count };
+          },
+        },
       };
       const result = await callback(transaction);
       if (version !== initialVersion) {
@@ -217,6 +244,13 @@ describe('PrismaShopeeOfferRepository official snapshots', () => {
     expect(fake.readState().products[0]?.commercialSnapshotFingerprint).toBe(
       fake.readState().snapshots[0]?.fingerprint,
     );
+    expect(fake.readState().categories).toEqual([
+      {
+        id: 'category-1',
+        mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+        discoveredAt: observedAt,
+      },
+    ]);
   });
 
   it('mantem A -> A e mudancas isoladas de rating/sales na mesma revision', async () => {

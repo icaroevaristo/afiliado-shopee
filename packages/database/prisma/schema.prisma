@@ -54,6 +54,18 @@ model ProductLead {
   @@index([offerEndsAt, unavailableAt])
 }
 
+model ShopeeCategory {
+  id            String   @id
+  name          String?
+  parentId      String?
+  mappingSource String   @default("OFFICIAL_PRODUCT_CATEGORY_ID")
+  discoveredAt  DateTime
+  updatedAt     DateTime @updatedAt
+
+  @@index([name])
+  @@index([parentId])
+}
+
 model CommercialOfferSnapshot {
   id             String      @id @default(cuid())
   productId      String

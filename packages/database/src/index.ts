@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+export { Prisma } from '@prisma/client';
 export const createPrismaClient = (databaseUrl?: string) =>
   new PrismaClient(
     databaseUrl

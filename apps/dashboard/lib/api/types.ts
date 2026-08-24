@@ -242,6 +242,91 @@ export type DashboardProduct = Product & {
 
 export type ShopeeOfferSource = 'MOCK' | 'MANUAL' | 'OFFICIAL';
 export type ShopeeOfferStatus = 'ACTIVE' | 'EXPIRED' | 'UNAVAILABLE';
+export type ShopeeOfferSort =
+  | 'recent'
+  | 'sales_desc'
+  | 'score_desc'
+  | 'discount_desc'
+  | 'commission_desc'
+  | 'price_asc'
+  | 'price_desc';
+export type ShopeeOfferDeliveryStatus = 'any' | 'sent' | 'not_sent';
+
+export type FlashDealCapability = {
+  status: 'UNSUPPORTED_CURRENT_PROVIDER_CONTRACT';
+  reasonCode: 'OFFICIAL_SIGNAL_NOT_AVAILABLE';
+};
+
+export type CommercialCatalogScore = {
+  candidateId: string;
+  campaignId: string;
+  campaignName: string;
+  nicheId: string;
+  score: number;
+  rankPosition: number | null;
+  candidateStatus:
+    | 'QUEUED'
+    | 'COPY_READY'
+    | 'RESERVED'
+    | 'DISPATCHED'
+    | 'BLOCKED'
+    | 'EXPIRED';
+};
+
+export type CommercialStateSummary = {
+  currentCandidateCount: number;
+  queued: number;
+  copyReady: number;
+  reserved: number;
+  dispatched: number;
+  blocked: number;
+  expired: number;
+  bestCurrentCommercialScore: number | null;
+};
+
+export type ShopeeOfferSnapshot = {
+  id: string;
+  revision: number;
+  fingerprint: string;
+  price: string;
+  priceMin: string | null;
+  priceMax: string | null;
+  discountRate: number;
+  commissionRate: number;
+  observedRating: number;
+  observedSales: number;
+  offerStartsAt: string | null;
+  offerEndsAt: string | null;
+  unavailableAt: string | null;
+  capturedAt: string;
+};
+
+export type ShopeeOfferDispatchHistory = {
+  dispatchId: string;
+  status: 'PENDING' | 'PROCESSING' | 'SENT' | 'FAILED';
+  destination: {
+    id: string;
+    name: string;
+    fingerprint: string | null;
+    type: 'INDIVIDUAL' | 'GROUP';
+  };
+  instanceName: string | null;
+  sentAt: string | null;
+  attemptCount: number;
+  run: {
+    id: string;
+    finalStatus: 'PENDING' | 'SENT' | 'FAILED' | 'AMBIGUOUS' | null;
+    investigationRequired: boolean;
+  } | null;
+};
+
+export type ShopeeOfferHistoryPage<T> = {
+  items: T[];
+  page: number;
+  limit: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+};
 
 export type ShopeeOffer = {
   id: string;
@@ -254,6 +339,8 @@ export type ShopeeOffer = {
   price: string;
   priceMin: string;
   priceMax: string;
+  referencePrice: null;
+  referencePriceUnavailableReason: 'OFFICIAL_REFERENCE_PRICE_NOT_AVAILABLE';
   discountRate: number;
   rating: number;
   sales: number;
@@ -262,6 +349,7 @@ export type ShopeeOffer = {
   imageUrl: string;
   productLink: string;
   affiliateLink?: string;
+  affiliateLinkPresent: boolean;
   offerStartsAt?: string;
   offerEndsAt?: string;
   fetchedAt: string;
@@ -272,6 +360,42 @@ export type ShopeeOffer = {
   createdAt: string;
   updatedAt: string;
   status: ShopeeOfferStatus;
+  commercialSnapshotRevision: number;
+  commercialSnapshotFingerprint: string | null;
+  snapshot: ShopeeOfferSnapshot | null;
+  capturedAt: string;
+  capturedAtSource: 'LATEST_SNAPSHOT' | 'FALLBACK_FETCHED_AT';
+  commercialScores: CommercialCatalogScore[];
+  bestCurrentCommercialScore: number | null;
+  commercialStateSummary: CommercialStateSummary;
+  everSent: boolean;
+  sentDestinationCount: number;
+  lastSentAt: string | null;
+  destinationDelivery: {
+    destinationId: string;
+    everSent: boolean;
+    lastSentAt: string | null;
+  } | null;
+};
+
+export type ShopeeOfferDetail = ShopeeOffer & {
+  dispatchHistory: ShopeeOfferHistoryPage<ShopeeOfferDispatchHistory>;
+  snapshotHistory: ShopeeOfferHistoryPage<ShopeeOfferSnapshot>;
+  flashDealCapability: FlashDealCapability;
+};
+
+export type ShopeeCategory = {
+  id: string;
+  name: string | null;
+  parentId: string | null;
+  mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID';
+  productCount: number;
+  displayLabel: string;
+};
+
+export type ShopeeCategoryPage = {
+  items: ShopeeCategory[];
+  hierarchyStatus: 'NOT_AVAILABLE_FROM_CURRENT_PROVIDER_CONTRACT';
 };
 
 export type ShopeeOfferFilters = {
@@ -279,6 +403,21 @@ export type ShopeeOfferFilters = {
   source?: ShopeeOfferSource | '';
   status?: ShopeeOfferStatus | '';
   affiliateLink?: 'present' | 'missing' | '';
+  categoryId?: string;
+  minDiscount?: number;
+  maxDiscount?: number;
+  minScore?: number;
+  maxScore?: number;
+  minPrice?: number;
+  maxPrice?: number;
+  minCommission?: number;
+  maxCommission?: number;
+  deliveryStatus?: ShopeeOfferDeliveryStatus;
+  destinationId?: string;
+  availability?: ShopeeOfferStatus | '';
+  capturedFrom?: string;
+  capturedTo?: string;
+  sort?: ShopeeOfferSort;
   page?: number;
   limit?: number;
 };
@@ -290,6 +429,9 @@ export type ShopeeOfferPage = {
   limit: number;
   total: number;
   totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  flashDealCapability: FlashDealCapability;
 };
 
 export type ShopeeOfferSyncReport = {

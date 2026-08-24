@@ -57,6 +57,7 @@ const POSTERIOR_MIGRATIONS = [
   '20260818213000_whatsapp_dispatch_manual_recovery',
   '20260822120000_phase14_instance_assignment_stickiness',
   '20260824120000_commercial_scheduler_persisted_settings',
+  '20260824130000_shopee_category_registry',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
@@ -110,6 +111,8 @@ const HISTORICAL_HASHES: Record<string, string> = {
     'b51a3477c0f13527937dc2403191de5320a22a2cf82239f229d4d8a1eff5147b',
   '20260824120000_commercial_scheduler_persisted_settings':
     '49e1c0432813518548966fe2ba6c0fd31191d64958bb8cd36703264f2da01d03',
+  '20260824130000_shopee_category_registry':
+    '7d20c78d632f0315583eede853ca01eb56adb3963fff412cb31c3a09c5333629',
 };
 
 const migration = (migrationName: string, finished = true) => ({
