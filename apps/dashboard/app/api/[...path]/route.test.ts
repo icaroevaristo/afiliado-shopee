@@ -138,6 +138,70 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('permite a leitura GET do lifecycle comercial agregado', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [], summary: {} }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/commercial-automation/lifecycles?page=1&limit=20'),
+      { params: Promise.resolve({ path: ['commercial-automation', 'lifecycles'] }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:3334/commercial-automation/lifecycles?page=1&limit=20',
+      expect.objectContaining({ method: 'GET', cache: 'no-store' }),
+    );
+  });
+
+  it('permite somente a leitura GET do historico de copies', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/commercial-automation/copies?page=2&limit=10'),
+      { params: Promise.resolve({ path: ['commercial-automation', 'copies'] }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:3334/commercial-automation/copies?page=2&limit=10',
+      expect.objectContaining({ method: 'GET', cache: 'no-store' }),
+    );
+  });
+
   it('bloqueia PATCH fora de settings sem chamar o upstream', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -156,6 +220,7 @@ describe('dashboard API proxy', () => {
 
   it('falha fechada sem token local e nao chama o upstream', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', '');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 

@@ -4,6 +4,8 @@ import {
   Activity,
   Boxes,
   ClipboardList,
+  FileText,
+  GitBranch,
   Gauge,
   LayoutDashboard,
   Menu,
@@ -25,6 +27,8 @@ const navigation = [
   { href: '/produtos', label: 'Produtos', icon: PackageSearch },
   { href: '/campanhas', label: 'Campanhas', icon: Tags },
   { href: '/automacao', label: 'Automacao', icon: Gauge },
+  { href: '/lifecycle', label: 'Lifecycle', icon: GitBranch },
+  { href: '/copies', label: 'Copies', icon: FileText },
 ];
 
 const secondaryNavigation = [

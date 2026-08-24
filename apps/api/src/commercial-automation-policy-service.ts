@@ -162,7 +162,7 @@ const nextWindowOpeningAtOrAfter = (
   throw new Error('Nao foi possivel calcular a proxima janela comercial');
 };
 
-const getLocalDayRange = (now: Date, timezone: string) => {
+export const getLocalDayRange = (now: Date, timezone: string) => {
   const today = getZonedParts(now, timezone);
   const dateKey = `${today.year}-${today.month}-${today.day}`;
   const isSameLocalDay = (timestamp: number) => {

@@ -71,6 +71,14 @@ import {
 import { CommercialDispatchOutboxService } from './commercial-dispatch-outbox-service';
 import { CommercialNicheService } from './commercial-niche-service';
 import { CommercialGroupCampaignService } from './commercial-group-campaign-service';
+import {
+  CommercialLifecycleService,
+  type CommercialLifecycleJob,
+  type CommercialLifecycleQueueName,
+} from './commercial-lifecycle-service';
+import { PrismaCommercialLifecycleRepository } from './prisma-commercial-lifecycle-repository';
+import { CommercialCopyHistoryService } from './commercial-copy-history-service';
+import { PrismaCommercialCopyHistoryRepository } from './prisma-commercial-copy-history-repository';
 import type { CommercialPromotionMiningService } from './commercial-promotion-mining-service';
 import type { CommercialPromotionCandidateStatus } from './repositories';
 import type { CommercialAiCopyProvider } from './commercial-ai-copy-provider';
@@ -167,6 +175,8 @@ export type BuildAppOptions = {
   commercialAutomationSchedulerStatusServiceFactory?: () => {
     getStatus(): Promise<CommercialAutomationSchedulerStatusSnapshot>;
   };
+  commercialLifecycleService?: Pick<CommercialLifecycleService, 'list'>;
+  commercialCopyHistoryService?: Pick<CommercialCopyHistoryService, 'list'>;
   commercialSchedulerConfig?: {
     enabled: boolean;
     cron: string;
@@ -552,6 +562,48 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       createCommercialAutomationQueue(getRedisConnection());
     return commercialAutomationQueue;
   };
+  const commercialLifecycleService =
+    options.commercialLifecycleService ??
+    new CommercialLifecycleService(
+      new PrismaCommercialLifecycleRepository(prisma),
+      {
+        getJob: async (queue: CommercialLifecycleQueueName, jobId: string) => {
+          const selectedQueue =
+            queue === 'whatsapp-dispatch'
+              ? getWhatsAppDispatchQueue()
+              : getCommercialAutomationQueue();
+          return (await selectedQueue.getJob(jobId)) as
+            | CommercialLifecycleJob
+            | null
+            | undefined;
+        },
+        getJobCounts: async (queue: CommercialLifecycleQueueName) => {
+          const selectedQueue =
+            queue === 'whatsapp-dispatch'
+              ? getWhatsAppDispatchQueue()
+              : getCommercialAutomationQueue();
+          if (!('getJobCounts' in selectedQueue)) return null;
+          const counts = await selectedQueue.getJobCounts(
+            'waiting',
+            'active',
+            'failed',
+          );
+          return {
+            waiting: counts.waiting ?? 0,
+            active: counts.active ?? 0,
+            failed: counts.failed ?? 0,
+          };
+        },
+      },
+      undefined,
+      options.commercialAutomationConfig?.timezone ??
+        COMMERCIAL_AUTOMATION_DEFAULTS.timezone,
+    );
+  const commercialCopyHistoryService =
+    options.commercialCopyHistoryService ??
+    new CommercialCopyHistoryService(
+      new PrismaCommercialCopyHistoryRepository(prisma),
+    );
   let pipelineScheduler:
     ReturnType<typeof createBullMqPipelineScheduler> | undefined;
   const schedulerReader = {
@@ -1036,6 +1088,56 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
           status === 400
             ? 'Paginacao invalida'
             : 'Historico da automacao comercial indisponivel',
+      });
+    }
+  });
+
+  app.get('/commercial-automation/lifecycles', async (request, reply) => {
+    try {
+      const query = request.query as { page?: string; limit?: string };
+      return await commercialLifecycleService.list({
+        page: parsePositiveInteger(query.page, 1, 100),
+        limit: parsePositiveInteger(query.limit, 20, 50),
+      });
+    } catch (error) {
+      const status =
+        error instanceof AppError && error.code === 'INVALID_PAGINATION'
+          ? 400
+          : 500;
+      return reply.status(status).send({
+        error:
+          status === 400
+            ? 'INVALID_PAGINATION'
+            : 'COMMERCIAL_LIFECYCLE_UNAVAILABLE',
+        message:
+          status === 400
+            ? 'Paginacao invalida'
+            : 'Lifecycle comercial indisponivel',
+      });
+    }
+  });
+
+  app.get('/commercial-automation/copies', async (request, reply) => {
+    try {
+      const query = request.query as { page?: string; limit?: string };
+      return await commercialCopyHistoryService.list({
+        page: parsePositiveInteger(query.page, 1, 100),
+        limit: parsePositiveInteger(query.limit, 20, 50),
+      });
+    } catch (error) {
+      const status =
+        error instanceof AppError && error.code === 'INVALID_PAGINATION'
+          ? 400
+          : 500;
+      return reply.status(status).send({
+        error:
+          status === 400
+            ? 'INVALID_PAGINATION'
+            : 'COMMERCIAL_COPY_HISTORY_UNAVAILABLE',
+        message:
+          status === 400
+            ? 'Paginacao invalida'
+            : 'Historico de copies indisponivel',
       });
     }
   });
