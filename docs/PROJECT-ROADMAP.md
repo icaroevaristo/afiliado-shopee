@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `589f9295d940ff5cce20ad6ad306bfef31c1d2ef` e evidências operacionais certificadas até a conclusão da Fase 14 em 2026-08-24.
+> Estado auditado contra `main` em `a3d16fad985fcf4708f5a5ba7a1dd68bc97c6078`; Fase 15 certificada como concluída em 2026-08-24.
 
 ## 1. Objetivo final
 
@@ -63,7 +63,7 @@ Princípios obrigatórios:
 
 ### Estado atual
 
-**Fase 14 DONE para registry, assignments e lifecycle sticky.** A operação multi-instância/multi-grupo real foi certificada com duas instâncias e dois grupos. Configuração temporal, pausa individual, stagger e administração pelo painel permanecem nas Fases 15 e 18.
+**Fase 14 DONE para registry, assignments e lifecycle sticky.** A operação multi-instância/multi-grupo real foi certificada com duas instâncias e dois grupos. A configuração temporal e o stagger da Fase 15 foram certificados; pausa individual e administração completa pelo painel permanecem na Fase 18.
 
 ### Requisito oficial
 
@@ -82,7 +82,7 @@ Uma instância indisponível não pode provocar troca silenciosa para outra se i
 
 ### Estado atual
 
-**Fase 14 DONE para operação multi-grupo real controlada.** Assignments, isolamento de nicho/dedupe/quota/cooldown e dois grupos reais foram certificados. Configuração completa pelo painel e cadência/stagger permanecem planejadas.
+**Fase 14 DONE para operação multi-grupo real controlada.** Assignments, isolamento de nicho/dedupe/quota/cooldown e dois grupos reais foram certificados. Cadência e stagger da Fase 15 foram certificados; configuração completa pelo painel permanece planejada para a Fase 18.
 
 ### Requisito oficial
 
@@ -94,7 +94,7 @@ Cada grupo deve ter destino/fingerprint, nicho/categoria, campanha, instância(s
 
 ### Estado atual
 
-**Core existe; orquestração temporal final ainda não está DONE.** Já existem janela, quotas global/grupo/campanha, minimum interval/cooldown, scheduler/worker, tick com no máximo um target confirmado, recovery/reservas fail-closed e pause. Fase 10 normalizou o runtime e Fase 11 provou one-shot real; isso não equivale a agenda autônoma multi-instância/multi-grupo.
+**Fase 15 DONE.** O scheduler comercial único está endurecido, com planner determinístico multi-instância/multi-grupo, jobs target-specific, `slotKey`/`jobId` determinísticos, cadence, window, minimum interval, quotas, stagger determinístico, restart/replan idempotente, configuração persistida sem dependência de `.env` para os campos da fase, `scheduleRevision`, stale schedule fail-closed e target constraint sem reroute.
 
 ### Requisito oficial
 
@@ -328,6 +328,26 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** Fase 13 concluída; lifecycle atual preservado.
 - **Critério objetivo:** pelo menos duas instâncias em teste/integração real controlada; assignments persistidos; pausa/falha de uma não redireciona silenciosamente outra; nicho/dedupe corretos por grupo; múltiplos grupos reais recebem candidates compatíveis.
 
+### Fase 15 — Scheduler multi-instância, cadence e stagger
+- **Estado:** `DONE`
+- **Objetivo original:** produzir agenda com horários por instância e espaçamento entre grupos.
+- **Dependências:** Fase 14 concluída.
+- **Critério objetivo preservado:** agenda respeita janela/intervalo/quotas; stagger evita rajadas; restart não duplica jobs; painel altera horários/intervalos sem `.env`; soak mostra sequência prevista entre grupos/instâncias.
+- **Implementação mergeada:** PR #99; feature HEAD `8c55e811e5cfe30a641e7203f8d58f9827d072fd`; merge commit `a3d16fad985fcf4708f5a5ba7a1dd68bc97c6078`. O scheduler comercial único foi endurecido sem paralelo, com planner determinístico multi-instância/multi-grupo, target jobs delayed BullMQ, `scheduleRevision`, aceitação atômica da execution, settings persistidos e superfície mínima de dashboard/API.
+- **Migration:** `20260824120000_commercial_scheduler_persisted_settings`, SHA-256 `49E1C0432813518548966FE2BA6C0FD31191D64958BB8CD36703264F2DA01D03`, `applied=true`, `pending=0`, `unresolved=0`, `schemaUpToDate=true`; aditiva, sem alteração destrutiva, com overrides nullable e `scheduleRevision` default `0`. Backup registrado: `phase15-pre-commercial-scheduler-settings-20260824-132827.dump`; restore drill da migration não foi executado.
+- **Configuração persistida:** `allowedStartTime`, `allowedEndTime`, `minimumIntervalMinutes`, `staggerMinutes` e `scheduleRevision`; override não nulo prevalece e `null` mantém o fallback. Após o soak, overrides voltaram a `null`, com efetivo `08:00–20:00`, minimum interval `60`, timezone `America/Sao_Paulo` e revision final `3`.
+- **Planner e identidade:** scheduler lógico `scheduled-commercial-automation`; jobs carregam identidade do target e revision. A identidade determinística é `scheduleRevision + canonical target identity + scheduledFor -> slotKey/jobId`; ticks sobrepostos e restart/replan convergiram para os mesmos jobs, com `duplicateLogicalJobs=0`.
+- **Cadência, stagger e constraints:** o primeiro slot usa `max(cadenceMinutes, minimumIntervalMinutes)`; o stagger é persistido/configurável, determinístico e distinto do cooldown. O target constraint valida campaign/group/assignment/instance/fingerprint/policy/provenance e ranking pós-sync; target inválido falha fechado, com `silentReroute=0`.
+- **Race de revision:** o commit `8c55e811e5cfe30a641e7203f8d58f9827d072fd` (`fix(scheduler): atomically accept schedule revision`) formaliza `FREEZE_AT_EXECUTION_ACCEPTANCE`; `expectedScheduleRevision` é validado dentro da transação `Serializable` antes da criação da execution. Revision stale cria execution/lifecycle/provider `0`; settings ausente equivale a revision `0`. P1 resolvido.
+- **Dashboard/API:** superfícies mínimas permitem consultar e alterar janela, minimum interval, stagger e cadence/window de campaign sem `.env` ou restart; administração completa de instâncias/grupos permanece na Fase 18.
+- **Regressão offline certificada:** planner `13/13`; API `1170 passed / 9 skipped`; worker `229`; dashboard `78`; database `46`; config `63`; queue `11`; providers `165`; Turbo `15/15`; typecheck `15/15`; build `10/10`; Prisma validate PASS; lint dos arquivos alterados PASS; `git diff --check` PASS. Permaneceram `9` erros de lint repository-wide preexistentes, fora do escopo.
+- **Soak controlado:** `PHASE_15_CONTROLLED_SOAK_SUCCESS=true`; PostgreSQL `51/90`, Redis/BullMQ `13/22`, scheduler writes `2/2`, enqueue attempts `3/8`, unique target jobs `2/4`, executeTick PREVIEW `1/2`; Shopee/OpenAI/Evolution/WhatsApp SEND `0`.
+- **Revision 1 e quotas:** janela `16:05–16:35` em `America/Sao_Paulo`, minimum interval `5`, stagger `7`. Campaign A foi planejada em `2026-08-24T19:05:00Z`, com slotKey `8651e376a7662043fb899456f31ad753a55b363ddea49c2d224e7f36ab9338ae`; Campaign B ficou `GROUP_DAILY_LIMIT_REACHED`, sem reroute e sem slot aceito.
+- **Overlap/restart:** foram executados `3` planner ticks; slots logicamente iguais convergiram, IDs não duplicaram, restart/replan reconstruiu a mesma agenda e permaneceu um único scheduler lógico.
+- **Revision 1 → 2:** alteração controlada de stagger `7 → 8` produziu o slotKey `bddb926346d0ae63195c0d2ea5aa76c087b933d879885d12cce3bfc7e9fbd467`; jobs da revision 1 permaneceram identificáveis como stale. O processamento retornou `SCHEDULE_REVISION_STALE`, com execution/sync/reservation/copy/run/dispatch/outbox/provider `0`.
+- **Preview e restore:** foi aceita uma execução PREVIEW/MOCK para Campaign A, grupo A e `afiliado-shopee-local`, com `PREVIEW_READY`, run `COMPLETED`, dispatch/outbox/WhatsApp job `0` e provider MOCK. Após o restore: Campaign A ativa, Campaign B inativa, scheduler não registrado, `activeExecutions=0`, `activeReservations=0`, `ambiguity=0`, `investigationRequired=0`, pending dispatch/outbox `0` e filas waiting/active/delayed `0`.
+- **Certificação final:** `12/12` critérios PASS; window, minimum interval, quotas, stagger, restart sem duplicidade, settings sem `.env`, determinismo multi-instância, soak, stale fail-closed e preservação da Fase 14 foram comprovados. `REAL_SEND_REQUIRED_FOR_PHASE15=false`.
+
 ### Fase 12 — Estabilidade controlada multiciclo
 - **Estado:** `DONE`
 - **Objetivo:** provar múltiplos ciclos reais sucessivos respeitando ranking, provenance, cooldown, quota, dedupe e recovery.
@@ -360,17 +380,10 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13 e 14 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14 e 15 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
-
-### Fase 15 — Scheduler multi-instância, cadence e stagger
-- **Estado:** `NOT_STARTED`
-- **Objetivo:** produzir agenda com horários por instância e espaçamento entre grupos.
-- **Evidência principal:** scheduler/cooldown existem, mas não há stagger configurável nem agenda N-instâncias certificada.
-- **Dependências:** Fase 14 concluída.
-- **Critério objetivo:** agenda respeita janela/intervalo/quotas; stagger evita rajadas; restart não duplica jobs; painel altera horários/intervalos sem `.env`; soak mostra sequência prevista entre grupos/instâncias.
 
 ### Fase 16 — Catálogo operacional, taxonomia Shopee e Ofertas Relâmpago
 - **Estado:** `NOT_STARTED` como experiência completa; fundações já existem.
@@ -456,7 +469,7 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Provenance | DONE | Fail-closed; revelou blocker real na Fase 12 |
 | Copy V10 | DONE | Geração/cache/validator provados |
 | Imagem/draft | DONE | Gate antes de dispatch |
-| Policy/destinos | DONE | Assignments e instâncias sticky certificados; cadência temporal permanece planejada |
+| Policy/destinos | DONE | Assignments e instâncias sticky certificados; cadence/stagger persistidos e constraints preservados |
 | Dispatch/outbox/Sender | DONE | Primeiro SEND real concluído |
 | E2E no-SEND | DONE | Regressão preservada |
 | Runtime/recovery base | DONE | Ainda falta autonomia contínua final |
@@ -464,10 +477,10 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Estabilidade multiciclo | DONE | Dois ciclos reais certificados; stale candidate reconciliado sem bypass |
 | Multi-instância real | DONE | Duas instâncias reais, assignments persistidos e lifecycle sticky certificados |
 | Multi-grupo real completo | DONE | Dois grupos reais, isolamento e candidates compatíveis certificados |
-| Scheduler/stagger final | NOT_STARTED | Cooldown existe; stagger/N-instâncias não |
+| Scheduler/stagger final | DONE | Planner determinístico multi-instância/multi-grupo; cadence/window/quotas/stagger e revision stale certificados |
 | Catálogo operacional completo | NOT_STARTED | Tela/modelo existentes, UX final não |
 | Categorias reais no painel | NOT_STARTED | IDs persistidos; taxonomia/UX final não |
 | Ofertas Relâmpago confiáveis | NOT_STARTED | Sem sinal oficial comprovado hoje |
 | Envio manual seguro | NOT_STARTED | Deve reutilizar pipeline atual |
 | Painel administrativo | NOT_STARTED | Console atual predominantemente read-only |
-| Soak/restart/autonomia | NOT_STARTED | Gate final do MVP |
+| Soak/restart/autonomia | NOT_STARTED | Soak e restart/replan da Fase 15 certificados; autonomia contínua final permanece planejada |
