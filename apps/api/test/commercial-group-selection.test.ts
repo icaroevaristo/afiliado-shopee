@@ -4,6 +4,7 @@ import {
   duplicateLogicalGroupFingerprints,
   isCommercialAuthorizedGroup,
 } from '../src/commercial-group-selection';
+import { assertCommercialStickyIdentity } from '../src/commercial-instance-stickiness';
 import type { WhatsAppGroupRecord } from '../src/repositories';
 
 const NOW = new Date('2026-08-16T12:00:00.000Z');
@@ -28,6 +29,9 @@ const group = (
 describe('commercial group selection identity', () => {
   it('autoriza somente GROUP ativo, disponivel, da instancia e com fingerprint valido', () => {
     expect(isCommercialAuthorizedGroup(group(), INSTANCE)).toBe(true);
+    expect(
+      isCommercialAuthorizedGroup(group({ assignedInstanceName: null }), INSTANCE),
+    ).toBe(true);
     expect(isCommercialAuthorizedGroup(group({ active: false }), INSTANCE)).toBe(false);
     expect(isCommercialAuthorizedGroup(group({ available: false }), INSTANCE)).toBe(false);
     expect(
@@ -60,5 +64,17 @@ describe('commercial group selection identity', () => {
     expect(
       duplicateLogicalGroupFingerprints([first, renamedDuplicate]),
     ).toEqual(['grp_aaaaaaaaaaaa']);
+  });
+
+  it('preserva lifecycle legado full-null mesmo com assignment migrado no destino', () => {
+    expect(
+      assertCommercialStickyIdentity({
+        runInstanceName: null,
+        dispatchInstanceName: null,
+        outboxInstanceName: null,
+        jobInstanceName: null,
+        destinationAssignedInstanceName: 'instance-a',
+      }),
+    ).toBeNull();
   });
 });

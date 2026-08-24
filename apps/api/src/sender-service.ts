@@ -20,6 +20,8 @@ import {
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
   type CommercialMessageDraftService,
 } from './commercial-message-draft-service';
+import { assertActiveCommercialInstance } from './commercial-instance-stickiness';
+import type { WhatsAppInstanceRepository } from './repositories';
 
 export type SenderServiceOptions = {
   dispatches: WhatsAppDispatchRepository;
@@ -28,6 +30,8 @@ export type SenderServiceOptions = {
   messageBuilder?: (copy: WhatsAppDispatchDetails['generatedCopy']) => string;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
+  instanceName?: string;
+  instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
 };
 
 
@@ -250,7 +254,10 @@ export class SenderService {
           'WHATSAPP_GROUP_POLICY_REQUIRED',
         );
       }
-      this.options.groupSendPolicy.assertAuthorized(dispatch.destination);
+      this.options.groupSendPolicy.assertAuthorized(
+        dispatch.destination,
+        this.options.instanceName,
+      );
     }
 
     const claimed = await this.options.dispatches.markAttemptPending(
@@ -264,6 +271,37 @@ export class SenderService {
     }
 
     try {
+      if (dispatch.destination.type === 'GROUP') {
+        const stickyInstanceName = dispatch.instanceName;
+        const hasStickyInstance = typeof stickyInstanceName === 'string';
+        if (
+          hasStickyInstance &&
+          dispatch.destination.assignedInstanceName !== stickyInstanceName
+        ) {
+          await this.options.dispatches.markFailed(
+            dispatch.id,
+            'Identidade sticky da instancia comercial divergente',
+          );
+          throw new AppError(
+            'Identidade sticky da instancia comercial divergente',
+            'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+          );
+        }
+        if (hasStickyInstance && this.options.instances) {
+          try {
+            await assertActiveCommercialInstance(
+              this.options.instances,
+              stickyInstanceName,
+            );
+          } catch (error) {
+            await this.options.dispatches.markFailed(
+              dispatch.id,
+              'Instancia do lifecycle comercial esta ausente ou inativa',
+            );
+            throw error;
+          }
+        }
+      }
       const result = await this.options.provider.sendMessage({
         destination: dispatch.destination.destination,
         message,
@@ -287,6 +325,13 @@ export class SenderService {
       );
       return updated;
     } catch (error) {
+      if (
+        error instanceof AppError &&
+        (error.code === 'COMMERCIAL_INSTANCE_INACTIVE' ||
+          error.code === 'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH')
+      ) {
+        throw error;
+      }
       if (
         error instanceof WhatsAppSendError &&
         !error.deliveryMayHaveStarted

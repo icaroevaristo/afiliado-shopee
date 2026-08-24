@@ -167,6 +167,7 @@ export type CommercialPipelineRunData = {
   mode: CommercialPipelineRunMode;
   status: CommercialPipelineRunStatus;
   executionId?: string | null;
+  instanceName?: string | null;
   productId?: string | null;
   groupDestinationId?: string | null;
   productName?: string | null;
@@ -257,6 +258,7 @@ export type CommercialDispatchOutboxRecord = {
   commercialRunId: string;
   dispatchId: string;
   jobId: string;
+  instanceName: string | null;
   status: CommercialDispatchOutboxStatus;
   failureCode: string | null;
   createdAt: Date;
@@ -278,10 +280,14 @@ export type CommercialDispatchOutboxPublicationContext = {
     | 'status'
     | 'dispatchId'
     | 'jobId'
+    | 'instanceName'
     | 'finalStatus'
     | 'investigationRequired'
   >;
-  dispatch: Pick<WhatsAppDispatchRecord, 'id' | 'status' | 'attemptCount'>;
+  dispatch: Pick<
+    WhatsAppDispatchRecord,
+    'id' | 'status' | 'attemptCount' | 'instanceName'
+  >;
 };
 
 type CommercialConfirmationPersistenceInputBase = {
@@ -290,6 +296,7 @@ type CommercialConfirmationPersistenceInputBase = {
   confirmedAt: Date;
   dispatch: WhatsAppDispatchCreateData & { id: string };
   jobId: string;
+  instanceName?: string | null;
 };
 
 export type CommercialConfirmationPersistenceInput =
@@ -310,6 +317,9 @@ export interface CommercialDispatchOutboxRepository {
     filters: CommercialDispatchOutboxFilters,
   ): Promise<{ items: CommercialDispatchOutboxRecord[]; total: number }>;
   findById(id: string): Promise<CommercialDispatchOutboxRecord | null>;
+  findByDispatchId?(
+    dispatchId: string,
+  ): Promise<CommercialDispatchOutboxRecord | null>;
   findPublicationContext(
     id: string,
   ): Promise<CommercialDispatchOutboxPublicationContext | null>;
@@ -351,6 +361,7 @@ export type CommercialAutomationHistorySnapshot = {
 export type CommercialAutomationTarget = {
   groupId: string;
   groupName: string;
+  instanceName?: string;
   logicalGroupFingerprint: string;
   campaignId: string;
   nicheId: string;
@@ -413,13 +424,18 @@ export type CommercialAutomationExecutionRecoveryContext = {
         | 'mode'
         | 'dispatchId'
         | 'jobId'
+        | 'instanceName'
         | 'finalStatus'
         | 'investigationRequired'
       > & {
         dispatch: Pick<
           WhatsAppDispatchRecord,
-          'id' | 'status' | 'attemptCount'
-        > | null;
+          'id' | 'status' | 'attemptCount' | 'instanceName'
+        > & {
+          destinationId?: string;
+          destinationType?: 'INDIVIDUAL' | 'GROUP';
+          destinationAssignedInstanceName?: string | null;
+        } | null;
         outbox: CommercialDispatchOutboxRecord | null;
       })
     | null;
@@ -456,6 +472,29 @@ export type CommercialPreMarkerReservationRecoveryResult =
         | 'JOB_EVIDENCE'
         | 'COPY_ATTEMPT_EVIDENCE'
         | 'FAILURE_COUNT_INVALID'
+        | 'CAS_CONFLICT'
+        | 'LOOKUP_FAILED';
+    };
+
+export type CommercialPreConfirmationReservationRecoveryResult =
+  | {
+      outcome: 'RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'ALREADY_RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'BLOCKED';
+      reason:
+        | 'EXECUTION_NOT_FOUND'
+        | 'EXECUTION_NOT_STARTED'
+        | 'EXECUTION_OWNERSHIP_INCOMPLETE'
+        | 'EXECUTION_NOT_STALE'
+        | 'RUN_EVIDENCE'
+        | 'RESERVATION_NOT_UNIQUE'
+        | 'RESERVATION_INVALID'
         | 'CAS_CONFLICT'
         | 'LOOKUP_FAILED';
     };
@@ -514,6 +553,10 @@ export interface CommercialAutomationExecutionRepository {
       failureCode: string;
     },
   ): Promise<CommercialPreMarkerReservationRecoveryResult>;
+  recoverStalePreConfirmationReservation?(
+    id: string,
+    input: { completedAt: Date; failureCode: string },
+  ): Promise<CommercialPreConfirmationReservationRecoveryResult>;
   recoverStale(
     id: string,
     input: {
@@ -575,6 +618,7 @@ export type CommercialCampaignGroupSummary = {
   fingerprint: string | null;
   active: boolean;
   available: boolean;
+  assignedInstanceName?: string | null;
 };
 
 export type CommercialCampaignNicheSummary = Pick<
@@ -1176,6 +1220,7 @@ export type WhatsAppDestinationData = {
   available?: boolean;
   fingerprint?: string | null;
   sourceInstanceName?: string | null;
+  assignedInstanceName?: string | null;
   memberCount?: number | null;
   ownerIsParticipant?: boolean | null;
   discoveredAt?: Date | null;
@@ -1195,6 +1240,7 @@ export type WhatsAppGroupRecord = WhatsAppDestinationRecord & {
   available: boolean;
   fingerprint: string;
   sourceInstanceName: string;
+  assignedInstanceName?: string | null;
   discoveredAt: Date;
   lastSyncedAt: Date;
 };
@@ -1230,6 +1276,7 @@ export type WhatsAppDispatchCreateData = {
   productId: string;
   generatedCopyId: string;
   destinationId: string;
+  instanceName?: string | null;
 };
 
 export type WhatsAppDispatchFilters = {
@@ -1292,6 +1339,7 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'available'
     | 'fingerprint'
     | 'sourceInstanceName'
+    | 'assignedInstanceName'
   > & { id?: string };
   product?: Pick<
     ProductLeadRecord,
@@ -1331,6 +1379,27 @@ export interface WhatsAppDestinationRepository {
     id: string,
     data: WhatsAppDestinationUpdate,
   ): Promise<WhatsAppDestinationRecord | null>;
+  assignToInstance?(
+    destinationId: string,
+    instanceName: string,
+  ): Promise<WhatsAppDestinationRecord | null>;
+}
+
+export type WhatsAppInstanceRecord = {
+  name: string;
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export interface WhatsAppInstanceRepository {
+  list(): Promise<WhatsAppInstanceRecord[]>;
+  findByName(name: string): Promise<WhatsAppInstanceRecord | null>;
+  upsert(name: string): Promise<WhatsAppInstanceRecord>;
+  setActive(
+    name: string,
+    active: boolean,
+  ): Promise<WhatsAppInstanceRecord | null>;
 }
 
 export interface WhatsAppGroupDirectoryRepository {
@@ -1344,6 +1413,7 @@ export interface WhatsAppGroupDirectoryRepository {
     sourceInstanceName: string,
     filters?: WhatsAppGroupFilters,
   ): Promise<WhatsAppGroupRecord[]>;
+  listAll?(filters?: WhatsAppGroupFilters): Promise<WhatsAppGroupRecord[]>;
   create(data: WhatsAppGroupCreateData): Promise<WhatsAppGroupRecord>;
   update(
     id: string,
@@ -1402,6 +1472,7 @@ export type WhatsAppDispatchManualRecoveryInspection = {
   runStatus: CommercialPipelineRunStatus;
   runFinalStatus: CommercialPipelineFinalStatus | null;
   investigationRequired: boolean;
+  instanceName: string | null;
   target: CommercialAutomationTarget;
 };
 

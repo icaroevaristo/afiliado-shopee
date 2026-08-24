@@ -15,7 +15,10 @@ export type WhatsAppGroupSendPolicyOptions = {
 export class WhatsAppGroupSendPolicy {
   constructor(private readonly options: WhatsAppGroupSendPolicyOptions) {}
 
-  assertAuthorized(destination: WhatsAppDispatchDetails['destination']) {
+  assertAuthorized(
+    destination: WhatsAppDispatchDetails['destination'],
+    expectedInstanceName?: string,
+  ) {
     if (destination.type !== 'GROUP') return;
     const externalGroupId = normalizeWhatsAppGroupId(destination.destination);
     const fingerprint = fingerprintWhatsAppGroupId(externalGroupId);
@@ -41,10 +44,10 @@ export class WhatsAppGroupSendPolicy {
     if (!destination.active) {
       block('Grupo nao autorizado para envio', 'WHATSAPP_GROUP_NOT_AUTHORIZED');
     }
-    if (
-      !this.options.instanceName ||
-      destination.sourceInstanceName !== this.options.instanceName
-    ) {
+    const assignedInstanceName =
+      destination.assignedInstanceName ?? destination.sourceInstanceName;
+    const instanceName = expectedInstanceName ?? this.options.instanceName;
+    if (!instanceName || assignedInstanceName !== instanceName) {
       block(
         'Grupo nao pertence a instancia atual',
         'WHATSAPP_GROUP_INSTANCE_MISMATCH',

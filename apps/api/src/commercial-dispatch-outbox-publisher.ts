@@ -8,7 +8,11 @@ import type {
 
 export type CommercialDispatchOutboxQueue = {
   hasJob(jobId: string): Promise<boolean>;
-  enqueue(dispatchId: string, jobId: string): Promise<void>;
+  enqueue(
+    dispatchId: string,
+    jobId: string,
+    instanceName?: string | null,
+  ): Promise<void>;
 };
 
 export type CommercialDispatchOutboxPublisherOptions = {
@@ -29,6 +33,8 @@ const identitiesAreConsistent = ({
   run,
   dispatch,
 }: CommercialDispatchOutboxPublicationContext) =>
+  (run.instanceName ?? null) === (outbox.instanceName ?? null) &&
+  (dispatch.instanceName ?? null) === (outbox.instanceName ?? null) &&
   run.id === outbox.commercialRunId &&
   run.mode === 'CONFIRMED' &&
   run.dispatchId === outbox.dispatchId &&
@@ -102,7 +108,15 @@ export class CommercialDispatchOutboxPublisher {
 
     if (!jobExists) {
       try {
-        await this.options.queue.enqueue(outbox.dispatchId, outbox.jobId);
+        if (outbox.instanceName) {
+          await this.options.queue.enqueue(
+            outbox.dispatchId,
+            outbox.jobId,
+            outbox.instanceName,
+          );
+        } else {
+          await this.options.queue.enqueue(outbox.dispatchId, outbox.jobId);
+        }
       } catch {
         try {
           jobExists = await this.options.queue.hasJob(outbox.jobId);

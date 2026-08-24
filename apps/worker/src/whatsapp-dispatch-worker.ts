@@ -20,6 +20,7 @@ import type { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-
 import { finalizeCommercialPipelineRun } from '../../api/src/commercial-pipeline-run-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { ApplicationRepositories } from '../../api/src/application-services';
+import { assertCommercialStickyIdentity } from '../../api/src/commercial-instance-stickiness';
 
 export type WhatsAppDispatchWorkerLogger = {
   info: (obj: unknown, msg?: string) => void;
@@ -46,11 +47,22 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
     ApplicationRepositories['commercialGroupCampaigns'],
     'renewAttempt'
   >;
+  commercialDispatchOutboxes?: Pick<
+    ApplicationRepositories['commercialDispatchOutboxes'],
+    'findByDispatchId'
+  >;
+  whatsappInstances?: Pick<
+    ApplicationRepositories['whatsappInstances'],
+    'findByName'
+  >;
 };
 
 type WhatsAppDispatchProcessorBaseOptions = {
   logger: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  whatsAppProviderResolver?: (
+    instanceName: string,
+  ) => WhatsAppProvider | Promise<WhatsAppProvider>;
   messageBuilder?: (copy: {
     titulo: string;
     mensagem: string;
@@ -81,6 +93,9 @@ type CreateWhatsAppDispatchWorkerOptions = {
   prisma?: ReturnType<typeof createPrismaClient>;
   logger?: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  whatsAppProviderResolver?: (
+    instanceName: string,
+  ) => WhatsAppProvider | Promise<WhatsAppProvider>;
   messageBuilder?: WhatsAppDispatchProcessorOptions['messageBuilder'];
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
@@ -222,6 +237,123 @@ const renewCommercialReservationForDispatch = async (input: {
   }
 };
 
+const resolveCommercialDispatchProvider = async (input: {
+  job: Pick<Job<WhatsAppDispatchJob>, 'data'>;
+  repositories: WhatsAppDispatchProcessorRepositories;
+  defaultProvider: WhatsAppProvider;
+  providerResolver?: (
+    instanceName: string,
+  ) => WhatsAppProvider | Promise<WhatsAppProvider>;
+}) => {
+  const run = await input.repositories.commercialRuns.findByDispatchId(
+    input.job.data.dispatchId,
+  );
+  if (!run) {
+    if (input.job.data.instanceName) {
+      throw reservationHandoffError(
+        'Job comercial possui instancia sticky sem run associado',
+        'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+      );
+    }
+    return { provider: input.defaultProvider, instanceName: undefined };
+  }
+  const dispatch =
+    await input.repositories.whatsappDispatches.findByIdWithDetails(
+      input.job.data.dispatchId,
+    );
+  if (!dispatch) {
+    throw reservationHandoffError(
+      'Dispatch comercial nao encontrado para validar a instancia',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
+  }
+  const outbox = await input.repositories.commercialDispatchOutboxes?.findByDispatchId?.(
+    dispatch.id,
+  );
+  const stickyInstanceName = assertCommercialStickyIdentity({
+    runInstanceName: run.instanceName,
+    dispatchInstanceName: dispatch.instanceName,
+    outboxInstanceName: outbox?.instanceName,
+    jobInstanceName: input.job.data.instanceName,
+  });
+  if (!stickyInstanceName) {
+    return { provider: input.defaultProvider, instanceName: undefined };
+  }
+  if (!outbox) {
+    throw reservationHandoffError(
+      'Outbox comercial ausente para lifecycle sticky',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
+  }
+  if (
+    outbox.commercialRunId !== run.id ||
+    outbox.dispatchId !== dispatch.id
+  ) {
+    throw reservationHandoffError(
+      'Outbox comercial nao pertence ao run/dispatch do lifecycle',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
+  }
+  if (
+    run.groupDestinationId !== dispatch.destinationId ||
+    dispatch.destination.assignedInstanceName !== stickyInstanceName
+  ) {
+    throw reservationHandoffError(
+      'Assignment da instancia mudou durante o lifecycle comercial',
+      'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
+    );
+  }
+  const instance = await input.repositories.whatsappInstances?.findByName(stickyInstanceName);
+  if (!instance || !instance.active) {
+    throw reservationHandoffError(
+      'Instancia do lifecycle comercial esta ausente ou inativa',
+      'COMMERCIAL_INSTANCE_INACTIVE',
+    );
+  }
+  if (!input.providerResolver) {
+    throw reservationHandoffError(
+      'Resolver de provider por instancia indisponivel',
+      'COMMERCIAL_INSTANCE_PROVIDER_RESOLVER_UNAVAILABLE',
+    );
+  }
+  return {
+    provider: await input.providerResolver(stickyInstanceName),
+    instanceName: stickyInstanceName,
+  };
+};
+
+const revalidateCommercialDispatchBeforeSend = async (input: {
+  job: Pick<Job<WhatsAppDispatchJob>, 'data'>;
+  repositories: WhatsAppDispatchProcessorRepositories;
+  resolvedProvider: {
+    provider: WhatsAppProvider;
+    instanceName: string | undefined;
+  };
+}) => {
+  const revalidated = await resolveCommercialDispatchProvider({
+    job: input.job,
+    repositories: input.repositories,
+    defaultProvider: input.resolvedProvider.provider,
+    providerResolver: input.resolvedProvider.instanceName
+      ? (instanceName) => {
+          if (instanceName !== input.resolvedProvider.instanceName) {
+            throw reservationHandoffError(
+              'Instancia do provider mudou antes do envio comercial',
+              'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
+            );
+          }
+          return input.resolvedProvider.provider;
+        }
+      : undefined,
+  });
+  if (revalidated.instanceName !== input.resolvedProvider.instanceName) {
+    throw reservationHandoffError(
+      'Identidade sticky mudou antes do envio comercial',
+      'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    );
+  }
+};
+
 export const processWhatsAppDispatchJob = async (
   job: Pick<Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
   options: WhatsAppDispatchProcessorOptions,
@@ -230,21 +362,33 @@ export const processWhatsAppDispatchJob = async (
 
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  const resolvedProvider = await resolveCommercialDispatchProvider({
+    job,
+    repositories,
+    defaultProvider: options.whatsAppProvider,
+    providerResolver: options.whatsAppProviderResolver,
+  });
   await renewCommercialReservationForDispatch({
     dispatchId: job.data.dispatchId,
     repositories,
     clock: options.clock ?? (() => new Date()),
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
   });
-  options.whatsAppProvider.beginRun?.(job.id ?? job.data.dispatchId);
   const sender = createSenderService({
     repositories,
-    whatsAppProvider: options.whatsAppProvider,
+    whatsAppProvider: resolvedProvider.provider,
+    instanceName: resolvedProvider.instanceName,
     logger: options.logger,
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService ?? new CommercialMessageDraftService(),
   });
+  await revalidateCommercialDispatchBeforeSend({
+    job,
+    repositories,
+    resolvedProvider,
+  });
+  resolvedProvider.provider.beginRun?.(job.id ?? job.data.dispatchId);
   let dispatch;
   try {
     dispatch = await sender.sendDispatch(job.data.dispatchId);
@@ -301,6 +445,7 @@ export const createWhatsAppDispatchWorker = (
     prisma,
     logger: options.logger ?? consoleLogger,
     whatsAppProvider: options.whatsAppProvider,
+    whatsAppProviderResolver: options.whatsAppProviderResolver,
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService,

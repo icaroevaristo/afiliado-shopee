@@ -13,11 +13,17 @@ import type {
   CommercialPromotionCandidateRecord,
   CommercialPromotionQueueItem,
   GeneratedCopyRecord,
+  WhatsAppInstanceRecord,
   WhatsAppGroupRecord,
 } from '../src/repositories';
 
 const NOW = new Date('2026-08-08T12:00:00.000Z');
 const preparationOptions = { executionId: 'execution-1' } as const;
+const attemptOptions = {
+  executionId: 'execution-1',
+  reservedAt: NOW,
+  leaseExpiresAt: new Date('2026-08-08T12:05:00.000Z'),
+} as const;
 const GROUP_FINGERPRINT = 'grp_123456789abc';
 const PRODUCT_LINK = 'https://shopee.com.br/product/1/product-1';
 const AFFILIATE_LINK = 'https://s.shopee.com.br/affiliate/product-1';
@@ -118,6 +124,7 @@ const group = (
   available: true,
   fingerprint: GROUP_FINGERPRINT,
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: NOW,
   lastSyncedAt: NOW,
   ...overrides,
@@ -268,6 +275,7 @@ const createSubject = (input: {
   product?: Partial<CommercialPromotionCopyContext['product']>;
   campaign?: Partial<CommercialGroupCampaignRecord>;
   group?: Partial<WhatsAppGroupRecord>;
+  useListAll?: boolean;
 } = {}) => {
   let currentCandidate = candidateRecord(input.candidate);
   const currentCampaign = campaign(input.campaign);
@@ -276,7 +284,11 @@ const createSubject = (input: {
     context(currentCandidate, input.product);
   const copyRecord = copy();
   const queue = queueItem(currentCandidate);
-  const groups = { list: vi.fn(async () => [currentGroup]) };
+  const listAll = vi.fn(async () => [currentGroup]);
+  const groups = {
+    list: vi.fn(async () => [currentGroup]),
+    listAll: input.useListAll ? listAll : undefined,
+  };
   const campaigns = {
     list: vi.fn(async () => ({ items: [currentCampaign], total: 1 })),
     findByLogicalGroupFingerprint: vi.fn(),
@@ -317,7 +329,10 @@ const createSubject = (input: {
   };
   campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
   const candidates = {
-    listQueue: vi.fn(async () => ({ items: [queue], total: 1 })),
+    listQueue: vi.fn<
+      (input: { campaignId: string; page?: number; limit?: number }) =>
+        Promise<{ items: CommercialPromotionQueueItem[]; total: number }>
+    >(async () => ({ items: [queue], total: 1 })),
   };
   const copies = {
     loadContext: vi.fn<
@@ -365,7 +380,9 @@ const createSubject = (input: {
   };
   mining.mine.mockResolvedValue({ rejectionSummary: {} });
   const deliveryHistory = {
-    wasProductSentToGroup: vi.fn(async () => false),
+    wasProductSentToGroup: vi.fn<
+      (productId: string, groupId: string) => Promise<boolean>
+    >(async () => false),
     findLastSentAtByGroup: vi.fn<
       (groupId: string) => Promise<Date | null>
     >(async (groupId) => {
@@ -375,6 +392,16 @@ const createSubject = (input: {
   };
   const pipeline = {
     dryRunFromPromotionCandidate: vi.fn(async () => pipelineResult()),
+  };
+  const instances = {
+    findByName: vi.fn<
+      (name: string) => Promise<WhatsAppInstanceRecord | null>
+    >(async (name: string) => ({
+        name,
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
   };
   const service = new CommercialAutomationCandidateFlowService({
     groups,
@@ -386,6 +413,7 @@ const createSubject = (input: {
     copyGeneration,
     draft: new CommercialMessageDraftService(),
     pipeline,
+    instances,
     instanceName: 'affiliate-bot',
     clock: () => NOW,
   });
@@ -403,6 +431,8 @@ const createSubject = (input: {
     service,
     target,
     groups,
+    instances,
+    listAll,
     campaigns,
     candidates,
     copies,
@@ -730,6 +760,111 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
+  it('bloqueia instancia inativa antes da reserva e da copy sem reroute', async () => {
+    const subject = createSubject({ useListAll: true });
+    const fallbackGroup = group({
+      id: 'group-b',
+      name: 'Grupo B',
+      destination: '120363000000000001@g.us',
+      fingerprint: 'grp_abcdef123456',
+      sourceInstanceName: 'instance-b',
+      assignedInstanceName: 'instance-b',
+    });
+    subject.listAll.mockResolvedValue([group(), fallbackGroup]);
+    subject.instances.findByName.mockImplementation(async (name: string) => ({
+      name,
+      active: name === 'instance-b',
+      createdAt: NOW,
+      updatedAt: NOW,
+    }));
+
+    await expect(
+      subject.service.reserveAttempt(subject.target, attemptOptions),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_TARGET_CHANGED' });
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_TARGET_CHANGED' });
+
+    expect(subject.campaigns.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia instancia ausente antes da reserva e da copy sem fallback', async () => {
+    const subject = createSubject({ useListAll: true });
+    const fallbackGroup = group({
+      id: 'group-b',
+      name: 'Grupo B',
+      destination: '120363000000000001@g.us',
+      fingerprint: 'grp_abcdef123456',
+      sourceInstanceName: 'instance-b',
+      assignedInstanceName: 'instance-b',
+    });
+    subject.listAll.mockResolvedValue([group(), fallbackGroup]);
+    subject.instances.findByName.mockImplementation(async (name: string) =>
+      name === 'affiliate-bot'
+        ? null
+        : {
+            name,
+            active: true,
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+    );
+
+    await expect(
+      subject.service.reserveAttempt(subject.target, attemptOptions),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_TARGET_CHANGED' });
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_TARGET_CHANGED' });
+
+    expect(subject.campaigns.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('revalida a instancia antes da preparacao e bloqueia a corrida active-inactive', async () => {
+    const subject = createSubject({ useListAll: true });
+    subject.instances.findByName
+      .mockResolvedValueOnce({
+        name: 'affiliate-bot',
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })
+      .mockResolvedValueOnce({
+        name: 'affiliate-bot',
+        active: false,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })
+      .mockImplementation(async () => ({
+        name: 'affiliate-bot',
+        active: false,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }));
+
+    await expect(subject.service.listTargets()).resolves.toHaveLength(1);
+    await expect(
+      subject.service.reserveAttempt(subject.target, attemptOptions),
+    ).rejects.toMatchObject({ code: 'NO_AUTHORIZED_GROUP' });
+    await expect(
+      subject.service.prepare(selection(subject.target), preparationOptions),
+    ).rejects.toMatchObject({ code: 'NO_AUTHORIZED_GROUP' });
+
+    expect(subject.campaigns.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
   it('seleciona o alvo menos recentemente enviado com desempate deterministico', async () => {
     const subject = createSubject();
     const groupTwo = group({
@@ -844,6 +979,268 @@ describe('CommercialAutomationCandidateFlowService', () => {
       'group-b',
       'group-c',
     ]);
+  });
+
+  it('isola nicho e dedupe entre grupos de instancias distintas', async () => {
+    const subject = createSubject({ useListAll: true });
+    const groupA = group({
+      id: 'group-a',
+      name: 'Grupo A',
+      destination: '120363000000000001@g.us',
+      fingerprint: 'grp_aaaaaaaaaaaa',
+      sourceInstanceName: 'instance-a',
+      assignedInstanceName: 'instance-a',
+    });
+    const groupB = group({
+      id: 'group-b',
+      name: 'Grupo B',
+      destination: '120363000000000002@g.us',
+      fingerprint: 'grp_bbbbbbbbbbbb',
+      sourceInstanceName: 'instance-b',
+      assignedInstanceName: 'instance-b',
+    });
+    const campaignA = campaign({
+      id: 'campaign-a',
+      logicalGroupFingerprint: groupA.fingerprint,
+      anchorDestinationId: groupA.id,
+      nicheId: 'niche-a',
+      niche: { id: 'niche-a', name: 'Casa A', slug: 'casa-a', active: true },
+    });
+    const campaignB = campaign({
+      id: 'campaign-b',
+      logicalGroupFingerprint: groupB.fingerprint,
+      anchorDestinationId: groupB.id,
+      nicheId: 'niche-b',
+      niche: {
+        id: 'niche-b',
+        name: 'Eletronicos B',
+        slug: 'eletronicos-b',
+        active: true,
+      },
+    });
+    subject.listAll.mockResolvedValue([groupA, groupB]);
+    subject.instances.findByName.mockImplementation(async (name: string) => ({
+      name,
+      active: true,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }));
+    subject.campaigns.findByLogicalGroupFingerprint.mockImplementation(
+      async (fingerprint: string) =>
+        fingerprint === groupA.fingerprint ? campaignA : campaignB,
+    );
+    const candidateA = candidateRecord({
+      id: 'candidate-a',
+      campaignId: campaignA.id,
+      productId: 'product-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    const candidateB = candidateRecord({
+      id: 'candidate-b',
+      campaignId: campaignB.id,
+      productId: 'product-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    subject.candidates.listQueue.mockImplementation(
+      async ({ campaignId }: { campaignId: string }) => ({
+        items: [
+          queueItem(campaignId === campaignA.id ? candidateA : candidateB),
+        ],
+        total: 1,
+      }),
+    );
+    const contextA = context({
+      id: candidateA.id,
+      campaignId: campaignA.id,
+      productId: 'product-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    contextA.campaign = campaignA;
+    const contextB = context({
+      id: candidateB.id,
+      campaignId: campaignB.id,
+      productId: 'product-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    contextB.campaign = campaignB;
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      candidateId === candidateA.id ? contextA : contextB,
+    );
+    subject.deliveryHistory.wasProductSentToGroup.mockImplementation(
+      async (productId: string, groupId: string) => {
+        expect(productId).toBe('product-1');
+        return groupId === groupA.id;
+      },
+    );
+    subject.copyGeneration.preview.mockResolvedValue({
+      eligible: true,
+      blockers: [],
+    });
+
+    const targets = await subject.service.listTargets();
+    expect(targets.map(({ groupId, instanceName, nicheId }) => ({
+      groupId,
+      instanceName,
+      nicheId,
+    }))).toEqual([
+      { groupId: groupA.id, instanceName: 'instance-a', nicheId: campaignA.nicheId },
+      { groupId: groupB.id, instanceName: 'instance-b', nicheId: campaignB.nicheId },
+    ]);
+
+    const targetA = targets.find(({ groupId }) => groupId === groupA.id);
+    const targetB = targets.find(({ groupId }) => groupId === groupB.id);
+    expect(targetA).toBeDefined();
+    expect(targetB).toBeDefined();
+    await expect(subject.service.preflight(targetA!)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
+    });
+    await expect(subject.service.preflight(targetB!)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: candidateB.id,
+      candidateStatus: 'QUEUED',
+    });
+    expect(subject.copyGeneration.preview).toHaveBeenCalledOnce();
+  });
+
+  it('mantem produto e nicho vinculados ao grupo correto entre instancias', async () => {
+    const subject = createSubject({ useListAll: true });
+    const groupA = group({
+      id: 'group-a-niche',
+      name: 'Grupo A Nicho',
+      destination: '120363000000000003@g.us',
+      fingerprint: 'grp_cccccccccccc',
+      sourceInstanceName: 'instance-a',
+      assignedInstanceName: 'instance-a',
+    });
+    const groupB = group({
+      id: 'group-b-niche',
+      name: 'Grupo B Nicho',
+      destination: '120363000000000004@g.us',
+      fingerprint: 'grp_dddddddddddd',
+      sourceInstanceName: 'instance-b',
+      assignedInstanceName: 'instance-b',
+    });
+    const campaignA = campaign({
+      id: 'campaign-a-niche',
+      logicalGroupFingerprint: groupA.fingerprint,
+      anchorDestinationId: groupA.id,
+      nicheId: 'niche-a-only',
+      niche: {
+        id: 'niche-a-only',
+        name: 'Casa A',
+        slug: 'casa-a-only',
+        active: true,
+      },
+    });
+    const campaignB = campaign({
+      id: 'campaign-b-niche',
+      logicalGroupFingerprint: groupB.fingerprint,
+      anchorDestinationId: groupB.id,
+      nicheId: 'niche-b-only',
+      niche: {
+        id: 'niche-b-only',
+        name: 'Eletronicos B',
+        slug: 'eletronicos-b-only',
+        active: true,
+      },
+    });
+    subject.listAll.mockResolvedValue([groupA, groupB]);
+    subject.campaigns.findByLogicalGroupFingerprint.mockImplementation(
+      async (fingerprint: string) =>
+        fingerprint === groupA.fingerprint ? campaignA : campaignB,
+    );
+    const candidateA = candidateRecord({
+      id: 'candidate-a-niche',
+      campaignId: campaignA.id,
+      productId: 'product-a-only',
+      snapshotId: 'snapshot-a-only',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    const candidateB = candidateRecord({
+      id: 'candidate-b-niche',
+      campaignId: campaignB.id,
+      productId: 'product-b-only',
+      snapshotId: 'snapshot-b-only',
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    subject.candidates.listQueue.mockImplementation(
+      async ({ campaignId }: { campaignId: string }) => ({
+        items: [
+          queueItem(campaignId === campaignA.id ? candidateA : candidateB),
+        ],
+        total: 1,
+      }),
+    );
+    const makeContext = (
+      candidate: CommercialPromotionCandidateRecord,
+      campaignRecord: CommercialGroupCampaignRecord,
+    ) => {
+      const candidateContext = context({
+        id: candidate.id,
+        campaignId: candidate.campaignId,
+        productId: candidate.productId,
+        snapshotId: candidate.snapshotId,
+        status: 'QUEUED',
+        generatedCopyId: null,
+      });
+      candidateContext.campaign = campaignRecord;
+      candidateContext.niche = {
+        ...candidateContext.niche,
+        ...campaignRecord.niche,
+      };
+      candidateContext.product = {
+        ...candidateContext.product,
+        id: candidate.productId,
+      };
+      candidateContext.snapshot = {
+        ...candidateContext.snapshot,
+        id: candidate.snapshotId,
+        productId: candidate.productId,
+      };
+      return candidateContext;
+    };
+    const contextA = makeContext(candidateA, campaignA);
+    const contextB = makeContext(candidateB, campaignB);
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      candidateId === candidateA.id ? contextA : contextB,
+    );
+    subject.deliveryHistory.wasProductSentToGroup.mockResolvedValue(false);
+    subject.copyGeneration.preview.mockResolvedValue({
+      eligible: true,
+      blockers: [],
+    });
+
+    const targets = await subject.service.listTargets();
+    const targetA = targets.find(({ groupId }) => groupId === groupA.id);
+    const targetB = targets.find(({ groupId }) => groupId === groupB.id);
+    expect(targetA).toMatchObject({
+      instanceName: 'instance-a',
+      nicheId: campaignA.nicheId,
+    });
+    expect(targetB).toMatchObject({
+      instanceName: 'instance-b',
+      nicheId: campaignB.nicheId,
+    });
+    await expect(subject.service.preflight(targetA!)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: candidateA.id,
+    });
+    await expect(subject.service.preflight(targetB!)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: candidateB.id,
+    });
+    expect(subject.copies.loadContext).toHaveBeenNthCalledWith(1, candidateA.id);
+    expect(subject.copies.loadContext).toHaveBeenNthCalledWith(2, candidateB.id);
+    expect(contextA.product.id).toBe(candidateA.productId);
+    expect(contextA.niche.id).toBe(campaignA.nicheId);
+    expect(contextB.product.id).toBe(candidateB.productId);
+    expect(contextB.niche.id).toBe(campaignB.nicheId);
   });
 
   it('bloqueia destinos fisicos que repetem a mesma fingerprint logica', async () => {

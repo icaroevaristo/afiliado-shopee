@@ -9,6 +9,9 @@ import type {
   WhatsAppDispatchManualRecoveryRequeueContext,
 } from './repositories';
 import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from './repositories';
+import {
+  assertCommercialStickyIdentity,
+} from './commercial-instance-stickiness';
 
 type RecoveryDb = Pick<
   DatabaseClient,
@@ -20,6 +23,7 @@ type RecoveryDb = Pick<
   | 'commercialPromotionCandidate'
   | 'commercialAutomationExecution'
   | 'commercialGroupCampaign'
+  | 'whatsAppInstance'
 >;
 
 const fail = (message: string, code: string): never => {
@@ -70,6 +74,7 @@ const buildRecoveryTarget = (
       fingerprint: string | null;
       active: boolean;
       available: boolean;
+      assignedInstanceName?: string | null;
     } | null;
   },
   destinationId: string,
@@ -90,6 +95,7 @@ const buildRecoveryTarget = (
     );
   }
   const verifiedDestination = destination!;
+  const instanceName = verifiedDestination.assignedInstanceName ?? undefined;
   return {
     groupId: verifiedDestination.id,
     groupName: verifiedDestination.name,
@@ -99,6 +105,7 @@ const buildRecoveryTarget = (
     dailyLimit: campaign.dailyLimit,
     failureCount: campaign.failureCount,
     nextEligibleAt: campaign.nextEligibleAt,
+    instanceName,
   };
 };
 
@@ -125,6 +132,10 @@ const loadLifecycle = async (
       generatedCopyId: true,
       productId: true,
       destinationId: true,
+      instanceName: true,
+      destination: {
+        select: { type: true, assignedInstanceName: true },
+      },
     },
   });
   if (!dispatch) {
@@ -165,6 +176,7 @@ const loadLifecycle = async (
       investigationRequired: true,
       jobId: true,
       dispatchId: true,
+      instanceName: true,
     },
   });
   if (runs.length !== 1) {
@@ -209,6 +221,7 @@ const loadLifecycle = async (
       dispatchId: true,
       jobId: true,
       status: true,
+      instanceName: true,
     },
   });
   if (
@@ -222,6 +235,25 @@ const loadLifecycle = async (
       'Outbox publicado nao corresponde ao lifecycle',
       'WHATSAPP_DISPATCH_MANUAL_RECOVERY_OUTBOX_INVALID',
     );
+  }
+  const stickyInstanceName = assertCommercialStickyIdentity({
+    runInstanceName: run.instanceName,
+    dispatchInstanceName: dispatch.instanceName,
+    outboxInstanceName: outboxes[0]?.instanceName,
+    destinationAssignedInstanceName:
+      dispatch.destination?.assignedInstanceName ?? null,
+  });
+  if (stickyInstanceName) {
+    const instance = await db.whatsAppInstance.findUnique({
+      where: { name: stickyInstanceName },
+      select: { active: true },
+    });
+    if (!instance || !instance.active) {
+      fail(
+        'Instancia do lifecycle comercial esta ausente ou inativa',
+        'COMMERCIAL_INSTANCE_INACTIVE',
+      );
+    }
   }
 
   const copy = await db.generatedCopy.findUnique({
@@ -294,7 +326,7 @@ const loadLifecycle = async (
       nextEligibleAt: true,
       anchorDestinationId: true,
       anchorDestination: {
-        select: { id: true, name: true, fingerprint: true, active: true, available: true },
+        select: { id: true, name: true, fingerprint: true, active: true, available: true, assignedInstanceName: true },
       },
       attemptExecutionId: true,
       attemptReservedAt: true,
@@ -323,6 +355,7 @@ const loadLifecycle = async (
     execution,
     campaign: campaign!,
     target,
+    instanceName: stickyInstanceName,
   };
 };
 
@@ -400,10 +433,12 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
     assertExistingRecoveryMatches(recovery, input);
     const dispatch = await this.prisma.whatsAppDispatch.findUnique({ where: { id: input.dispatchId }, select: {
       id: true, status: true, attemptCount: true, externalMessageId: true, sentAt: true, generatedCopyId: true, productId: true, destinationId: true,
+      instanceName: true, destination: { select: { assignedInstanceName: true } },
     }});
     if (!dispatch) fail('Dispatch nao encontrado', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_DISPATCH_NOT_FOUND');
     const runs = await this.prisma.commercialPipelineRun.findMany({ where: { dispatchId: input.dispatchId }, select: {
       id: true, executionId: true, mode: true, status: true, finalStatus: true, investigationRequired: true, jobId: true,
+      instanceName: true,
     }});
     if (runs.length !== 1) fail('Run do dispatch nao e inequivoco', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_RUN_LINK_INVALID');
     const run = runs[0]!;
@@ -411,10 +446,29 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
       fail('Run/execution divergiram do recovery autorizado', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_RUN_EXECUTION_MISMATCH');
     }
     const outboxes = await this.prisma.commercialDispatchOutbox.findMany({ where: { dispatchId: input.dispatchId }, select: {
-      commercialRunId: true, dispatchId: true, jobId: true, status: true,
+      commercialRunId: true, dispatchId: true, jobId: true, status: true, instanceName: true,
     }});
     if (outboxes.length !== 1 || outboxes[0]!.commercialRunId !== run.id || outboxes[0]!.dispatchId !== input.dispatchId || outboxes[0]!.status !== 'PUBLISHED' || outboxes[0]!.jobId !== run.jobId) {
       fail('Outbox publicado nao corresponde ao lifecycle', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_OUTBOX_INVALID');
+    }
+    const stickyInstanceName = assertCommercialStickyIdentity({
+      runInstanceName: run.instanceName,
+      dispatchInstanceName: dispatch!.instanceName,
+      outboxInstanceName: outboxes[0]?.instanceName,
+      destinationAssignedInstanceName:
+        dispatch!.destination?.assignedInstanceName ?? null,
+    });
+    if (stickyInstanceName) {
+      const instance = await this.prisma.whatsAppInstance.findUnique({
+        where: { name: stickyInstanceName },
+        select: { active: true },
+      });
+      if (!instance || !instance.active) {
+        fail(
+          'Instancia do lifecycle comercial esta ausente ou inativa',
+          'COMMERCIAL_INSTANCE_INACTIVE',
+        );
+      }
     }
     const copy = await this.prisma.generatedCopy.findUnique({ where: { id: dispatch!.generatedCopyId }, select: { productId: true, createdFromCandidateId: true } });
     if (!copy || !copy.createdFromCandidateId || copy.productId !== dispatch!.productId) fail('GeneratedCopy nao esta inequivocamente ligada ao dispatch', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_COPY_LINK_INVALID');
@@ -435,7 +489,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         failureCount: true,
         nextEligibleAt: true,
         anchorDestinationId: true,
-        anchorDestination: { select: { id: true, name: true, fingerprint: true, active: true, available: true } },
+        anchorDestination: { select: { id: true, name: true, fingerprint: true, active: true, available: true, assignedInstanceName: true } },
       },
     });
     if (!campaign || campaign.id !== recovery.campaignId) fail('Campaign do recovery divergiu', 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH');
@@ -444,7 +498,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
     return { recovery, jobId: run.jobId!, campaignId: candidate.campaignId, candidateId: candidate.id, dispatchId: input.dispatchId,
       runId: run.id, executionId: input.expectedExecutionId, dispatchStatus: dispatch!.status, attemptCount: dispatch!.attemptCount,
       externalMessageId: dispatch!.externalMessageId, sentAt: dispatch!.sentAt, runStatus: run.status, runFinalStatus: run.finalStatus,
-      investigationRequired: run.investigationRequired, target };
+      investigationRequired: run.investigationRequired, target, instanceName: stickyInstanceName };
   }
 
   async rearmAuthorizedRetry(
@@ -480,6 +534,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         candidateId: lifecycle.candidate.id, dispatchId: input.dispatchId, runId: lifecycle.run.id,
         executionId: input.expectedExecutionId, dispatchStatus: 'PENDING', attemptCount: 1, externalMessageId: null, sentAt: null,
         runStatus: lifecycle.run.status, runFinalStatus: lifecycle.run.finalStatus, investigationRequired: lifecycle.run.investigationRequired,
+        instanceName: lifecycle.instanceName,
         target: lifecycle.target,
       };
     }, { isolationLevel: 'Serializable' });

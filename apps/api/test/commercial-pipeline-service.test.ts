@@ -58,6 +58,7 @@ const group = (
   available: true,
   fingerprint: 'grp_123456789abc',
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
   ...overrides,
@@ -65,6 +66,7 @@ const group = (
 
 class MemoryRuns implements CommercialPipelineRunRepository {
   records: CommercialPipelineRunRecord[] = [];
+  createdSnapshots: CommercialPipelineRunRecord[] = [];
 
   async create(data: CommercialPipelineRunData) {
     const record = {
@@ -73,6 +75,7 @@ class MemoryRuns implements CommercialPipelineRunRepository {
       createdAt: data.createdAt ?? now,
     };
     this.records.push(record);
+    this.createdSnapshots.push({ ...record });
     return record;
   }
 
@@ -168,7 +171,11 @@ const build = ({
       listCommercialCandidates,
     } as never,
     groups: {
-      list: async () => groups,
+      list: async (sourceInstanceName: string) =>
+        groups.filter(
+          (candidate) => candidate.sourceInstanceName === sourceInstanceName,
+        ),
+      listAll: async () => groups,
     } as never,
     campaigns,
     score: {
@@ -180,6 +187,14 @@ const build = ({
       wasProductSentToGroup: async (productId, groupId) =>
         sent.has(`${productId}:${groupId}`),
       findLastSentAtByGroup: async () => null,
+    },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
     },
     instanceName: 'affiliate-bot',
     subIdPrefix: 'whatsapp',
@@ -296,6 +311,7 @@ describe('CommercialPipelineService', () => {
         id: 'group-1',
         name: 'Grupo ficticio autorizado',
         fingerprint: 'grp_123456789abc',
+        assignedInstanceName: 'affiliate-bot',
       },
       campaign: 'commercial-automation',
       copyPreview: 'copy pronta',
@@ -529,6 +545,33 @@ describe('CommercialPipelineService', () => {
       target: {
         groupId: 'two',
         groupName: secondGroup.name,
+        instanceName: 'affiliate-bot',
+        logicalGroupFingerprint: secondGroup.fingerprint,
+        campaignId: 'campaign-two',
+        nicheId: 'niche-two',
+        dailyLimit: 60,
+      } satisfies CommercialAutomationTarget,
+    });
+
+    expect(result.selectedGroup).toMatchObject({
+      id: 'two',
+      fingerprint: 'grp_abcdef123456',
+    });
+  });
+
+  it('usa a instancia sticky do alvo no preview multi-instancia', async () => {
+    const secondGroup = group('two', {
+      sourceInstanceName: 'instance-a',
+      assignedInstanceName: 'instance-b',
+      fingerprint: 'grp_abcdef123456',
+    });
+    const { service } = build({ groups: [group('one'), secondGroup] });
+
+    const result = await service.dryRun({
+      target: {
+        groupId: 'two',
+        groupName: secondGroup.name,
+        instanceName: 'instance-b',
         logicalGroupFingerprint: secondGroup.fingerprint,
         campaignId: 'campaign-two',
         nicheId: 'niche-two',
@@ -668,6 +711,9 @@ describe('CommercialPipelineService', () => {
       productId: 'product-a',
       groupFingerprint: 'grp_123456789abc',
       failureCode: null,
+    });
+    expect(runs.createdSnapshots[0]).toMatchObject({
+      instanceName: 'affiliate-bot',
     });
   });
 

@@ -386,6 +386,7 @@ const createRealCandidateFlowForIntegration = () => {
     active: true,
     available: true,
     sourceInstanceName: 'affiliate-bot',
+    assignedInstanceName: 'affiliate-bot',
   };
   const groupB = {
     id: 'group-b',
@@ -395,6 +396,7 @@ const createRealCandidateFlowForIntegration = () => {
     active: true,
     available: true,
     sourceInstanceName: 'affiliate-bot',
+    assignedInstanceName: 'affiliate-bot',
   };
   const campaignFor = (group: typeof groupA) => ({
     id: `campaign-${group.id.slice(-1)}`,
@@ -606,6 +608,14 @@ const createRealCandidateFlowForIntegration = () => {
     copyGeneration: copyGeneration as never,
     draft: new CommercialMessageDraftService(),
     pipeline: flowPipeline as never,
+    instances: {
+      findByName: vi.fn(async () => ({
+        name: 'affiliate-bot',
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
+    },
     instanceName: 'affiliate-bot',
     clock: () => NOW,
   });
@@ -622,6 +632,7 @@ const createStatefulCrossTickCandidateFlow = () => {
     active: true,
     available: true,
     sourceInstanceName: 'affiliate-bot',
+    assignedInstanceName: 'affiliate-bot',
   }));
   type CandidateState = {
     id: string;
@@ -878,6 +889,14 @@ const createStatefulCrossTickCandidateFlow = () => {
     copyGeneration: copyGeneration as never,
     draft: new CommercialMessageDraftService(),
     pipeline: flowPipeline as never,
+    instances: {
+      findByName: vi.fn(async () => ({
+        name: 'affiliate-bot',
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
+    },
     instanceName: 'affiliate-bot',
     clock: () => NOW,
   });
@@ -915,6 +934,14 @@ const createStatefulCrossTickCandidateFlow = () => {
     } as never,
     history: history as never,
     groups: groupRepository as never,
+    instances: {
+      findByName: vi.fn(async () => ({
+        name: 'affiliate-bot',
+        active: true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
+    },
     instanceName: 'affiliate-bot',
     config: {
       enabled: true,
@@ -2227,6 +2254,7 @@ describe('CommercialAutomationOrchestrator', () => {
           campaignId: 'campaign-b',
           nicheId: 'niche-b',
           dailyLimit: 60,
+          instanceName: 'affiliate-bot',
         },
       }),
     ).resolves.toMatchObject({

@@ -38,6 +38,14 @@ export const startIsolatedWhatsAppDispatchWorker = (
     ...options.providerFactoryOptions,
     logger,
   });
+  const providerResolver = (instanceName: string) =>
+    (options.providerFactory ?? createWhatsAppProvider)(
+      { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
+      {
+        ...options.providerFactoryOptions,
+        logger,
+      },
+    );
   const groupSendPolicy = new WhatsAppGroupSendPolicy({
     enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
     safeMode: config.EVOLUTION_SAFE_MODE,
@@ -48,6 +56,7 @@ export const startIsolatedWhatsAppDispatchWorker = (
     {
       logger,
       whatsAppProvider: provider,
+      whatsAppProviderResolver: providerResolver,
       groupSendPolicy,
       reservationLeaseMilliseconds:
         config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,

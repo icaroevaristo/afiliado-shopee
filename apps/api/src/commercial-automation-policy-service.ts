@@ -2,14 +2,17 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
   duplicateLogicalGroupFingerprints,
+  isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
+import { filterExecutableCommercialGroups } from './commercial-instance-stickiness';
 import type {
   CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
   WhatsAppGroupDirectoryRepository,
+  WhatsAppInstanceRepository,
 } from './repositories';
 
 export const COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION =
@@ -210,7 +213,9 @@ export class CommercialAutomationPolicyService {
     private readonly dependencies: {
       settings: CommercialAutomationSettingsRepository;
       history: CommercialAutomationHistoryRepository;
-      groups: Pick<WhatsAppGroupDirectoryRepository, 'list'>;
+      groups: Pick<WhatsAppGroupDirectoryRepository, 'list'> &
+        Partial<Pick<WhatsAppGroupDirectoryRepository, 'listAll'>>;
+      instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
       instanceName: string;
       config: CommercialAutomationPolicyConfig;
       clock?: () => Date;
@@ -245,10 +250,12 @@ export class CommercialAutomationPolicyService {
     const dayRange = getLocalDayRange(now, this.dependencies.config.timezone);
     const [groups, ambiguousExecution, activeExecution, staleExecution] =
       await Promise.all([
-        this.dependencies.groups.list(this.dependencies.instanceName, {
-          active: true,
-          available: true,
-        }),
+        this.dependencies.groups.listAll
+          ? this.dependencies.groups.listAll({ active: true, available: true })
+          : this.dependencies.groups.list(this.dependencies.instanceName, {
+              active: true,
+              available: true,
+            }),
         this.dependencies.history.hasAmbiguousCommercialExecution(excludedAmbiguousRunId),
         this.dependencies.history.hasActiveCommercialExecution(
           now,
@@ -257,8 +264,15 @@ export class CommercialAutomationPolicyService {
         ),
         this.dependencies.history.hasStaleCommercialExecution(now),
       ]);
-    const authorizedGroups = groups.filter((group) =>
-      isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
+    const authorizedCandidates = groups.filter((group) =>
+      this.dependencies.groups.listAll
+        ? typeof group.assignedInstanceName === 'string' &&
+          isCommercialAssignedGroup(group, group.assignedInstanceName)
+        : isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
+    );
+    const authorizedGroups = await filterExecutableCommercialGroups(
+      authorizedCandidates,
+      this.dependencies.instances,
     );
     const duplicateFingerprints = duplicateLogicalGroupFingerprints(
       authorizedGroups,
@@ -267,7 +281,8 @@ export class CommercialAutomationPolicyService {
       ? authorizedGroups.find(
           (group) =>
             group.id === target.groupId &&
-            group.fingerprint === target.logicalGroupFingerprint,
+            group.fingerprint === target.logicalGroupFingerprint &&
+            group.assignedInstanceName === target.instanceName,
         )
       : undefined;
     const history = await this.dependencies.history.getSnapshot({

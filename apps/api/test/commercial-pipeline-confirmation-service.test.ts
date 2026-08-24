@@ -63,6 +63,7 @@ const group = (
   available: true,
   fingerprint: 'grp_123456789abc',
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
   ...overrides,
@@ -88,6 +89,7 @@ const readyRun = (
   selectionReasons: ['Maior score'],
   copyPreview: preview,
   plannedSubIds: ['whatsapp', 'grp_123456789abc'],
+  instanceName: 'affiliate-bot',
   createdAt: now,
   completedAt: now,
   ...overrides,
@@ -148,6 +150,7 @@ class MemoryOutboxes implements CommercialDispatchOutboxRepository {
       dispatchId: input.dispatch.id,
       jobId: input.jobId,
       status: 'PENDING',
+      instanceName: input.instanceName ?? null,
       failureCode: null,
       createdAt: input.confirmedAt,
       publishedAt: null,
@@ -225,12 +228,14 @@ const build = ({
   currentOffer = offer(),
   groups = [group()],
   alreadySent = false,
+  inactiveInstances = new Set<string>(),
   environment = {},
 }: {
   run?: CommercialPipelineRunRecord;
   currentOffer?: ShopeeOfferRecord | null;
   groups?: WhatsAppGroupRecord[];
   alreadySent?: boolean;
+  inactiveInstances?: Set<string>;
   environment?: Partial<{
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -254,7 +259,18 @@ const build = ({
   const service = new CommercialPipelineConfirmationService({
     runs,
     offers: { findOfferById: async () => currentOffer } as never,
-    groups: { list: async () => groups } as never,
+    groups: {
+      list: async () => groups,
+      listAll: async () => groups,
+    } as never,
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: !inactiveInstances.has(name),
+        createdAt: now,
+        updatedAt: now,
+      }),
+    },
     outboxes,
     deliveryHistory: {
       wasProductSentToGroup: async () => alreadySent,
@@ -386,6 +402,16 @@ describe('CommercialPipelineConfirmationService', () => {
     expect(state.outboxes.records).toHaveLength(0);
   });
 
+  it('rejeita run novo sem identidade sticky antes de confirmar', async () => {
+    const state = build({ run: readyRun({ instanceName: null }) });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID' });
+    expect(state.outboxes.records).toHaveLength(0);
+    expect(state.enqueue).not.toHaveBeenCalled();
+  });
+
   it('uma corrida concorrente confirma e publica somente uma vez', async () => {
     const state = build();
     const results = await Promise.allSettled([
@@ -471,5 +497,24 @@ describe('CommercialPipelineConfirmationService', () => {
       code: 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP',
     });
     expect(state.outboxes.records).toHaveLength(0);
+  });
+
+  it('ignora duplicidade logica de instancia inativa na confirmacao', async () => {
+    const state = build({
+      groups: [
+        group(),
+        group({
+          id: 'inactive-duplicate-group',
+          sourceInstanceName: 'instance-b',
+          assignedInstanceName: 'instance-b',
+        }),
+      ],
+      inactiveInstances: new Set(['instance-b']),
+    });
+
+    await expect(
+      state.service.confirm('dry-run-id', COMMERCIAL_CONFIRMATION_TOKEN),
+    ).resolves.toMatchObject({ selectedGroup: { name: 'Grupo ficticio autorizado' } });
+    expect(state.outboxes.dispatches[0]?.destinationId).toBe('group-id');
   });
 });

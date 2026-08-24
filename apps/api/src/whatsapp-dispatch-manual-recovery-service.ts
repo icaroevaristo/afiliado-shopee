@@ -6,6 +6,7 @@ import {
   type WhatsAppDispatchManualRecoveryInspection,
   type WhatsAppDispatchManualRecoveryRepository,
 } from './repositories';
+import { assertCommercialStickyIdentity } from './commercial-instance-stickiness';
 
 export type ManualRecoveryJobState =
   | 'failed'
@@ -18,6 +19,7 @@ export type ManualRecoveryJobState =
 
 export type ManualRecoveryQueueJob = {
   id: string;
+  instanceName?: string | null;
   attemptsMade: number;
   getState(): Promise<ManualRecoveryJobState>;
   retry(): Promise<void>;
@@ -172,6 +174,13 @@ export class WhatsAppDispatchManualRecoveryService {
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_JOB_MISSING',
       );
     }
+    assertCommercialStickyIdentity({
+      runInstanceName: inspection.instanceName,
+      dispatchInstanceName: inspection.instanceName,
+      outboxInstanceName: inspection.instanceName,
+      jobInstanceName: job.instanceName,
+      destinationAssignedInstanceName: inspection.instanceName,
+    });
     const equivalentJobIds = await this.queue.findEquivalentJobIds(inspection.dispatchId);
     const foreignEquivalentJobIds = [...new Set(equivalentJobIds)].filter(
       (jobId) => jobId !== inspection.jobId,

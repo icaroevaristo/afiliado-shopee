@@ -63,6 +63,7 @@ const group: WhatsAppGroupRecord = {
   available: true,
   fingerprint: fingerprintWhatsAppGroupId(groupDestination),
   sourceInstanceName: 'affiliate-bot',
+  assignedInstanceName: 'affiliate-bot',
   discoveredAt: now,
   lastSyncedAt: now,
 };
@@ -99,6 +100,7 @@ const createRun = (copyPreview: string): CommercialPipelineRunRecord => ({
   status: 'COMPLETED',
   productId: offer.id,
   groupDestinationId: group.id,
+  instanceName: 'affiliate-bot',
   productName: offer.productName,
   productPrice: offer.price,
   groupName: group.name,
@@ -176,6 +178,7 @@ const provenanceContext = () => ({
 const policyTarget = {
   groupId: group.id,
   groupName: group.name,
+  instanceName: 'affiliate-bot',
   logicalGroupFingerprint: group.fingerprint,
   campaignId: 'campaign-1',
   nicheId: 'niche-1',
@@ -218,6 +221,14 @@ const policyStatus = async ({
       hasStaleCommercialExecution: async () => false,
     },
     groups: { list: async () => [selectedGroup] },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    },
     instanceName: 'affiliate-bot',
     config: {
       enabled: true,
@@ -300,6 +311,14 @@ const listTargetsWithRealFairness = async ({
     },
     draft: { createDraft: vi.fn() },
     pipeline: { dryRunFromPromotionCandidate: vi.fn() },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    },
     instanceName: 'affiliate-bot',
     clock: () => now,
   });
@@ -607,7 +626,10 @@ describe('Phase 9 E2E local sem SEND', () => {
         instanceName: 'affiliate-bot',
       });
       expect(() =>
-        policy.assertAuthorized({ ...group, sourceInstanceName: 'other-instance' }),
+        policy.assertAuthorized({
+          ...group,
+          assignedInstanceName: 'other-instance',
+        }),
       ).toThrow();
     });
 
@@ -873,6 +895,7 @@ describe('Phase 9 E2E local sem SEND', () => {
       productId: offer.id,
       generatedCopyId: generatedCopyId,
       destinationId: group.id,
+      instanceName: 'affiliate-bot',
       status: dispatch?.status ?? 'PENDING',
       attemptCount: dispatch?.attemptCount ?? 0,
       errorMessage: dispatch?.errorMessage ?? null,
@@ -899,7 +922,7 @@ describe('Phase 9 E2E local sem SEND', () => {
       list: vi.fn(),
       findById: vi.fn(async (id) => (id === run.id ? run : null)),
       findByDispatchId: vi.fn(async (id) =>
-        id === dispatch?.id ? run : null,
+        id === (dispatch?.id ?? 'dispatch-1') ? run : null,
       ),
       finalizeByDispatchId: vi.fn(async (_dispatchId, completedAt) => {
         if (!dispatch || dispatch.status !== 'SENT') {
@@ -949,8 +972,9 @@ describe('Phase 9 E2E local sem SEND', () => {
           commercialRunId: input.runId,
           dispatchId: input.dispatch.id,
           jobId: input.jobId,
-          status: 'PENDING',
-          failureCode: null,
+      status: 'PENDING',
+      instanceName: input.instanceName,
+      failureCode: null,
           createdAt: input.confirmedAt,
           publishedAt: null,
         };
@@ -973,6 +997,9 @@ describe('Phase 9 E2E local sem SEND', () => {
         total: outbox ? 1 : 0,
       })),
       findById: vi.fn(async (id) => (outbox?.id === id ? outbox : null)),
+      findByDispatchId: vi.fn(async (id) =>
+        outbox?.dispatchId === id ? outbox : null,
+      ),
       findPublicationContext: vi.fn(async () =>
         outbox && dispatch
           ? { outbox, run, dispatch }
@@ -997,6 +1024,14 @@ describe('Phase 9 E2E local sem SEND', () => {
       runs,
       offers: { findOfferById: vi.fn(async () => offer) } as never,
       groups: { list: vi.fn(async () => [group]) } as never,
+      instances: {
+        findByName: vi.fn(async (name: string) => ({
+          name,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      },
       outboxes,
       deliveryHistory: {
         wasProductSentToGroup: vi.fn(async () => false),
@@ -1082,6 +1117,15 @@ describe('Phase 9 E2E local sem SEND', () => {
     const repositories: WhatsAppDispatchProcessorRepositories = {
       whatsappDispatches,
       commercialRuns: runs,
+      commercialDispatchOutboxes: outboxes,
+      whatsappInstances: {
+        findByName: vi.fn(async (name: string) => ({
+          name,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      },
       commercialPromotions: {
         markDispatchedByGeneratedCopyId,
         markBlockedByGeneratedCopyId,
@@ -1103,12 +1147,16 @@ describe('Phase 9 E2E local sem SEND', () => {
     > = {
       id: 'job-1',
       name: JOB_NAMES.whatsappDispatch,
-      data: { dispatchId: 'dispatch-1' },
+      data: {
+        dispatchId: 'commercial-run-1-dispatch',
+        instanceName: 'affiliate-bot',
+      },
     };
 
     await processWhatsAppDispatchJob(job, {
       repositories,
       whatsAppProvider: provider,
+      whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
       groupSendPolicy,
       logger: { info: vi.fn(), error: vi.fn() },
     });

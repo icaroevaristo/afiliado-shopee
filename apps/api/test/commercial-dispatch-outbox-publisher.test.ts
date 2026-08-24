@@ -15,12 +15,14 @@ const build = ({
   attemptCount = 0,
   runJobId = null,
   jobExists = false,
+  instanceName = null,
 }: {
   outboxStatus?: CommercialDispatchOutboxRecord['status'];
   dispatchStatus?: CommercialDispatchOutboxPublicationContext['dispatch']['status'];
   attemptCount?: number;
   runJobId?: string | null;
   jobExists?: boolean;
+  instanceName?: string | null;
 } = {}) => {
   const record: CommercialDispatchOutboxRecord = {
     id: 'outbox-id',
@@ -28,6 +30,7 @@ const build = ({
     dispatchId: 'dispatch-id',
     jobId: 'job-id',
     status: outboxStatus,
+    instanceName,
     failureCode: null,
     createdAt: now,
     publishedAt: outboxStatus === 'PUBLISHED' ? now : null,
@@ -42,17 +45,22 @@ const build = ({
       jobId: runJobId,
       finalStatus: 'PENDING',
       investigationRequired: false,
+      instanceName,
     },
     dispatch: {
       id: 'dispatch-id',
       status: dispatchStatus,
       attemptCount,
+      instanceName,
     },
   };
   const jobs = new Set(jobExists ? ['job-id'] : []);
-  const enqueue = vi.fn(async (_dispatchId: string, jobId: string) => {
+  const enqueue = vi.fn(
+    async (_dispatchId: string, jobId: string, queuedInstanceName?: string | null) => {
+      expect(queuedInstanceName ?? null).toBe(instanceName);
     jobs.add(jobId);
-  });
+    },
+  );
   const markPublished = vi.fn(async (_id: string, publishedAt: Date) => {
     record.status = 'PUBLISHED';
     record.publishedAt = publishedAt;
@@ -106,6 +114,19 @@ describe('CommercialDispatchOutboxPublisher', () => {
     expect(state.enqueue).toHaveBeenCalledOnce();
     expect(state.enqueue).toHaveBeenCalledWith('dispatch-id', 'job-id');
     expect(state.jobs).toEqual(new Set(['job-id']));
+    expect(state.record.status).toBe('PUBLISHED');
+  });
+
+  it('transporta a instancia persistida para o job novo', async () => {
+    const state = build({ instanceName: 'instance-a' });
+
+    await state.publisher.publish('outbox-id');
+
+    expect(state.enqueue).toHaveBeenCalledWith(
+      'dispatch-id',
+      'job-id',
+      'instance-a',
+    );
     expect(state.record.status).toBe('PUBLISHED');
   });
 

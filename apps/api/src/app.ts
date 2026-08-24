@@ -670,12 +670,12 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         queue: {
           hasJob: async (jobId) =>
             Boolean(await getWhatsAppDispatchQueue().getJob(jobId)),
-          enqueue: async (dispatchId, jobId) => {
+          enqueue: async (dispatchId, jobId, instanceName) => {
             await enqueueControlledWhatsAppDispatch(
               getWhatsAppDispatchQueue() as ReturnType<
                 typeof createWhatsAppDispatchQueue
               >,
-              { dispatchId },
+              { dispatchId, ...(instanceName ? { instanceName } : {}) },
               jobId,
             );
           },

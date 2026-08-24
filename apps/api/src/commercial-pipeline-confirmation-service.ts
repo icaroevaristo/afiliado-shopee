@@ -4,14 +4,21 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { CommercialCopyGenerator } from './commercial-copy-service';
 import {
   duplicateLogicalGroupFingerprints,
+  isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
+import {
+  assertActiveCommercialInstance,
+  filterExecutableCommercialGroups,
+  requireAssignedInstanceName,
+} from './commercial-instance-stickiness';
 import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
   CommercialDeliveryHistoryRepository,
   CommercialDispatchOutboxRepository,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
+  WhatsAppInstanceRepository,
   ShopeeOfferRepository,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupRecord,
@@ -58,6 +65,7 @@ export type CommercialPipelineConfirmationServiceOptions = {
   runs: CommercialPipelineRunRepository;
   offers: ShopeeOfferRepository;
   groups: WhatsAppGroupDirectoryRepository;
+  instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   outboxes: CommercialDispatchOutboxRepository;
   deliveryHistory: CommercialDeliveryHistoryRepository;
   copy: CommercialCopyGenerator;
@@ -217,13 +225,22 @@ export class CommercialPipelineConfirmationService {
         }
       }
 
-      const groups = (
-        await this.options.groups.list(this.options.instanceName, {
-          active: true,
-          available: true,
-        })
+      const candidateGroups = (
+        this.options.groups.listAll
+          ? await this.options.groups.listAll({ active: true, available: true })
+          : await this.options.groups.list(this.options.instanceName, {
+              active: true,
+              available: true,
+            })
       ).filter((group): group is WhatsAppGroupRecord =>
-        isCommercialAuthorizedGroup(group, this.options.instanceName),
+        this.options.groups.listAll
+          ? typeof group.assignedInstanceName === 'string' &&
+            isCommercialAssignedGroup(group, group.assignedInstanceName)
+          : isCommercialAuthorizedGroup(group, this.options.instanceName),
+      );
+      const groups = await filterExecutableCommercialGroups(
+        candidateGroups,
+        this.options.instances,
       );
       if (duplicateLogicalGroupFingerprints(groups).length > 0) {
         return changed(
@@ -245,6 +262,29 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_GROUP_CHANGED',
         );
       }
+      const assignedInstanceName = requireAssignedInstanceName(group);
+      if (!run.instanceName || group.assignedInstanceName !== run.instanceName) {
+        return changed(
+          'Lifecycle comercial nao possui assignment sticky valida',
+          'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
+        );
+      }
+      if (assignedInstanceName !== run.instanceName) {
+        return changed(
+          'Lifecycle comercial possui instancia atribuida divergente',
+          'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
+        );
+      }
+      try {
+        await assertActiveCommercialInstance(
+          this.options.instances,
+          assignedInstanceName,
+        );
+      } catch (error) {
+        if (error instanceof AppError) return changed(error.message, error.code);
+        throw error;
+      }
+      const stickyInstanceName = assignedInstanceName;
       if (
         await this.options.deliveryHistory.wasProductSentToGroup(
           run.productId,
@@ -263,12 +303,14 @@ export class CommercialPipelineConfirmationService {
               outboxId: ids.outboxId,
               runId: run.id,
               confirmedAt,
+              instanceName: stickyInstanceName,
               existingGeneratedCopyId,
               dispatch: {
                 id: ids.dispatchId,
                 productId: run.productId,
                 generatedCopyId: existingGeneratedCopyId,
                 destinationId: group.id,
+                instanceName: stickyInstanceName,
               },
               jobId: ids.jobId,
             }
@@ -276,6 +318,7 @@ export class CommercialPipelineConfirmationService {
               outboxId: ids.outboxId,
               runId: run.id,
               confirmedAt,
+              instanceName: stickyInstanceName,
               copy: {
                 id: ids.copyId,
                 productId: run.productId,
@@ -289,6 +332,7 @@ export class CommercialPipelineConfirmationService {
                 productId: run.productId,
                 generatedCopyId: ids.copyId,
                 destinationId: group.id,
+                instanceName: stickyInstanceName,
               },
               jobId: ids.jobId,
             },

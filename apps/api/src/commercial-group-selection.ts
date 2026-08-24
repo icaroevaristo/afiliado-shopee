@@ -10,6 +10,19 @@ export const isCommercialAuthorizedGroup = (
   group.active === true &&
   group.available === true &&
   group.sourceInstanceName === instanceName &&
+  (group.assignedInstanceName === undefined ||
+    group.assignedInstanceName === null ||
+    group.assignedInstanceName === instanceName) &&
+  COMMERCIAL_GROUP_FINGERPRINT.test(group.fingerprint);
+
+export const isCommercialAssignedGroup = (
+  group: WhatsAppGroupRecord,
+  instanceName: string,
+) =>
+  group.type === 'GROUP' &&
+  group.active === true &&
+  group.available === true &&
+  group.assignedInstanceName === instanceName &&
   COMMERCIAL_GROUP_FINGERPRINT.test(group.fingerprint);
 
 export const duplicateLogicalGroupFingerprints = (

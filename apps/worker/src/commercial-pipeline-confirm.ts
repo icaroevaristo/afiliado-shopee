@@ -209,10 +209,10 @@ export const createRealCommercialConfirmRuntime = async (
     repositories,
     queue: {
       hasJob: async (jobId) => Boolean(await whatsappQueue.getJob(jobId)),
-      enqueue: async (dispatchId, jobId) => {
+      enqueue: async (dispatchId, jobId, instanceName) => {
         await enqueueControlledWhatsAppDispatch(
           whatsappQueue,
-          { dispatchId },
+          { dispatchId, ...(instanceName ? { instanceName } : {}) },
           jobId,
         );
       },
@@ -228,6 +228,11 @@ export const createRealCommercialConfirmRuntime = async (
     logger: workerLogger,
   });
   const provider = createWhatsAppProvider(config, { logger: workerLogger });
+  const providerResolver = (instanceName: string) =>
+    createWhatsAppProvider(
+      { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
+      { logger: workerLogger },
+    );
   const groupSendPolicy = new WhatsAppGroupSendPolicy({
     enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
     safeMode: config.EVOLUTION_SAFE_MODE,
@@ -272,6 +277,7 @@ export const createRealCommercialConfirmRuntime = async (
         prisma,
         logger: workerLogger,
         whatsAppProvider: provider,
+        whatsAppProviderResolver: providerResolver,
         groupSendPolicy,
         reservationLeaseMilliseconds:
           config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,

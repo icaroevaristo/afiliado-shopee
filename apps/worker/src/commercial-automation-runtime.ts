@@ -101,6 +101,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     });
   const candidateFlow = new CommercialAutomationCandidateFlowService({
     groups: repositories.whatsappGroups,
+    instances: repositories.whatsappInstances,
     campaigns: repositories.commercialGroupCampaigns,
     candidates: repositories.commercialPromotions,
     deliveryHistory: repositories.commercialDeliveryHistory,
