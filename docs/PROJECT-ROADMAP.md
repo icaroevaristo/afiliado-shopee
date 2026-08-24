@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `2171297b8ad8dd09bde99648f6515b4ad24e4920` e evidências operacionais certificadas até a conclusão da Fase 13 em 2026-08-22.
+> Estado auditado contra `main` em `589f9295d940ff5cce20ad6ad306bfef31c1d2ef` e evidências operacionais certificadas até a conclusão da Fase 14 em 2026-08-24.
 
 ## 1. Objetivo final
 
@@ -63,7 +63,7 @@ Princípios obrigatórios:
 
 ### Estado atual
 
-**NOT_STARTED como capacidade completa do MVP.** Existem fundações de instância/destino (`sourceInstanceName`, provider/worker WhatsApp), mas runtime/policy principal ainda gira em torno de uma única `EVOLUTION_INSTANCE_NAME`. Não há prova de operação simultânea real com N instâncias nem configuração independente pelo painel.
+**Fase 14 DONE para registry, assignments e lifecycle sticky.** A operação multi-instância/multi-grupo real foi certificada com duas instâncias e dois grupos. Configuração temporal, pausa individual, stagger e administração pelo painel permanecem nas Fases 15 e 18.
 
 ### Requisito oficial
 
@@ -82,7 +82,7 @@ Uma instância indisponível não pode provocar troca silenciosa para outra se i
 
 ### Estado atual
 
-**Parcialmente implementado, não certificado como MVP real multi-grupo.** Há fairness/multi-group em `docs/phase-3-fairness-selection.md`, destinos/fingerprint/policy em `docs/phase-7-destinations-publication-policies.md`, campanhas/nichos e `categoryIds` em `commercial-niche-domain.ts`/`commercial-niche-matcher.ts`. Falta prova operacional simultânea, assignments completos e configuração pelo painel.
+**Fase 14 DONE para operação multi-grupo real controlada.** Assignments, isolamento de nicho/dedupe/quota/cooldown e dois grupos reais foram certificados. Configuração completa pelo painel e cadência/stagger permanecem planejadas.
 
 ### Requisito oficial
 
@@ -318,6 +318,16 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 
 ## 11. Fases concluídas recentemente
 
+### Fase 14 — Multi-instância e multi-grupo real
+- **Estado:** `DONE`
+- **Objetivo:** remover a premissa operacional de uma única `EVOLUTION_INSTANCE_NAME` e operar N instâncias/grupos com assignments persistidos.
+- **Evidência de implementação:** PR #97 mergeado em `main` pelo merge commit `589f9295d940ff5cce20ad6ad306bfef31c1d2ef`, com feature HEAD `7f4c65ddf55800adaf17d96cfa93d7b3812d67d9`. O contrato inclui registry `WhatsAppInstance`, provenance `sourceInstanceName`, assignment `assignedInstanceName`, identidade sticky em run/dispatch/outbox/job, resolução de provider pela instância persistida, falha fechada para identidade ausente/inativa/reassociada/divergente, ausência de reroute silencioso, compatibilidade legacy full-null e recovery/manual recovery sticky-aware.
+- **Evidência da migration:** `20260822120000_phase14_instance_assignment_stickiness`, SHA-256 `B51A3477C0F13527937DC2403191DE5320A22A2CF82239F229D4D8A1EFF5147B`, aplicada com `pending=0`, `unresolved=0` e schema up to date; migration aditiva, campos legacy nullable, `ON DELETE RESTRICT`, sem backfill de histórico de lifecycle e sem operação destrutiva.
+- **Evidência operacional:** duas instâncias e dois grupos reais controlados. `afiliado-shopee-local` concluiu lifecycle histórico `COMPLETED/SENT` com `attemptCount=1`. `afiliado-shopee-secondary` concluiu a execução `cmt75qipi0001iwmmzc4kiuco` e run `cmt75qmja001jiwmm362gfgnn` como `COMPLETED/SENT`, com dispatch `SENT`/`attemptCount=1`, candidate `DISPATCHED`, outbox `PUBLISHED`, job `completed`/`attemptsMade=1`, reservation liberada, `ambiguity=0`, `investigationRequired=0`, retry/requeue/manualRecovery `0`.
+- **Sticky e isolamento:** destination, run, dispatch, outbox, job e providerResolver do ciclo B resolveram para `afiliado-shopee-secondary`, com reroute B→A `0`; assignments persistidos, cross-assignment `0`, isolamento de niche/dedupe/quota/cooldown aprovado e estado final Campaign A ativa/Campaign B inativa com `dailyLimit=1`.
+- **Dependências:** Fase 13 concluída; lifecycle atual preservado.
+- **Critério objetivo:** pelo menos duas instâncias em teste/integração real controlada; assignments persistidos; pausa/falha de uma não redireciona silenciosamente outra; nicho/dedupe corretos por grupo; múltiplos grupos reais recebem candidates compatíveis.
+
 ### Fase 12 — Estabilidade controlada multiciclo
 - **Estado:** `DONE`
 - **Objetivo:** provar múltiplos ciclos reais sucessivos respeitando ranking, provenance, cooldown, quota, dedupe e recovery.
@@ -350,23 +360,16 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12 e 13 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13 e 14 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
-
-### Fase 14 — Multi-instância e multi-grupo real
-- **Estado:** `NOT_STARTED`
-- **Objetivo:** remover a premissa operacional de uma única `EVOLUTION_INSTANCE_NAME` e operar N instâncias/grupos com assignments persistidos.
-- **Evidência principal:** destino possui `sourceInstanceName`, mas runtime/config principal é singular e não há certificação real multi-número.
-- **Dependências:** Fase 13 concluída; lifecycle atual preservado.
-- **Critério objetivo:** pelo menos duas instâncias em teste/integração real controlada; assignments persistidos; pausa/falha de uma não redireciona silenciosamente outra; nicho/dedupe corretos por grupo; múltiplos grupos reais recebem candidates compatíveis.
 
 ### Fase 15 — Scheduler multi-instância, cadence e stagger
 - **Estado:** `NOT_STARTED`
 - **Objetivo:** produzir agenda com horários por instância e espaçamento entre grupos.
 - **Evidência principal:** scheduler/cooldown existem, mas não há stagger configurável nem agenda N-instâncias certificada.
-- **Dependências:** Fase 14.
+- **Dependências:** Fase 14 concluída.
 - **Critério objetivo:** agenda respeita janela/intervalo/quotas; stagger evita rajadas; restart não duplica jobs; painel altera horários/intervalos sem `.env`; soak mostra sequência prevista entre grupos/instâncias.
 
 ### Fase 16 — Catálogo operacional, taxonomia Shopee e Ofertas Relâmpago
@@ -453,14 +456,14 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Provenance | DONE | Fail-closed; revelou blocker real na Fase 12 |
 | Copy V10 | DONE | Geração/cache/validator provados |
 | Imagem/draft | DONE | Gate antes de dispatch |
-| Policy/destinos | DONE | Runtime atual ainda centrado em uma instância configurada |
+| Policy/destinos | DONE | Assignments e instâncias sticky certificados; cadência temporal permanece planejada |
 | Dispatch/outbox/Sender | DONE | Primeiro SEND real concluído |
 | E2E no-SEND | DONE | Regressão preservada |
 | Runtime/recovery base | DONE | Ainda falta autonomia contínua final |
 | Primeiro SEND real | DONE | Fase 11 certificada |
 | Estabilidade multiciclo | DONE | Dois ciclos reais certificados; stale candidate reconciliado sem bypass |
-| Multi-instância real | NOT_STARTED | Requisito de MVP |
-| Multi-grupo real completo | NOT_STARTED | Core existe; operação/configuração não certificada |
+| Multi-instância real | DONE | Duas instâncias reais, assignments persistidos e lifecycle sticky certificados |
+| Multi-grupo real completo | DONE | Dois grupos reais, isolamento e candidates compatíveis certificados |
 | Scheduler/stagger final | NOT_STARTED | Cooldown existe; stagger/N-instâncias não |
 | Catálogo operacional completo | NOT_STARTED | Tela/modelo existentes, UX final não |
 | Categorias reais no painel | NOT_STARTED | IDs persistidos; taxonomia/UX final não |
