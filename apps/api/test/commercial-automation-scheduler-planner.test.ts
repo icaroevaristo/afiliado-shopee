@@ -179,6 +179,62 @@ describe('commercial automation scheduler planner', () => {
     );
   });
 
+  it('usa a maior entre cadencia e intervalo minimo para o primeiro slot apos envio', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, staggerMinutes: 0 },
+      targets: [
+        target('a', {
+          cadenceMinutes: 60,
+          lastSentAt: new Date('2026-08-24T12:00:00.000Z'),
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 180,
+    });
+
+    expect(result.slots[0].scheduledFor.toISOString()).toBe(
+      '2026-08-24T13:00:00.000Z',
+    );
+  });
+
+  it('converge IDs de slots sobrepostos entre ticks do planner', () => {
+    const targets = [
+      target('a', {
+        cadenceMinutes: 15,
+        lastSentAt: new Date('2026-08-24T11:45:00.000Z'),
+      }),
+    ];
+    const firstTick = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, staggerMinutes: 0 },
+      targets,
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const secondTick = planCommercialTargetSlots({
+      now: new Date('2026-08-24T12:15:00.000Z'),
+      schedule: { ...schedule, staggerMinutes: 0 },
+      targets,
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const firstByScheduledFor = new Map(
+      firstTick.slots.map((slot) => [slot.scheduledFor.toISOString(), slot.jobId]),
+    );
+    const overlaps = secondTick.slots.filter((slot) =>
+      firstByScheduledFor.has(slot.scheduledFor.toISOString()),
+    );
+
+    expect(overlaps).not.toEqual([]);
+    expect(
+      overlaps.every(
+        (slot) =>
+          firstByScheduledFor.get(slot.scheduledFor.toISOString()) === slot.jobId,
+      ),
+    ).toBe(true);
+  });
+
   it('mantem grupos da mesma instancia em ordem canonica com stagger zero', () => {
     const result = planCommercialTargetSlots({
       now,

@@ -91,7 +91,6 @@ const makeSlotKey = (
   scheduleRevision: number,
   target: CommercialAutomationPlannerTarget,
   scheduledFor: Date,
-  slotIndex: number,
 ) =>
   createHash('sha256')
     .update(
@@ -99,7 +98,6 @@ const makeSlotKey = (
         scheduleRevision,
         canonicalTargetKey(target),
         scheduledFor.toISOString(),
-        slotIndex,
       ].join('|'),
     )
     .digest('hex');
@@ -215,7 +213,10 @@ export const planCommercialTargetSlots = ({
             target.lastSentAt
               ? new Date(
                   target.lastSentAt.getTime() +
-                    schedule.minimumIntervalMinutes * MINUTE_MS,
+                    Math.max(
+                      schedule.minimumIntervalMinutes,
+                      cadenceMinutes,
+                    ) * MINUTE_MS,
                 )
               : null,
             target.nextEligibleAt,
@@ -290,7 +291,6 @@ export const planCommercialTargetSlots = ({
       schedule.scheduleRevision,
       candidate.target,
       candidate.scheduledFor,
-      candidate.slotIndex,
     );
     const target: CommercialAutomationTargetConstraint = {
       campaignId: candidate.target.campaignId,
