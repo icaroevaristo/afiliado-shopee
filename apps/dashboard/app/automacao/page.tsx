@@ -1,12 +1,17 @@
 'use client';
 
-import { Pause, Play, ShieldCheck } from 'lucide-react';
+import { Pause, Play, Save, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   getCommercialAutomationSchedulerStatus,
+  getCommercialAutomationScheduleSettings,
+  getCommercialAutomationSchedulePreview,
   getCommercialAutomationStatus,
   pauseCommercialAutomation,
   resumeCommercialAutomation,
+  updateCommercialAutomationScheduleSettings,
+  type CommercialAutomationScheduleSettings,
+  type CommercialAutomationSchedulePreview,
   type CommercialAutomationSchedulerStatus,
   type CommercialAutomationStatus,
 } from '../../lib/api';
@@ -27,19 +32,26 @@ function ConfirmationModal({ action, busy, onCancel, onConfirm }: { action: 'pau
 export default function AutomationPage() {
   const [status, setStatus] = useState<CommercialAutomationStatus | null>(null);
   const [scheduler, setScheduler] = useState<CommercialAutomationSchedulerStatus | null>(null);
+  const [schedule, setSchedule] = useState<CommercialAutomationScheduleSettings | null>(null);
+  const [schedulePreview, setSchedulePreview] = useState<CommercialAutomationSchedulePreview | null>(null);
+  const [scheduleDraft, setScheduleDraft] = useState({ start: '', end: '', minimum: '', stagger: '' });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [action, setAction] = useState<'pause' | 'resume' | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
 
   const load = async (initial = false) => {
     if (initial) setLoading(true); else setRefreshing(true);
     setError(null);
     try {
-      const [nextStatus, nextScheduler] = await Promise.all([getCommercialAutomationStatus(), getCommercialAutomationSchedulerStatus()]);
+      const [nextStatus, nextScheduler, nextSchedule, nextPreview] = await Promise.all([getCommercialAutomationStatus(), getCommercialAutomationSchedulerStatus(), getCommercialAutomationScheduleSettings(), getCommercialAutomationSchedulePreview()]);
       setStatus(nextStatus);
       setScheduler(nextScheduler);
+      setSchedule(nextSchedule);
+      setSchedulePreview(nextPreview);
+      setScheduleDraft({ start: nextSchedule.allowedStartTime, end: nextSchedule.allowedEndTime, minimum: String(nextSchedule.minimumIntervalMinutes), stagger: String(nextSchedule.staggerMinutes) });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Nao foi possivel consultar a automacao.');
     } finally {
@@ -72,6 +84,27 @@ export default function AutomationPage() {
       setError(cause instanceof Error ? cause.message : 'A alteracao nao foi aplicada.');
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const applySchedule = async () => {
+    if (!schedule) return;
+    setScheduleBusy(true);
+    setError(null);
+    try {
+      const next = await updateCommercialAutomationScheduleSettings({
+        allowedStartTime: scheduleDraft.start,
+        allowedEndTime: scheduleDraft.end,
+        minimumIntervalMinutes: Number(scheduleDraft.minimum),
+        staggerMinutes: Number(scheduleDraft.stagger),
+        expectedRevision: schedule.scheduleRevision,
+      });
+      setSchedule(next);
+      setScheduleDraft({ start: next.allowedStartTime, end: next.allowedEndTime, minimum: String(next.minimumIntervalMinutes), stagger: String(next.staggerMinutes) });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'A agenda nao foi atualizada.');
+    } finally {
+      setScheduleBusy(false);
     }
   };
 
@@ -109,7 +142,17 @@ export default function AutomationPage() {
             </div>
           </OpsSection>
         </div>
-        <OpsSection title="Acoes de controle" meta="Pausar e retomar sao as unicas escritas permitidas pelo console.">
+        {schedule ? <OpsSection title="Agenda comercial" meta={`Overrides persistidos · revisao ${schedule.scheduleRevision} · ${schedule.timezone}`}>
+          <div className="ops-health-list mb-4"><div className="ops-health-row"><span className="ops-health-name">Proximo slot</span><span className="ops-mono">{schedulePreview?.nextSlot ? `${formatDateTimeInTimezone(schedulePreview.nextSlot.scheduledFor, schedule.timezone, '—', 'medium')} · ${schedulePreview.nextSlot.instanceName} · ${schedulePreview.nextSlot.campaignId}/${schedulePreview.nextSlot.groupId}` : 'Nenhum slot elegivel'}</span></div><div className="ops-health-row"><span className="ops-health-name">Slots planejados</span><span className="ops-mono">{schedulePreview?.plannedSlots ?? '—'}</span></div></div>
+          <div className="grid gap-4 md:grid-cols-4">
+            <label className="ops-control"><span className="ops-control-label">Inicio da janela</span><input className="ops-input" type="time" value={scheduleDraft.start} onChange={(event) => setScheduleDraft((current) => ({ ...current, start: event.target.value }))} /></label>
+            <label className="ops-control"><span className="ops-control-label">Fim da janela</span><input className="ops-input" type="time" value={scheduleDraft.end} onChange={(event) => setScheduleDraft((current) => ({ ...current, end: event.target.value }))} /></label>
+            <label className="ops-control"><span className="ops-control-label">Minimum interval (min)</span><input className="ops-input" type="number" min="1" max="1440" value={scheduleDraft.minimum} onChange={(event) => setScheduleDraft((current) => ({ ...current, minimum: event.target.value }))} /></label>
+            <label className="ops-control"><span className="ops-control-label">Stagger (min)</span><input className="ops-input" type="number" min="0" max="1440" value={scheduleDraft.stagger} onChange={(event) => setScheduleDraft((current) => ({ ...current, stagger: event.target.value }))} /></label>
+          </div>
+          <div className="mt-4 flex justify-end"><button type="button" className="ops-button" data-variant="primary" onClick={() => void applySchedule()} disabled={scheduleBusy}><Save size={14} aria-hidden="true" /> {scheduleBusy ? 'Salvando...' : 'Salvar agenda'}</button></div>
+        </OpsSection> : null}
+        <OpsSection title="Acoes de controle" meta="Pausar, retomar e atualizar a agenda persistida; sem edicao de .env ou cron.">
           <div className="flex flex-wrap gap-2"><button type="button" className="ops-button" data-variant="danger" onClick={() => setAction('pause')} disabled={status.paused}><Pause size={14} aria-hidden="true" /> Pausar automacao</button><button type="button" className="ops-button" data-variant="primary" onClick={() => setAction('resume')} disabled={!status.paused}><Play size={14} aria-hidden="true" /> Retomar automacao</button></div>
         </OpsSection>
       </> : null}

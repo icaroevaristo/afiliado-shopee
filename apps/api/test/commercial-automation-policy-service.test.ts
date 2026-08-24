@@ -6,6 +6,7 @@ import {
   type CommercialAutomationPolicyConfig,
 } from '../src/commercial-automation-policy-service';
 import type {
+  CommercialAutomationScheduleUpdate,
   CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
@@ -63,6 +64,11 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
       paused,
       pausedAt: paused ? NOW : null,
       resumedAt: paused ? null : NOW,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumIntervalMinutes: null,
+      staggerMinutes: null,
+      scheduleRevision: 0,
       updatedAt: NOW,
     };
   }
@@ -81,6 +87,37 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
       paused,
       pausedAt: paused ? now : this.record.pausedAt,
       resumedAt: paused ? this.record.resumedAt : now,
+      updatedAt: now,
+    };
+    return this.record;
+  }
+
+  async updateSchedule(input: CommercialAutomationScheduleUpdate, now: Date) {
+    if (
+      input.expectedRevision !== undefined &&
+      input.expectedRevision !== this.record.scheduleRevision
+    ) {
+      throw new Error('revision conflict');
+    }
+    this.record = {
+      ...this.record,
+      allowedStartTime:
+        input.allowedStartTime === undefined
+          ? this.record.allowedStartTime
+          : input.allowedStartTime,
+      allowedEndTime:
+        input.allowedEndTime === undefined
+          ? this.record.allowedEndTime
+          : input.allowedEndTime,
+      minimumIntervalMinutes:
+        input.minimumIntervalMinutes === undefined
+          ? this.record.minimumIntervalMinutes
+          : input.minimumIntervalMinutes,
+      staggerMinutes:
+        input.staggerMinutes === undefined
+          ? this.record.staggerMinutes
+          : input.staggerMinutes,
+      scheduleRevision: this.record.scheduleRevision + 1,
       updatedAt: now,
     };
     return this.record;
@@ -219,6 +256,36 @@ describe('CommercialAutomationPolicyService', () => {
     });
     expect(resumed.paused).toBe(false);
     expect(resumed.allowed).toBe(true);
+  });
+
+  it('usa override persistido e incrementa revision sem reiniciar', async () => {
+    const { service } = createSubject();
+
+    await expect(service.getScheduleSettings()).resolves.toMatchObject({
+      allowedStartTime: '08:00',
+      minimumIntervalMinutes: 60,
+      staggerMinutes: 0,
+      scheduleRevision: 0,
+    });
+    await expect(
+      service.updateScheduleSettings({
+        allowedStartTime: '13:00',
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        expectedRevision: 0,
+      }),
+    ).resolves.toMatchObject({
+      allowedStartTime: '13:00',
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      scheduleRevision: 1,
+    });
+    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+      allowed: false,
+      reasons: ['OUTSIDE_ALLOWED_WINDOW'],
+      allowedStartTime: '13:00',
+      minimumIntervalMinutes: 14,
+    });
   });
 
   it('permite dentro da janela e calcula o dia no timezone configurado', async () => {

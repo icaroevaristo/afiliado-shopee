@@ -185,6 +185,23 @@ describe('envSchema Scheduler comercial', () => {
     ).toBe(false);
   });
 
+  it('bloqueia o scheduler legado quando o scheduler comercial esta habilitado', () => {
+    const result = envSchema.safeParse({
+      ...baseEnv,
+      COMMERCIAL_SCHEDULER_ENABLED: 'true',
+      SCHEDULER_ENABLED: 'true',
+      SCHEDULER_CRON: '0 9 * * *',
+      SCHEDULER_TIMEZONE: 'America/Sao_Paulo',
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message)).toContain(
+        'LEGACY_SCHEDULER_MUST_REMAIN_DISABLED',
+      );
+    }
+  });
+
   it.each(['mock', 'manual'])(
     'bloqueia send com provider Shopee %s',
     (provider) => {

@@ -62,6 +62,7 @@ import type { CommercialPipelineConfirmationService } from './commercial-pipelin
 import type {
   CommercialAutomationPolicyConfig,
   CommercialAutomationPolicyService,
+  CommercialAutomationScheduleUpdate,
 } from './commercial-automation-policy-service';
 import { CommercialAutomationExecutionService } from './commercial-automation-execution-service';
 import {
@@ -71,6 +72,7 @@ import {
 import { CommercialDispatchOutboxService } from './commercial-dispatch-outbox-service';
 import { CommercialNicheService } from './commercial-niche-service';
 import { CommercialGroupCampaignService } from './commercial-group-campaign-service';
+import { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type { CommercialPromotionMiningService } from './commercial-promotion-mining-service';
 import type { CommercialPromotionCandidateStatus } from './repositories';
 import type { CommercialAiCopyProvider } from './commercial-ai-copy-provider';
@@ -136,6 +138,16 @@ export type BuildAppOptions = {
   commercialAutomationPolicyService?: Pick<
     CommercialAutomationPolicyService,
     'evaluateAutomationReadiness' | 'setPaused'
+  > &
+    Partial<
+      Pick<
+        CommercialAutomationPolicyService,
+        'getScheduleSettings' | 'updateScheduleSettings'
+      >
+    >;
+  commercialAutomationSchedulePlanner?: Pick<
+    CommercialAutomationSchedulerPlanner,
+    'preview'
   >;
   commercialAutomationConfig?: CommercialAutomationPolicyConfig;
   commercialAutomationExecutionService?: Pick<
@@ -704,6 +716,18 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       });
     return commercialAutomationPolicyService;
   };
+  const commercialAutomationSchedulePlanner =
+    options.commercialAutomationSchedulePlanner ??
+    new CommercialAutomationSchedulerPlanner({
+      settings: repositories.commercialAutomationSettings,
+      campaigns: repositories.commercialGroupCampaigns,
+      groups: repositories.whatsappGroups,
+      instances: repositories.whatsappInstances,
+      history: repositories.commercialAutomationHistory,
+      policy: getCommercialAutomationPolicyService(),
+      config:
+        options.commercialAutomationConfig ?? COMMERCIAL_AUTOMATION_DEFAULTS,
+    });
 
   const allowedDashboardOrigin = 'http://127.0.0.1:3000';
   await app.register(cors, {
@@ -1011,6 +1035,156 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return reply.status(503).send({
         error: 'COMMERCIAL_AUTOMATION_SCHEDULER_STATUS_UNAVAILABLE',
         message: 'Status do Scheduler comercial indisponivel',
+      });
+    }
+  });
+
+  app.get('/commercial-automation/settings', async (request, reply) => {
+    const service = getCommercialAutomationPolicyService();
+    if (!service.getScheduleSettings) {
+      return reply.status(503).send({
+        error: 'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
+        message: 'Configuracao persistida da agenda indisponivel',
+      });
+    }
+    try {
+      return await service.getScheduleSettings();
+    } catch (error) {
+      request.log.error(
+        {
+          event: 'commercial-automation.schedule-settings.failed',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Commercial automation schedule settings failed',
+      );
+      return reply.status(503).send({
+        error: 'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
+        message: 'Configuracao persistida da agenda indisponivel',
+      });
+    }
+  });
+
+  app.get('/commercial-automation/schedule/preview', async (request, reply) => {
+    try {
+      const result = await commercialAutomationSchedulePlanner.preview();
+      const first = result.slots[0];
+      return {
+        scheduleRevision: first?.target.scheduleRevision ?? null,
+        plannedSlots: result.slots.length,
+        skippedTargets: result.skippedTargets,
+        nextSlot: first
+          ? {
+              slotKey: first.slotKey,
+              jobId: first.jobId,
+              scheduledFor: first.target.scheduledFor,
+              campaignId: first.target.campaignId,
+              groupId: first.target.groupId,
+              logicalGroupFingerprint: first.target.logicalGroupFingerprint,
+              instanceName: first.target.instanceName,
+            }
+          : null,
+      };
+    } catch (error) {
+      request.log.error(
+        {
+          event: 'commercial-automation.schedule-preview.failed',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Commercial automation schedule preview failed',
+      );
+      return reply.status(503).send({
+        error: 'COMMERCIAL_AUTOMATION_SCHEDULE_PREVIEW_UNAVAILABLE',
+        message: 'Previa da agenda comercial indisponivel',
+      });
+    }
+  });
+
+  app.patch('/commercial-automation/settings/schedule', async (request, reply) => {
+    const service = getCommercialAutomationPolicyService();
+    if (!service.updateScheduleSettings) {
+      return reply.status(503).send({
+        error: 'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
+        message: 'Configuracao persistida da agenda indisponivel',
+      });
+    }
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.status(400).send({
+        error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+        message: 'Atualizacao de agenda invalida',
+      });
+    }
+    const record = body as Record<string, unknown>;
+    const allowedKeys = new Set([
+      'allowedStartTime',
+      'allowedEndTime',
+      'minimumIntervalMinutes',
+      'staggerMinutes',
+      'expectedRevision',
+    ]);
+    if (
+      Object.keys(record).length === 0 ||
+      Object.keys(record).some((key) => !allowedKeys.has(key))
+    ) {
+      return reply.status(400).send({
+        error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+        message: 'Atualizacao de agenda invalida',
+      });
+    }
+    const update: CommercialAutomationScheduleUpdate = {};
+    for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
+      const value = record[key];
+      if (value !== undefined) {
+        if (value !== null && typeof value !== 'string') {
+          return reply.status(400).send({
+            error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+            message: 'Atualizacao de agenda invalida',
+          });
+        }
+        update[key] = value;
+      }
+    }
+    for (const key of ['minimumIntervalMinutes', 'staggerMinutes'] as const) {
+      const value = record[key];
+      if (value !== undefined) {
+        if (value !== null && typeof value !== 'number') {
+          return reply.status(400).send({
+            error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+            message: 'Atualizacao de agenda invalida',
+          });
+        }
+        update[key] = value;
+      }
+    }
+    if (record.expectedRevision !== undefined) {
+      if (typeof record.expectedRevision !== 'number') {
+        return reply.status(400).send({
+          error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+          message: 'Atualizacao de agenda invalida',
+        });
+      }
+      update.expectedRevision = record.expectedRevision;
+    }
+    try {
+      return await service.updateScheduleSettings(update);
+    } catch (error) {
+      if (error instanceof AppError) {
+        const status =
+          error.code === 'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_CONFLICT'
+            ? 409
+            : 400;
+        return reply.status(status).send({ error: error.code, message: error.message });
+      }
+      request.log.error(
+        {
+          event: 'commercial-automation.schedule-settings.update-failed',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Commercial automation schedule settings update failed',
+      );
+      return reply.status(500).send({
+        error: 'COMMERCIAL_AUTOMATION_SETTINGS_FAILED',
+        message: 'Falha ao atualizar agenda comercial',
       });
     }
   });

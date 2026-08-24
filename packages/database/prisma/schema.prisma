@@ -415,11 +415,16 @@ model CommercialDispatchOutbox {
 }
 
 model CommercialAutomationSettings {
-  id        String    @id @default("commercial-automation")
-  paused    Boolean   @default(true)
-  pausedAt  DateTime? @default(now())
-  resumedAt DateTime?
-  updatedAt DateTime  @default(now()) @updatedAt
+  id                       String    @id @default("commercial-automation")
+  paused                   Boolean   @default(true)
+  pausedAt                 DateTime? @default(now())
+  resumedAt                DateTime?
+  allowedStartTime         String?
+  allowedEndTime           String?
+  minimumIntervalMinutes   Int?
+  staggerMinutes            Int?
+  scheduleRevision         Int       @default(0)
+  updatedAt                DateTime  @default(now()) @updatedAt
 }
 
 model CommercialAutomationExecution {

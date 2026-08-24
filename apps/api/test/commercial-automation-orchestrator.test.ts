@@ -1464,6 +1464,93 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
 
+  it('aplica target constraint do scheduler sem fallback para outro grupo', async () => {
+    const targets: CommercialAutomationTarget[] = [
+      {
+        groupId: 'group-a',
+        groupName: 'Grupo A',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        campaignId: 'campaign-a',
+        nicheId: 'niche-a',
+        dailyLimit: 60,
+        instanceName: 'instance-a',
+      },
+      {
+        groupId: 'group-b',
+        groupName: 'Grupo B',
+        logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+        campaignId: 'campaign-b',
+        nicheId: 'niche-b',
+        dailyLimit: 60,
+        instanceName: 'instance-b',
+      },
+    ];
+    const subject = createSubject({ targets });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+        targetConstraint: {
+          campaignId: 'campaign-b',
+          groupId: 'group-b',
+          logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+          instanceName: 'instance-b',
+          scheduledFor: '2026-07-25T14:00:00.000Z',
+          slotKey: 'slot-b',
+          scheduleRevision: 1,
+        },
+      }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[1] }),
+      expect.any(Object),
+    );
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(
+      expect.objectContaining({ target: targets[0] }),
+    );
+  });
+
+  it('bloqueia target reatribuido sem cair para outro grupo', async () => {
+    const targetA: CommercialAutomationTarget = {
+      groupId: 'group-a',
+      groupName: 'Grupo A',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      campaignId: 'campaign-a',
+      nicheId: 'niche-a',
+      dailyLimit: 60,
+      instanceName: 'instance-a',
+    };
+    const subject = createSubject({ targets: [targetA] });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+        targetConstraint: {
+          campaignId: 'campaign-b',
+          groupId: 'group-b',
+          logicalGroupFingerprint: 'grp_bbbbbbbbbbbb',
+          instanceName: 'instance-b',
+          scheduledFor: '2026-07-25T14:00:00.000Z',
+          slotKey: 'slot-b',
+          scheduleRevision: 1,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'],
+    });
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.preflight).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
   it('avanca de A sem candidato para B com COPY_READY sem criar artefatos em A', async () => {
     const targets: CommercialAutomationTarget[] = [
       {

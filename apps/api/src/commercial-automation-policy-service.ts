@@ -10,10 +10,13 @@ import type {
   CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
+  CommercialAutomationScheduleUpdate,
   CommercialAutomationSettingsRepository,
   WhatsAppGroupDirectoryRepository,
   WhatsAppInstanceRepository,
 } from './repositories';
+
+export type { CommercialAutomationScheduleUpdate } from './repositories';
 
 export const COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION =
   'RETOMAR_AUTOMACAO_COMERCIAL';
@@ -51,6 +54,42 @@ export type CommercialAutomationPolicyConfig = {
   dailyGroupLimit: number;
   minimumIntervalMinutes: number;
 };
+
+export type CommercialAutomationEffectiveSchedule = {
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  dailyGlobalLimit: number;
+  dailyGroupLimit: number;
+  minimumIntervalMinutes: number;
+  staggerMinutes: number;
+  scheduleRevision: number;
+};
+
+export type CommercialAutomationScheduleSettings = Pick<
+  CommercialAutomationEffectiveSchedule,
+  | 'timezone'
+  | 'allowedStartTime'
+  | 'allowedEndTime'
+  | 'minimumIntervalMinutes'
+  | 'staggerMinutes'
+  | 'scheduleRevision'
+>;
+
+export const resolveCommercialAutomationSchedule = (
+  config: CommercialAutomationPolicyConfig,
+  settings: CommercialAutomationSettingsRecord,
+): CommercialAutomationEffectiveSchedule => ({
+  timezone: config.timezone,
+  allowedStartTime: settings.allowedStartTime ?? config.allowedStartTime,
+  allowedEndTime: settings.allowedEndTime ?? config.allowedEndTime,
+  dailyGlobalLimit: config.dailyGlobalLimit,
+  dailyGroupLimit: config.dailyGroupLimit,
+  minimumIntervalMinutes:
+    settings.minimumIntervalMinutes ?? config.minimumIntervalMinutes,
+  staggerMinutes: settings.staggerMinutes ?? 0,
+  scheduleRevision: settings.scheduleRevision,
+});
 
 export type CommercialAutomationStatus = {
   enabled: boolean;
@@ -128,7 +167,75 @@ const parseTime = (time: string) => {
   return hour * 60 + minute;
 };
 
-const isInsideAllowedWindow = (
+const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+const assertTime = (value: string | null | undefined, field: string) => {
+  if (value !== null && value !== undefined && !TIME_PATTERN.test(value)) {
+    throw new AppError(`${field} invalido`, 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID');
+  }
+};
+
+const assertScheduleUpdate = (
+  input: CommercialAutomationScheduleUpdate,
+  effective: CommercialAutomationEffectiveSchedule,
+) => {
+  const hasScheduleField = [
+    'allowedStartTime',
+    'allowedEndTime',
+    'minimumIntervalMinutes',
+    'staggerMinutes',
+  ].some((field) => field in input);
+  if (!hasScheduleField) {
+    throw new AppError(
+      'A atualizacao de agenda esta vazia',
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+  const start = input.allowedStartTime ?? effective.allowedStartTime;
+  const end = input.allowedEndTime ?? effective.allowedEndTime;
+  assertTime(start, 'allowedStartTime');
+  assertTime(end, 'allowedEndTime');
+  if (start === end) {
+    throw new AppError(
+      'A janela comercial nao pode ter inicio e fim iguais',
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+  const minimumIntervalMinutes =
+    input.minimumIntervalMinutes ?? effective.minimumIntervalMinutes;
+  if (
+    !Number.isSafeInteger(minimumIntervalMinutes) ||
+    minimumIntervalMinutes < 1 ||
+    minimumIntervalMinutes > 1_440
+  ) {
+    throw new AppError(
+      'minimumIntervalMinutes invalido',
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+  const staggerMinutes = input.staggerMinutes ?? effective.staggerMinutes;
+  if (
+    !Number.isSafeInteger(staggerMinutes) ||
+    staggerMinutes < 0 ||
+    staggerMinutes > 1_440
+  ) {
+    throw new AppError(
+      'staggerMinutes invalido',
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+  if (
+    input.expectedRevision !== undefined &&
+    (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+  ) {
+    throw new AppError(
+      'scheduleRevision esperado invalido',
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+};
+
+export const isInsideAllowedWindow = (
   date: Date,
   timezone: string,
   startTime: string,
@@ -143,7 +250,7 @@ const isInsideAllowedWindow = (
     : current >= start || current < end;
 };
 
-const nextWindowOpeningAtOrAfter = (
+export const nextWindowOpeningAtOrAfter = (
   date: Date,
   timezone: string,
   startTime: string,
@@ -162,7 +269,7 @@ const nextWindowOpeningAtOrAfter = (
   throw new Error('Nao foi possivel calcular a proxima janela comercial');
 };
 
-const getLocalDayRange = (now: Date, timezone: string) => {
+export const getLocalDayRange = (now: Date, timezone: string) => {
   const today = getZonedParts(now, timezone);
   const dateKey = `${today.year}-${today.month}-${today.day}`;
   const isSameLocalDay = (timestamp: number) => {
@@ -239,6 +346,26 @@ export class CommercialAutomationPolicyService {
     ]);
 
     return this.buildStatus({ now, settings, ...context });
+  }
+
+  async getScheduleSettings(): Promise<CommercialAutomationScheduleSettings> {
+    const now = (this.dependencies.clock ?? (() => new Date()))();
+    const settings = await this.dependencies.settings.getOrCreate(now);
+    return resolveCommercialAutomationSchedule(this.dependencies.config, settings);
+  }
+
+  async updateScheduleSettings(
+    input: CommercialAutomationScheduleUpdate,
+  ): Promise<CommercialAutomationScheduleSettings> {
+    const now = (this.dependencies.clock ?? (() => new Date()))();
+    const current = await this.dependencies.settings.getOrCreate(now);
+    const effective = resolveCommercialAutomationSchedule(
+      this.dependencies.config,
+      current,
+    );
+    assertScheduleUpdate(input, effective);
+    const updated = await this.dependencies.settings.updateSchedule(input, now);
+    return resolveCommercialAutomationSchedule(this.dependencies.config, updated);
   }
 
   private async loadOperationalContext(
@@ -356,31 +483,37 @@ export class CommercialAutomationPolicyService {
     dayEndsAt: Date;
   }): CommercialAutomationStatus {
     const { config } = this.dependencies;
+    const effective = resolveCommercialAutomationSchedule(config, settings);
+    const targetTimezone = target?.timezone ?? effective.timezone;
+    const targetStartTime =
+      target?.allowedStartTime ?? effective.allowedStartTime;
+    const targetEndTime = target?.allowedEndTime ?? effective.allowedEndTime;
     const reasons: CommercialAutomationReason[] = [];
     const outsideWindow = !isInsideAllowedWindow(
       now,
-      config.timezone,
-      config.allowedStartTime,
-      config.allowedEndTime,
+      targetTimezone,
+      targetStartTime,
+      targetEndTime,
     );
-    const globalQuotaValid = isValidDailyQuota(config.dailyGlobalLimit);
+    const globalQuotaValid = isValidDailyQuota(effective.dailyGlobalLimit);
     const globalLimitReached =
       !globalQuotaValid ||
-      history.globalSentToday >= config.dailyGlobalLimit;
+      history.globalSentToday >= effective.dailyGlobalLimit;
     const globalLastSentAt = history.globalLastSentAt ?? history.lastSentAt;
     const groupLastSentAt = target ? (history.groupLastSentAt ?? null) : null;
     const campaignQuotaValid = !target || isValidDailyQuota(target.dailyLimit);
-    const groupQuotaValid = isValidDailyQuota(config.dailyGroupLimit);
+    const groupQuotaValid = isValidDailyQuota(effective.dailyGroupLimit);
     const effectiveGroupLimit =
       target && campaignQuotaValid && groupQuotaValid
-        ? Math.min(target.dailyLimit, config.dailyGroupLimit)
+        ? Math.min(target.dailyLimit, effective.dailyGroupLimit)
         : null;
     const groupLimitReached =
       effectiveGroupLimit !== null &&
       history.groupSentToday >= effectiveGroupLimit;
     const intervalEndsAt = groupLastSentAt
       ? new Date(
-          groupLastSentAt.getTime() + config.minimumIntervalMinutes * 60_000,
+          groupLastSentAt.getTime() +
+            effective.minimumIntervalMinutes * 60_000,
         )
       : null;
     const minimumIntervalNotReached = Boolean(
@@ -416,15 +549,13 @@ export class CommercialAutomationPolicyService {
       const candidates: Date[] = [];
       if (outsideWindow) {
         candidates.push(
-          nextWindowOpeningAtOrAfter(
-            now,
-            config.timezone,
-            config.allowedStartTime,
-            config.allowedEndTime,
-          ),
+          nextWindowOpeningAtOrAfter(now, targetTimezone, targetStartTime, targetEndTime),
         );
       }
-      if (globalLimitReached || (target && (!groupQuotaValid || groupLimitReached)))
+      if (
+        globalLimitReached ||
+        (target && (!groupQuotaValid || groupLimitReached))
+      )
         candidates.push(dayEndsAt);
       if (target && minimumIntervalNotReached && intervalEndsAt)
         candidates.push(intervalEndsAt);
@@ -433,9 +564,9 @@ export class CommercialAutomationPolicyService {
       );
       nextAllowedAt = nextWindowOpeningAtOrAfter(
         latest,
-        config.timezone,
-        config.allowedStartTime,
-        config.allowedEndTime,
+        targetTimezone,
+        targetStartTime,
+        targetEndTime,
       );
     }
 
@@ -447,7 +578,9 @@ export class CommercialAutomationPolicyService {
       globalSentToday: history.globalSentToday,
       globalRemainingToday: Math.max(
         0,
-        globalQuotaValid ? config.dailyGlobalLimit - history.globalSentToday : 0,
+        globalQuotaValid
+          ? effective.dailyGlobalLimit - history.globalSentToday
+          : 0,
       ),
       groupSentToday: target ? history.groupSentToday : null,
       groupRemainingToday: target
@@ -465,12 +598,12 @@ export class CommercialAutomationPolicyService {
       pausedAt: isoOrNull(settings.pausedAt),
       resumedAt: isoOrNull(settings.resumedAt),
       updatedAt: settings.updatedAt.toISOString(),
-      allowedStartTime: config.allowedStartTime,
-      allowedEndTime: config.allowedEndTime,
-      timezone: config.timezone,
-      dailyGlobalLimit: config.dailyGlobalLimit,
-      dailyGroupLimit: config.dailyGroupLimit,
-      minimumIntervalMinutes: config.minimumIntervalMinutes,
+      allowedStartTime: effective.allowedStartTime,
+      allowedEndTime: effective.allowedEndTime,
+      timezone: effective.timezone,
+      dailyGlobalLimit: effective.dailyGlobalLimit,
+      dailyGroupLimit: effective.dailyGroupLimit,
+      minimumIntervalMinutes: effective.minimumIntervalMinutes,
       authorizedGroupCount,
     };
   }

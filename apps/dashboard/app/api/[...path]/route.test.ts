@@ -84,6 +84,46 @@ describe('dashboard API proxy', () => {
     );
   });
 
+  it('permite somente os caminhos de agenda explicitamente autorizados', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await GET(
+      new Request('http://dashboard.local/api/commercial-automation/settings'),
+      { params: Promise.resolve({ path: ['commercial-automation', 'settings'] }) },
+    );
+    const response = await PATCH(
+      new Request('http://dashboard.local/api/commercial-automation/settings/schedule', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ staggerMinutes: 5 }),
+      }),
+      { params: Promise.resolve({ path: ['commercial-automation', 'settings', 'schedule'] }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock.mock.calls[3][0]).toBe(
+      'http://127.0.0.1:3334/commercial-automation/settings/schedule',
+    );
+  });
+
   it('bloqueia POST sem chamar o upstream', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -156,6 +196,7 @@ describe('dashboard API proxy', () => {
 
   it('falha fechada sem token local e nao chama o upstream', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', '');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 

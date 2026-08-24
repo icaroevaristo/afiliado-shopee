@@ -178,4 +178,121 @@ describe('processCommercialAutomationJob', () => {
     });
     expect(executeTick).not.toHaveBeenCalled();
   });
+
+  it('usa o planner no tick global quando ele esta composto', async () => {
+    const executeTick = vi.fn();
+    const plan = vi.fn(async () => ({ slots: [] }));
+    const enqueue = vi.fn(async () => undefined);
+    await processCommercialAutomationJob(
+      {
+        id: 'planner-tick-1',
+        name: JOB_NAMES.commercialAutomationTick,
+        data: { mode: 'send' },
+      },
+      {
+        orchestrator: { executeTick } as never,
+        planner: { plan },
+        enqueueTarget: enqueue,
+        provider: 'official',
+        mode: 'send',
+      },
+    );
+
+    expect(plan).toHaveBeenCalledOnce();
+    expect(plan).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'send', enqueue }),
+    );
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia job target stale antes do orchestrator', async () => {
+    const executeTick = vi.fn();
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T12:00:00.000Z',
+      slotKey: 'slot-a',
+      scheduleRevision: 2,
+    };
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-slot-a',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: { mode: 'send', kind: 'target', target },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'official',
+          mode: 'send',
+          getScheduleRevision: vi.fn(async () => 3),
+        },
+      ),
+    ).resolves.toEqual({ skipped: true, reason: 'SCHEDULE_REVISION_STALE' });
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('transporta target constraint no job target atual', async () => {
+    const executeTick = vi.fn(async () => ({ status: 'preview-ready' }));
+    const target = {
+      campaignId: 'campaign-a',
+      groupId: 'group-a',
+      logicalGroupFingerprint: 'fingerprint-a',
+      instanceName: 'instance-a',
+      scheduledFor: '2026-08-24T00:00:00.000Z',
+      slotKey: 'slot-a',
+      scheduleRevision: 2,
+    };
+    await processCommercialAutomationJob(
+      {
+        id: 'commercial-target-slot-a',
+        name: JOB_NAMES.commercialAutomationTarget,
+        data: { mode: 'send', kind: 'target', target },
+      },
+      {
+        orchestrator: { executeTick } as never,
+        provider: 'official',
+        mode: 'send',
+        getScheduleRevision: vi.fn(async () => 2),
+      },
+    );
+    expect(executeTick).toHaveBeenCalledWith(
+      expect.objectContaining({ targetConstraint: target }),
+    );
+  });
+
+  it('rejeita payload target incompleto antes do orchestrator', async () => {
+    const executeTick = vi.fn();
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'commercial-target-invalid',
+          name: JOB_NAMES.commercialAutomationTarget,
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: '',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'fingerprint-a',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-24T12:00:00.000Z',
+              slotKey: 'slot-invalid',
+              scheduleRevision: 2,
+            },
+          },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          provider: 'official',
+          mode: 'send',
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_TARGET_CONSTRAINT_INVALID',
+    });
+    expect(executeTick).not.toHaveBeenCalled();
+  });
 });

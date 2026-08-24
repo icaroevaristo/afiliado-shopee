@@ -338,7 +338,20 @@ export type CommercialAutomationSettingsRecord = {
   paused: boolean;
   pausedAt: Date | null;
   resumedAt: Date | null;
+  allowedStartTime: string | null;
+  allowedEndTime: string | null;
+  minimumIntervalMinutes: number | null;
+  staggerMinutes: number | null;
+  scheduleRevision: number;
   updatedAt: Date;
+};
+
+export type CommercialAutomationScheduleUpdate = {
+  allowedStartTime?: string | null;
+  allowedEndTime?: string | null;
+  minimumIntervalMinutes?: number | null;
+  staggerMinutes?: number | null;
+  expectedRevision?: number;
 };
 
 export interface CommercialAutomationSettingsRepository {
@@ -346,6 +359,10 @@ export interface CommercialAutomationSettingsRepository {
   getOrCreate(now: Date): Promise<CommercialAutomationSettingsRecord>;
   setPaused(
     paused: boolean,
+    now: Date,
+  ): Promise<CommercialAutomationSettingsRecord>;
+  updateSchedule(
+    input: CommercialAutomationScheduleUpdate,
     now: Date,
   ): Promise<CommercialAutomationSettingsRecord>;
 }
@@ -366,6 +383,10 @@ export type CommercialAutomationTarget = {
   campaignId: string;
   nicheId: string;
   dailyLimit: number;
+  cadenceMinutes?: number;
+  timezone?: string;
+  allowedStartTime?: string;
+  allowedEndTime?: string;
   failureCount?: number;
   nextEligibleAt?: Date | null;
 };

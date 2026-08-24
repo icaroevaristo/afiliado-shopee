@@ -7,6 +7,42 @@ import {
 } from '../src/prisma-repositories';
 
 describe('commercial automation Prisma repositories', () => {
+  it('atualiza agenda com CAS de revision e incremento atomico', async () => {
+    const update = vi.fn().mockResolvedValue({
+      paused: true,
+      pausedAt: null,
+      resumedAt: null,
+      allowedStartTime: '08:00',
+      allowedEndTime: '23:00',
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      scheduleRevision: 1,
+      updatedAt: new Date('2026-08-24T12:00:00.000Z'),
+    });
+    const repository = new PrismaCommercialAutomationSettingsRepository({
+      commercialAutomationSettings: { update },
+    } as never);
+
+    await repository.updateSchedule(
+      {
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        expectedRevision: 0,
+      },
+      new Date('2026-08-24T12:00:00.000Z'),
+    );
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: 'commercial-automation', scheduleRevision: 0 },
+      data: {
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        scheduleRevision: { increment: 1 },
+        updatedAt: new Date('2026-08-24T12:00:00.000Z'),
+      },
+    });
+  });
+
   it('inicializa o singleton pausado e persiste pausa/retomada', async () => {
     const upsert = vi
       .fn()

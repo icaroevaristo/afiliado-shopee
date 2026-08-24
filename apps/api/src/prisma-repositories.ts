@@ -8,6 +8,7 @@ import type {
   CommercialPreConfirmationReservationRecoveryResult,
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
+  CommercialAutomationScheduleUpdate,
   CommercialAutomationSettingsRepository,
   CommercialDeliveryHistoryRepository,
   CommercialConfirmationPersistenceInput,
@@ -1034,6 +1035,12 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
 
   async update(id: string, data: CommercialGroupCampaignUpdateData) {
     try {
+      const scheduleChanged = [
+        'cadenceMinutes',
+        'timezone',
+        'allowedStartTime',
+        'allowedEndTime',
+      ].some((field) => field in data);
       const updateCampaign = async (
         client: Pick<DatabaseClient, 'commercialGroupCampaign' | 'commercialNiche'>,
       ) => {
@@ -1068,11 +1075,29 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
           include: commercialCampaignInclude,
         });
       };
-      const record = data.nicheId
-        ? await this.prisma.$transaction(updateCampaign, {
-            isolationLevel: 'Serializable',
-          })
-        : await updateCampaign(this.prisma);
+      const record =
+        data.nicheId || scheduleChanged
+          ? await this.prisma.$transaction(
+              async (transaction) => {
+                const updated = await updateCampaign(transaction);
+                if (updated && scheduleChanged) {
+                  await transaction.commercialAutomationSettings.upsert({
+                    where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
+                    create: {
+                      id: COMMERCIAL_AUTOMATION_SETTINGS_ID,
+                      scheduleRevision: 1,
+                    },
+                    update: {
+                      scheduleRevision: { increment: 1 },
+                      updatedAt: new Date(),
+                    },
+                  });
+                }
+                return updated;
+              },
+              { isolationLevel: 'Serializable' },
+            )
+          : await updateCampaign(this.prisma);
       if (!record) return null;
       return mapCommercialGroupCampaign(record);
     } catch (error) {
@@ -3494,8 +3519,39 @@ export class PrismaCommercialAutomationSettingsRepository implements CommercialA
       where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
       data: paused
         ? { paused: true, pausedAt: now }
-        : { paused: false, resumedAt: now },
+      : { paused: false, resumedAt: now },
     });
+  }
+
+  async updateSchedule(
+    input: CommercialAutomationScheduleUpdate,
+    now: Date,
+  ): Promise<CommercialAutomationSettingsRecord> {
+    const { expectedRevision, ...schedule } = input;
+    try {
+      return await this.prisma.commercialAutomationSettings.update({
+        where:
+          expectedRevision === undefined
+            ? { id: COMMERCIAL_AUTOMATION_SETTINGS_ID }
+            : {
+                id: COMMERCIAL_AUTOMATION_SETTINGS_ID,
+                scheduleRevision: expectedRevision,
+              },
+        data: {
+          ...schedule,
+          scheduleRevision: { increment: 1 },
+          updatedAt: now,
+        },
+      });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) {
+        throw new AppError(
+          'A configuracao de agenda mudou durante a atualizacao',
+          'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_CONFLICT',
+        );
+      }
+      throw error;
+    }
   }
 }
 

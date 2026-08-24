@@ -40,6 +40,8 @@ export type CommercialAutomationReason =
   | 'NO_AUTHORIZED_GROUP'
   | 'MULTIPLE_AUTHORIZED_GROUPS'
   | 'AMBIGUOUS_COMMERCIAL_RUN_EXISTS'
+  | 'COMMERCIAL_EXECUTION_IN_PROGRESS'
+  | 'STALE_COMMERCIAL_EXECUTION_EXISTS'
   | 'COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP'
   | 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE';
 
@@ -64,6 +66,30 @@ export type CommercialAutomationStatus = {
   dailyGroupLimit: number;
   minimumIntervalMinutes: number;
   authorizedGroupCount: number;
+};
+
+export type CommercialAutomationScheduleSettings = {
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  minimumIntervalMinutes: number;
+  staggerMinutes: number;
+  scheduleRevision: number;
+};
+
+export type CommercialAutomationSchedulePreview = {
+  scheduleRevision: number | null;
+  plannedSlots: number;
+  skippedTargets: string[];
+  nextSlot: {
+    slotKey: string;
+    jobId: string;
+    scheduledFor: string;
+    campaignId: string;
+    groupId: string;
+    logicalGroupFingerprint: string;
+    instanceName: string;
+  } | null;
 };
 
 export type CommercialAutomationSchedulerStatus = {
@@ -452,6 +478,13 @@ export type CommercialCampaign = {
   } | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CommercialCampaignScheduleUpdate = {
+  cadenceMinutes?: number;
+  timezone?: string;
+  allowedStartTime?: string;
+  allowedEndTime?: string;
 };
 
 export type CommercialCampaignPage = {

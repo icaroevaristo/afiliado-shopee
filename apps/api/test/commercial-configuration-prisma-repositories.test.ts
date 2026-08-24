@@ -108,4 +108,74 @@ describe('PrismaCommercialGroupCampaignRepository', () => {
       fingerprintWhatsAppGroupId(` ${GROUP_ID} `),
     );
   });
+
+  it('incrementa revision da agenda na mesma transacao da campanha', async () => {
+    const now = new Date('2026-08-24T12:00:00.000Z');
+    const updated = {
+      id: 'campaign-1',
+      name: 'Campanha',
+      logicalGroupFingerprint: 'fingerprint-1',
+      anchorDestinationId: 'destination-1',
+      nicheId: 'niche-1',
+      active: true,
+      cadenceMinutes: 30,
+      timezone: 'America/Sao_Paulo',
+      allowedStartTime: '08:00',
+      allowedEndTime: '21:00',
+      dailyLimit: 60,
+      failureCount: 0,
+      nextEligibleAt: null,
+      attemptExecutionId: null,
+      attemptReservedAt: null,
+      attemptLeaseExpiresAt: null,
+      queueTargetSize: 40,
+      dedupeDays: 30,
+      niche: { id: 'niche-1', name: 'Nicho', slug: 'nicho', active: true },
+      anchorDestination: {
+        id: 'destination-1',
+        name: 'Grupo',
+        fingerprint: 'fingerprint-1',
+        active: true,
+        available: true,
+        assignedInstanceName: 'instance-1',
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const update = vi.fn(async () => updated);
+    const upsert = vi.fn(async () => undefined);
+    const transaction = {
+      commercialGroupCampaign: { update },
+      commercialNiche: { findUnique: vi.fn() },
+      commercialAutomationSettings: { upsert },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback, options) => {
+        expect(options).toEqual({ isolationLevel: 'Serializable' });
+        return callback(transaction);
+      }),
+    };
+
+    const repository = new PrismaCommercialGroupCampaignRepository(
+      prisma as never,
+    );
+    await repository.update('campaign-1', {
+      cadenceMinutes: 30,
+      allowedStartTime: '08:00',
+      allowedEndTime: '21:00',
+    });
+
+    expect(update).toHaveBeenCalledOnce();
+    expect(upsert).toHaveBeenCalledWith({
+      where: { id: 'commercial-automation' },
+      create: {
+        id: 'commercial-automation',
+        scheduleRevision: 1,
+      },
+      update: {
+        scheduleRevision: { increment: 1 },
+        updatedAt: expect.any(Date),
+      },
+    });
+  });
 });

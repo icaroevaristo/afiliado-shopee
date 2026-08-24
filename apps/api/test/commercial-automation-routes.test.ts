@@ -27,11 +27,48 @@ const status: CommercialAutomationStatus = {
   authorizedGroupCount: 0,
 };
 
+const schedule = {
+  timezone: 'America/Sao_Paulo',
+  allowedStartTime: '08:00',
+  allowedEndTime: '20:00',
+  minimumIntervalMinutes: 60,
+  staggerMinutes: 0,
+  scheduleRevision: 0,
+};
+
+const schedulePreview = {
+  slots: [
+    {
+      slotKey: 'slot-preview-1',
+      jobId: 'commercial-target-slot-preview-1',
+      scheduledFor: new Date('2026-08-24T12:00:00.000Z'),
+      delayMs: 0,
+      target: {
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        logicalGroupFingerprint: 'fingerprint-1',
+        instanceName: 'instance-1',
+        scheduledFor: '2026-08-24T12:00:00.000Z',
+        slotKey: 'slot-preview-1',
+        scheduleRevision: 0,
+      },
+    },
+  ],
+  skippedTargets: [],
+};
+
 const apps: Array<Awaited<ReturnType<typeof buildAuthenticatedTestApp>>> = [];
 
 const createApp = async () => {
   const evaluateAutomationReadiness = vi.fn().mockResolvedValue(status);
   const setPaused = vi.fn().mockResolvedValue(status);
+  const getScheduleSettings = vi.fn().mockResolvedValue(schedule);
+  const updateScheduleSettings = vi.fn().mockResolvedValue({
+    ...schedule,
+    minimumIntervalMinutes: 14,
+    scheduleRevision: 1,
+  });
+  const preview = vi.fn().mockResolvedValue(schedulePreview);
   const pipelineAdd = vi.fn();
   const dispatchAdd = vi.fn();
   const app = await buildAuthenticatedTestApp({
@@ -40,7 +77,10 @@ const createApp = async () => {
     commercialAutomationPolicyService: {
       evaluateAutomationReadiness,
       setPaused,
+      getScheduleSettings,
+      updateScheduleSettings,
     },
+    commercialAutomationSchedulePlanner: { preview },
     pipelineQueue: { add: pipelineAdd },
     whatsappDispatchQueue: {
       add: dispatchAdd,
@@ -52,6 +92,9 @@ const createApp = async () => {
     app,
     evaluateAutomationReadiness,
     setPaused,
+    getScheduleSettings,
+    updateScheduleSettings,
+    preview,
     pipelineAdd,
     dispatchAdd,
   };
@@ -94,6 +137,72 @@ describe('commercial automation routes', () => {
       paused: true,
       confirmation: undefined,
     });
+  });
+
+  it('consulta e atualiza somente a agenda persistida', async () => {
+    const subject = await createApp();
+
+    const getResponse = await subject.app.inject({
+      method: 'GET',
+      url: '/commercial-automation/settings',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    expect(getResponse.json()).toEqual(schedule);
+
+    const patchResponse = await subject.app.inject({
+      method: 'PATCH',
+      url: '/commercial-automation/settings/schedule',
+      payload: {
+        minimumIntervalMinutes: 14,
+        staggerMinutes: 5,
+        expectedRevision: 0,
+      },
+    });
+    expect(patchResponse.statusCode).toBe(200);
+    expect(subject.updateScheduleSettings).toHaveBeenCalledWith({
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      expectedRevision: 0,
+    });
+  });
+
+  it('consulta a previa da agenda sem criar trabalho', async () => {
+    const subject = await createApp();
+
+    const response = await subject.app.inject({
+      method: 'GET',
+      url: '/commercial-automation/schedule/preview',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      scheduleRevision: 0,
+      plannedSlots: 1,
+      skippedTargets: [],
+      nextSlot: {
+        slotKey: 'slot-preview-1',
+        jobId: 'commercial-target-slot-preview-1',
+        scheduledFor: '2026-08-24T12:00:00.000Z',
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        logicalGroupFingerprint: 'fingerprint-1',
+        instanceName: 'instance-1',
+      },
+    });
+    expect(subject.preview).toHaveBeenCalledOnce();
+    expect(subject.pipelineAdd).not.toHaveBeenCalled();
+    expect(subject.dispatchAdd).not.toHaveBeenCalled();
+  });
+
+  it('rejeita campos que nao pertencem ao contrato da agenda', async () => {
+    const subject = await createApp();
+    const response = await subject.app.inject({
+      method: 'PATCH',
+      url: '/commercial-automation/settings/schedule',
+      payload: { dailyGlobalLimit: 999 },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(subject.updateScheduleSettings).not.toHaveBeenCalled();
   });
 
   it('retoma somente com a confirmacao exata', async () => {

@@ -65,6 +65,7 @@ const setup = async () => {
     total: 1,
     totalPages: 1,
   }));
+  const updateCampaign = vi.fn(async () => campaign);
   const dispatchAdd = vi.fn();
   const app = await buildAuthenticatedTestApp({
     logger: false,
@@ -79,14 +80,14 @@ const setup = async () => {
       create: vi.fn(async () => campaign),
       list: listCampaigns,
       find: vi.fn(async () => campaign),
-      update: vi.fn(async () => campaign),
+      update: updateCampaign,
       activate: vi.fn(async () => ({ ...campaign, active: true })),
       deactivate: vi.fn(async () => campaign),
     },
     whatsappDispatchQueue: { add: dispatchAdd, getJob: vi.fn() },
   });
   apps.push(app);
-  return { app, listNiches, listCampaigns, dispatchAdd };
+  return { app, listNiches, listCampaigns, updateCampaign, dispatchAdd };
 };
 
 afterEach(async () => Promise.all(apps.splice(0).map((app) => app.close())));
@@ -138,6 +139,27 @@ describe('commercial configuration routes', () => {
         })
       ).statusCode,
     ).toBe(400);
+    expect(subject.dispatchAdd).not.toHaveBeenCalled();
+  });
+
+  it('permite alterar somente a agenda necessaria da campanha', async () => {
+    const subject = await setup();
+    const response = await subject.app.inject({
+      method: 'PATCH',
+      url: '/commercial/campaigns/campaign-1',
+      payload: {
+        cadenceMinutes: 30,
+        allowedStartTime: '08:00',
+        allowedEndTime: '21:00',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(subject.updateCampaign).toHaveBeenCalledWith('campaign-1', {
+      cadenceMinutes: 30,
+      allowedStartTime: '08:00',
+      allowedEndTime: '21:00',
+    });
     expect(subject.dispatchAdd).not.toHaveBeenCalled();
   });
 });

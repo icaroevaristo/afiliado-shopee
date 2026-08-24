@@ -5,6 +5,8 @@ import AutomationPage from './page';
 
 const getStatusMock = vi.fn();
 const getSchedulerMock = vi.fn();
+const getScheduleMock = vi.fn();
+const getPreviewMock = vi.fn();
 const pauseMock = vi.fn();
 const resumeMock = vi.fn();
 
@@ -12,6 +14,10 @@ vi.mock('../../lib/api', () => ({
   getCommercialAutomationStatus: (...args: unknown[]) => getStatusMock(...args),
   getCommercialAutomationSchedulerStatus: (...args: unknown[]) =>
     getSchedulerMock(...args),
+  getCommercialAutomationScheduleSettings: (...args: unknown[]) =>
+    getScheduleMock(...args),
+  getCommercialAutomationSchedulePreview: (...args: unknown[]) =>
+    getPreviewMock(...args),
   pauseCommercialAutomation: (...args: unknown[]) => pauseMock(...args),
   resumeCommercialAutomation: (...args: unknown[]) => resumeMock(...args),
 }));
@@ -51,9 +57,33 @@ const scheduler = {
   mode: 'send',
 };
 
+const schedule = {
+  timezone: 'America/Sao_Paulo',
+  allowedStartTime: '08:00',
+  allowedEndTime: '23:00',
+  minimumIntervalMinutes: 14,
+  staggerMinutes: 5,
+  scheduleRevision: 0,
+};
+
 beforeEach(() => {
   getStatusMock.mockReset().mockResolvedValue(status);
   getSchedulerMock.mockReset().mockResolvedValue(scheduler);
+  getScheduleMock.mockReset().mockResolvedValue(schedule);
+  getPreviewMock.mockReset().mockResolvedValue({
+    scheduleRevision: 0,
+    plannedSlots: 1,
+    skippedTargets: [],
+    nextSlot: {
+      slotKey: 'slot-1',
+      jobId: 'commercial-target-slot-1',
+      scheduledFor: '2026-08-10T12:15:00.000Z',
+      campaignId: 'campaign-1',
+      groupId: 'group-1',
+      logicalGroupFingerprint: 'fingerprint-1',
+      instanceName: 'affiliate-bot',
+    },
+  });
   pauseMock.mockReset();
   resumeMock.mockReset();
 });

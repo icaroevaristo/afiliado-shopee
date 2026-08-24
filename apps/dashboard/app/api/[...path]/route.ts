@@ -10,6 +10,8 @@ const READ_PATHS: readonly PathPattern[] = [
   ['scheduler'],
   ['commercial-automation', 'status'],
   ['commercial-automation', 'scheduler'],
+  ['commercial-automation', 'settings'],
+  ['commercial-automation', 'schedule', 'preview'],
   ['commercial-automation', 'executions'],
   ['commercial', 'campaigns'],
   ['commercial', 'campaigns', '*', 'queue'],
@@ -25,6 +27,8 @@ const READ_PATHS: readonly PathPattern[] = [
 
 const PATCH_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'settings'],
+  ['commercial-automation', 'settings', 'schedule'],
+  ['commercial', 'campaigns', '*'],
 ];
 
 const matchesPath = (path: readonly string[], pattern: PathPattern) =>

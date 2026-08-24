@@ -38,6 +38,7 @@ export const JOB_NAMES = {
   pipelineProduct: 'pipeline-product',
   whatsappDispatch: 'whatsapp-dispatch',
   commercialAutomationTick: 'commercial-automation-tick',
+  commercialAutomationTarget: 'commercial-automation-target',
 } as const;
 
 export const DEFAULT_PIPELINE_SCHEDULER_JOB_ID = 'scheduled-pipeline-product';
@@ -82,7 +83,22 @@ export type WhatsAppDispatchJob = {
   dispatchId: string;
   instanceName?: string;
 };
-export type CommercialAutomationJob = { mode: CommercialAutomationMode };
+export type CommercialAutomationTargetConstraint = {
+  campaignId: string;
+  groupId: string;
+  logicalGroupFingerprint: string;
+  instanceName: string;
+  scheduledFor: string;
+  slotKey: string;
+  scheduleRevision: number;
+};
+export type CommercialAutomationJob =
+  | { mode: CommercialAutomationMode; kind?: 'planner' }
+  | {
+      mode: CommercialAutomationMode;
+      kind: 'target';
+      target: CommercialAutomationTargetConstraint;
+    };
 
 export const enqueuePipelineProduct = (
   queue: Queue<PipelineProductJob>,
@@ -108,6 +124,18 @@ export const enqueueControlledWhatsAppDispatch = (
   queue.add(JOB_NAMES.whatsappDispatch, data, {
     ...CONTROLLED_E2E_WHATSAPP_DISPATCH_JOB_OPTIONS,
     jobId,
+  });
+
+export const enqueueCommercialAutomationTarget = (
+  queue: Queue<CommercialAutomationJob>,
+  data: Extract<CommercialAutomationJob, { kind: 'target' }>,
+  jobId: string,
+  delay: number,
+) =>
+  queue.add(JOB_NAMES.commercialAutomationTarget, data, {
+    ...COMMERCIAL_AUTOMATION_JOB_OPTIONS,
+    jobId,
+    delay,
   });
 
 export const enqueueControlledE2EWhatsAppDispatch =

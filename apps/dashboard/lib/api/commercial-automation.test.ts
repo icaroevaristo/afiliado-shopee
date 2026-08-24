@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getCommercialAutomationSchedulerStatus,
+  getCommercialAutomationScheduleSettings,
+  getCommercialAutomationSchedulePreview,
   listCommercialAutomationExecutions,
   listCommercialDispatchOutbox,
   getCommercialAutomationStatus,
   pauseCommercialAutomation,
   resumeCommercialAutomation,
+  updateCommercialAutomationScheduleSettings,
 } from './commercial-automation';
 
 const response = (body: unknown) =>
@@ -77,6 +80,41 @@ describe('commercial automation API', () => {
     expect(fetch).toHaveBeenNthCalledWith(
       3,
       '/api/commercial-automation/outbox?page=1&limit=5',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('consulta e atualiza agenda sem misturar com pause/resume', async () => {
+    await getCommercialAutomationScheduleSettings();
+    await updateCommercialAutomationScheduleSettings({
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      expectedRevision: 0,
+    });
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/commercial-automation/settings',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/commercial-automation/settings/schedule',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          minimumIntervalMinutes: 14,
+          staggerMinutes: 5,
+          expectedRevision: 0,
+        }),
+      }),
+    );
+  });
+
+  it('consulta a proxima agenda sem criar jobs', async () => {
+    await getCommercialAutomationSchedulePreview();
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/commercial-automation/schedule/preview',
       expect.objectContaining({ method: 'GET' }),
     );
   });
