@@ -145,6 +145,7 @@ const catalogFixture = (
   id: string,
   categoryId: string,
   input: {
+    source?: 'MOCK' | 'MANUAL' | 'OFFICIAL';
     price: number;
     discount: number;
     commission: number;
@@ -162,7 +163,7 @@ const catalogFixture = (
     dispatchStatuses: input.dispatchStatuses,
     record: {
       id,
-      source: 'OFFICIAL',
+      source: input.source ?? 'OFFICIAL',
       providerProductId: `provider-${id}`,
       nome: `Produto ${id}`,
       categoria: categoryId,
@@ -242,11 +243,21 @@ const createFilteredCatalogPrismaMock = (fixtures: CatalogFixture[]) => {
   }) => {
     const sql = queryText(query);
     const destinationId = query.values?.[0] as string | null | undefined;
+    const source = query.values?.find(
+      (value): value is 'MOCK' | 'MANUAL' | 'OFFICIAL' =>
+        value === 'MOCK' || value === 'MANUAL' || value === 'OFFICIAL',
+    );
     return fixtures.filter((fixture) => {
       const record = fixture.record;
       const sentToScopedDestination =
         fixture.dispatchStatuses.includes('SENT') &&
         fixture.sentDestinationIds.includes(String(destinationId));
+      if (
+        sql.includes('p."source" = ') &&
+        record.source !== source
+      ) {
+        return false;
+      }
       if (
         sql.includes('p."categoryIds" @> ARRAY[') &&
         !(record.categoryIds as string[]).includes(
@@ -555,6 +566,16 @@ describe('Shopee offer API', () => {
         sentDestinationIds: [],
         dispatchStatuses: ['PENDING'],
       }),
+      catalogFixture('product-mock', 'category-mock', {
+        source: 'MOCK',
+        price: 45,
+        discount: 25,
+        commission: 7,
+        sales: 950,
+        score: null,
+        sentDestinationIds: ['destination-a'],
+        dispatchStatuses: ['SENT'],
+      }),
     ]);
     const app = await buildAuthenticatedTestApp({
       logger: false,
@@ -576,6 +597,7 @@ describe('Shopee offer API', () => {
       'capturedFrom=not-a-date',
       'categoryId=category%2Funsafe',
       'destinationId=destination%20unsafe',
+      'source=invalid',
     ]) {
       const response = await app.inject({
         method: 'GET',
@@ -586,6 +608,16 @@ describe('Shopee offer API', () => {
         error: 'INVALID_CATALOG_QUERY',
       });
     }
+
+    const rawQueryCountBeforeInvalidSource = prisma.$queryRaw.mock.calls.length;
+    const invalidSource = await app.inject({
+      method: 'GET',
+      url: '/shopee/offers?source=invalid',
+    });
+    expect(invalidSource.statusCode).toBe(400);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(
+      rawQueryCountBeforeInvalidSource,
+    );
 
     const catalog = await app.inject({
       method: 'GET',
@@ -617,6 +649,12 @@ describe('Shopee offer API', () => {
       ['categoryId=category-a', ['product-a']],
       ['categoryId=category-b', ['product-b']],
       ['categoryId=category-c', ['product-c']],
+      ['source=OFFICIAL', ['product-a', 'product-b', 'product-c']],
+      ['source=MOCK', ['product-mock']],
+      [
+        'source=OFFICIAL&categoryId=category-b&minScore=80&minPrice=30&maxPrice=60&deliveryStatus=not_sent&destinationId=destination-a&capturedFrom=2026-08-24T00%3A00%3A00.000Z&capturedTo=2026-08-25T00%3A00%3A00.000Z',
+        ['product-b'],
+      ],
       ['minScore=1&sort=score_desc', ['product-a', 'product-b']],
       [
         'deliveryStatus=not_sent&destinationId=destination-a&sort=score_desc',
@@ -625,6 +663,7 @@ describe('Shopee offer API', () => {
       ['sort=score_desc&page=1&limit=1', ['product-a']],
       ['sort=score_desc&page=2&limit=1', ['product-b']],
       ['sort=score_desc&page=3&limit=1', ['product-c']],
+      ['source=OFFICIAL&sort=sales_desc&page=1&limit=2', ['product-a', 'product-b']],
     ] as const) {
       const response = await app.inject({
         method: 'GET',

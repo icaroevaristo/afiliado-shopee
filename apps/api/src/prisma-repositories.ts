@@ -579,7 +579,9 @@ const catalogSql = (filters: OperationalCatalogFilters) => {
   const destinationId = filters.destinationId ?? null;
   const conditions: Prisma.Sql[] = [];
   if (filters.source)
-    conditions.push(Prisma.sql`p."source" = ${filters.source}`);
+    conditions.push(
+      Prisma.sql`p."source" = ${filters.source}::"ShopeeOfferSource"`,
+    );
   if (filters.affiliateLink === 'present') {
     conditions.push(Prisma.sql`p."affiliateLink" IS NOT NULL`);
   }

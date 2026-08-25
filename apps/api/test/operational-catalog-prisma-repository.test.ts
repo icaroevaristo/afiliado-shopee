@@ -209,6 +209,39 @@ const catalogFilters = {
 };
 
 describe('PrismaShopeeOfferRepository operational catalog', () => {
+  it('tipa source como ShopeeOfferSource e mantém o valor parametrizado', async () => {
+    const rawQueries: Array<{
+      strings?: readonly string[];
+      values?: readonly unknown[];
+    }> = [];
+    const queryRaw = vi.fn(
+      async (query: { strings?: readonly string[]; values?: readonly unknown[] }) => {
+        rawQueries.push(query);
+        const text = queryText(query);
+        if (text.includes('COUNT(*) AS "total"')) return [{ total: BigInt(0) }];
+        return [];
+      },
+    );
+    const repository = new PrismaShopeeOfferRepository({ $queryRaw: queryRaw } as never);
+
+    await repository.listOperationalCatalog({
+      page: 1,
+      limit: 20,
+      sort: 'recent',
+      deliveryStatus: 'any',
+      source: 'OFFICIAL',
+    });
+
+    const catalogQuery = rawQueries.find((query) =>
+      queryText(query).includes('FROM catalog'),
+    );
+    expect(queryText(catalogQuery ?? {})).toContain(
+      'p."source" = ::"ShopeeOfferSource"',
+    );
+    expect(queryText(catalogQuery ?? {})).not.toContain('OFFICIAL');
+    expect(catalogQuery?.values).toContain('OFFICIAL');
+  });
+
   it('ignora candidate stale e mantém semantics global e por destino para SENT', async () => {
     const queryRaw = vi
       .fn()
