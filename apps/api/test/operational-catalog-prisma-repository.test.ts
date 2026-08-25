@@ -560,44 +560,102 @@ describe('PrismaShopeeOfferRepository operational catalog', () => {
     );
   });
 
-  it('retorna somente IDs observados e mantém nome nulo como neutro', async () => {
+  it('usa ShopeeCategory como source of truth e conta somente ProductLead OFFICIAL', async () => {
+    const rawQueries: Array<{
+      strings?: readonly string[];
+      values?: readonly unknown[];
+    }> = [];
+    const queryRaw = vi.fn(
+      async (query: {
+        strings?: readonly string[];
+        values?: readonly unknown[];
+      }) => {
+        rawQueries.push(query);
+        return [
+          {
+            id: '100001',
+            name: null,
+            parentId: null,
+            mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+            productCount: BigInt(1),
+          },
+          {
+            id: '100002',
+            name: null,
+            parentId: null,
+            mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+            productCount: BigInt(2),
+          },
+          {
+            id: '100004',
+            name: null,
+            parentId: null,
+            mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+            productCount: BigInt(0),
+          },
+        ];
+      },
+    );
     const repository = new PrismaShopeeOfferRepository({
-      $queryRaw: vi.fn(async () => [
-        {
-          id: '100',
-          name: null,
-          parentId: null,
-          mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
-          productCount: BigInt(2),
-        },
-        {
-          id: '200',
-          name: 'Nome futuro comprovado',
-          parentId: null,
-          mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
-          productCount: BigInt(1),
-        },
-      ]),
+      $queryRaw: queryRaw,
     } as never);
 
     await expect(repository.listObservedCategories()).resolves.toEqual([
       {
-        id: '100',
+        id: '100001',
+        name: null,
+        parentId: null,
+        mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+        productCount: 1,
+        displayLabel: 'Categoria 100001',
+      },
+      {
+        id: '100002',
         name: null,
         parentId: null,
         mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
         productCount: 2,
-        displayLabel: 'Categoria 100',
+        displayLabel: 'Categoria 100002',
       },
       {
-        id: '200',
-        name: 'Nome futuro comprovado',
+        id: '100004',
+        name: null,
         parentId: null,
         mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
-        productCount: 1,
-        displayLabel: 'Nome futuro comprovado',
+        productCount: 0,
+        displayLabel: 'Categoria 100004',
       },
     ]);
+
+    const query = rawQueries[0];
+    expect(queryText(query)).toContain('FROM "ShopeeCategory" registry');
+    expect(queryText(query)).toContain(
+      'product."source" = ::"ShopeeOfferSource"',
+    );
+    expect(queryText(query)).toContain('COUNT(DISTINCT product."id")');
+    expect(queryText(query)).not.toContain('FROM "ProductLead" product,');
+    expect(query.values).toContain('OFFICIAL');
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('não expõe categoria de ProductLead ausente no registry', async () => {
+    const queryRaw = vi.fn(async () => [
+      {
+        id: '100001',
+        name: null,
+        parentId: null,
+        mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+        productCount: BigInt(1),
+      },
+    ]);
+    const repository = new PrismaShopeeOfferRepository({
+      $queryRaw: queryRaw,
+    } as never);
+
+    const categories = await repository.listObservedCategories();
+
+    expect(categories.map(({ id }) => id)).toEqual(['100001']);
+    expect(categories.map(({ id }) => id)).not.toContain('100003');
   });
 
   it('mantém source OFFICIAL no filtro de todas as páginas do backfill', async () => {

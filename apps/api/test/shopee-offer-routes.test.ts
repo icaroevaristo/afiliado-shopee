@@ -146,6 +146,7 @@ const catalogFixture = (
   categoryId: string,
   input: {
     source?: 'MOCK' | 'MANUAL' | 'OFFICIAL';
+    categoryIds?: string[];
     price: number;
     discount: number;
     commission: number;
@@ -167,7 +168,7 @@ const catalogFixture = (
       providerProductId: `provider-${id}`,
       nome: `Produto ${id}`,
       categoria: categoryId,
-      categoryIds: [categoryId],
+      categoryIds: input.categoryIds ?? [categoryId],
       preco: String(input.price),
       precoMin: String(input.price),
       precoMax: String(input.price),
@@ -355,8 +356,10 @@ const createFilteredCatalogPrismaMock = (fixtures: CatalogFixture[]) => {
             parentId: null,
             mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
             productCount: BigInt(
-              fixtures.filter((fixture) =>
-                (fixture.record.categoryIds as string[]).includes(id),
+              fixtures.filter(
+                (fixture) =>
+                  fixture.record.source === 'OFFICIAL' &&
+                  (fixture.record.categoryIds as string[]).includes(id),
               ).length,
             ),
           }));
@@ -566,8 +569,9 @@ describe('Shopee offer API', () => {
         sentDestinationIds: [],
         dispatchStatuses: ['PENDING'],
       }),
-      catalogFixture('product-mock', 'category-mock', {
+      catalogFixture('product-mock', 'category-b', {
         source: 'MOCK',
+        categoryIds: ['category-b', '100003'],
         price: 45,
         discount: 25,
         commission: 7,
@@ -647,7 +651,7 @@ describe('Shopee offer API', () => {
 
     for (const [query, expectedIds] of [
       ['categoryId=category-a', ['product-a']],
-      ['categoryId=category-b', ['product-b']],
+      ['categoryId=category-b', ['product-b', 'product-mock']],
       ['categoryId=category-c', ['product-c']],
       ['source=OFFICIAL', ['product-a', 'product-b', 'product-c']],
       ['source=MOCK', ['product-mock']],
@@ -691,14 +695,38 @@ describe('Shopee offer API', () => {
       url: '/shopee/offers/categories',
     });
     expect(categories.statusCode).toBe(200);
-    expect(categories.json()).toMatchObject({
+    expect(categories.json()).toEqual({
       hierarchyStatus: 'NOT_AVAILABLE_FROM_CURRENT_PROVIDER_CONTRACT',
       items: [
-        { id: 'category-a', displayLabel: 'Categoria category-a' },
-        { id: 'category-b', displayLabel: 'Categoria category-b' },
-        { id: 'category-c', displayLabel: 'Categoria category-c' },
+        {
+          id: 'category-a',
+          name: null,
+          parentId: null,
+          mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+          productCount: 1,
+          displayLabel: 'Categoria category-a',
+        },
+        {
+          id: 'category-b',
+          name: null,
+          parentId: null,
+          mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+          productCount: 1,
+          displayLabel: 'Categoria category-b',
+        },
+        {
+          id: 'category-c',
+          name: null,
+          parentId: null,
+          mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+          productCount: 1,
+          displayLabel: 'Categoria category-c',
+        },
       ],
     });
+    expect(categories.json().items.map(({ id }: { id: string }) => id)).not.toContain(
+      '100003',
+    );
     await app.close();
   });
 });

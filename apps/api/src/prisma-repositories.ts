@@ -1356,34 +1356,40 @@ export class PrismaShopeeOfferRepository
       id: string;
       name: string | null;
       parentId: string | null;
-      mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID' | null;
+      mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID';
       productCount: bigint | number;
     };
+    const officialSource = 'OFFICIAL' as const;
     const rows = await this.prisma.$queryRaw<CategoryRow[]>(Prisma.sql`
+      WITH official_category_counts AS (
+        SELECT
+          category_id AS "id",
+          COUNT(DISTINCT product."id") AS "productCount"
+        FROM "ProductLead" product
+        CROSS JOIN LATERAL unnest(product."categoryIds") AS category_id
+        WHERE product."source" = ${officialSource}::"ShopeeOfferSource"
+          AND btrim(category_id) <> ''
+        GROUP BY category_id
+      )
       SELECT
-        observed."id",
+        registry."id",
         registry."name",
         registry."parentId",
         registry."mappingSource",
-        observed."productCount"
-      FROM (
-        SELECT category_id AS "id", COUNT(*) AS "productCount"
-        FROM "ProductLead" product,
-          unnest(product."categoryIds") AS category_id
-        WHERE btrim(category_id) <> ''
-        GROUP BY category_id
-      ) observed
-      LEFT JOIN "ShopeeCategory" registry ON registry."id" = observed."id"
+        COALESCE(counts."productCount", 0) AS "productCount"
+      FROM "ShopeeCategory" registry
+      LEFT JOIN official_category_counts counts
+        ON counts."id" = registry."id"
       ORDER BY
         CASE WHEN registry."name" IS NULL THEN 1 ELSE 0 END ASC,
         registry."name" ASC NULLS LAST,
-        observed."id" ASC
+        registry."id" ASC
     `);
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
       parentId: row.parentId,
-      mappingSource: row.mappingSource ?? 'OFFICIAL_PRODUCT_CATEGORY_ID',
+      mappingSource: row.mappingSource,
       productCount: countAsNumber(row.productCount),
       displayLabel: row.name ?? `Categoria ${row.id}`,
     }));
