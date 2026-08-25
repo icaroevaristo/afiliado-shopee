@@ -74,7 +74,12 @@ import { CommercialNicheService } from './commercial-niche-service';
 import { CommercialGroupCampaignService } from './commercial-group-campaign-service';
 import { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type { CommercialPromotionMiningService } from './commercial-promotion-mining-service';
-import type { CommercialPromotionCandidateStatus } from './repositories';
+import type {
+  CommercialPromotionCandidateStatus,
+  OperationalCatalogDeliveryStatus,
+  OperationalCatalogFilters,
+  OperationalCatalogSort,
+} from './repositories';
 import type { CommercialAiCopyProvider } from './commercial-ai-copy-provider';
 import type {
   CommercialAiCopyConfig,
@@ -224,6 +229,234 @@ const parsePositiveInteger = (
   }
   return parsed;
 };
+
+const CATALOG_SORTS = new Set<OperationalCatalogSort>([
+  'recent',
+  'sales_desc',
+  'score_desc',
+  'discount_desc',
+  'commission_desc',
+  'price_asc',
+  'price_desc',
+]);
+
+const CATALOG_DELIVERY_STATUSES = new Set<OperationalCatalogDeliveryStatus>([
+  'any',
+  'sent',
+  'not_sent',
+]);
+
+const CATALOG_QUERY_FIELDS = new Set([
+  'keyword',
+  'source',
+  'status',
+  'availability',
+  'affiliateLink',
+  'categoryId',
+  'minDiscount',
+  'maxDiscount',
+  'minScore',
+  'maxScore',
+  'minPrice',
+  'maxPrice',
+  'minCommission',
+  'maxCommission',
+  'deliveryStatus',
+  'destinationId',
+  'capturedFrom',
+  'capturedTo',
+  'sort',
+  'page',
+  'limit',
+]);
+
+const CATALOG_IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/;
+
+const catalogQueryError = (message: string) =>
+  new AppError(message, 'INVALID_CATALOG_QUERY');
+
+const parseCatalogNumber = (value: unknown, field: string) => {
+  if (value === undefined || value === '') return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw catalogQueryError(`Filtro inválido: ${field}`);
+  }
+  if (parsed < 0) {
+    throw catalogQueryError(`Filtro inválido: ${field}`);
+  }
+  return parsed;
+};
+
+const parseCatalogIdentifier = (value: unknown, field: string) => {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !CATALOG_IDENTIFIER.test(value)) {
+    throw catalogQueryError(`Identificador inválido: ${field}`);
+  }
+  return value;
+};
+
+const parseCatalogDate = (value: unknown, field: string) => {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string') {
+    throw catalogQueryError(`Data inválida: ${field}`);
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw catalogQueryError(`Data inválida: ${field}`);
+  }
+  return parsed;
+};
+
+const assertCatalogRange = (
+  min: number | Date | undefined,
+  max: number | Date | undefined,
+  label: string,
+) => {
+  if (
+    min !== undefined &&
+    max !== undefined &&
+    min.valueOf() > max.valueOf()
+  ) {
+    throw catalogQueryError(`Faixa inválida: ${label}`);
+  }
+};
+
+const parseCatalogEnum = <T extends string>(
+  value: unknown,
+  values: ReadonlySet<T>,
+  field: string,
+): T | undefined => {
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string' || !values.has(value as T)) {
+    throw catalogQueryError(`Filtro inválido: ${field}`);
+  }
+  return value as T;
+};
+
+const parseCatalogQuery = (query: unknown): OperationalCatalogFilters => {
+  if (!query || typeof query !== 'object' || Array.isArray(query)) {
+    throw catalogQueryError('Query inválida');
+  }
+  const record = query as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !CATALOG_QUERY_FIELDS.has(key))) {
+    throw catalogQueryError('A query contém campos não permitidos');
+  }
+  const source = parseCatalogEnum(
+    record.source,
+    new Set<ShopeeAffiliateOfferSource>(['MOCK', 'MANUAL', 'OFFICIAL']),
+    'source',
+  );
+  const status = parseCatalogEnum(
+    record.status,
+    new Set<'ACTIVE' | 'EXPIRED' | 'UNAVAILABLE'>([
+      'ACTIVE',
+      'EXPIRED',
+      'UNAVAILABLE',
+    ]),
+    'status',
+  );
+  const availability = parseCatalogEnum(
+    record.availability,
+    new Set<'ACTIVE' | 'EXPIRED' | 'UNAVAILABLE'>([
+      'ACTIVE',
+      'EXPIRED',
+      'UNAVAILABLE',
+    ]),
+    'availability',
+  );
+  if (status && availability && status !== availability) {
+    throw catalogQueryError('status e availability não podem divergir');
+  }
+  const affiliateLink = parseCatalogEnum(
+    record.affiliateLink,
+    new Set<'present' | 'missing'>(['present', 'missing']),
+    'affiliateLink',
+  );
+  const deliveryStatus =
+    parseCatalogEnum(
+      record.deliveryStatus,
+      CATALOG_DELIVERY_STATUSES,
+      'deliveryStatus',
+    ) ?? 'any';
+  const sort =
+    parseCatalogEnum(record.sort, CATALOG_SORTS, 'sort') ?? 'recent';
+  const minDiscount = parseCatalogNumber(record.minDiscount, 'minDiscount');
+  const maxDiscount = parseCatalogNumber(record.maxDiscount, 'maxDiscount');
+  const minScore = parseCatalogNumber(record.minScore, 'minScore');
+  const maxScore = parseCatalogNumber(record.maxScore, 'maxScore');
+  const minPrice = parseCatalogNumber(record.minPrice, 'minPrice');
+  const maxPrice = parseCatalogNumber(record.maxPrice, 'maxPrice');
+  const minCommission = parseCatalogNumber(
+    record.minCommission,
+    'minCommission',
+  );
+  const maxCommission = parseCatalogNumber(
+    record.maxCommission,
+    'maxCommission',
+  );
+  const capturedFrom = parseCatalogDate(record.capturedFrom, 'capturedFrom');
+  const capturedTo = parseCatalogDate(record.capturedTo, 'capturedTo');
+  if (record.keyword !== undefined && typeof record.keyword !== 'string') {
+    throw catalogQueryError('Filtro inválido: keyword');
+  }
+  assertCatalogRange(minDiscount, maxDiscount, 'discount');
+  assertCatalogRange(minScore, maxScore, 'score');
+  assertCatalogRange(minPrice, maxPrice, 'price');
+  assertCatalogRange(minCommission, maxCommission, 'commission');
+  assertCatalogRange(capturedFrom, capturedTo, 'capturedAt');
+  return {
+    source,
+    status: status ?? availability,
+    affiliateLink,
+    keyword:
+      typeof record.keyword === 'string'
+        ? record.keyword.trim() || undefined
+        : undefined,
+    categoryId: parseCatalogIdentifier(record.categoryId, 'categoryId'),
+    minDiscount,
+    maxDiscount,
+    minScore,
+    maxScore,
+    minPrice,
+    maxPrice,
+    minCommission,
+    maxCommission,
+    deliveryStatus,
+    destinationId: parseCatalogIdentifier(record.destinationId, 'destinationId'),
+    capturedFrom,
+    capturedTo,
+    sort,
+    page: parsePositiveInteger(record.page, 1, 100_000),
+    limit: parsePositiveInteger(record.limit, 20, 100),
+  };
+};
+
+const parseCatalogDetailQuery = (query: unknown) => {
+  if (!query || typeof query !== 'object' || Array.isArray(query)) {
+    throw catalogQueryError('Query inválida');
+  }
+  const record = query as Record<string, unknown>;
+  const allowed = new Set([
+    'dispatchPage',
+    'dispatchLimit',
+    'snapshotPage',
+    'snapshotLimit',
+  ]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) {
+    throw catalogQueryError('A query contém campos não permitidos');
+  }
+  return {
+    dispatchPage: parsePositiveInteger(record.dispatchPage, 1, 100_000),
+    dispatchLimit: parsePositiveInteger(record.dispatchLimit, 20, 100),
+    snapshotPage: parsePositiveInteger(record.snapshotPage, 1, 100_000),
+    snapshotLimit: parsePositiveInteger(record.snapshotLimit, 20, 100),
+  };
+};
+
+const FLASH_DEAL_CAPABILITY = {
+  status: 'UNSUPPORTED_CURRENT_PROVIDER_CONTRACT',
+  reasonCode: 'OFFICIAL_SIGNAL_NOT_AVAILABLE',
+} as const;
 
 const parseCommercialConfigurationQuery = (query: unknown) => {
   if (!query || typeof query !== 'object' || Array.isArray(query)) {
@@ -1482,48 +1715,30 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
 
   app.get('/shopee/offers', async (request, reply) => {
     try {
-      const query = request.query as Record<string, unknown>;
-      const page = parsePositiveInteger(query.page, 1, 100000);
-      const limit = parsePositiveInteger(query.limit, 20, 100);
-      const source = ['MOCK', 'MANUAL', 'OFFICIAL'].includes(
-        String(query.source),
-      )
-        ? (query.source as ShopeeAffiliateOfferSource)
-        : undefined;
-      const status = ['ACTIVE', 'EXPIRED', 'UNAVAILABLE'].includes(
-        String(query.status),
-      )
-        ? (query.status as 'ACTIVE' | 'EXPIRED' | 'UNAVAILABLE')
-        : undefined;
-      const affiliateLink = ['present', 'missing'].includes(
-        String(query.affiliateLink),
-      )
-        ? (query.affiliateLink as 'present' | 'missing')
-        : undefined;
-      const result = await repositories.shopeeOffers.listOffers({
-        source,
-        status,
-        affiliateLink,
-        keyword:
-          typeof query.keyword === 'string'
-            ? query.keyword.trim() || undefined
-            : undefined,
-        page,
-        limit,
-      });
+      const filters = parseCatalogQuery(request.query);
+      const result = await repositories.shopeeOffers.listOperationalCatalog(
+        filters,
+      );
       return {
         provider: shopeeOfferProvider.source.toLocaleLowerCase(),
         items: result.items.map((item) => ({
           ...item,
           status: offerStatus(item),
         })),
-        page,
-        limit,
+        flashDealCapability: FLASH_DEAL_CAPABILITY,
+        page: filters.page,
+        limit: filters.limit,
         total: result.total,
-        totalPages: Math.max(1, Math.ceil(result.total / limit)),
+        totalPages: Math.max(1, Math.ceil(result.total / filters.limit)),
+        hasNextPage: filters.page * filters.limit < result.total,
+        hasPreviousPage: filters.page > 1,
       };
     } catch (error) {
-      if (error instanceof AppError && error.code === 'INVALID_PAGINATION') {
+      if (
+        error instanceof AppError &&
+        (error.code === 'INVALID_PAGINATION' ||
+          error.code === 'INVALID_CATALOG_QUERY')
+      ) {
         return reply
           .status(400)
           .send({ error: error.code, message: error.message });
@@ -1532,16 +1747,43 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     }
   });
 
+  app.get('/shopee/offers/categories', async () => ({
+    items: await repositories.shopeeOffers.listObservedCategories(),
+    hierarchyStatus: 'NOT_AVAILABLE_FROM_CURRENT_PROVIDER_CONTRACT' as const,
+  }));
+
   app.get('/shopee/offers/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const offer = await repositories.shopeeOffers.findOfferById(id);
+    if (!CATALOG_IDENTIFIER.test(id)) {
+      return reply.status(400).send({
+        error: 'INVALID_CATALOG_QUERY',
+        message: 'Identificador inválido: id',
+      });
+    }
+    let pagination: ReturnType<typeof parseCatalogDetailQuery>;
+    try {
+      pagination = parseCatalogDetailQuery(request.query);
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'INVALID_CATALOG_QUERY') {
+        return reply.status(400).send({ error: error.code, message: error.message });
+      }
+      throw error;
+    }
+    const offer = await repositories.shopeeOffers.findOperationalCatalogOffer({
+      id,
+      ...pagination,
+    });
     if (!offer) {
       return reply.status(404).send({
         error: 'OFFER_NOT_FOUND',
         message: 'Oferta nao encontrada',
       });
     }
-    return { ...offer, status: offerStatus(offer) };
+    return {
+      ...offer,
+      status: offerStatus(offer),
+      flashDealCapability: FLASH_DEAL_CAPABILITY,
+    };
   });
 
   app.post('/shopee/offers/import/validate', async (request, reply) => {

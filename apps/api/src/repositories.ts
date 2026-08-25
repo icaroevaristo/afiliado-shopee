@@ -63,6 +63,7 @@ export type ProductLeadRecord = ProductLeadData & {
 };
 
 export type ShopeeOfferStatus = 'ACTIVE' | 'EXPIRED' | 'UNAVAILABLE';
+export type WhatsAppDestinationType = 'INDIVIDUAL' | 'GROUP';
 
 export type ShopeeOfferRecord = ShopeeProductOffer & {
   id: string;
@@ -90,6 +91,155 @@ export type ShopeeOfferFilters = {
   page: number;
   limit: number;
 };
+
+export type OperationalCatalogSort =
+  | 'recent'
+  | 'sales_desc'
+  | 'score_desc'
+  | 'discount_desc'
+  | 'commission_desc'
+  | 'price_asc'
+  | 'price_desc';
+
+export type OperationalCatalogDeliveryStatus = 'any' | 'sent' | 'not_sent';
+
+export type OperationalCatalogFilters = ShopeeOfferFilters & {
+  categoryId?: string;
+  minDiscount?: number;
+  maxDiscount?: number;
+  minScore?: number;
+  maxScore?: number;
+  minPrice?: number;
+  maxPrice?: number;
+  minCommission?: number;
+  maxCommission?: number;
+  deliveryStatus?: OperationalCatalogDeliveryStatus;
+  destinationId?: string;
+  capturedFrom?: Date;
+  capturedTo?: Date;
+  sort: OperationalCatalogSort;
+};
+
+export type OperationalCatalogScore = {
+  candidateId: string;
+  campaignId: string;
+  campaignName: string;
+  nicheId: string;
+  score: number;
+  rankPosition: number | null;
+  candidateStatus: CommercialPromotionCandidateStatus;
+};
+
+export type CommercialStateSummary = {
+  currentCandidateCount: number;
+  queued: number;
+  copyReady: number;
+  reserved: number;
+  dispatched: number;
+  blocked: number;
+  expired: number;
+  bestCurrentCommercialScore: number | null;
+};
+
+export type CatalogSnapshot = {
+  id: string;
+  revision: number;
+  fingerprint: string;
+  price: string;
+  priceMin: string | null;
+  priceMax: string | null;
+  discountRate: number;
+  commissionRate: number;
+  observedRating: number;
+  observedSales: number;
+  offerStartsAt: Date | null;
+  offerEndsAt: Date | null;
+  unavailableAt: Date | null;
+  capturedAt: Date;
+};
+
+export type CatalogDispatchHistory = {
+  dispatchId: string;
+  status: WhatsAppDispatchStatus;
+  destination: {
+    id: string;
+    name: string;
+    fingerprint: string | null;
+    type: WhatsAppDestinationType;
+  };
+  instanceName: string | null;
+  sentAt: Date | null;
+  attemptCount: number;
+  run: {
+    id: string;
+    finalStatus: CommercialPipelineFinalStatus | null;
+    investigationRequired: boolean;
+  } | null;
+};
+
+export type CatalogHistoryPage<T> = {
+  items: T[];
+  page: number;
+  limit: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+};
+
+export type OperationalCatalogOffer = ShopeeOfferRecord & {
+  affiliateLinkPresent: boolean;
+  referencePrice: null;
+  referencePriceUnavailableReason: 'OFFICIAL_REFERENCE_PRICE_NOT_AVAILABLE';
+  commercialSnapshotRevision: number;
+  commercialSnapshotFingerprint: string | null;
+  snapshot: CatalogSnapshot | null;
+  capturedAt: Date;
+  capturedAtSource: 'LATEST_SNAPSHOT' | 'FALLBACK_FETCHED_AT';
+  commercialScores: OperationalCatalogScore[];
+  bestCurrentCommercialScore: number | null;
+  commercialStateSummary: CommercialStateSummary;
+  everSent: boolean;
+  sentDestinationCount: number;
+  lastSentAt: Date | null;
+  destinationDelivery: {
+    destinationId: string;
+    everSent: boolean;
+    lastSentAt: Date | null;
+  } | null;
+};
+
+export type OperationalCatalogDetail = OperationalCatalogOffer & {
+  dispatchHistory: CatalogHistoryPage<CatalogDispatchHistory>;
+  snapshotHistory: CatalogHistoryPage<CatalogSnapshot>;
+};
+
+export type ShopeeCategoryRecord = {
+  id: string;
+  name: string | null;
+  parentId: string | null;
+  mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID';
+  productCount: number;
+  displayLabel: string;
+};
+
+export type ShopeeCategoryBackfillProduct = {
+  productId: string;
+  categoryIds: string[];
+};
+
+export interface ShopeeCategoryBackfillRepository {
+  /**
+   * Lists official provider category observations for deterministic backfill
+   * pagination by ProductLead id.
+   */
+  listProductCategoryIdsForBackfill(input: {
+    afterProductId?: string;
+    limit: number;
+  }): Promise<ShopeeCategoryBackfillProduct[]>;
+  createObservedCategories(
+    categoryIds: string[],
+    discoveredAt: Date,
+  ): Promise<number>;
+}
 
 export type CommercialOfferCandidateFilters = {
   source: ShopeeAffiliateOfferSource;
@@ -123,6 +273,20 @@ export interface ShopeeOfferRepository {
   listCommercialCandidates(
     filters: CommercialOfferCandidateFilters,
   ): Promise<ShopeeOfferRecord[]>;
+}
+
+export interface OperationalCatalogRepository {
+  listOperationalCatalog(
+    filters: OperationalCatalogFilters,
+  ): Promise<{ items: OperationalCatalogOffer[]; total: number }>;
+  findOperationalCatalogOffer(input: {
+    id: string;
+    dispatchPage: number;
+    dispatchLimit: number;
+    snapshotPage: number;
+    snapshotLimit: number;
+  }): Promise<OperationalCatalogDetail | null>;
+  listObservedCategories(): Promise<ShopeeCategoryRecord[]>;
 }
 
 export interface CommercialOfferSnapshotBackfillRepository {

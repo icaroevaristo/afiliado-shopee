@@ -1,4 +1,7 @@
-import type { DatabaseClient } from '@shopee-auto-affiliate-ai/database';
+import {
+  Prisma,
+  type DatabaseClient,
+} from '@shopee-auto-affiliate-ai/database';
 import type {
   AnalyticsRepository,
   CommercialAutomationExecutionRecord,
@@ -33,6 +36,14 @@ import type {
   CommercialNicheRepository,
   CommercialOfferCandidateFilters,
   CommercialOfferSnapshotBackfillRepository,
+  CatalogDispatchHistory,
+  CatalogSnapshot,
+  CommercialStateSummary,
+  OperationalCatalogDetail,
+  OperationalCatalogFilters,
+  OperationalCatalogOffer,
+  OperationalCatalogRepository,
+  OperationalCatalogScore,
   CommercialPromotionCandidateRecord,
   CommercialPromotionCandidateRepository,
   CommercialPromotionAttemptContext,
@@ -59,6 +70,8 @@ import type {
   ShopeeOfferFilters,
   ShopeeOfferRecord,
   ShopeeOfferRepository,
+  ShopeeCategoryRecord,
+  ShopeeCategoryBackfillRepository,
   WhatsAppDestinationData,
   WhatsAppDestinationRecord,
   WhatsAppDestinationRepository,
@@ -170,7 +183,9 @@ const toPrismaProductData = (data: ProductLeadData) => ({
 });
 
 const mapShopeeOffer = (
-  record: Record<string, unknown>,
+  record:
+    | Record<string, unknown>
+    | Prisma.ProductLeadGetPayload<Prisma.ProductLeadDefaultArgs>,
 ): ShopeeOfferRecord => ({
   id: String(record.id),
   source: record.source as ShopeeOfferRecord['source'],
@@ -334,6 +349,436 @@ const throwOfficialSnapshotPersistenceError = (error: unknown): never => {
   throw error;
 };
 
+const catalogProductInclude = {
+  commercialOfferSnapshots: {
+    orderBy: [{ revision: 'desc' }, { id: 'asc' }],
+    take: 1,
+  },
+} satisfies Prisma.ProductLeadInclude;
+
+type CatalogProductRow = Prisma.ProductLeadGetPayload<{
+  include: typeof catalogProductInclude;
+}>;
+
+type CatalogSelectionRow = {
+  id: string;
+  bestCurrentCommercialScore: number | null;
+  globalEverSent: boolean;
+  globalSentDestinationCount: bigint | number;
+  globalLastSentAt: Date | null;
+  scopedEverSent: boolean;
+  scopedLastSentAt: Date | null;
+};
+
+type CatalogCandidateAggregateRow = {
+  productId: string;
+  currentCandidateCount: bigint | number;
+  queued: bigint | number;
+  copyReady: bigint | number;
+  reserved: bigint | number;
+  dispatched: bigint | number;
+  blocked: bigint | number;
+  expired: bigint | number;
+  bestCurrentCommercialScore: number | null;
+};
+
+type CatalogCurrentCandidateRow = {
+  productId: string;
+  candidateId: string;
+  campaignId: string;
+  campaignName: string;
+  nicheId: string;
+  score: number;
+  rankPosition: number | null;
+  candidateStatus: OperationalCatalogScore['candidateStatus'];
+};
+
+const CATALOG_CURRENT_CANDIDATE_LIMIT = 100;
+
+const catalogCandidateAggregateSql = (productIds: string[]) => Prisma.sql`
+  SELECT
+    candidate."productId" AS "productId",
+    COUNT(*) AS "currentCandidateCount",
+    COUNT(*) FILTER (WHERE candidate."status" = 'QUEUED') AS "queued",
+    COUNT(*) FILTER (WHERE candidate."status" = 'COPY_READY') AS "copyReady",
+    COUNT(*) FILTER (WHERE candidate."status" = 'RESERVED') AS "reserved",
+    COUNT(*) FILTER (WHERE candidate."status" = 'DISPATCHED') AS "dispatched",
+    COUNT(*) FILTER (WHERE candidate."status" = 'BLOCKED') AS "blocked",
+    COUNT(*) FILTER (WHERE candidate."status" = 'EXPIRED') AS "expired",
+    MAX(candidate."commercialScore") AS "bestCurrentCommercialScore"
+  FROM "ProductLead" product
+  INNER JOIN "CommercialOfferSnapshot" snapshot
+    ON snapshot."productId" = product."id"
+    AND snapshot."revision" = product."commercialSnapshotRevision"
+    AND snapshot."fingerprint" = product."commercialSnapshotFingerprint"
+  INNER JOIN "CommercialPromotionCandidate" candidate
+    ON candidate."productId" = product."id"
+    AND candidate."snapshotId" = snapshot."id"
+  WHERE product."id" IN (${Prisma.join(productIds)})
+  GROUP BY candidate."productId"
+`;
+
+const catalogCurrentCandidatesSql = (productIds: string[]) => Prisma.sql`
+  WITH current_candidates AS (
+    SELECT
+      candidate."productId" AS "productId",
+      candidate."id" AS "candidateId",
+      campaign."id" AS "campaignId",
+      campaign."name" AS "campaignName",
+      campaign."nicheId" AS "nicheId",
+      candidate."commercialScore" AS "score",
+      candidate."rankPosition" AS "rankPosition",
+      candidate."status" AS "candidateStatus",
+      ROW_NUMBER() OVER (
+        PARTITION BY candidate."productId"
+        ORDER BY
+          candidate."commercialScore" DESC,
+          candidate."campaignId" ASC,
+          candidate."id" ASC
+      ) AS "currentPosition"
+    FROM "ProductLead" product
+    INNER JOIN "CommercialOfferSnapshot" snapshot
+      ON snapshot."productId" = product."id"
+      AND snapshot."revision" = product."commercialSnapshotRevision"
+      AND snapshot."fingerprint" = product."commercialSnapshotFingerprint"
+    INNER JOIN "CommercialPromotionCandidate" candidate
+      ON candidate."productId" = product."id"
+      AND candidate."snapshotId" = snapshot."id"
+    INNER JOIN "CommercialGroupCampaign" campaign
+      ON campaign."id" = candidate."campaignId"
+    WHERE product."id" IN (${Prisma.join(productIds)})
+  )
+  SELECT
+    "productId",
+    "candidateId",
+    "campaignId",
+    "campaignName",
+    "nicheId",
+    "score",
+    "rankPosition",
+    "candidateStatus"
+  FROM current_candidates
+  WHERE "currentPosition" <= ${CATALOG_CURRENT_CANDIDATE_LIMIT}
+  ORDER BY
+    "productId" ASC,
+    "score" DESC,
+    "campaignId" ASC,
+    "candidateId" ASC
+`;
+
+const catalogSnapshotFromRecord = (
+  snapshot: Prisma.CommercialOfferSnapshotGetPayload<Prisma.CommercialOfferSnapshotDefaultArgs>,
+): CatalogSnapshot => ({
+  id: snapshot.id,
+  revision: snapshot.revision,
+  fingerprint: snapshot.fingerprint,
+  price: snapshot.price.toString(),
+  priceMin: snapshot.priceMin?.toString() ?? null,
+  priceMax: snapshot.priceMax?.toString() ?? null,
+  discountRate: snapshot.discountRate,
+  commissionRate: snapshot.commissionRate,
+  observedRating: snapshot.observedRating,
+  observedSales: snapshot.observedSales,
+  offerStartsAt: snapshot.offerStartsAt,
+  offerEndsAt: snapshot.offerEndsAt,
+  unavailableAt: snapshot.unavailableAt,
+  capturedAt: snapshot.capturedAt,
+});
+
+const countAsNumber = (value: bigint | number) => Number(value);
+
+const catalogScoresByProductId = (
+  candidates: CatalogCurrentCandidateRow[],
+): Map<string, OperationalCatalogScore[]> => {
+  const scoresByProductId = new Map<string, OperationalCatalogScore[]>();
+  for (const candidate of candidates) {
+    const scores = scoresByProductId.get(candidate.productId) ?? [];
+    scores.push({
+      candidateId: candidate.candidateId,
+      campaignId: candidate.campaignId,
+      campaignName: candidate.campaignName,
+      nicheId: candidate.nicheId,
+      score: candidate.score,
+      rankPosition: candidate.rankPosition,
+      candidateStatus: candidate.candidateStatus,
+    });
+    scoresByProductId.set(candidate.productId, scores);
+  }
+  return scoresByProductId;
+};
+
+const commercialStateSummaryFromAggregate = (
+  aggregate: CatalogCandidateAggregateRow | undefined,
+): CommercialStateSummary => ({
+  currentCandidateCount: countAsNumber(aggregate?.currentCandidateCount ?? 0),
+  queued: countAsNumber(aggregate?.queued ?? 0),
+  copyReady: countAsNumber(aggregate?.copyReady ?? 0),
+  reserved: countAsNumber(aggregate?.reserved ?? 0),
+  dispatched: countAsNumber(aggregate?.dispatched ?? 0),
+  blocked: countAsNumber(aggregate?.blocked ?? 0),
+  expired: countAsNumber(aggregate?.expired ?? 0),
+  bestCurrentCommercialScore: aggregate?.bestCurrentCommercialScore ?? null,
+});
+
+const catalogOfferFromRecord = (
+  product: CatalogProductRow,
+  selection: CatalogSelectionRow,
+  destinationId: string | undefined,
+  candidateAggregate: CatalogCandidateAggregateRow | undefined,
+  commercialScores: OperationalCatalogScore[],
+): OperationalCatalogOffer => {
+  const latestSnapshot = product.commercialOfferSnapshots[0] ?? null;
+  return {
+    ...mapShopeeOffer(product),
+    affiliateLinkPresent: Boolean(product.affiliateLink),
+    referencePrice: null,
+    referencePriceUnavailableReason: 'OFFICIAL_REFERENCE_PRICE_NOT_AVAILABLE',
+    commercialSnapshotRevision: product.commercialSnapshotRevision,
+    commercialSnapshotFingerprint: product.commercialSnapshotFingerprint,
+    snapshot: latestSnapshot ? catalogSnapshotFromRecord(latestSnapshot) : null,
+    capturedAt: latestSnapshot?.capturedAt ?? product.fetchedAt,
+    capturedAtSource: latestSnapshot
+      ? 'LATEST_SNAPSHOT'
+      : 'FALLBACK_FETCHED_AT',
+    commercialScores,
+    bestCurrentCommercialScore:
+      candidateAggregate?.bestCurrentCommercialScore ?? null,
+    commercialStateSummary:
+      commercialStateSummaryFromAggregate(candidateAggregate),
+    everSent: selection.globalEverSent,
+    sentDestinationCount: countAsNumber(selection.globalSentDestinationCount),
+    lastSentAt: selection.globalLastSentAt,
+    destinationDelivery: destinationId
+      ? {
+          destinationId,
+          everSent: selection.scopedEverSent,
+          lastSentAt: selection.scopedLastSentAt,
+        }
+      : null,
+  };
+};
+
+const sqlAnd = (conditions: Prisma.Sql[]) =>
+  conditions.length === 0 ? Prisma.empty : Prisma.join(conditions, ' AND ');
+
+const catalogOrderBy = (sort: OperationalCatalogFilters['sort']) => {
+  const orderBy: Record<OperationalCatalogFilters['sort'], Prisma.Sql> = {
+    recent: Prisma.sql`catalog."capturedAt" DESC NULLS LAST, catalog."id" ASC`,
+    sales_desc: Prisma.sql`catalog."sales" DESC, catalog."id" ASC`,
+    score_desc: Prisma.sql`catalog."bestCurrentCommercialScore" DESC NULLS LAST, catalog."id" ASC`,
+    discount_desc: Prisma.sql`catalog."discountRate" DESC, catalog."id" ASC`,
+    commission_desc: Prisma.sql`catalog."commissionRate" DESC, catalog."id" ASC`,
+    price_asc: Prisma.sql`catalog."price" ASC, catalog."id" ASC`,
+    price_desc: Prisma.sql`catalog."price" DESC, catalog."id" ASC`,
+  };
+  return orderBy[sort];
+};
+
+const catalogSql = (filters: OperationalCatalogFilters) => {
+  const now = new Date();
+  const destinationId = filters.destinationId ?? null;
+  const conditions: Prisma.Sql[] = [];
+  if (filters.source)
+    conditions.push(
+      Prisma.sql`p."source" = ${filters.source}::"ShopeeOfferSource"`,
+    );
+  if (filters.affiliateLink === 'present') {
+    conditions.push(Prisma.sql`p."affiliateLink" IS NOT NULL`);
+  }
+  if (filters.affiliateLink === 'missing') {
+    conditions.push(Prisma.sql`p."affiliateLink" IS NULL`);
+  }
+  if (filters.keyword) {
+    const keyword = `%${filters.keyword}%`;
+    conditions.push(
+      Prisma.sql`(p."nome" ILIKE ${keyword} OR p."loja" ILIKE ${keyword})`,
+    );
+  }
+  if (filters.categoryId) {
+    conditions.push(
+      Prisma.sql`p."categoryIds" @> ARRAY[${filters.categoryId}]::text[]`,
+    );
+  }
+  if (filters.minDiscount !== undefined) {
+    conditions.push(Prisma.sql`p."desconto" >= ${filters.minDiscount}`);
+  }
+  if (filters.maxDiscount !== undefined) {
+    conditions.push(Prisma.sql`p."desconto" <= ${filters.maxDiscount}`);
+  }
+  if (filters.minPrice !== undefined) {
+    conditions.push(Prisma.sql`p."preco" >= ${filters.minPrice}`);
+  }
+  if (filters.maxPrice !== undefined) {
+    conditions.push(Prisma.sql`p."preco" <= ${filters.maxPrice}`);
+  }
+  if (filters.minCommission !== undefined) {
+    conditions.push(Prisma.sql`p."comissao" >= ${filters.minCommission}`);
+  }
+  if (filters.maxCommission !== undefined) {
+    conditions.push(Prisma.sql`p."comissao" <= ${filters.maxCommission}`);
+  }
+  if (filters.minScore !== undefined) {
+    conditions.push(
+      Prisma.sql`score."bestCurrentCommercialScore" >= ${filters.minScore}`,
+    );
+  }
+  if (filters.maxScore !== undefined) {
+    conditions.push(
+      Prisma.sql`score."bestCurrentCommercialScore" <= ${filters.maxScore}`,
+    );
+  }
+  if (filters.capturedFrom) {
+    conditions.push(
+      Prisma.sql`COALESCE(latest."capturedAt", p."fetchedAt") >= ${filters.capturedFrom}`,
+    );
+  }
+  if (filters.capturedTo) {
+    conditions.push(
+      Prisma.sql`COALESCE(latest."capturedAt", p."fetchedAt") <= ${filters.capturedTo}`,
+    );
+  }
+  if (filters.status === 'UNAVAILABLE') {
+    conditions.push(Prisma.sql`p."unavailableAt" IS NOT NULL`);
+  }
+  if (filters.status === 'EXPIRED') {
+    conditions.push(
+      Prisma.sql`p."unavailableAt" IS NULL AND p."offerEndsAt" <= ${now}`,
+    );
+  }
+  if (filters.status === 'ACTIVE') {
+    conditions.push(
+      Prisma.sql`p."unavailableAt" IS NULL AND (p."offerEndsAt" IS NULL OR p."offerEndsAt" > ${now})`,
+    );
+  }
+  if (filters.deliveryStatus === 'sent') {
+    conditions.push(Prisma.sql`delivery."scopedEverSent" = true`);
+  }
+  if (filters.deliveryStatus === 'not_sent') {
+    conditions.push(Prisma.sql`delivery."scopedEverSent" = false`);
+  }
+  const where = sqlAnd(conditions);
+  const whereClause =
+    conditions.length === 0 ? Prisma.empty : Prisma.sql`WHERE ${where}`;
+  return Prisma.sql`
+    WITH catalog AS (
+      SELECT
+        p."id" AS "id",
+        p."preco" AS "price",
+        p."vendidos" AS "sales",
+        p."desconto" AS "discountRate",
+        p."comissao" AS "commissionRate",
+        COALESCE(latest."capturedAt", p."fetchedAt") AS "capturedAt",
+        score."bestCurrentCommercialScore" AS "bestCurrentCommercialScore",
+        global_delivery."globalEverSent" AS "globalEverSent",
+        global_delivery."globalSentDestinationCount" AS "globalSentDestinationCount",
+        global_delivery."globalLastSentAt" AS "globalLastSentAt",
+        delivery."scopedEverSent" AS "scopedEverSent",
+        delivery."scopedLastSentAt" AS "scopedLastSentAt"
+      FROM "ProductLead" p
+      LEFT JOIN LATERAL (
+        SELECT snapshot."capturedAt"
+        FROM "CommercialOfferSnapshot" snapshot
+        WHERE snapshot."productId" = p."id"
+        ORDER BY snapshot."revision" DESC, snapshot."id" ASC
+        LIMIT 1
+      ) latest ON true
+      LEFT JOIN LATERAL (
+        SELECT MAX(candidate."commercialScore") AS "bestCurrentCommercialScore"
+        FROM "CommercialOfferSnapshot" snapshot
+        INNER JOIN "CommercialPromotionCandidate" candidate
+          ON candidate."snapshotId" = snapshot."id"
+          AND candidate."productId" = p."id"
+        INNER JOIN "CommercialGroupCampaign" campaign
+          ON campaign."id" = candidate."campaignId"
+        WHERE snapshot."productId" = p."id"
+          AND snapshot."revision" = p."commercialSnapshotRevision"
+          AND snapshot."fingerprint" = p."commercialSnapshotFingerprint"
+      ) score ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) > 0 AS "globalEverSent",
+          COUNT(DISTINCT dispatch."destinationId") AS "globalSentDestinationCount",
+          MAX(dispatch."sentAt") AS "globalLastSentAt"
+        FROM "WhatsAppDispatch" dispatch
+        WHERE dispatch."productId" = p."id" AND dispatch."status" = 'SENT'
+      ) global_delivery ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) > 0 AS "scopedEverSent",
+          MAX(dispatch."sentAt") AS "scopedLastSentAt"
+        FROM "WhatsAppDispatch" dispatch
+        WHERE dispatch."productId" = p."id"
+          AND dispatch."status" = 'SENT'
+          AND (${destinationId}::text IS NULL OR dispatch."destinationId" = ${destinationId})
+      ) delivery ON true
+      ${whereClause}
+    )
+  `;
+};
+
+const registerObservedOfficialCategories = async (
+  client: Pick<DatabaseClient, 'shopeeCategory'>,
+  categoryIds: string[],
+  discoveredAt: Date,
+) => {
+  const uniqueCategoryIds = [...new Set(categoryIds.filter(Boolean))];
+  if (uniqueCategoryIds.length === 0) return;
+  await client.shopeeCategory.createMany({
+    data: uniqueCategoryIds.map((id) => ({
+      id,
+      mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+      discoveredAt,
+    })),
+    skipDuplicates: true,
+  });
+};
+
+const catalogDispatchInclude = {
+  destination: {
+    select: {
+      id: true,
+      name: true,
+      fingerprint: true,
+      type: true,
+    },
+  },
+  commercialPipelineRun: {
+    select: {
+      id: true,
+      finalStatus: true,
+      investigationRequired: true,
+    },
+  },
+} satisfies Prisma.WhatsAppDispatchInclude;
+
+type CatalogDispatchRow = Prisma.WhatsAppDispatchGetPayload<{
+  include: typeof catalogDispatchInclude;
+}>;
+
+const catalogDispatchFromRecord = (
+  dispatch: CatalogDispatchRow,
+): CatalogDispatchHistory => ({
+  dispatchId: dispatch.id,
+  status: dispatch.status,
+  destination: {
+    id: dispatch.destination.id,
+    name: dispatch.destination.name,
+    fingerprint: dispatch.destination.fingerprint,
+    type: dispatch.destination.type,
+  },
+  instanceName: dispatch.instanceName,
+  sentAt: dispatch.sentAt,
+  attemptCount: dispatch.attemptCount,
+  run: dispatch.commercialPipelineRun
+    ? {
+        id: dispatch.commercialPipelineRun.id,
+        finalStatus: dispatch.commercialPipelineRun.finalStatus,
+        investigationRequired:
+          dispatch.commercialPipelineRun.investigationRequired,
+      }
+    : null,
+});
+
 export class PrismaAnalyticsRepository implements AnalyticsRepository {
   constructor(
     private readonly prisma: Pick<
@@ -460,7 +905,11 @@ export class PrismaProductRepository implements ProductRepository {
 }
 
 export class PrismaShopeeOfferRepository
-  implements ShopeeOfferRepository, CommercialOfferSnapshotBackfillRepository
+  implements
+    ShopeeOfferRepository,
+    OperationalCatalogRepository,
+    CommercialOfferSnapshotBackfillRepository,
+    ShopeeCategoryBackfillRepository
 {
   constructor(private readonly prisma: DatabaseClient) {}
 
@@ -524,6 +973,11 @@ export class PrismaShopeeOfferRepository
             await transaction.commercialOfferSnapshot.create({
               data: snapshotData(material, product.id, 1, fingerprint),
             });
+            await registerObservedOfficialCategories(
+              transaction,
+              offer.categoryIds,
+              offer.fetchedAt,
+            );
             return {
               product: mapShopeeOffer(
                 product as unknown as Record<string, unknown>,
@@ -588,6 +1042,11 @@ export class PrismaShopeeOfferRepository
               ),
             });
           }
+          await registerObservedOfficialCategories(
+            transaction,
+            offer.categoryIds,
+            offer.fetchedAt,
+          );
           return {
             product: mapShopeeOffer(
               product as unknown as Record<string, unknown>,
@@ -739,6 +1198,245 @@ export class PrismaShopeeOfferRepository
       ),
       total,
     };
+  }
+
+  async listOperationalCatalog(filters: OperationalCatalogFilters) {
+    const catalog = catalogSql(filters);
+    const skip = (filters.page - 1) * filters.limit;
+    const [selection, totals] = await Promise.all([
+      this.prisma.$queryRaw<CatalogSelectionRow[]>(Prisma.sql`
+        ${catalog}
+        SELECT
+          catalog."id",
+          catalog."bestCurrentCommercialScore",
+          COALESCE(catalog."globalEverSent", false) AS "globalEverSent",
+          COALESCE(catalog."globalSentDestinationCount", 0) AS "globalSentDestinationCount",
+          catalog."globalLastSentAt",
+          COALESCE(catalog."scopedEverSent", false) AS "scopedEverSent",
+          catalog."scopedLastSentAt"
+        FROM catalog
+        ORDER BY ${catalogOrderBy(filters.sort)}
+        OFFSET ${skip}
+        LIMIT ${filters.limit}
+      `),
+      this.prisma.$queryRaw<Array<{ total: bigint | number }>>(Prisma.sql`
+        ${catalog}
+        SELECT COUNT(*) AS "total" FROM catalog
+      `),
+    ]);
+    if (selection.length === 0) {
+      return { items: [], total: countAsNumber(totals[0]?.total ?? 0) };
+    }
+    const productIds = selection.map(({ id }) => id);
+    const records = await this.prisma.productLead.findMany({
+      where: { id: { in: productIds } },
+      include: catalogProductInclude,
+    });
+    const [candidateAggregates, currentCandidates] = await Promise.all([
+      this.prisma.$queryRaw<CatalogCandidateAggregateRow[]>(
+        catalogCandidateAggregateSql(productIds),
+      ),
+      this.prisma.$queryRaw<CatalogCurrentCandidateRow[]>(
+        catalogCurrentCandidatesSql(productIds),
+      ),
+    ]);
+    const aggregateByProductId = new Map(
+      candidateAggregates.map((row) => [row.productId, row]),
+    );
+    const scoresByProductId = catalogScoresByProductId(currentCandidates);
+    const recordById = new Map(records.map((record) => [record.id, record]));
+    return {
+      items: selection.flatMap((row) => {
+        const product = recordById.get(row.id);
+        return product
+          ? [
+              catalogOfferFromRecord(
+                product,
+                row,
+                filters.destinationId,
+                aggregateByProductId.get(row.id),
+                scoresByProductId.get(row.id) ?? [],
+              ),
+            ]
+          : [];
+      }),
+      total: countAsNumber(totals[0]?.total ?? 0),
+    };
+  }
+
+  async findOperationalCatalogOffer(input: {
+    id: string;
+    dispatchPage: number;
+    dispatchLimit: number;
+    snapshotPage: number;
+    snapshotLimit: number;
+  }): Promise<OperationalCatalogDetail | null> {
+    const product = await this.prisma.productLead.findUnique({
+      where: { id: input.id },
+      include: catalogProductInclude,
+    });
+    if (!product) return null;
+    const [
+      candidateAggregates,
+      currentCandidates,
+      sentStats,
+      destinations,
+      dispatches,
+      snapshots,
+    ] = await Promise.all([
+      this.prisma.$queryRaw<CatalogCandidateAggregateRow[]>(
+        catalogCandidateAggregateSql([input.id]),
+      ),
+      this.prisma.$queryRaw<CatalogCurrentCandidateRow[]>(
+        catalogCurrentCandidatesSql([input.id]),
+      ),
+      this.prisma.whatsAppDispatch.aggregate({
+        where: { productId: input.id, status: 'SENT' },
+        _count: { _all: true },
+        _max: { sentAt: true },
+      }),
+      this.prisma.whatsAppDispatch.groupBy({
+        by: ['destinationId'],
+        where: { productId: input.id, status: 'SENT' },
+      }),
+      this.prisma.whatsAppDispatch.findMany({
+        where: { productId: input.id },
+        include: catalogDispatchInclude,
+        orderBy: [{ sentAt: 'desc' }, { id: 'asc' }],
+        skip: (input.dispatchPage - 1) * input.dispatchLimit,
+        take: input.dispatchLimit + 1,
+      }),
+      this.prisma.commercialOfferSnapshot.findMany({
+        where: { productId: input.id },
+        orderBy: [{ revision: 'desc' }, { id: 'asc' }],
+        skip: (input.snapshotPage - 1) * input.snapshotLimit,
+        take: input.snapshotLimit + 1,
+      }),
+    ]);
+    const candidateAggregate = candidateAggregates[0];
+    const dispatchPage = dispatches.slice(0, input.dispatchLimit);
+    const snapshotPage = snapshots.slice(0, input.snapshotLimit);
+    const selection: CatalogSelectionRow = {
+      id: product.id,
+      bestCurrentCommercialScore:
+        candidateAggregate?.bestCurrentCommercialScore ?? null,
+      globalEverSent: sentStats._count._all > 0,
+      globalSentDestinationCount: destinations.length,
+      globalLastSentAt: sentStats._max.sentAt,
+      scopedEverSent: sentStats._count._all > 0,
+      scopedLastSentAt: sentStats._max.sentAt,
+    };
+    return {
+      ...catalogOfferFromRecord(
+        product,
+        selection,
+        undefined,
+        candidateAggregate,
+        catalogScoresByProductId(currentCandidates).get(product.id) ?? [],
+      ),
+      dispatchHistory: {
+        items: dispatchPage.map(catalogDispatchFromRecord),
+        page: input.dispatchPage,
+        limit: input.dispatchLimit,
+        hasNextPage: dispatches.length > input.dispatchLimit,
+        hasPreviousPage: input.dispatchPage > 1,
+      },
+      snapshotHistory: {
+        items: snapshotPage.map(catalogSnapshotFromRecord),
+        page: input.snapshotPage,
+        limit: input.snapshotLimit,
+        hasNextPage: snapshots.length > input.snapshotLimit,
+        hasPreviousPage: input.snapshotPage > 1,
+      },
+    };
+  }
+
+  async listObservedCategories(): Promise<ShopeeCategoryRecord[]> {
+    type CategoryRow = {
+      id: string;
+      name: string | null;
+      parentId: string | null;
+      mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID';
+      productCount: bigint | number;
+    };
+    const officialSource = 'OFFICIAL' as const;
+    const rows = await this.prisma.$queryRaw<CategoryRow[]>(Prisma.sql`
+      WITH official_category_counts AS (
+        SELECT
+          category_id AS "id",
+          COUNT(DISTINCT product."id") AS "productCount"
+        FROM "ProductLead" product
+        CROSS JOIN LATERAL unnest(product."categoryIds") AS category_id
+        WHERE product."source" = ${officialSource}::"ShopeeOfferSource"
+          AND btrim(category_id) <> ''
+        GROUP BY category_id
+      )
+      SELECT
+        registry."id",
+        registry."name",
+        registry."parentId",
+        registry."mappingSource",
+        COALESCE(counts."productCount", 0) AS "productCount"
+      FROM "ShopeeCategory" registry
+      LEFT JOIN official_category_counts counts
+        ON counts."id" = registry."id"
+      ORDER BY
+        CASE WHEN registry."name" IS NULL THEN 1 ELSE 0 END ASC,
+        registry."name" ASC NULLS LAST,
+        registry."id" ASC
+    `);
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      parentId: row.parentId,
+      mappingSource: row.mappingSource,
+      productCount: countAsNumber(row.productCount),
+      displayLabel: row.name ?? `Categoria ${row.id}`,
+    }));
+  }
+
+  async listProductCategoryIdsForBackfill({
+    afterProductId,
+    limit,
+  }: {
+    afterProductId?: string;
+    limit: number;
+  }) {
+    const records = await this.prisma.productLead.findMany({
+      where: {
+        source: 'OFFICIAL',
+        id: afterProductId ? { gt: afterProductId } : undefined,
+      },
+      select: { id: true, categoryIds: true },
+      orderBy: { id: 'asc' },
+      take: Math.min(Math.max(limit, 1), 500),
+    });
+    return records.map((record) => ({
+      productId: record.id,
+      categoryIds: record.categoryIds,
+    }));
+  }
+
+  async createObservedCategories(categoryIds: string[], discoveredAt: Date) {
+    const normalizedCategoryIds = [
+      ...new Set(
+        categoryIds
+          .map((categoryId) => categoryId.trim())
+          .filter((categoryId) => categoryId.length > 0),
+      ),
+    ].sort((left, right) => left.localeCompare(right));
+    if (normalizedCategoryIds.length === 0) return 0;
+    const result = await this.prisma.shopeeCategory.createMany({
+      data: normalizedCategoryIds.map((id) => ({
+        id,
+        name: null,
+        parentId: null,
+        mappingSource: 'OFFICIAL_PRODUCT_CATEGORY_ID',
+        discoveredAt,
+      })),
+      skipDuplicates: true,
+    });
+    return result.count;
   }
 
   async listCommercialCandidates(filters: CommercialOfferCandidateFilters) {
@@ -1020,18 +1718,14 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
 
   async findById(id: string) {
     const record = await findCommercialGroupCampaign(this.prisma, { id });
-    return record
-      ? mapCommercialGroupCampaign(record)
-      : null;
+    return record ? mapCommercialGroupCampaign(record) : null;
   }
 
   async findByLogicalGroupFingerprint(logicalGroupFingerprint: string) {
     const record = await findCommercialGroupCampaign(this.prisma, {
       logicalGroupFingerprint,
     });
-    return record
-      ? mapCommercialGroupCampaign(record)
-      : null;
+    return record ? mapCommercialGroupCampaign(record) : null;
   }
 
   async update(id: string, data: CommercialGroupCampaignUpdateData) {
@@ -1043,7 +1737,10 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
         'allowedEndTime',
       ].some((field) => field in data);
       const updateCampaign = async (
-        client: Pick<DatabaseClient, 'commercialGroupCampaign' | 'commercialNiche'>,
+        client: Pick<
+          DatabaseClient,
+          'commercialGroupCampaign' | 'commercialNiche'
+        >,
       ) => {
         if (data.nicheId) {
           const [campaign, niche] = await Promise.all([
@@ -1189,10 +1886,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
     return this.attemptRepository.reserve(input);
   }
 
-  async releaseAttempt(input: {
-    campaignId: string;
-    executionId: string;
-  }) {
+  async releaseAttempt(input: { campaignId: string; executionId: string }) {
     return this.attemptRepository.release(input);
   }
 
@@ -1229,9 +1923,7 @@ type CommercialGroupCampaignAttemptPrismaDelegate = {
   }): Promise<CommercialGroupCampaignAttemptState | null>;
 };
 
-export class PrismaCommercialGroupCampaignAttemptRepository
-  implements CommercialGroupCampaignAttemptRepository
-{
+export class PrismaCommercialGroupCampaignAttemptRepository implements CommercialGroupCampaignAttemptRepository {
   constructor(
     private readonly campaigns: CommercialGroupCampaignAttemptPrismaDelegate,
   ) {}
@@ -1337,8 +2029,7 @@ export class PrismaCommercialGroupCampaignAttemptRepository
       };
     }
     if (
-      current.attemptLeaseExpiresAt.getTime() >=
-      input.leaseExpiresAt.getTime()
+      current.attemptLeaseExpiresAt.getTime() >= input.leaseExpiresAt.getTime()
     ) {
       return {
         kind: 'RENEWED',
@@ -1474,7 +2165,9 @@ const mapCommercialAiCopyAttempt = (record: Record<string, unknown>) => ({
   inputTokens: (record.inputTokens as number | null) ?? null,
   outputTokens: (record.outputTokens as number | null) ?? null,
   totalTokens: (record.totalTokens as number | null) ?? null,
-  validationFailureCodes: sanitizeCommercialAiCopyValidationFailureCodes(record.validationFailureCodes),
+  validationFailureCodes: sanitizeCommercialAiCopyValidationFailureCodes(
+    record.validationFailureCodes,
+  ),
   startedAt: record.startedAt as Date,
   completedAt: (record.completedAt as Date | null) ?? null,
   createdAt: record.createdAt as Date,
@@ -1490,7 +2183,8 @@ const mapCommercialAiCopyAttemptStatus = (
   model: String(record.model),
   promptVersion: String(record.promptVersion),
   validationVersion: String(record.validationVersion),
-  status: record.status as CommercialCopyGenerationAttemptStatusRecord['status'],
+  status:
+    record.status as CommercialCopyGenerationAttemptStatusRecord['status'],
   failureCode: (record.failureCode as string | null) ?? null,
   requestMayHaveStarted: Boolean(record.requestMayHaveStarted),
   providerHttpStatus: (record.providerHttpStatus as number | null) ?? null,
@@ -1500,7 +2194,9 @@ const mapCommercialAiCopyAttemptStatus = (
   inputTokens: (record.inputTokens as number | null) ?? null,
   outputTokens: (record.outputTokens as number | null) ?? null,
   totalTokens: (record.totalTokens as number | null) ?? null,
-  validationFailureCodes: sanitizeCommercialAiCopyValidationFailureCodes(record.validationFailureCodes),
+  validationFailureCodes: sanitizeCommercialAiCopyValidationFailureCodes(
+    record.validationFailureCodes,
+  ),
   startedAt: record.startedAt as Date,
   completedAt: (record.completedAt as Date | null) ?? null,
   createdAt: record.createdAt as Date,
@@ -1527,8 +2223,10 @@ const commercialPromotionCopyContextFromRecord = (
       productLink: (product.productLink as string | null) ?? null,
       affiliateLink: (product.affiliateLink as string | null) ?? null,
       price: decimalString(product.preco as PrismaDecimalLike) as string,
-      priceMin: decimalString(product.precoMin as PrismaDecimalLike | null) ?? null,
-      priceMax: decimalString(product.precoMax as PrismaDecimalLike | null) ?? null,
+      priceMin:
+        decimalString(product.precoMin as PrismaDecimalLike | null) ?? null,
+      priceMax:
+        decimalString(product.precoMax as PrismaDecimalLike | null) ?? null,
       discountRate: Number(product.desconto),
       commissionRate: Number(product.comissao),
       rating: Number(product.nota),
@@ -2096,11 +2794,10 @@ export class PrismaCommercialPromotionRepository
   }
 
   async markDispatchedByGeneratedCopyId(generatedCopyId: string) {
-    const candidates =
-      await this.prisma.commercialPromotionCandidate.findMany({
-        where: { generatedCopyId },
-        select: { id: true, campaignId: true, status: true },
-      });
+    const candidates = await this.prisma.commercialPromotionCandidate.findMany({
+      where: { generatedCopyId },
+      select: { id: true, campaignId: true, status: true },
+    });
     if (candidates.length === 0) return { kind: 'LEGACY' as const };
     if (candidates.length !== 1) {
       throw new AppError(
@@ -2142,11 +2839,10 @@ export class PrismaCommercialPromotionRepository
       };
     }
 
-    const current =
-      await this.prisma.commercialPromotionCandidate.findUnique({
-        where: { id: candidate.id },
-        select: { generatedCopyId: true, status: true },
-      });
+    const current = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { id: candidate.id },
+      select: { generatedCopyId: true, status: true },
+    });
     if (
       current?.generatedCopyId === generatedCopyId &&
       current.status === 'DISPATCHED'
@@ -2165,11 +2861,10 @@ export class PrismaCommercialPromotionRepository
   }
 
   async markBlockedByGeneratedCopyId(generatedCopyId: string) {
-    const candidates =
-      await this.prisma.commercialPromotionCandidate.findMany({
-        where: { generatedCopyId },
-        select: { id: true, status: true },
-      });
+    const candidates = await this.prisma.commercialPromotionCandidate.findMany({
+      where: { generatedCopyId },
+      select: { id: true, status: true },
+    });
     if (candidates.length === 0) return { kind: 'LEGACY' as const };
     if (candidates.length !== 1) {
       throw new AppError(
@@ -2209,11 +2904,10 @@ export class PrismaCommercialPromotionRepository
       };
     }
 
-    const current =
-      await this.prisma.commercialPromotionCandidate.findUnique({
-        where: { id: candidate.id },
-        select: { generatedCopyId: true, status: true },
-      });
+    const current = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { id: candidate.id },
+      select: { generatedCopyId: true, status: true },
+    });
     if (
       current?.generatedCopyId === generatedCopyId &&
       current.status === 'BLOCKED'
@@ -2234,22 +2928,21 @@ export class PrismaCommercialPromotionRepository
     generatedCopyId: string,
     expectedAttempt?: { campaignId: string; executionId: string },
   ) {
-    const candidates =
-      await this.prisma.commercialPromotionCandidate.findMany({
-        where: {
-          generatedCopyId,
-          ...(expectedAttempt
-            ? {
-                campaignId: expectedAttempt.campaignId,
-                campaign: { attemptExecutionId: expectedAttempt.executionId },
-              }
-            : {}),
-        },
-        select: {
-          campaignId: true,
-          campaign: { select: { failureCount: true, nextEligibleAt: true } },
-        },
-      });
+    const candidates = await this.prisma.commercialPromotionCandidate.findMany({
+      where: {
+        generatedCopyId,
+        ...(expectedAttempt
+          ? {
+              campaignId: expectedAttempt.campaignId,
+              campaign: { attemptExecutionId: expectedAttempt.executionId },
+            }
+          : {}),
+      },
+      select: {
+        campaignId: true,
+        campaign: { select: { failureCount: true, nextEligibleAt: true } },
+      },
+    });
     if (candidates.length === 0) return { kind: 'LEGACY' as const };
     if (candidates.length !== 1) {
       throw new AppError(
@@ -2294,15 +2987,14 @@ export class PrismaCommercialPromotionRepository
   async findAttemptContextByGeneratedCopyId(
     generatedCopyId: string,
   ): Promise<CommercialPromotionAttemptContext> {
-    const candidates =
-      await this.prisma.commercialPromotionCandidate.findMany({
-        where: { generatedCopyId },
-        select: {
-          id: true,
-          campaignId: true,
-          campaign: { select: { attemptExecutionId: true } },
-        },
-      });
+    const candidates = await this.prisma.commercialPromotionCandidate.findMany({
+      where: { generatedCopyId },
+      select: {
+        id: true,
+        campaignId: true,
+        campaign: { select: { attemptExecutionId: true } },
+      },
+    });
     if (candidates.length === 0) return { kind: 'NONE' };
     if (candidates.length !== 1) return { kind: 'AMBIGUOUS' };
     return {
@@ -2313,13 +3005,9 @@ export class PrismaCommercialPromotionRepository
     };
   }
 
-  async releaseAttempt(input: {
-    campaignId: string;
-    executionId: string;
-  }) {
+  async releaseAttempt(input: { campaignId: string; executionId: string }) {
     return this.attemptRepository.release(input);
   }
-
 }
 
 type CommercialCopyPrismaClient = Pick<
@@ -2816,7 +3504,10 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
           inputTokens: input.inputTokens ?? null,
           outputTokens: input.outputTokens ?? null,
           totalTokens: input.totalTokens ?? null,
-          validationFailureCodes: sanitizeCommercialAiCopyValidationFailureCodes(input.validationFailureCodes),
+          validationFailureCodes:
+            sanitizeCommercialAiCopyValidationFailureCodes(
+              input.validationFailureCodes,
+            ),
           completedAt: input.completedAt,
         },
       },
@@ -2975,10 +3666,7 @@ export class PrismaCommercialPipelineRunRepository
     return record;
   }
 
-  async finalizeByDispatchId(
-    dispatchId: string,
-    completedAt: Date,
-  ) {
+  async finalizeByDispatchId(dispatchId: string, completedAt: Date) {
     if (!this.prisma.commercialPipelineRun) return null;
 
     const readCurrent = async () =>
@@ -3075,8 +3763,7 @@ export class PrismaCommercialPipelineRunRepository
       return 'SENT' as const;
     }
     if (
-      (current.finalStatus === 'FAILED' &&
-        !current.investigationRequired) ||
+      (current.finalStatus === 'FAILED' && !current.investigationRequired) ||
       current.dispatch?.status === 'FAILED'
     ) {
       return 'FAILED' as const;
@@ -3372,7 +4059,12 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
           },
         },
         dispatch: {
-          select: { id: true, status: true, attemptCount: true, instanceName: true },
+          select: {
+            id: true,
+            status: true,
+            attemptCount: true,
+            instanceName: true,
+          },
         },
       },
     });
@@ -3520,7 +4212,7 @@ export class PrismaCommercialAutomationSettingsRepository implements CommercialA
       where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
       data: paused
         ? { paused: true, pausedAt: now }
-      : { paused: false, resumedAt: now },
+        : { paused: false, resumedAt: now },
     });
   }
 
@@ -3649,7 +4341,9 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
     };
   }
 
-  async hasAmbiguousCommercialExecution(excludedRunId?: string): Promise<boolean> {
+  async hasAmbiguousCommercialExecution(
+    excludedRunId?: string,
+  ): Promise<boolean> {
     const [run, execution] = await Promise.all([
       this.prisma.commercialPipelineRun.findFirst({
         where: {
@@ -3723,14 +4417,14 @@ const mapCommercialAutomationExecution = (
   leaseExpiresAt: (record.leaseExpiresAt as Date | null) ?? null,
   mode: record.mode as CommercialAutomationExecutionRecord['mode'],
   status: record.status as CommercialAutomationExecutionRecord['status'],
-  externalStage: record.externalStage as CommercialAutomationExecutionRecord['externalStage'],
+  externalStage:
+    record.externalStage as CommercialAutomationExecutionRecord['externalStage'],
   reasons: record.reasons as string[],
   commercialRunId: (record.commercialRunId as string | null) ?? null,
   failureCode: (record.failureCode as string | null) ?? null,
   startedAt: record.startedAt as Date,
   completedAt: (record.completedAt as Date | null) ?? null,
 });
-
 
 const COMMERCIAL_PREMARKER_MAX_BACKOFF_MINUTES = 24 * 60;
 const COMMERCIAL_PREMARKER_MAX_FAILURE_COUNT = 2_147_483_647;
@@ -3739,7 +4433,9 @@ class CommercialPreMarkerRecoveryCasConflictError extends Error {}
 class CommercialPreMarkerRecoveryLookupError extends Error {}
 class CommercialPreConfirmationRecoveryCasConflictError extends Error {}
 
-const commercialPreMarkerRecoveryLookup = async <T>(lookup: () => Promise<T>) => {
+const commercialPreMarkerRecoveryLookup = async <T>(
+  lookup: () => Promise<T>,
+) => {
   try {
     return await lookup();
   } catch {
@@ -3865,8 +4561,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
                     where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
                     select: { scheduleRevision: true },
                   });
-                const currentScheduleRevision =
-                  settings?.scheduleRevision ?? 0;
+                const currentScheduleRevision = settings?.scheduleRevision ?? 0;
                 if (
                   currentScheduleRevision !== input.expectedScheduleRevision
                 ) {
@@ -4120,7 +4815,9 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
               reason: 'EXECUTION_OWNERSHIP_INCOMPLETE' as const,
             };
           }
-          if (execution.leaseExpiresAt.getTime() > input.completedAt.getTime()) {
+          if (
+            execution.leaseExpiresAt.getTime() > input.completedAt.getTime()
+          ) {
             return {
               outcome: 'BLOCKED' as const,
               reason: 'EXECUTION_NOT_STALE' as const,
@@ -4141,14 +4838,14 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
 
           const linkedRun = await commercialPreMarkerRecoveryLookup(() =>
             transaction.commercialPipelineRun.findUnique({
-            where: { executionId: id },
-            select: {
-              id: true,
-              dispatchId: true,
-              jobId: true,
-              dispatch: { select: { id: true } },
-              dispatchOutbox: { select: { id: true, status: true } },
-            },
+              where: { executionId: id },
+              select: {
+                id: true,
+                dispatchId: true,
+                jobId: true,
+                dispatch: { select: { id: true } },
+                dispatchOutbox: { select: { id: true, status: true } },
+              },
             }),
           );
           if (linkedRun) {
@@ -4170,7 +4867,10 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
                 reason: 'JOB_EVIDENCE' as const,
               };
             }
-            return { outcome: 'BLOCKED' as const, reason: 'RUN_EVIDENCE' as const };
+            return {
+              outcome: 'BLOCKED' as const,
+              reason: 'RUN_EVIDENCE' as const,
+            };
           }
 
           const reservations = await commercialPreMarkerRecoveryLookup(() =>
@@ -4206,7 +4906,8 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
             };
           }
           if (
-            campaign.attemptLeaseExpiresAt.getTime() > input.completedAt.getTime()
+            campaign.attemptLeaseExpiresAt.getTime() >
+            input.completedAt.getTime()
           ) {
             return {
               outcome: 'BLOCKED' as const,
@@ -4229,7 +4930,9 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
           const copyAttempt = await commercialPreMarkerRecoveryLookup(() =>
             transaction.commercialCopyGenerationAttempt.findFirst({
               where: {
-                candidateId: { in: candidates.map((candidate) => candidate.id) },
+                candidateId: {
+                  in: candidates.map((candidate) => candidate.id),
+                },
                 status: { in: ['STARTED', 'AMBIGUOUS'] },
               },
               select: { id: true },
@@ -4360,9 +5063,10 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     try {
       return await this.prisma.$transaction(
         async (transaction) => {
-          const execution = await transaction.commercialAutomationExecution.findUnique({
-            where: { id },
-          });
+          const execution =
+            await transaction.commercialAutomationExecution.findUnique({
+              where: { id },
+            });
           if (!execution) {
             return {
               outcome: 'BLOCKED' as const,
@@ -4397,7 +5101,9 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
               reason: 'EXECUTION_OWNERSHIP_INCOMPLETE' as const,
             };
           }
-          if (execution.leaseExpiresAt.getTime() > input.completedAt.getTime()) {
+          if (
+            execution.leaseExpiresAt.getTime() > input.completedAt.getTime()
+          ) {
             return {
               outcome: 'BLOCKED' as const,
               reason: 'EXECUTION_NOT_STALE' as const,
@@ -4437,16 +5143,17 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
             };
           }
 
-          const reservations = await transaction.commercialGroupCampaign.findMany({
-            where: { attemptExecutionId: id },
-            take: 2,
-            select: {
-              id: true,
-              attemptExecutionId: true,
-              attemptReservedAt: true,
-              attemptLeaseExpiresAt: true,
-            },
-          });
+          const reservations =
+            await transaction.commercialGroupCampaign.findMany({
+              where: { attemptExecutionId: id },
+              take: 2,
+              select: {
+                id: true,
+                attemptExecutionId: true,
+                attemptReservedAt: true,
+                attemptLeaseExpiresAt: true,
+              },
+            });
           if (reservations.length > 1) {
             return {
               outcome: 'BLOCKED' as const,
@@ -4466,49 +5173,52 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
             };
           }
           if (reservation) {
-            const released = await transaction.commercialGroupCampaign.updateMany({
-              where: {
-                id: reservation.id,
-                attemptExecutionId: id,
-                attemptReservedAt: reservation.attemptReservedAt,
-                attemptLeaseExpiresAt: reservation.attemptLeaseExpiresAt,
-              },
-              data: {
-                attemptExecutionId: null,
-                attemptReservedAt: null,
-                attemptLeaseExpiresAt: null,
-              },
-            });
+            const released =
+              await transaction.commercialGroupCampaign.updateMany({
+                where: {
+                  id: reservation.id,
+                  attemptExecutionId: id,
+                  attemptReservedAt: reservation.attemptReservedAt,
+                  attemptLeaseExpiresAt: reservation.attemptLeaseExpiresAt,
+                },
+                data: {
+                  attemptExecutionId: null,
+                  attemptReservedAt: null,
+                  attemptLeaseExpiresAt: null,
+                },
+              });
             if (released.count !== 1) {
               throw new CommercialPreConfirmationRecoveryCasConflictError();
             }
           }
 
-          const updated = await transaction.commercialAutomationExecution.updateMany({
-            where: {
-              id,
-              status: 'STARTED',
-              externalStage: execution.externalStage,
-              commercialRunId: execution.commercialRunId,
-              ownerId: execution.ownerId,
-              activeKey: execution.activeKey,
-              heartbeatAt: execution.heartbeatAt,
-              leaseExpiresAt: execution.leaseExpiresAt,
-            },
-            data: {
-              activeKey: null,
-              status: 'FAILED',
-              failureCode: input.failureCode,
-              completedAt: input.completedAt,
-            },
-          });
+          const updated =
+            await transaction.commercialAutomationExecution.updateMany({
+              where: {
+                id,
+                status: 'STARTED',
+                externalStage: execution.externalStage,
+                commercialRunId: execution.commercialRunId,
+                ownerId: execution.ownerId,
+                activeKey: execution.activeKey,
+                heartbeatAt: execution.heartbeatAt,
+                leaseExpiresAt: execution.leaseExpiresAt,
+              },
+              data: {
+                activeKey: null,
+                status: 'FAILED',
+                failureCode: input.failureCode,
+                completedAt: input.completedAt,
+              },
+            });
           if (updated.count !== 1) {
             throw new CommercialPreConfirmationRecoveryCasConflictError();
           }
 
-          const recovered = await transaction.commercialAutomationExecution.findUnique({
-            where: { id },
-          });
+          const recovered =
+            await transaction.commercialAutomationExecution.findUnique({
+              where: { id },
+            });
           if (!recovered) {
             throw new CommercialPreConfirmationRecoveryCasConflictError();
           }
@@ -4766,9 +5476,7 @@ export class PrismaWhatsAppDestinationRepository implements WhatsAppDestinationR
   }
 }
 
-export class PrismaWhatsAppInstanceRepository
-  implements WhatsAppInstanceRepository
-{
+export class PrismaWhatsAppInstanceRepository implements WhatsAppInstanceRepository {
   constructor(
     private readonly prisma: Pick<DatabaseClient, 'whatsAppInstance'>,
   ) {}
@@ -5033,43 +5741,42 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       ...record,
       generatedCopy: {
         ...record.generatedCopy,
-        promotionCandidates: promotionCandidates.map(
-          (candidate) => ({
-            ...candidate,
-            product: {
-              id: candidate.product.id,
-              source:
-                candidate.product.source === 'OFFICIAL'
-                  ? 'OFFICIAL'
-                  : candidate.product.source === 'MANUAL'
-                    ? 'MANUAL'
-                    : 'MOCK',
-              providerProductId: candidate.product.providerProductId,
-              productName: candidate.product.nome,
-              shopName: candidate.product.loja,
-              productLink: candidate.product.productLink,
-              affiliateLink: candidate.product.affiliateLink,
-              price: decimalString(candidate.product.preco) ?? '',
-              priceMin: decimalString(candidate.product.precoMin) ?? null,
-              priceMax: decimalString(candidate.product.precoMax) ?? null,
-              discountRate: Number(candidate.product.desconto),
-              commissionRate: Number(candidate.product.comissao),
-              rating: Number(candidate.product.nota),
-              sales: Number(candidate.product.vendidos),
-              offerStartsAt: candidate.product.offerStartsAt,
-              urlImagem: candidate.product.urlImagem,
-              offerEndsAt: candidate.product.offerEndsAt,
-              unavailableAt: candidate.product.unavailableAt,
-              commercialSnapshotRevision:
-                candidate.product.commercialSnapshotRevision,
-              commercialSnapshotFingerprint:
-                candidate.product.commercialSnapshotFingerprint,
-              updatedAt: candidate.product.updatedAt,
-            },
-          }),
-        ),
+        promotionCandidates: promotionCandidates.map((candidate) => ({
+          ...candidate,
+          product: {
+            id: candidate.product.id,
+            source:
+              candidate.product.source === 'OFFICIAL'
+                ? 'OFFICIAL'
+                : candidate.product.source === 'MANUAL'
+                  ? 'MANUAL'
+                  : 'MOCK',
+            providerProductId: candidate.product.providerProductId,
+            productName: candidate.product.nome,
+            shopName: candidate.product.loja,
+            productLink: candidate.product.productLink,
+            affiliateLink: candidate.product.affiliateLink,
+            price: decimalString(candidate.product.preco) ?? '',
+            priceMin: decimalString(candidate.product.precoMin) ?? null,
+            priceMax: decimalString(candidate.product.precoMax) ?? null,
+            discountRate: Number(candidate.product.desconto),
+            commissionRate: Number(candidate.product.comissao),
+            rating: Number(candidate.product.nota),
+            sales: Number(candidate.product.vendidos),
+            offerStartsAt: candidate.product.offerStartsAt,
+            urlImagem: candidate.product.urlImagem,
+            offerEndsAt: candidate.product.offerEndsAt,
+            unavailableAt: candidate.product.unavailableAt,
+            commercialSnapshotRevision:
+              candidate.product.commercialSnapshotRevision,
+            commercialSnapshotFingerprint:
+              candidate.product.commercialSnapshotFingerprint,
+            updatedAt: candidate.product.updatedAt,
+          },
+        })),
       },
-    };  }
+    };
+  }
 
   async findByIdWithDetails(
     id: string,

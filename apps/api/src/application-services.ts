@@ -66,6 +66,7 @@ import type {
   CouponRepository,
   GeneratedCopyRepository,
   ProductRepository,
+  OperationalCatalogRepository,
   ShopeeOfferRepository,
   WhatsAppDestinationRepository,
   WhatsAppInstanceRepository,
@@ -99,7 +100,7 @@ export type ApplicationRepositories = {
   whatsappInstances: WhatsAppInstanceRepository;
   whatsappDispatches: WhatsAppDispatchRepository;
   whatsappGroups: WhatsAppGroupDirectoryRepository;
-  shopeeOffers: ShopeeOfferRepository;
+  shopeeOffers: ShopeeOfferRepository & OperationalCatalogRepository;
   coupons: CouponRepository;
   commercialRuns: CommercialPipelineRunRepository &
     CommercialPipelineRunFinalizationRepository;
