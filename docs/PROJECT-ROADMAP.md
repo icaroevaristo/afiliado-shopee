@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `a3d16fad985fcf4708f5a5ba7a1dd68bc97c6078`; Fase 15 certificada como concluída em 2026-08-24.
+> Estado auditado contra `main` em `39805eee865eec04cc29b944c3ad4ce8704e1be8`; Fase 15 certificada como concluída e Fase 16 certificada como concluída em 2026-08-25.
 
 ## 1. Objetivo final
 
@@ -113,7 +113,7 @@ Não criar rajadas simultâneas. O stagger deve ser persistido/configurável e s
 
 ### Estado atual
 
-**Parcial.** Há `ProductLead`, snapshots, API de produtos e tela `apps/dashboard/app/produtos/page.tsx`. O dashboard atual já navega produtos, mas a auditoria não encontrou evidência de cobertura completa do contrato operacional abaixo.
+**DONE.** O catálogo operacional read-only está disponível na API e em `apps/dashboard/app/produtos/page.tsx`, com navegação completa, detalhe, filtros server-side, paginação determinística e histórico de snapshots/publicações.
 
 O MVP deve manter **todos os produtos capturados navegáveis** e, quando os dados existirem, mostrar:
 
@@ -138,7 +138,7 @@ Filtros combináveis mínimos: categoria, desconto, score, preço/faixa, comiss�
 
 ### Estado atual
 
-**Fundação presente; taxonomia operacional completa ainda não DONE.**
+**DONE para o registry dinâmico de IDs oficiais.** A taxonomia exposta pelo catálogo usa `ShopeeCategory` como registry expansível, sem enumeração hardcoded de categorias.
 
 Evidências atuais:
 
@@ -148,13 +148,15 @@ Evidências atuais:
 - official catalog CLI/service aceita `categoryId`;
 - repositories já aceitam filtro por categoryId.
 
+O registry certificado contém 101 categorias oficiais; nomes oficiais e hierarchy ainda não estão disponíveis, e `name`/`parentId` permanecem nullable. IDs novos `OFFICIAL` podem ser incorporados sem nova regra de código.
+
 O MVP deve persistir/mapear a taxonomia real do provider e permitir produtos por categoria no painel. Não deve reduzir a Shopee a uma enumeração hardcoded pequena. Uma camada de nomes amigáveis pode existir, mas deve mapear IDs reais e admitir expansão sem regra nova para cada categoria.
 
 ### 7.3 Ofertas Relâmpago
 
 ### Estado atual
 
-**NOT_STARTED como classificação confiável.**
+**EXPLICITLY_UNSUPPORTED.** O provider não disponibiliza sinal oficial suficiente para classificar Flash Deal; a ausência é tratada fail-closed e não há suporte declarado.
 
 O contrato oficial documentado hoje expõe preço, desconto, período da oferta, comissão, vendas, categoria etc., mas a auditoria não encontrou campo inequívoco `flashDeal`/tipo de promoção equivalente. O texto `#OfertaRelampago` existente em templates legados de copy **não é evidência do provider** e não pode classificar produto.
 
@@ -348,6 +350,25 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Preview e restore:** foi aceita uma execução PREVIEW/MOCK para Campaign A, grupo A e `afiliado-shopee-local`, com `PREVIEW_READY`, run `COMPLETED`, dispatch/outbox/WhatsApp job `0` e provider MOCK. Após o restore: Campaign A ativa, Campaign B inativa, scheduler não registrado, `activeExecutions=0`, `activeReservations=0`, `ambiguity=0`, `investigationRequired=0`, pending dispatch/outbox `0` e filas waiting/active/delayed `0`.
 - **Certificação final:** `12/12` critérios PASS; window, minimum interval, quotas, stagger, restart sem duplicidade, settings sem `.env`, determinismo multi-instância, soak, stale fail-closed e preservação da Fase 14 foram comprovados. `REAL_SEND_REQUIRED_FOR_PHASE15=false`.
 
+### Fase 16 — Catálogo operacional, taxonomia Shopee e Ofertas Relâmpago
+- **Estado:** `DONE`.
+- **Implementação mergeada:** PR #101, título `feat(catalog): add operational Shopee product catalog`; implementation HEAD `c99f49f9d4b09f4d81052d3b60af1aaf22e8c7f6`; merge commit `39805eee865eec04cc29b944c3ad4ce8704e1be8`.
+- **Escopo certificado:** catálogo operacional read-only; paginação determinística; filtros server-side combináveis; catálogo completo navegável; detalhe de produto; snapshot history; publication/dispatch history; `sent`/`not_sent` global e por destino; score comercial coerente com o snapshot atual; candidate stale não participa do score; dashboard Produtos operacional; nenhuma publicação manual adicionada.
+- **Taxonomia e registry:** `ShopeeCategory` é um registry dinâmico de IDs reais vindos do provider `OFFICIAL`, sem enum/lista hardcoded. Nomes oficiais e hierarchy ainda não estão disponíveis; `name` e `parentId` são nullable; novos IDs `OFFICIAL` podem ser incorporados sem nova regra de código. O registry certificado contém 101 categorias oficiais; a categoria MOCK-only `100003` está ausente.
+- **Endpoint de categorias:** `GET /shopee/offers/categories` certificado com HTTP 200, 101 categorias, IDs exatamente iguais ao registry, `100003` ausente, contagens somente para `ProductLead.source=OFFICIAL` e sem N+1.
+- **Migration:** `20260824130000_shopee_category_registry`, SHA-256 `7D20C78D632F0315583EEDE853CA01EB56ADB3963FFF412CB31C3A09C5333629`, `applied=true`, `pending=0`, `unresolved=0`, `checksumMatches=true`; aditiva, não destrutiva, sem rewrite de `ProductLead`, snapshots ou lifecycle.
+- **Backup operacional:** `phase16-pre-category-registry-20260825-113339.dump`, SHA-256 `EFD23C7204D876CA336F23662C04663DCB9BD4DE5F5C28FAD781E6EE314AFB9F`, formato PostgreSQL custom/PGDMP, `pg_restore --list` PASS. Nenhum restore drill é declarado.
+- **Backfill certificado:** `backfillCalls=1`, somente `ProductLead.source=OFFICIAL`, `productsScanned=101`, `uniqueCategoryIds=101`, `created=101`, `duplicatesSkipped=0`, `mockIdsIncluded=0`, `secondBackfillCall=0`, mapping source `OFFICIAL_PRODUCT_CATEGORY_ID`. A idempotência foi certificada pelo contrato/testes; não foi necessária segunda chamada.
+- **Catálogo real (evidência da certificação, não invariantes):** `ProductLead=124`, `OFFICIAL=101`, `MOCK=23`, `CommercialOfferSnapshot=134`, todos os produtos navegáveis, duplicidade entre páginas `0`, ordenação determinística `true`, current commercial score em 29 produtos, `staleScoreLeak=0`, `SENT products=21`, `SENT dispatches=23`, `not_sent=103`; histórico de snapshot e publicação PASS.
+- **Filtros certificados:** `source`, `category`, `discount`, `score`, `price`, `commission`, sales sort, `sent`/`not_sent`, destination-scoped sent state, availability, `capturedAt`, combinações e paginação mantendo filtros. O enum PostgreSQL `OFFICIAL`/`MOCK` foi certificado; source inválido retorna HTTP 400 antes do PostgreSQL.
+- **Flash Deal:** `FLASH_DEAL_STATE=EXPLICITLY_UNSUPPORTED`, `providerSignal=OFFICIAL_SIGNAL_NOT_AVAILABLE`, `heuristics=false`, `FLASH_DEAL_PROVIDER_PROOF_REQUIRED=true`. Não há classificação por desconto, price drop, período promocional, nome, texto, hashtag ou promotion candidate. O contrato permanece fail-closed e não declara suporte a Flash Deal.
+- **Critérios:** critérios originais preservados; `12/12 PASS`: produtos navegáveis; campos operacionais; filtros combináveis; IDs reais persistidos; categorias filtráveis; taxonomia expansível; enviado/não enviado; destinos/histórico; Flash Deal oficial ou explicitamente unsupported; proteção contra heurística; source/provenance corretos; Fase 15 DONE.
+- **Certificação:** `PHASE16_CATEGORY_REGISTRY_CERTIFIED=true`, `PHASE16_MIGRATION_CERTIFIED=true`, `PHASE16_BACKFILL_CERTIFIED=true`, `PHASE16_CATALOG_REAL_DATA_CERTIFIED=true`, `PHASE_16_OPERATIONAL_REQUIREMENT_MET=true`, `PHASE_16_DONE=true`, `REAL_SEND_REQUIRED_FOR_PHASE16=false`, `SOL_REVIEW=APPROVED`, `P0=0`, `P1=0`, `P2=0`.
+- **Automação:** durante migration/backfill, a automação foi pausada controladamente; após a certificação, `paused=false` e `scheduleRevision=3`. Nenhum scheduler, worker, `executeTick`, provider ou SEND foi iniciado pela restauração. A Fase 16 não depende de automação pausada.
+- **Testes e validações relevantes:** API full `1190 passed / 12 skipped`; database `46 PASS`; fix final `3 arquivos / 21 PASS`; API afetada `5 arquivos / 38 PASS`; dashboard `22 arquivos / 80 PASS`; typecheck PASS; lint dos arquivos alterados PASS; build PASS; Prisma validate PASS; `git diff --check` PASS. Não se declara lint global PASS.
+- **Dependências:** provider oficial e modelo de catálogo atuais; Fase 15 concluída.
+- **Critério objetivo preservado:** todos os produtos capturados navegáveis; campos/filtros mínimos da seção 7; categorias reais mapeadas e filtráveis; histórico de destinos/envios; Ofertas Relâmpago habilitadas só após prova de sinal oficial e teste de mapeamento, ou explicitamente indisponíveis se o provider não suportar.
+
 ### Fase 12 — Estabilidade controlada multiciclo
 - **Estado:** `DONE`
 - **Objetivo:** provar múltiplos ciclos reais sucessivos respeitando ranking, provenance, cooldown, quota, dedupe e recovery.
@@ -380,23 +401,16 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13, 14 e 15 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14, 15 e 16 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
-
-### Fase 16 — Catálogo operacional, taxonomia Shopee e Ofertas Relâmpago
-- **Estado:** `NOT_STARTED` como experiência completa; fundações já existem.
-- **Objetivo:** transformar catálogo persistido em ferramenta operacional completa.
-- **Evidência principal:** ProductLead/snapshots/categoryIds e página Produtos existem; UX/filtros/histórico estão incompletos; não há sinal confiável documentado de flash deal.
-- **Dependências:** provider oficial e modelo de catálogo atuais.
-- **Critério objetivo:** todos os produtos capturados navegáveis; campos/filtros mínimos da seção 7; categorias reais mapeadas e filtráveis; histórico de destinos/envios; Ofertas Relâmpago habilitadas só após prova de sinal oficial e teste de mapeamento, ou explicitamente indisponíveis se o provider não suportar.
 
 ### Fase 17 — Envio manual seguro pelo mesmo pipeline
 - **Estado:** `NOT_STARTED`
 - **Objetivo:** permitir publicação iniciada pelo proprietário sem segundo boundary de SEND.
 - **Evidência principal:** dashboard atual proíbe manual SEND; pipeline seguro já existe e deve ser reutilizado.
-- **Dependências:** Fases 13–16.
+- **Dependências:** Fases 13–16 concluídas.
 - **Critério objetivo:** produto/grupos selecionados no painel atravessam provenance/copy/draft/policy/dedupe/reservation/dispatch/outbox/Sender/finalizer; idempotency key impede duplo clique/retry duplicado; ambiguous result bloqueia nova tentativa automática.
 
 ### Fase 18 — Painel de configuração e observabilidade operacional
@@ -478,9 +492,9 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Multi-instância real | DONE | Duas instâncias reais, assignments persistidos e lifecycle sticky certificados |
 | Multi-grupo real completo | DONE | Dois grupos reais, isolamento e candidates compatíveis certificados |
 | Scheduler/stagger final | DONE | Planner determinístico multi-instância/multi-grupo; cadence/window/quotas/stagger e revision stale certificados |
-| Catálogo operacional completo | NOT_STARTED | Tela/modelo existentes, UX final não |
-| Categorias reais no painel | NOT_STARTED | IDs persistidos; taxonomia/UX final não |
-| Ofertas Relâmpago confiáveis | NOT_STARTED | Sem sinal oficial comprovado hoje |
+| Catálogo operacional completo | DONE | Catálogo read-only, detalhe, filtros, paginação e histórico certificados |
+| Categorias reais no painel | DONE | Registry dinâmico com 101 IDs oficiais; nomes/hierarchy ainda indisponíveis |
+| Ofertas Relâmpago confiáveis | EXPLICITLY_UNSUPPORTED | Sem sinal oficial do provider; heurísticas bloqueadas fail-closed |
 | Envio manual seguro | NOT_STARTED | Deve reutilizar pipeline atual |
 | Painel administrativo | NOT_STARTED | Console atual predominantemente read-only |
 | Soak/restart/autonomia | NOT_STARTED | Soak e restart/replan da Fase 15 certificados; autonomia contínua final permanece planejada |
