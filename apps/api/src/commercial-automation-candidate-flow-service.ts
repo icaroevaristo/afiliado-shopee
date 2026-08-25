@@ -38,6 +38,7 @@ import type {
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
   CommercialPipelineRejectionCode,
+  CommercialPromotionCandidateRecord,
   CommercialPromotionCandidateRepository,
   CommercialPromotionCopyRepository,
   CommercialPromotionQueueItem,
@@ -73,6 +74,8 @@ export type CommercialAutomationCandidateFlowResult = {
 
 export type CommercialAutomationCandidatePreparationOptions = {
   executionId: string;
+  existingRunId?: string;
+  manualSelection?: boolean;
   miningReport?: Pick<
     CommercialPromotionMiningReport,
     'rejectionSummary'
@@ -940,8 +943,10 @@ export class CommercialAutomationCandidateFlowService {
       },
       group,
       executionId: options.executionId,
+      existingRunId: options.existingRunId,
       instanceName: requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
+      manualSelection: options.manualSelection ?? false,
       copyPreview: draft.caption,
       candidateCount: selection.queue.candidateCount,
       eligibleCount: selection.queue.eligibleCount,
@@ -971,6 +976,55 @@ export class CommercialAutomationCandidateFlowService {
       copyPreview: draft.caption,
       pipeline,
     };
+  }
+
+  async prepareManual(
+    productId: string,
+    target: CommercialAutomationTarget,
+    options: Pick<
+      CommercialAutomationCandidatePreparationOptions,
+      'executionId' | 'existingRunId'
+    >,
+  ): Promise<CommercialAutomationCandidateFlowResult> {
+    const selectManualCandidate = (
+      this.options.mining as typeof this.options.mining & {
+        selectManualCandidate?: (input: {
+          campaignId: string;
+          productId: string;
+          logicalGroupFingerprint: string;
+        }) => Promise<CommercialPromotionQueueItem | CommercialPromotionCandidateRecord>;
+      }
+    ).selectManualCandidate;
+    if (!selectManualCandidate) {
+      throw appError(
+        'Selecao manual de candidate indisponivel',
+        'MANUAL_PUBLICATION_CANDIDATE_UNAVAILABLE',
+      );
+    }
+    const candidate = await selectManualCandidate({
+      campaignId: target.campaignId,
+      productId,
+      logicalGroupFingerprint: target.logicalGroupFingerprint,
+    });
+    if (candidate.status !== 'QUEUED' && candidate.status !== 'COPY_READY') {
+      throw appError(
+        'Candidate manual nao esta pronto para preparacao',
+        'MANUAL_PUBLICATION_CANDIDATE_NOT_READY',
+      );
+    }
+    return this.prepare(
+      {
+        target,
+        candidateId: candidate.id,
+        candidateStatus: candidate.status,
+        queue: { candidateCount: 1, eligibleCount: 1, rejectedCount: 0 },
+      },
+      {
+        executionId: options.executionId,
+        existingRunId: options.existingRunId,
+        manualSelection: true,
+      },
+    );
   }
 
   async revalidate(input: CommercialAutomationCandidateRevalidation) {

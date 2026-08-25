@@ -122,6 +122,10 @@ class MemoryRuns implements CommercialPipelineRunRepository {
     return this.records.find((record) => record.id === id) ?? null;
   }
 
+  async findByExecutionId(executionId: string) {
+    return this.records.find((record) => record.executionId === executionId) ?? null;
+  }
+
   async findByDispatchId(dispatchId: string) {
     return (
       this.records.find((record) => record.dispatchId === dispatchId) ?? null

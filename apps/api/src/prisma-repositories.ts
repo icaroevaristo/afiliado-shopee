@@ -53,6 +53,16 @@ import type {
   CommercialCopyGenerationAttemptStatusRecord,
   CommercialPromotionMaterializationInput,
   CommercialPromotionSnapshotRecord,
+  CommercialManualCandidateMaterializationInput,
+  ManualPublicationAcceptance,
+  ManualPublicationQuotaReservation,
+  ManualPublicationQuotaReservationInput,
+  ManualPublicationRequestCreateData,
+  ManualPublicationRequestRecord,
+  ManualPublicationRequestRepository,
+  ManualPublicationRequestUpdate,
+  ManualPublicationTargetRecord,
+  ManualPublicationTargetUpdate,
   CommercialPipelineRunData,
   CommercialPipelineRunFilters,
   CommercialPipelineRunRecord,
@@ -2141,6 +2151,7 @@ const mapCommercialPromotionCandidate = (
   expiresAt: (record.expiresAt as Date | null) ?? null,
   dedupeUntil: (record.dedupeUntil as Date | null) ?? null,
   blockedReason: (record.blockedReason as string | null) ?? null,
+  manualSelectionOverride: Boolean(record.manualSelectionOverride),
   createdAt: record.createdAt as Date,
   updatedAt: record.updatedAt as Date,
 });
@@ -2425,6 +2436,53 @@ export class PrismaCommercialPromotionRepository
     };
   }
 
+  async findOfficialCatalogItem(productId: string) {
+    const product = await this.prisma.productLead.findFirst({
+      where: { id: productId, source: 'OFFICIAL' },
+    });
+    if (!product) return null;
+    const currentRevision = product.commercialSnapshotRevision;
+    const [currentSnapshot, previousSnapshot, latestSnapshotRevision] =
+      await Promise.all([
+        currentRevision > 0
+          ? this.prisma.commercialOfferSnapshot.findUnique({
+              where: {
+                productId_revision: {
+                  productId,
+                  revision: currentRevision,
+                },
+              },
+            })
+          : Promise.resolve(null),
+        currentRevision > 1
+          ? this.prisma.commercialOfferSnapshot.findUnique({
+              where: {
+                productId_revision: {
+                  productId,
+                  revision: currentRevision - 1,
+                },
+              },
+            })
+          : Promise.resolve(null),
+        this.prisma.commercialOfferSnapshot.aggregate({
+          where: { productId },
+          _max: { revision: true },
+        }),
+      ]);
+    return {
+      product: mapShopeeOffer(product),
+      commercialSnapshotRevision: currentRevision,
+      commercialSnapshotFingerprint: product.commercialSnapshotFingerprint,
+      latestSnapshotRevision: latestSnapshotRevision._max.revision ?? null,
+      currentSnapshot: currentSnapshot
+        ? mapCommercialPromotionSnapshot({ ...currentSnapshot })
+        : null,
+      previousSnapshot: previousSnapshot
+        ? mapCommercialPromotionSnapshot({ ...previousSnapshot })
+        : null,
+    };
+  }
+
   async listCampaignCandidates(campaignId: string) {
     const records = await this.prisma.commercialPromotionCandidate.findMany({
       where: { campaignId },
@@ -2435,6 +2493,149 @@ export class PrismaCommercialPromotionRepository
         record as unknown as Record<string, unknown>,
       ),
     );
+  }
+
+  async findByCampaignAndProduct(campaignId: string, productId: string) {
+    const record = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { campaignId_productId: { campaignId, productId } },
+    });
+    return record
+      ? mapCommercialPromotionCandidate({ ...record })
+      : null;
+  }
+
+  async ensureManualCandidate(
+    input: CommercialManualCandidateMaterializationInput,
+  ) {
+    try {
+      const record = await this.prisma.$transaction(
+        async (transaction) => {
+          const [campaign, product, snapshot, current] = await Promise.all([
+            transaction.commercialGroupCampaign.findUnique({
+              where: { id: input.campaignId },
+              include: { niche: { select: { active: true } } },
+            }),
+            transaction.productLead.findUnique({
+              where: { id: input.productId },
+              select: {
+                id: true,
+                source: true,
+                commercialSnapshotRevision: true,
+                commercialSnapshotFingerprint: true,
+                unavailableAt: true,
+                offerEndsAt: true,
+              },
+            }),
+            transaction.commercialOfferSnapshot.findUnique({
+              where: { id: input.snapshotId },
+              select: { id: true, productId: true, revision: true, fingerprint: true },
+            }),
+            transaction.commercialPromotionCandidate.findUnique({
+              where: {
+                campaignId_productId: {
+                  campaignId: input.campaignId,
+                  productId: input.productId,
+                },
+              },
+            }),
+          ]);
+          if (
+            !campaign ||
+            !campaign.active ||
+            !campaign.niche.active ||
+            !product ||
+            product.source !== 'OFFICIAL' ||
+            !snapshot ||
+            snapshot.productId !== input.productId ||
+            snapshot.revision !== input.snapshotRevision ||
+            snapshot.fingerprint !== input.snapshotFingerprint ||
+            product.commercialSnapshotRevision !== input.snapshotRevision ||
+            product.commercialSnapshotFingerprint !== input.snapshotFingerprint
+          ) {
+            throw new AppError(
+              'Produto ou campanha mudou antes da selecao manual',
+              'MANUAL_PUBLICATION_STATE_CHANGED',
+            );
+          }
+          if (product.unavailableAt || (product.offerEndsAt && product.offerEndsAt <= input.now)) {
+            throw new AppError(
+              'Produto oficial indisponivel para publicacao manual',
+              'MANUAL_PUBLICATION_PRODUCT_INELIGIBLE',
+            );
+          }
+          if (current?.status === 'RESERVED') {
+            throw new AppError(
+              'Produto e grupo ja possuem uma reserva ativa',
+              'MANUAL_PUBLICATION_TARGET_CONFLICT',
+            );
+          }
+          if (
+            current?.status === 'DISPATCHED' &&
+            current.dedupeUntil !== null &&
+            current.dedupeUntil > input.now
+          ) {
+            throw new AppError(
+              'Produto ja possui deduplicacao ativa para a campanha',
+              'PRODUCT_ALREADY_SENT',
+            );
+          }
+
+          const data = {
+            snapshotId: input.snapshotId,
+            status:
+              current?.status === 'COPY_READY'
+                ? ('COPY_READY' as const)
+                : ('QUEUED' as const),
+            rankPosition: null,
+            commercialScore: input.commercialScore,
+            scorePolicyVersion: input.scorePolicyVersion,
+            minimumScoreUsed: input.minimumScoreUsed,
+            scoreBreakdown: input.scoreBreakdown as never,
+            promotionSignals: input.promotionSignals,
+            priceDropPercent: input.priceDropPercent,
+            lastEvaluatedAt: input.now,
+            expiresAt: input.expiresAt,
+            dedupeUntil: null,
+            blockedReason: null,
+            manualSelectionOverride: true,
+          };
+          const updated = current
+            ? await transaction.commercialPromotionCandidate.update({
+                where: { id: current.id },
+                data: {
+                  ...data,
+                  generatedCopyId:
+                    current.status === 'COPY_READY'
+                      ? current.generatedCopyId
+                      : null,
+                  queuedAt:
+                    current.status === 'COPY_READY'
+                      ? current.queuedAt
+                      : input.now,
+                },
+              })
+            : await transaction.commercialPromotionCandidate.create({
+                data: {
+                  ...data,
+                  campaignId: input.campaignId,
+                  productId: input.productId,
+                  queuedAt: input.now,
+                },
+              });
+          return updated;
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      return mapCommercialPromotionCandidate({ ...record });
+    } catch (error) {
+      if (isUniqueConstraintError(error) || isTransactionConflictError(error)) {
+        throw new AppError(
+          'Outra selecao manual alterou o mesmo produto e grupo',
+          'MANUAL_PUBLICATION_TARGET_CONFLICT',
+        );
+      }
+      throw error;
+    }
   }
 
   async findRecentlySentProductIds(input: {
@@ -2530,7 +2731,10 @@ export class PrismaCommercialPromotionRepository
               orderBy: { id: 'asc' },
             });
           const protectedCount = currentCandidates.filter(
-            ({ status }) => status === 'COPY_READY' || status === 'RESERVED',
+            ({ status, manualSelectionOverride }) =>
+              status === 'COPY_READY' ||
+              status === 'RESERVED' ||
+              (status === 'QUEUED' && manualSelectionOverride),
           ).length;
           const queuedBefore = currentCandidates.filter(
             ({ status }) => status === 'QUEUED',
@@ -2695,7 +2899,8 @@ export class PrismaCommercialPromotionRepository
           for (const candidate of currentCandidates) {
             if (
               candidate.status !== 'QUEUED' ||
-              selectedIds.has(candidate.productId)
+              selectedIds.has(candidate.productId) ||
+              candidate.manualSelectionOverride
             ) {
               continue;
             }
@@ -3645,6 +3850,17 @@ export class PrismaCommercialPipelineRunRepository
       : null;
   }
 
+  async findByExecutionId(
+    executionId: string,
+  ): Promise<CommercialPipelineRunRecord | null> {
+    const record = await this.prisma.commercialPipelineRun.findUnique({
+      where: { executionId } as never,
+    });
+    return record
+      ? mapCommercialPipelineRun({ ...record })
+      : null;
+  }
+
   async findByDispatchId(
     dispatchId: string,
   ): Promise<CommercialPipelineRunRecord | null> {
@@ -4171,6 +4387,529 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
         ambiguous as unknown as Record<string, unknown>,
       );
     });
+  }
+}
+
+const manualPublicationTargetInclude = {
+  destination: {
+    select: {
+      id: true,
+      name: true,
+      type: true,
+      fingerprint: true,
+      active: true,
+      available: true,
+    },
+  },
+  campaign: {
+    select: {
+      id: true,
+      name: true,
+      active: true,
+      niche: { select: { id: true, active: true } },
+      dailyLimit: true,
+      cadenceMinutes: true,
+      timezone: true,
+      allowedStartTime: true,
+      allowedEndTime: true,
+      failureCount: true,
+      nextEligibleAt: true,
+    },
+  },
+  candidate: {
+    select: { id: true, generatedCopyId: true, status: true },
+  },
+  run: {
+    select: {
+      id: true,
+      status: true,
+      finalStatus: true,
+      investigationRequired: true,
+    },
+  },
+  dispatch: {
+    select: { id: true, status: true, sentAt: true },
+  },
+  outbox: {
+    select: { id: true, status: true },
+  },
+} as const;
+
+const manualPublicationRequestInclude = {
+  targets: {
+    orderBy: [
+      { logicalGroupFingerprint: 'asc' },
+      { destinationId: 'asc' },
+    ],
+    include: manualPublicationTargetInclude,
+  },
+} as const;
+
+const mapManualPublicationTarget = (
+  record: Record<string, unknown>,
+): ManualPublicationTargetRecord => {
+  const destination = record.destination as Record<string, unknown> | null;
+  const campaign = record.campaign as Record<string, unknown> | null;
+  const niche = campaign?.niche as Record<string, unknown> | null;
+  return {
+    id: String(record.id),
+    requestId: String(record.requestId),
+    destinationId: String(record.destinationId),
+    campaignId: String(record.campaignId),
+    logicalGroupFingerprint: String(record.logicalGroupFingerprint),
+    assignedInstanceName: String(record.assignedInstanceName),
+    candidateId: (record.candidateId as string | null) ?? null,
+    runId: (record.runId as string | null) ?? null,
+    dispatchId: (record.dispatchId as string | null) ?? null,
+    outboxId: (record.outboxId as string | null) ?? null,
+    status: record.status as ManualPublicationTargetRecord['status'],
+    blockedReason: (record.blockedReason as string | null) ?? null,
+    investigationRequired: Boolean(record.investigationRequired),
+    createdAt: record.createdAt as Date,
+    updatedAt: record.updatedAt as Date,
+    destination: destination
+      ? {
+          id: String(destination.id),
+          name: String(destination.name),
+          type: destination.type as 'GROUP' | 'INDIVIDUAL',
+          fingerprint: (destination.fingerprint as string | null) ?? null,
+          active: Boolean(destination.active),
+          available: Boolean(destination.available),
+        }
+      : undefined,
+    campaign: campaign
+      ? {
+          id: String(campaign.id),
+          name: String(campaign.name),
+          active: Boolean(campaign.active),
+          nicheId: String(niche?.id),
+          nicheActive: Boolean(niche?.active),
+          dailyLimit: Number(campaign.dailyLimit),
+          cadenceMinutes: Number(campaign.cadenceMinutes),
+          timezone: String(campaign.timezone),
+          allowedStartTime: String(campaign.allowedStartTime),
+          allowedEndTime: String(campaign.allowedEndTime),
+          failureCount: Number(campaign.failureCount),
+          nextEligibleAt: (campaign.nextEligibleAt as Date | null) ?? null,
+        }
+      : undefined,
+    candidate: record.candidate
+      ? (record.candidate as ManualPublicationTargetRecord['candidate'])
+      : null,
+    run: record.run
+      ? (record.run as ManualPublicationTargetRecord['run'])
+      : null,
+    dispatch: record.dispatch
+      ? (record.dispatch as ManualPublicationTargetRecord['dispatch'])
+      : null,
+    outbox: record.outbox
+      ? (record.outbox as ManualPublicationTargetRecord['outbox'])
+      : null,
+  };
+};
+
+const mapManualPublicationRequest = (
+  record: Record<string, unknown>,
+): ManualPublicationRequestRecord => ({
+  id: String(record.id),
+  idempotencyKey: String(record.idempotencyKey),
+  payloadHash: String(record.payloadHash),
+  productId: String(record.productId),
+  requestedSnapshotId: String(record.requestedSnapshotId),
+  requestedSnapshotRevision: Number(record.requestedSnapshotRevision),
+  requestedSnapshotFingerprint: String(record.requestedSnapshotFingerprint),
+  status: record.status as ManualPublicationRequestRecord['status'],
+  createdAt: record.createdAt as Date,
+  updatedAt: record.updatedAt as Date,
+  completedAt: (record.completedAt as Date | null) ?? null,
+  processingOwnerId: (record.processingOwnerId as string | null) ?? null,
+  processingLeaseExpiresAt:
+    (record.processingLeaseExpiresAt as Date | null) ?? null,
+  targets: Array.isArray(record.targets)
+    ? record.targets.map((target) =>
+        mapManualPublicationTarget({ ...target }),
+      )
+    : [],
+});
+
+const loadManualPublicationRequest = (
+  client: Pick<DatabaseClient, 'manualPublicationRequest'>,
+  where: { id: string } | { idempotencyKey: string },
+) =>
+  client.manualPublicationRequest.findUnique({
+    where,
+    include: manualPublicationRequestInclude,
+  } as never);
+
+export class PrismaManualPublicationRequestRepository
+  implements ManualPublicationRequestRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  private async assertCurrentState(
+    transaction: Pick<
+      DatabaseClient,
+      | 'productLead'
+      | 'commercialOfferSnapshot'
+      | 'whatsAppDestination'
+      | 'commercialGroupCampaign'
+      | 'whatsAppInstance'
+    >,
+    input: ManualPublicationRequestCreateData,
+  ) {
+    const [product, snapshot, destinations, campaigns, instances] =
+      await Promise.all([
+        transaction.productLead.findUnique({
+          where: { id: input.productId },
+          select: {
+            id: true,
+            source: true,
+            affiliateLink: true,
+            productLink: true,
+            unavailableAt: true,
+            offerEndsAt: true,
+            commercialSnapshotRevision: true,
+            commercialSnapshotFingerprint: true,
+          },
+        }),
+        transaction.commercialOfferSnapshot.findUnique({
+          where: { id: input.requestedSnapshotId },
+          select: { id: true, productId: true, revision: true, fingerprint: true },
+        }),
+        transaction.whatsAppDestination.findMany({
+          where: {
+            id: { in: input.targets.map((target) => target.destinationId) },
+          },
+          select: {
+            id: true,
+            type: true,
+            active: true,
+            available: true,
+            fingerprint: true,
+            assignedInstanceName: true,
+          },
+        }),
+        transaction.commercialGroupCampaign.findMany({
+          where: { id: { in: input.targets.map((target) => target.campaignId) } },
+          select: {
+            id: true,
+            logicalGroupFingerprint: true,
+            active: true,
+            niche: { select: { active: true } },
+          },
+        }),
+        transaction.whatsAppInstance.findMany({
+          where: {
+            name: {
+              in: input.targets.map((target) => target.assignedInstanceName),
+            },
+          },
+          select: { name: true, active: true },
+        }),
+      ]);
+    const destinationById = new Map(destinations.map((row) => [row.id, row]));
+    const campaignById = new Map(campaigns.map((row) => [row.id, row]));
+    const instanceByName = new Map(instances.map((row) => [row.name, row]));
+    const now = new Date();
+    const validProduct =
+      product?.source === 'OFFICIAL' &&
+      !product.unavailableAt &&
+      (!product.offerEndsAt || product.offerEndsAt > now) &&
+      Boolean(product.affiliateLink) &&
+      Boolean(product.productLink) &&
+      product.commercialSnapshotRevision === input.requestedSnapshotRevision &&
+      product.commercialSnapshotFingerprint ===
+        input.requestedSnapshotFingerprint;
+    const validSnapshot =
+      snapshot?.id === input.requestedSnapshotId &&
+      snapshot.productId === input.productId &&
+      snapshot.revision === input.requestedSnapshotRevision &&
+      snapshot.fingerprint === input.requestedSnapshotFingerprint;
+    const validTargets = input.targets.every((target) => {
+      const destination = destinationById.get(target.destinationId);
+      const campaign = campaignById.get(target.campaignId);
+      const instance = instanceByName.get(target.assignedInstanceName);
+      return Boolean(
+        destination &&
+          destination.type === 'GROUP' &&
+          destination.fingerprint === target.logicalGroupFingerprint &&
+          destination.assignedInstanceName === target.assignedInstanceName &&
+          campaign &&
+          campaign.logicalGroupFingerprint === target.logicalGroupFingerprint &&
+          instance,
+      );
+    });
+    if (!validProduct || !validSnapshot || !validTargets) {
+      throw new AppError(
+        'Produto, snapshot ou destino mudou antes da aceitacao manual',
+        'MANUAL_PUBLICATION_STATE_CHANGED',
+      );
+    }
+  }
+
+  async accept(input: ManualPublicationRequestCreateData): Promise<ManualPublicationAcceptance> {
+    try {
+      const record = await this.prisma.$transaction(
+        async (transaction) => {
+          const existing = await loadManualPublicationRequest(
+            transaction,
+            { idempotencyKey: input.idempotencyKey },
+          );
+          if (existing) {
+            if (
+              existing.payloadHash !== input.payloadHash ||
+              existing.productId !== input.productId
+            ) {
+              throw new AppError(
+                'A chave de idempotencia ja representa outro payload',
+                'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
+              );
+            }
+            return {
+              created: false,
+              request: mapManualPublicationRequest({ ...existing }),
+            };
+          }
+          await this.assertCurrentState(transaction, input);
+          const request = await transaction.manualPublicationRequest.create({
+            data: {
+              id: input.id,
+              idempotencyKey: input.idempotencyKey,
+              payloadHash: input.payloadHash,
+              productId: input.productId,
+              requestedSnapshotId: input.requestedSnapshotId,
+              requestedSnapshotRevision: input.requestedSnapshotRevision,
+              requestedSnapshotFingerprint: input.requestedSnapshotFingerprint,
+              status: input.status ?? 'ACCEPTED',
+              createdAt: input.createdAt,
+            },
+          });
+          await transaction.manualPublicationTarget.createMany({
+            data: input.targets.map((target) => ({
+              id: target.id,
+              requestId: request.id,
+              destinationId: target.destinationId,
+              campaignId: target.campaignId,
+              logicalGroupFingerprint: target.logicalGroupFingerprint,
+              assignedInstanceName: target.assignedInstanceName,
+              status: target.status ?? 'ACCEPTED',
+            })),
+          });
+          const accepted = await loadManualPublicationRequest(transaction, {
+            id: request.id,
+          });
+          if (!accepted) throw new Error('manual request disappeared');
+          return {
+            created: true,
+            request: mapManualPublicationRequest({ ...accepted }),
+          };
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      return record;
+    } catch (error) {
+      if (isUniqueConstraintError(error) || isTransactionConflictError(error)) {
+        const existing = await this.findByIdempotencyKey(input.idempotencyKey);
+        if (!existing) throw error;
+        if (
+          existing.payloadHash !== input.payloadHash ||
+          existing.productId !== input.productId
+        ) {
+          throw new AppError(
+            'A chave de idempotencia ja representa outro payload',
+            'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
+          );
+        }
+        return { request: existing, created: false };
+      }
+      throw error;
+    }
+  }
+
+  async findById(id: string) {
+    const record = await loadManualPublicationRequest(this.prisma, { id });
+    return record
+      ? mapManualPublicationRequest({ ...record })
+      : null;
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string) {
+    const record = await loadManualPublicationRequest(this.prisma, {
+      idempotencyKey,
+    });
+    return record
+      ? mapManualPublicationRequest({ ...record })
+      : null;
+  }
+
+  async claimProcessing(
+    id: string,
+    ownerId: string,
+    now: Date,
+    leaseExpiresAt: Date,
+  ) {
+    const claimed = await this.prisma.manualPublicationRequest.updateMany({
+      where: {
+        id,
+        OR: [
+          { status: 'ACCEPTED' },
+          {
+            status: 'PROCESSING',
+            OR: [
+              { processingLeaseExpiresAt: null },
+              { processingLeaseExpiresAt: { lte: now } },
+            ],
+          },
+        ],
+      },
+      data: {
+        status: 'PROCESSING',
+        processingOwnerId: ownerId,
+        processingLeaseExpiresAt: leaseExpiresAt,
+        completedAt: null,
+      },
+    } as never);
+    if (claimed.count !== 1) return null;
+    return this.findById(id);
+  }
+
+  async renewProcessing(
+    id: string,
+    ownerId: string,
+    leaseExpiresAt: Date,
+  ) {
+    const renewed = await this.prisma.manualPublicationRequest.updateMany({
+      where: {
+        id,
+        status: 'PROCESSING',
+        processingOwnerId: ownerId,
+      },
+      data: { processingLeaseExpiresAt: leaseExpiresAt },
+    } as never);
+    return renewed.count === 1;
+  }
+
+  async reserveSendSlot(
+    input: ManualPublicationQuotaReservationInput,
+  ): Promise<ManualPublicationQuotaReservation> {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`
+        SELECT "id"
+        FROM "CommercialAutomationSettings"
+        WHERE "id" = 'commercial-automation'
+        FOR UPDATE
+      `;
+      const target = await transaction.manualPublicationTarget.findUnique({
+        where: { id: input.targetId },
+        select: { id: true, destinationId: true, status: true },
+      });
+      if (
+        !target ||
+        !['ACCEPTED', 'PROCESSING'].includes(target.status)
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
+        };
+      }
+      const sentWhere = {
+        status: 'SENT' as const,
+        sentAt: { gte: input.dayStartsAt, lt: input.dayEndsAt },
+        destination: { type: 'GROUP' as const },
+      };
+      const activeWhere = {
+        id: { not: input.targetId },
+        status: { in: ['PROCESSING', 'QUEUED'] as const },
+        OR: [
+          { dispatchId: null },
+          { dispatch: { status: { not: 'SENT' as const } } },
+        ],
+      };
+      const [sentGlobal, sentGroup, activeGlobal, activeGroup] =
+        await Promise.all([
+          transaction.whatsAppDispatch.count({ where: sentWhere }),
+          transaction.whatsAppDispatch.count({
+            where: { ...sentWhere, destinationId: target.destinationId },
+          }),
+          transaction.manualPublicationTarget.count({ where: activeWhere } as never),
+          transaction.manualPublicationTarget.count({
+            where: { ...activeWhere, destinationId: target.destinationId },
+          } as never),
+        ]);
+      if (
+        input.globalDailyLimit <= 0 ||
+        sentGlobal + activeGlobal >= input.globalDailyLimit
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'GLOBAL_DAILY_LIMIT_REACHED',
+        };
+      }
+      if (
+        input.groupDailyLimit <= 0 ||
+        sentGroup + activeGroup >= input.groupDailyLimit
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'GROUP_DAILY_LIMIT_REACHED',
+        };
+      }
+      const claimed = await transaction.manualPublicationTarget.updateMany({
+        where: {
+          id: input.targetId,
+          status: { in: ['ACCEPTED', 'PROCESSING'] as const },
+        },
+        data: { status: 'PROCESSING' },
+      });
+      return claimed.count === 1
+        ? { kind: 'RESERVED' as const }
+        : {
+            kind: 'BLOCKED' as const,
+            reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
+          };
+    });
+  }
+
+  async releaseSendSlot(targetId: string): Promise<void> {
+    await this.prisma.manualPublicationTarget.updateMany({
+      where: {
+        id: targetId,
+        status: 'PROCESSING',
+        candidateId: null,
+        runId: null,
+        dispatchId: null,
+        outboxId: null,
+      },
+      data: { status: 'ACCEPTED' },
+    });
+  }
+
+  async updateTarget(id: string, data: ManualPublicationTargetUpdate) {
+    try {
+      const record = await this.prisma.manualPublicationTarget.update({
+        where: { id },
+        data,
+        include: manualPublicationTargetInclude,
+      } as never);
+      return mapManualPublicationTarget({ ...record });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  async updateRequest(id: string, data: ManualPublicationRequestUpdate) {
+    try {
+      const record = await this.prisma.manualPublicationRequest.update({
+        where: { id },
+        data,
+        include: manualPublicationRequestInclude,
+      } as never);
+      return mapManualPublicationRequest({ ...record });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      throw error;
+    }
   }
 }
 

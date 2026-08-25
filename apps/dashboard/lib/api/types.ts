@@ -384,6 +384,85 @@ export type ShopeeOfferDetail = ShopeeOffer & {
   flashDealCapability: FlashDealCapability;
 };
 
+export type ManualPublicationGroupOption = {
+  destinationId: string;
+  displayName: string;
+  fingerprint: string | null;
+  campaignId: string | null;
+  assignedInstanceName: string | null;
+  eligible: boolean;
+  blockers: string[];
+  copyStatus: 'AVAILABLE' | 'READY' | 'BLOCKED' | 'UNKNOWN';
+  draftPreview: {
+    generatedCopyId: string;
+    imageUrl: string | null;
+    caption: string;
+    deliveryMode: 'IMAGE' | 'TEXT';
+    warnings: string[];
+    title: string;
+    message: string;
+    cta: string;
+    hashtags: string;
+  } | null;
+};
+
+export type ManualPublicationOptions = {
+  product: {
+    id: string;
+    name: string;
+    source: string | null;
+    price: string;
+    affiliateLinkPresent: boolean;
+    available: boolean;
+    snapshot: {
+      id: string;
+      revision: number;
+      fingerprint: string;
+      capturedAt: string;
+    } | null;
+  };
+  candidate: {
+    available: boolean;
+    copyReady: boolean;
+  };
+  groups: ManualPublicationGroupOption[];
+};
+
+export type ManualPublicationTarget = {
+  id: string;
+  requestId: string;
+  destinationId: string;
+  campaignId: string;
+  logicalGroupFingerprint: string;
+  assignedInstanceName: string;
+  candidateId: string | null;
+  runId: string | null;
+  dispatchId: string | null;
+  outboxId: string | null;
+  status: 'ACCEPTED' | 'PROCESSING' | 'QUEUED' | 'SENT' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+  blockedReason: string | null;
+  investigationRequired: boolean;
+  sentAt: string | null;
+  destination?: { id: string; name: string; type: 'GROUP' | 'INDIVIDUAL'; fingerprint: string | null };
+  campaign?: { id: string; name: string; active: boolean; nicheId: string; nicheActive: boolean };
+};
+
+export type ManualPublicationRequest = {
+  id: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  productId: string;
+  requestedSnapshotId: string;
+  requestedSnapshotRevision: number;
+  requestedSnapshotFingerprint: string;
+  status: 'ACCEPTED' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  product: { id: string; name: string; source: string | null };
+  targets: ManualPublicationTarget[];
+};
+
 export type ShopeeCategory = {
   id: string;
   name: string | null;

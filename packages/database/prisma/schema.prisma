@@ -12,6 +12,7 @@ model ProductLead {
   whatsappDispatches     WhatsAppDispatch[]
   coupons                Coupon[]
   commercialPipelineRuns CommercialPipelineRun[]
+  manualPublicationRequests ManualPublicationRequest[] @relation("ManualPublicationRequestProduct")
   commercialOfferSnapshots CommercialOfferSnapshot[]
   commercialPromotionCandidates CommercialPromotionCandidate[]
   id                     String                  @id @default(cuid())
@@ -87,6 +88,7 @@ model CommercialOfferSnapshot {
   promotionCandidates CommercialPromotionCandidate[]
   generatedCopies GeneratedCopy[]
   copyGenerationAttempts CommercialCopyGenerationAttempt[]
+  manualPublicationRequests ManualPublicationRequest[] @relation("ManualPublicationRequestSnapshot")
 
   @@unique([productId, revision])
   @@index([productId, revision])
@@ -141,6 +143,7 @@ model WhatsAppDestination {
   dispatches             WhatsAppDispatch[]
   commercialPipelineRuns CommercialPipelineRun[]
   anchoredCampaigns      CommercialGroupCampaign[]
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetDestination")
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
 
@@ -156,6 +159,7 @@ model WhatsAppInstance {
   commercialPipelineRuns    CommercialPipelineRun[]
   whatsappDispatches        WhatsAppDispatch[]
   commercialDispatchOutboxes CommercialDispatchOutbox[]
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetInstance")
   createdAt                 DateTime                     @default(now())
   updatedAt                 DateTime                     @updatedAt
 }
@@ -204,6 +208,7 @@ model CommercialGroupCampaign {
   queueTargetSize         Int                  @default(40)
   dedupeDays              Int                  @default(30)
   promotionCandidates     CommercialPromotionCandidate[]
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetCampaign")
   createdAt               DateTime             @default(now())
   updatedAt               DateTime             @updatedAt
 
@@ -235,8 +240,10 @@ model CommercialPromotionCandidate {
   expiresAt        DateTime?
   dedupeUntil      DateTime?
   blockedReason    String?
+  manualSelectionOverride Boolean                         @default(false)
   createdAt        DateTime                           @default(now())
   updatedAt        DateTime                           @updatedAt
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetCandidate")
 
   @@unique([campaignId, productId])
   @@index([campaignId, status, rankPosition])
@@ -302,6 +309,7 @@ model WhatsAppDispatch {
   commercialPipelineRun CommercialPipelineRun?
   commercialOutbox      CommercialDispatchOutbox?
   manualRecovery        WhatsAppDispatchManualRecovery?
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetDispatch")
 
   @@unique([generatedCopyId, destinationId])
   @@index([productId])
@@ -398,6 +406,7 @@ model CommercialPipelineRun {
   createdAt             DateTime                       @default(now())
   completedAt           DateTime?
   dispatchOutbox        CommercialDispatchOutbox?
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetRun")
 
   @@index([createdAt])
   @@index([status, mode])
@@ -421,9 +430,66 @@ model CommercialDispatchOutbox {
   failureCode     String?
   createdAt       DateTime                       @default(now())
   publishedAt     DateTime?
+  manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetOutbox")
 
   @@index([status, createdAt])
   @@index([instanceName])
+}
+
+model ManualPublicationRequest {
+  id                         String                         @id @default(cuid())
+  idempotencyKey             String                         @unique
+  payloadHash                String
+  productId                  String
+  product                    ProductLead                    @relation("ManualPublicationRequestProduct", fields: [productId], references: [id], onDelete: Restrict)
+  requestedSnapshotId        String
+  requestedSnapshot          CommercialOfferSnapshot       @relation("ManualPublicationRequestSnapshot", fields: [requestedSnapshotId], references: [id], onDelete: Restrict)
+  requestedSnapshotRevision  Int
+  requestedSnapshotFingerprint String
+  status                     ManualPublicationRequestStatus @default(ACCEPTED)
+  createdAt                  DateTime                       @default(now())
+  updatedAt                  DateTime                       @updatedAt
+  completedAt                DateTime?
+  processingOwnerId          String?
+  processingLeaseExpiresAt   DateTime?
+  targets                    ManualPublicationTarget[]
+
+  @@index([productId, status])
+  @@index([status, createdAt])
+  @@index([status, processingLeaseExpiresAt])
+}
+
+model ManualPublicationTarget {
+  id                     String                         @id @default(cuid())
+  requestId              String
+  request                ManualPublicationRequest       @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  destinationId          String
+  destination             WhatsAppDestination            @relation("ManualPublicationTargetDestination", fields: [destinationId], references: [id], onDelete: Restrict)
+  campaignId             String
+  campaign               CommercialGroupCampaign         @relation("ManualPublicationTargetCampaign", fields: [campaignId], references: [id], onDelete: Restrict)
+  logicalGroupFingerprint String
+  assignedInstanceName   String
+  assignedInstance       WhatsAppInstance             @relation("ManualPublicationTargetInstance", fields: [assignedInstanceName], references: [name], onDelete: Restrict)
+  candidateId            String?
+  candidate              CommercialPromotionCandidate?  @relation("ManualPublicationTargetCandidate", fields: [candidateId], references: [id], onDelete: Restrict)
+  runId                  String?
+  run                    CommercialPipelineRun?         @relation("ManualPublicationTargetRun", fields: [runId], references: [id], onDelete: Restrict)
+  dispatchId             String?
+  dispatch               WhatsAppDispatch?              @relation("ManualPublicationTargetDispatch", fields: [dispatchId], references: [id], onDelete: Restrict)
+  outboxId               String?
+  outbox                 CommercialDispatchOutbox?       @relation("ManualPublicationTargetOutbox", fields: [outboxId], references: [id], onDelete: Restrict)
+  status                 ManualPublicationTargetStatus  @default(ACCEPTED)
+  blockedReason          String?
+  investigationRequired  Boolean                        @default(false)
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+
+  @@unique([requestId, destinationId])
+  @@index([destinationId, status])
+  @@index([campaignId, status])
+  @@index([runId])
+  @@index([dispatchId])
+  @@index([outboxId])
 }
 
 model CommercialAutomationSettings {
@@ -516,6 +582,26 @@ enum CommercialPipelineFinalStatus {
 enum CommercialDispatchOutboxStatus {
   PENDING
   PUBLISHED
+  AMBIGUOUS
+}
+
+enum ManualPublicationRequestStatus {
+  ACCEPTED
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  BLOCKED
+  FAILED
+  AMBIGUOUS
+}
+
+enum ManualPublicationTargetStatus {
+  ACCEPTED
+  PROCESSING
+  QUEUED
+  SENT
+  BLOCKED
+  FAILED
   AMBIGUOUS
 }
 

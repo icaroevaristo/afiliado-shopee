@@ -59,6 +59,7 @@ export type CommercialPipelineConfirmationResult = {
 
 export type CommercialPipelineConfirmationOptions = {
   existingGeneratedCopyId?: string;
+  manual?: boolean;
 };
 
 export type CommercialPipelineConfirmationServiceOptions = {
@@ -80,7 +81,10 @@ const changed = (message: string, code: string): never => {
   throw new AppError(message, code);
 };
 
-const assertEnvironment = (environment: CommercialConfirmationEnvironment) => {
+const assertEnvironment = (
+  environment: CommercialConfirmationEnvironment,
+  options: { manual?: boolean } = {},
+) => {
   if (!environment.groupSendEnabled) {
     changed(
       'Envio comercial para grupos esta desativado',
@@ -93,7 +97,7 @@ const assertEnvironment = (environment: CommercialConfirmationEnvironment) => {
       'COMMERCIAL_SAFE_MODE_REQUIRED',
     );
   }
-  if (environment.schedulerEnabled) {
+  if (environment.schedulerEnabled && !options.manual) {
     changed(
       'Scheduler deve permanecer desativado',
       'COMMERCIAL_SCHEDULER_BLOCKED',
@@ -172,9 +176,15 @@ export class CommercialPipelineConfirmationService {
         'COMMERCIAL_CONFIRMATION_INVALID',
       );
     }
-    assertEnvironment(this.options.environment);
+    assertEnvironment(this.options.environment, { manual: options.manual });
     const existingGeneratedCopyId = options.existingGeneratedCopyId;
     const hasExistingGeneratedCopy = existingGeneratedCopyId !== undefined;
+    if (options.manual && !hasExistingGeneratedCopy) {
+      changed(
+        'Publicacao manual exige copy vinculada ao candidate',
+        'MANUAL_PUBLICATION_CANDIDATE_COPY_REQUIRED',
+      );
+    }
     if (existingGeneratedCopyId !== undefined && !existingGeneratedCopyId.trim()) {
       changed(
         'Copy candidate-scoped invalida',
@@ -191,6 +201,7 @@ export class CommercialPipelineConfirmationService {
       if (
         !product ||
         !['MOCK', 'MANUAL', 'OFFICIAL'].includes(product.source) ||
+        (options.manual && product.source !== 'OFFICIAL') ||
         commercialProductRejections(product, this.clock()).length > 0 ||
         product.productName !== run.productName ||
         product.price !== run.productPrice ||

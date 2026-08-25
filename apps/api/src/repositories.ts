@@ -383,6 +383,9 @@ export interface CommercialPipelineRunRepository {
     filters: CommercialPipelineRunFilters,
   ): Promise<{ items: CommercialPipelineRunRecord[]; total: number }>;
   findById(id: string): Promise<CommercialPipelineRunRecord | null>;
+  findByExecutionId(
+    executionId: string,
+  ): Promise<CommercialPipelineRunRecord | null>;
   findByDispatchId(
     dispatchId: string,
   ): Promise<CommercialPipelineRunRecord | null>;
@@ -496,6 +499,195 @@ export interface CommercialDispatchOutboxRepository {
     failureCode: string,
     completedAt: Date,
   ): Promise<CommercialDispatchOutboxRecord | null>;
+}
+
+export type ManualPublicationRequestStatus =
+  | 'ACCEPTED'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'AMBIGUOUS';
+
+export type ManualPublicationTargetStatus =
+  | 'ACCEPTED'
+  | 'PROCESSING'
+  | 'QUEUED'
+  | 'SENT'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'AMBIGUOUS';
+
+export type ManualPublicationTargetCreateData = {
+  id?: string;
+  requestId: string;
+  destinationId: string;
+  campaignId: string;
+  logicalGroupFingerprint: string;
+  assignedInstanceName: string;
+  status?: ManualPublicationTargetStatus;
+};
+
+export type ManualPublicationRequestCreateData = {
+  id?: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  productId: string;
+  requestedSnapshotId: string;
+  requestedSnapshotRevision: number;
+  requestedSnapshotFingerprint: string;
+  status?: ManualPublicationRequestStatus;
+  createdAt?: Date;
+  targets: ManualPublicationTargetCreateData[];
+};
+
+export type ManualPublicationTargetRecord = {
+  id: string;
+  requestId: string;
+  destinationId: string;
+  campaignId: string;
+  logicalGroupFingerprint: string;
+  assignedInstanceName: string;
+  candidateId: string | null;
+  runId: string | null;
+  dispatchId: string | null;
+  outboxId: string | null;
+  status: ManualPublicationTargetStatus;
+  blockedReason: string | null;
+  investigationRequired: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  destination?: {
+    id: string;
+    name: string;
+    type: WhatsAppDestinationType;
+    fingerprint: string | null;
+    active: boolean;
+    available: boolean;
+  };
+  campaign?: {
+    id: string;
+    name: string;
+    active: boolean;
+    nicheId: string;
+    nicheActive: boolean;
+    dailyLimit: number;
+    cadenceMinutes: number;
+    timezone: string;
+    allowedStartTime: string;
+    allowedEndTime: string;
+    failureCount: number;
+    nextEligibleAt: Date | null;
+  };
+  candidate?: {
+    id: string;
+    generatedCopyId: string | null;
+    status: CommercialPromotionCandidateStatus;
+  } | null;
+  run?: {
+    id: string;
+    status: CommercialPipelineRunStatus;
+    finalStatus: CommercialPipelineFinalStatus | null;
+    investigationRequired: boolean;
+  } | null;
+  dispatch?: {
+    id: string;
+    status: WhatsAppDispatchStatus;
+    sentAt: Date | null;
+  } | null;
+  outbox?: {
+    id: string;
+    status: CommercialDispatchOutboxStatus;
+  } | null;
+};
+
+export type ManualPublicationRequestRecord = {
+  id: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  productId: string;
+  requestedSnapshotId: string;
+  requestedSnapshotRevision: number;
+  requestedSnapshotFingerprint: string;
+  status: ManualPublicationRequestStatus;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+  processingOwnerId: string | null;
+  processingLeaseExpiresAt: Date | null;
+  targets: ManualPublicationTargetRecord[];
+};
+
+export type ManualPublicationTargetUpdate = Partial<
+  Pick<
+    ManualPublicationTargetRecord,
+    | 'candidateId'
+    | 'runId'
+    | 'dispatchId'
+    | 'outboxId'
+    | 'status'
+    | 'blockedReason'
+    | 'investigationRequired'
+  >
+>;
+
+export type ManualPublicationRequestUpdate = Partial<
+  Pick<
+    ManualPublicationRequestRecord,
+    'status' | 'completedAt' | 'processingOwnerId' | 'processingLeaseExpiresAt'
+  >
+>;
+
+export type ManualPublicationAcceptance = {
+  request: ManualPublicationRequestRecord;
+  created: boolean;
+};
+
+export type ManualPublicationQuotaReservationInput = {
+  targetId: string;
+  now: Date;
+  dayStartsAt: Date;
+  dayEndsAt: Date;
+  globalDailyLimit: number;
+  groupDailyLimit: number;
+};
+
+export type ManualPublicationQuotaReservation =
+  | { kind: 'RESERVED' }
+  | { kind: 'BLOCKED'; reason: string };
+
+export interface ManualPublicationRequestRepository {
+  accept(
+    input: ManualPublicationRequestCreateData,
+  ): Promise<ManualPublicationAcceptance>;
+  findById(id: string): Promise<ManualPublicationRequestRecord | null>;
+  findByIdempotencyKey(
+    idempotencyKey: string,
+  ): Promise<ManualPublicationRequestRecord | null>;
+  claimProcessing(
+    id: string,
+    ownerId: string,
+    now: Date,
+    leaseExpiresAt: Date,
+  ): Promise<ManualPublicationRequestRecord | null>;
+  renewProcessing(
+    id: string,
+    ownerId: string,
+    leaseExpiresAt: Date,
+  ): Promise<boolean>;
+  reserveSendSlot(
+    input: ManualPublicationQuotaReservationInput,
+  ): Promise<ManualPublicationQuotaReservation>;
+  releaseSendSlot(targetId: string): Promise<void>;
+  updateTarget(
+    id: string,
+    data: ManualPublicationTargetUpdate,
+  ): Promise<ManualPublicationTargetRecord | null>;
+  updateRequest(
+    id: string,
+    data: ManualPublicationRequestUpdate,
+  ): Promise<ManualPublicationRequestRecord | null>;
 }
 
 export type CommercialAutomationSettingsRecord = {
@@ -1045,6 +1237,7 @@ export interface CommercialPromotionCatalogRepository {
     items: CommercialPromotionCatalogItem[];
     hasMore: boolean;
   }>;
+  findOfficialCatalogItem?(productId: string): Promise<CommercialPromotionCatalogItem | null>;
 }
 
 export type CommercialPromotionCandidateRecord = {
@@ -1066,8 +1259,25 @@ export type CommercialPromotionCandidateRecord = {
   expiresAt: Date | null;
   dedupeUntil: Date | null;
   blockedReason: string | null;
+  manualSelectionOverride?: boolean;
   createdAt: Date;
   updatedAt: Date;
+};
+
+export type CommercialManualCandidateMaterializationInput = {
+  campaignId: string;
+  productId: string;
+  snapshotId: string;
+  snapshotRevision: number;
+  snapshotFingerprint: string;
+  commercialScore: number;
+  scorePolicyVersion: CommercialOfferScorePolicyVersion;
+  minimumScoreUsed: number;
+  scoreBreakdown: CommercialPipelineScoreBreakdown;
+  promotionSignals: CommercialPromotionSignal[];
+  priceDropPercent: string | null;
+  expiresAt: Date | null;
+  now: Date;
 };
 
 export type CommercialPromotionRankedCandidate = {
@@ -1144,6 +1354,13 @@ export interface CommercialPromotionCandidateRepository {
     limit: number;
     status?: CommercialPromotionCandidateStatus;
   }): Promise<{ items: CommercialPromotionQueueItem[]; total: number }>;
+  findByCampaignAndProduct?(
+    campaignId: string,
+    productId: string,
+  ): Promise<CommercialPromotionCandidateRecord | null>;
+  ensureManualCandidate?(
+    input: CommercialManualCandidateMaterializationInput,
+  ): Promise<CommercialPromotionCandidateRecord>;
   markDispatchedByGeneratedCopyId(
     generatedCopyId: string,
   ): Promise<CommercialPromotionDispatchFinalization>;

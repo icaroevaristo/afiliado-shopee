@@ -279,6 +279,7 @@ describe('commercial reservation lease handoff integration', () => {
       }),
       list: vi.fn(),
       findById: vi.fn(async (id) => (id === runId ? run : null)),
+      findByExecutionId: vi.fn(async (id) => (id === runId ? run : null)),
       findByDispatchId: vi.fn(async (id) =>
         id === dispatchId ? run : null,
       ),

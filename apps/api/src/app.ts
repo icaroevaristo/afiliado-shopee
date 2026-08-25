@@ -47,6 +47,10 @@ import {
   createCommercialPromotionCopyGenerationService,
   createPrismaRepositories,
 } from './application-services';
+import {
+  ManualPublicationService,
+  type ManualPublicationInput,
+} from './manual-publication-service';
 import type { AnalyticsService } from './analytics-service';
 import { SchedulerStatusService } from './scheduler-status-service';
 import {
@@ -75,6 +79,7 @@ import { CommercialGroupCampaignService } from './commercial-group-campaign-serv
 import { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type { CommercialPromotionMiningService } from './commercial-promotion-mining-service';
 import type {
+  CommercialAutomationTarget,
   CommercialPromotionCandidateStatus,
   OperationalCatalogDeliveryStatus,
   OperationalCatalogFilters,
@@ -85,6 +90,8 @@ import type {
   CommercialAiCopyConfig,
   CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
+import { CommercialAutomationCandidateFlowService } from './commercial-automation-candidate-flow-service';
+import { CommercialMessageDraftService } from './commercial-message-draft-service';
 
 export type BuildAppOptions = {
   logger?: boolean;
@@ -134,6 +141,10 @@ export type BuildAppOptions = {
     CommercialPipelineConfirmationService,
     'confirm'
   >;
+  manualPublicationService?: Pick<
+    ManualPublicationService,
+    'getOptions' | 'create' | 'find'
+  >;
   commercialConfirmationEnvironment?: {
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -147,7 +158,7 @@ export type BuildAppOptions = {
     Partial<
       Pick<
         CommercialAutomationPolicyService,
-        'getScheduleSettings' | 'updateScheduleSettings'
+        'getScheduleSettings' | 'updateScheduleSettings' | 'evaluateManualSendSafety'
       >
     >;
   commercialAutomationSchedulePlanner?: Pick<
@@ -948,6 +959,74 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
           options.commercialAutomationConfig ?? COMMERCIAL_AUTOMATION_DEFAULTS,
       });
     return commercialAutomationPolicyService;
+  };
+  let manualPublicationService = options.manualPublicationService;
+  const getManualPublicationService = () => {
+    const configuredPolicy = getCommercialAutomationPolicyService();
+    const manualPolicy = {
+      evaluateManualSendSafety: async (
+        target: CommercialAutomationTarget,
+      ) => {
+        if (!configuredPolicy.evaluateManualSendSafety) {
+          throw new AppError(
+            'Policy de envio manual indisponivel',
+            'MANUAL_PUBLICATION_POLICY_UNAVAILABLE',
+          );
+        }
+        return configuredPolicy.evaluateManualSendSafety(target);
+      },
+    };
+    const configuredPipeline = getCommercialPipelineService() as Partial<
+      Pick<CommercialPipelineService, 'dryRunFromPromotionCandidate'>
+    >;
+    manualPublicationService ??= new ManualPublicationService({
+      requests: repositories.manualPublicationRequests,
+      offers: repositories.shopeeOffers,
+      catalog: repositories.commercialPromotions,
+      groups: repositories.whatsappGroups,
+      campaigns: repositories.commercialGroupCampaigns,
+      instances: repositories.whatsappInstances,
+      candidates: repositories.commercialPromotions,
+      copies: repositories.commercialPromotionCopies,
+      deliveryHistory: repositories.commercialDeliveryHistory,
+      policy: manualPolicy,
+      candidateFlow: new CommercialAutomationCandidateFlowService({
+        groups: repositories.whatsappGroups,
+        instances: repositories.whatsappInstances,
+        campaigns: repositories.commercialGroupCampaigns,
+        candidates: repositories.commercialPromotions,
+        deliveryHistory: repositories.commercialDeliveryHistory,
+        copies: repositories.commercialPromotionCopies,
+        mining: getCommercialPromotionMiningService(),
+        copyGeneration: getCommercialPromotionCopyService(),
+        draft: new CommercialMessageDraftService(),
+        pipeline: {
+          dryRunFromPromotionCandidate: (...args) => {
+            if (!configuredPipeline.dryRunFromPromotionCandidate) {
+              throw new AppError(
+                'Pipeline manual indisponivel',
+                'MANUAL_PUBLICATION_PIPELINE_UNAVAILABLE',
+              );
+            }
+            return configuredPipeline.dryRunFromPromotionCandidate(...args);
+          },
+        },
+        instanceName: options.groupInstanceName ?? 'affiliate-bot',
+        logger: app.log,
+      }),
+      confirmation: getCommercialPipelineConfirmationService(),
+      runs: repositories.commercialRuns,
+      outboxes: repositories.commercialDispatchOutboxes,
+      dispatches: repositories.whatsappDispatches,
+      environment: options.commercialConfirmationEnvironment ?? {
+        groupSendEnabled: false,
+        safeMode: true,
+        schedulerEnabled: options.schedulerEnabled ?? false,
+        maximumMessagesPerRun: 1,
+      },
+      logger: app.log,
+    });
+    return manualPublicationService;
   };
   const commercialAutomationSchedulePlanner =
     options.commercialAutomationSchedulePlanner ??
@@ -1955,6 +2034,83 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
           error instanceof AppError
             ? error.message
             : 'Falha segura ao confirmar pipeline comercial',
+      });
+    }
+  });
+
+  app.get('/commercial-publications/manual/options', async (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+    if (typeof query.productId !== 'string' || !query.productId.trim()) {
+      return reply.status(400).send({
+        error: 'MANUAL_PUBLICATION_INVALID',
+        message: 'productId obrigatorio',
+      });
+    }
+    try {
+      return await getManualPublicationService().getOptions(query.productId);
+    } catch (error) {
+      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      const status = code === 'OFFER_NOT_FOUND' ? 404 : code.startsWith('MANUAL_PUBLICATION_') ? 409 : 500;
+      return reply.status(status).send({
+        error: code,
+        message: error instanceof AppError ? error.message : 'Falha ao consultar opcoes de publicacao manual',
+      });
+    }
+  });
+
+  app.post('/commercial-publications/manual', async (request, reply) => {
+    const body = request.body;
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).sort().join('|') !== 'confirm|destinationIds|idempotencyKey|productId'
+    ) {
+      return reply.status(400).send({
+        error: 'MANUAL_PUBLICATION_INVALID',
+        message: 'Payload de publicacao manual invalido',
+      });
+    }
+    try {
+      const result = await getManualPublicationService().create(
+        body as ManualPublicationInput,
+      );
+      return reply.status(result.created ? 201 : 200).send(result.request);
+    } catch (error) {
+      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      const status =
+        code === 'MANUAL_PUBLICATION_INVALID' ||
+        code === 'MANUAL_PUBLICATION_CONFIRMATION_INVALID' ||
+        code === 'MANUAL_PUBLICATION_DESTINATION_LIMIT'
+          ? 400
+          : code === 'OFFER_NOT_FOUND'
+            ? 404
+            : code === 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT' ||
+                code.startsWith('MANUAL_PUBLICATION_') ||
+                code.startsWith('COMMERCIAL_') ||
+                code === 'PRODUCT_ALREADY_SENT'
+              ? 409
+              : 500;
+      request.log.error(
+        { event: 'manual-publication.route.failed', code },
+        'Manual publication route failed',
+      );
+      return reply.status(status).send({
+        error: code,
+        message: error instanceof AppError ? error.message : 'Falha segura na publicacao manual',
+      });
+    }
+  });
+
+  app.get('/commercial-publications/manual/:requestId', async (request, reply) => {
+    try {
+      const { requestId } = request.params as { requestId: string };
+      return await getManualPublicationService().find(requestId);
+    } catch (error) {
+      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      return reply.status(code === 'MANUAL_PUBLICATION_NOT_FOUND' ? 404 : 500).send({
+        error: code,
+        message: error instanceof AppError ? error.message : 'Falha ao consultar publicacao manual',
       });
     }
   });

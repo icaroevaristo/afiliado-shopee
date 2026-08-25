@@ -48,6 +48,7 @@ import {
   PrismaWhatsAppInstanceRepository,
   PrismaWhatsAppDispatchRepository,
   PrismaWhatsAppGroupDirectoryRepository,
+  PrismaManualPublicationRequestRepository,
 } from './prisma-repositories';
 import type {
   AnalyticsRepository,
@@ -72,6 +73,7 @@ import type {
   WhatsAppInstanceRepository,
   WhatsAppDispatchRepository,
   WhatsAppGroupDirectoryRepository,
+  ManualPublicationRequestRepository,
 } from './repositories';
 import {
   CommercialAutomationPolicyService,
@@ -114,6 +116,7 @@ export type ApplicationRepositories = {
   commercialAutomationSettings: CommercialAutomationSettingsRepository;
   commercialAutomationHistory: CommercialAutomationHistoryRepository;
   commercialAutomationExecutions: CommercialAutomationExecutionRepository;
+  manualPublicationRequests: ManualPublicationRequestRepository;
 };
 
 export type ApplicationServices = {
@@ -347,6 +350,9 @@ export const createPrismaRepositories = (
       new PrismaCommercialAutomationHistoryRepository(prisma),
     commercialAutomationExecutions:
       new PrismaCommercialAutomationExecutionRepository(prisma),
+    manualPublicationRequests: new PrismaManualPublicationRequestRepository(
+      prisma,
+    ),
   };
 };
 

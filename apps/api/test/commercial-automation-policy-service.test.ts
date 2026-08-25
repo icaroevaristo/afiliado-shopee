@@ -236,6 +236,15 @@ describe('CommercialAutomationPolicyService', () => {
     });
   });
 
+  it('nao usa a pausa de automacao como bloqueio isolado para envio manual', async () => {
+    const { service } = createSubject({ paused: true });
+
+    const result = await service.evaluateManualSendSafety(target());
+
+    expect(result.allowed).toBe(true);
+    expect(result.reasons).not.toContain('AUTOMATION_PAUSED');
+  });
+
   it('pausa diretamente e exige a confirmacao exata para retomar', async () => {
     const { service, settings } = createSubject();
 

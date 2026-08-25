@@ -15,6 +15,7 @@ import type {
   CommercialPromotionCandidateRecord,
   CommercialPromotionCandidateRepository,
   CommercialPromotionCatalogRepository,
+  CommercialManualCandidateMaterializationInput,
   CommercialPromotionRankedCandidate,
   CommercialPromotionRejectionCode,
   CommercialPromotionSignal,
@@ -653,6 +654,166 @@ export class CommercialPromotionMiningService {
       'Commercial promotion mining completed',
     );
     return report;
+  }
+
+  private async findCatalogItemForManualSelection(productId: string) {
+    if (this.dependencies.catalog.findOfficialCatalogItem) {
+      return this.dependencies.catalog.findOfficialCatalogItem(productId);
+    }
+    let afterId: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await this.dependencies.catalog.listOfficialCatalogPage({
+        ...(afterId ? { afterId } : {}),
+        limit: 200,
+      });
+      const found = result.items.find(({ product }) => product.id === productId);
+      if (found) return found;
+      if (!result.hasMore) return null;
+      afterId = result.items.at(-1)?.product.id;
+      if (!afterId) return null;
+    }
+    throw new AppError(
+      'Catalogo oficial excede o limite seguro de selecao manual',
+      'MANUAL_PUBLICATION_CATALOG_LIMIT',
+    );
+  }
+
+  async selectManualCandidate(input: {
+    campaignId: string;
+    productId: string;
+    logicalGroupFingerprint: string;
+  }): Promise<CommercialPromotionCandidateRecord> {
+    const now = this.dependencies.clock?.() ?? new Date();
+    const { campaign, niche, groupAvailable } =
+      await this.loadConfiguration(input.campaignId);
+    if (campaign.logicalGroupFingerprint !== input.logicalGroupFingerprint) {
+      return promotionError(
+        'Campanha nao corresponde ao grupo selecionado',
+        'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
+      );
+    }
+    if (!campaign.active) return promotionError('Campanha inativa', 'CAMPAIGN_INACTIVE');
+    if (!niche.active) return promotionError('Nicho inativo', 'NICHE_INACTIVE');
+    if (!groupAvailable) return promotionError('Grupo logico indisponivel', 'GROUP_UNAVAILABLE');
+
+    const item = await this.findCatalogItemForManualSelection(input.productId);
+    if (!item || item.product.source !== 'OFFICIAL') {
+      return promotionError(
+        'Somente ofertas OFFICIAL podem produzir publicacao manual',
+        'MANUAL_PUBLICATION_SOURCE_UNSUPPORTED',
+      );
+    }
+    const structural = commercialProductRejections(item.product, now);
+    if (structural.length > 0) {
+      return promotionError(
+        'Produto oficial inelegivel para publicacao manual',
+        structural[0],
+      );
+    }
+    if (
+      !item.currentSnapshot ||
+      snapshotState({
+        product: item.product,
+        revision: item.commercialSnapshotRevision,
+        fingerprint: item.commercialSnapshotFingerprint,
+        latestSnapshotRevision: item.latestSnapshotRevision,
+        currentSnapshot: item.currentSnapshot,
+        previousSnapshot: item.previousSnapshot,
+      })
+    ) {
+      return promotionError(
+        'Snapshot comercial esta ausente ou desatualizado',
+        'MANUAL_PUBLICATION_SNAPSHOT_STALE',
+      );
+    }
+
+    const scoreBreakdown = sanitizeCommercialScoreBreakdown(
+      this.dependencies.scorePolicies.forSource('OFFICIAL').score(item.product),
+    );
+    if (scoreBreakdown.policyVersion !== 'official-v2') {
+      return promotionError(
+        'Politica de score oficial inesperada',
+        'COMMERCIAL_PROMOTION_SCORE_POLICY_INVALID',
+      );
+    }
+    const nicheMatch = this.dependencies.matcher.match({
+      product: item.product,
+      niche,
+      finalScore: scoreBreakdown.finalScore,
+    });
+    if (!nicheMatch.matched) {
+      return promotionError(
+        'Produto nao corresponde ao nicho/campanha selecionado',
+        nicheMatch.reasonCodes.includes('SCORE_BELOW_MINIMUM')
+          ? 'SCORE_BELOW_MINIMUM'
+          : 'MANUAL_PUBLICATION_NICHE_NOT_MATCHED',
+      );
+    }
+    const signalResult = this.dependencies.signalDetector.detect({
+      product: item.product,
+      currentSnapshot: item.currentSnapshot,
+      previousSnapshot: item.previousSnapshot,
+      now,
+    });
+    if (signalResult.signals.length === 0) {
+      return promotionError(
+        'Produto nao possui sinal comercial elegivel',
+        'NO_PROMOTION_SIGNAL',
+      );
+    }
+    const recentlySent = await this.dependencies.candidates.findRecentlySentProductIds({
+      productIds: [item.product.id],
+      logicalGroupFingerprint: input.logicalGroupFingerprint,
+      sentAtOrAfter: dedupeSince(now, campaign.dedupeDays),
+    });
+    if (recentlySent.has(item.product.id)) {
+      return promotionError('Produto ja foi enviado ao grupo', 'PRODUCT_ALREADY_SENT');
+    }
+    const existing = this.dependencies.candidates.findByCampaignAndProduct
+      ? await this.dependencies.candidates.findByCampaignAndProduct(
+          input.campaignId,
+          input.productId,
+        )
+      : (
+          await this.dependencies.candidates.listCampaignCandidates(
+            input.campaignId,
+          )
+        ).find((candidate) => candidate.productId === input.productId) ?? null;
+    if (existing?.status === 'RESERVED') {
+      return promotionError(
+        'Produto e grupo ja possuem uma reserva ativa',
+        'MANUAL_PUBLICATION_TARGET_CONFLICT',
+      );
+    }
+    if (
+      existing?.status === 'DISPATCHED' &&
+      existing.dedupeUntil !== null &&
+      existing.dedupeUntil > now
+    ) {
+      return promotionError('Produto ja possui deduplicacao ativa', 'PRODUCT_ALREADY_SENT');
+    }
+    if (!this.dependencies.candidates.ensureManualCandidate) {
+      return promotionError(
+        'Materializacao de candidate manual indisponivel',
+        'MANUAL_PUBLICATION_CANDIDATE_UNAVAILABLE',
+      );
+    }
+    const materialization: CommercialManualCandidateMaterializationInput = {
+      campaignId: input.campaignId,
+      productId: input.productId,
+      snapshotId: item.currentSnapshot.id,
+      snapshotRevision: item.currentSnapshot.revision,
+      snapshotFingerprint: item.currentSnapshot.fingerprint,
+      commercialScore: scoreBreakdown.finalScore,
+      scorePolicyVersion: 'official-v2',
+      minimumScoreUsed: niche.minimumScore,
+      scoreBreakdown,
+      promotionSignals: signalResult.signals,
+      priceDropPercent: signalResult.priceDropPercent,
+      expiresAt: item.product.offerEndsAt ?? null,
+      now,
+    };
+    return this.dependencies.candidates.ensureManualCandidate(materialization);
   }
 
   async listQueue(
