@@ -566,4 +566,37 @@ describe('PrismaShopeeOfferRepository operational catalog', () => {
       },
     ]);
   });
+
+  it('mantém source OFFICIAL no filtro de todas as páginas do backfill', async () => {
+    const findMany = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 'product-001', categoryIds: ['100001'] }])
+      .mockResolvedValueOnce([{ id: 'product-003', categoryIds: ['100004'] }]);
+    const repository = new PrismaShopeeOfferRepository({
+      productLead: { findMany },
+    } as never);
+
+    await expect(
+      repository.listProductCategoryIdsForBackfill({ limit: 1 }),
+    ).resolves.toEqual([{ productId: 'product-001', categoryIds: ['100001'] }]);
+    await expect(
+      repository.listProductCategoryIdsForBackfill({
+        afterProductId: 'product-001',
+        limit: 1,
+      }),
+    ).resolves.toEqual([{ productId: 'product-003', categoryIds: ['100004'] }]);
+
+    expect(findMany).toHaveBeenNthCalledWith(1, {
+      where: { source: 'OFFICIAL', id: undefined },
+      select: { id: true, categoryIds: true },
+      orderBy: { id: 'asc' },
+      take: 1,
+    });
+    expect(findMany).toHaveBeenNthCalledWith(2, {
+      where: { source: 'OFFICIAL', id: { gt: 'product-001' } },
+      select: { id: true, categoryIds: true },
+      orderBy: { id: 'asc' },
+      take: 1,
+    });
+  });
 });

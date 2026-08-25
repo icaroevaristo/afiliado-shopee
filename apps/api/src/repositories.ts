@@ -227,6 +227,10 @@ export type ShopeeCategoryBackfillProduct = {
 };
 
 export interface ShopeeCategoryBackfillRepository {
+  /**
+   * Lists official provider category observations for deterministic backfill
+   * pagination by ProductLead id.
+   */
   listProductCategoryIdsForBackfill(input: {
     afterProductId?: string;
     limit: number;

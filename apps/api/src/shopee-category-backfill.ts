@@ -9,6 +9,7 @@ export const SHOPEE_CATEGORY_BACKFILL_CONFIRMATION =
 const DEFAULT_BATCH_SIZE = 100;
 
 export type ShopeeCategoryBackfillReport = {
+  /** Number of OFFICIAL ProductLead records effectively read by the backfill. */
   productsScanned: number;
   observedCategoryIds: number;
   categoriesCreated: number;

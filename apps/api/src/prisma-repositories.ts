@@ -1395,7 +1395,10 @@ export class PrismaShopeeOfferRepository
     limit: number;
   }) {
     const records = await this.prisma.productLead.findMany({
-      where: afterProductId ? { id: { gt: afterProductId } } : undefined,
+      where: {
+        source: 'OFFICIAL',
+        id: afterProductId ? { gt: afterProductId } : undefined,
+      },
       select: { id: true, categoryIds: true },
       orderBy: { id: 'asc' },
       take: Math.min(Math.max(limit, 1), 500),
