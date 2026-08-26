@@ -27,6 +27,7 @@ import type {
   CommercialDispatchOutboxRepository,
   CommercialDeliveryHistoryRepository,
   ManualPublicationRequestCreateData,
+  ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
   ManualPublicationRequestRepository,
   ManualPublicationTargetRecord,
@@ -48,6 +49,12 @@ export type ManualPublicationInput = {
   productId: string;
   destinationIds: string[];
   confirm: string;
+};
+
+export type ManualPublicationPreviewInput = {
+  idempotencyKey: string;
+  productId: string;
+  destinationIds: string[];
 };
 
 export type ManualPublicationGroupOption = {
@@ -171,6 +178,18 @@ const normalizeId = (value: unknown, field: string) => {
 };
 
 export const canonicalManualPublicationPayload = (input: {
+  mode?: ManualPublicationRequestMode;
+  productId: string;
+  destinationIds: string[];
+}) =>
+  JSON.stringify({
+    version: MANUAL_PUBLICATION_CONTRACT_VERSION,
+    mode: input.mode ?? 'SEND',
+    productId: input.productId.trim(),
+    destinationIds: [...new Set(input.destinationIds.map((id) => id.trim()))].sort(),
+  });
+
+const legacyCanonicalManualPublicationPayload = (input: {
   productId: string;
   destinationIds: string[];
 }) =>
@@ -202,6 +221,19 @@ const uniqueDestinationIds = (value: unknown) => {
   return unique;
 };
 
+const assertStrictPreviewInput = (input: ManualPublicationPreviewInput) => {
+  if (
+    Object.keys(input).sort().join('|') !==
+    'destinationIds|idempotencyKey|productId'
+  ) {
+    return fail(
+      'Payload de preview manual invalido',
+      'MANUAL_PUBLICATION_INVALID',
+    );
+  }
+  return input;
+};
+
 const currentSnapshot = (item: CommercialPromotionCatalogItem | null) =>
   item?.currentSnapshot && item.product.source === 'OFFICIAL'
     ? {
@@ -221,6 +253,37 @@ const productIsAvailable = (item: CommercialPromotionCatalogItem | null, now: Da
       item.commercialSnapshotFingerprint === item.currentSnapshot.fingerprint &&
       commercialProductRejections(item.product, now).length === 0,
   );
+
+const previewProductIsAvailable = (
+  item: CommercialPromotionCatalogItem | null,
+  now: Date,
+) =>
+  Boolean(
+    item &&
+      productIsAvailable(item, now) &&
+      item.currentSnapshot &&
+      !item.currentSnapshot.unavailableAt &&
+      (!item.currentSnapshot.offerStartsAt ||
+        item.currentSnapshot.offerStartsAt <= now) &&
+      (!item.currentSnapshot.offerEndsAt || item.currentSnapshot.offerEndsAt > now) &&
+      /^https?:\/\//iu.test(item.product.productLink),
+  );
+
+const requestMatchesOperation = (
+  request: ManualPublicationRequestRecord,
+  input: {
+    mode: ManualPublicationRequestMode;
+    productId: string;
+    payloadHash: string;
+    legacyPayloadHash?: string;
+  },
+) =>
+  request.mode === input.mode &&
+  request.productId === input.productId &&
+  (request.payloadHash === input.payloadHash ||
+    (input.mode === 'SEND' &&
+      Boolean(input.legacyPayloadHash) &&
+      request.payloadHash === input.legacyPayloadHash));
 
 const targetFromRecord = (
   target: ManualPublicationTargetRecord,
@@ -566,8 +629,9 @@ export class ManualPublicationService {
   }
 
   private async buildAcceptance(
-    input: ManualPublicationInput,
+    input: ManualPublicationInput | ManualPublicationPreviewInput,
     requestId: string,
+    mode: ManualPublicationRequestMode,
   ): Promise<ManualPublicationRequestCreateData> {
     const productId = normalizeId(input.productId, 'productId');
     const destinationIds = uniqueDestinationIds(input.destinationIds);
@@ -583,7 +647,12 @@ export class ManualPublicationService {
         'MANUAL_PUBLICATION_SOURCE_UNSUPPORTED',
       );
     }
-    if (!item || !productIsAvailable(item, this.clock())) {
+    if (
+      !item ||
+      !(mode === 'PREVIEW'
+        ? previewProductIsAvailable(item, this.clock())
+        : productIsAvailable(item, this.clock()))
+    ) {
       return fail(
         'Produto ou snapshot oficial inelegivel',
         'MANUAL_PUBLICATION_PRODUCT_INELIGIBLE',
@@ -614,6 +683,32 @@ export class ManualPublicationService {
           'COMMERCIAL_GROUP_CAMPAIGN_NOT_FOUND',
         );
       }
+      if (mode === 'PREVIEW') {
+        if (!group.active || !group.available) {
+          return fail(
+            'Grupo manual inativo ou indisponivel',
+            'MANUAL_PUBLICATION_TARGET_INVALID',
+          );
+        }
+        if (!campaign.active) {
+          return fail(
+            'Campanha comercial inativa',
+            'CAMPAIGN_INACTIVE',
+          );
+        }
+        if (!campaign.niche.active) {
+          return fail('Nicho comercial inativo', 'NICHE_INACTIVE');
+        }
+        const instance = await this.options.instances.findByName(
+          group.assignedInstanceName,
+        );
+        if (!instance?.active) {
+          return fail(
+            'Instancia comercial inativa ou ausente',
+            'COMMERCIAL_INSTANCE_INACTIVE',
+          );
+        }
+      }
       targets.push({
         id: `${requestId}-target-${String(index + 1).padStart(2, '0')}`,
         requestId,
@@ -624,6 +719,11 @@ export class ManualPublicationService {
       });
     }
     const canonicalPayload = canonicalManualPublicationPayload({
+      mode,
+      productId,
+      destinationIds,
+    });
+    const legacyPayload = legacyCanonicalManualPublicationPayload({
       productId,
       destinationIds,
     });
@@ -631,11 +731,15 @@ export class ManualPublicationService {
       id: requestId,
       idempotencyKey: normalizeId(input.idempotencyKey, 'idempotencyKey'),
       payloadHash: manualPublicationPayloadHash(canonicalPayload),
+      mode,
+      ...(mode === 'SEND'
+        ? { legacyPayloadHash: manualPublicationPayloadHash(legacyPayload) }
+        : {}),
       productId,
       requestedSnapshotId: snapshot.id,
       requestedSnapshotRevision: snapshot.revision,
       requestedSnapshotFingerprint: snapshot.fingerprint,
-      status: 'ACCEPTED',
+      status: mode === 'PREVIEW' ? 'PREVIEW_READY' : 'ACCEPTED',
       createdAt: this.clock(),
       targets,
     };
@@ -967,6 +1071,7 @@ export class ManualPublicationService {
   }
 
   private async aggregate(request: ManualPublicationRequestRecord) {
+    if (request.mode === 'PREVIEW') return request;
     const refreshedTargets = [] as ManualPublicationTargetRecord[];
     for (const target of request.targets) {
       refreshedTargets.push(await this.updateTargetState(target));
@@ -1245,6 +1350,7 @@ export class ManualPublicationService {
     request: ManualPublicationRequestRecord,
     ownerId: string,
   ) {
+    if (request.mode === 'PREVIEW') return request;
     const now = this.clock();
     const leaseExpiresAt = new Date(
       now.getTime() + MANUAL_PUBLICATION_PROCESSING_LEASE_SECONDS * 1_000,
@@ -1319,6 +1425,7 @@ export class ManualPublicationService {
       id: request.id,
       idempotencyKey: request.idempotencyKey,
       payloadHash: request.payloadHash,
+      mode: request.mode,
       productId: request.productId,
       requestedSnapshotId: request.requestedSnapshotId,
       requestedSnapshotRevision: request.requestedSnapshotRevision,
@@ -1354,6 +1461,13 @@ export class ManualPublicationService {
     const normalizedKey = normalizeId(input.idempotencyKey, 'idempotencyKey');
     const expectedHash = manualPublicationPayloadHash(
       canonicalManualPublicationPayload({
+        mode: 'SEND',
+        productId: normalizedProductId,
+        destinationIds: normalizedDestinationIds,
+      }),
+    );
+    const legacyHash = manualPublicationPayloadHash(
+      legacyCanonicalManualPublicationPayload({
         productId: normalizedProductId,
         destinationIds: normalizedDestinationIds,
       }),
@@ -1363,8 +1477,12 @@ export class ManualPublicationService {
     );
     if (existing) {
       if (
-        existing.payloadHash !== expectedHash ||
-        existing.productId !== normalizedProductId
+        !requestMatchesOperation(existing, {
+          mode: 'SEND',
+          productId: normalizedProductId,
+          payloadHash: expectedHash,
+          legacyPayloadHash: legacyHash,
+        })
       ) {
         return fail(
           'A chave de idempotencia ja representa outro payload',
@@ -1385,7 +1503,7 @@ export class ManualPublicationService {
       return { request: await this.view(request), created: false };
     }
     const requestId = `manual-publication-${randomUUID()}`;
-    const acceptance = await this.buildAcceptance(input, requestId);
+    const acceptance = await this.buildAcceptance(input, requestId, 'SEND');
     const accepted = await this.options.requests.accept(acceptance);
     const request = await this.process(accepted.request, randomUUID());
     this.options.logger?.info(
@@ -1400,11 +1518,85 @@ export class ManualPublicationService {
     return { request: await this.view(request), created: accepted.created };
   }
 
+  async preview(
+    input: ManualPublicationPreviewInput,
+  ): Promise<ManualPublicationResult> {
+    assertStrictPreviewInput(input);
+    const normalizedProductId = normalizeId(input.productId, 'productId');
+    const normalizedDestinationIds = uniqueDestinationIds(input.destinationIds);
+    const normalizedKey = normalizeId(input.idempotencyKey, 'idempotencyKey');
+    const expectedHash = manualPublicationPayloadHash(
+      canonicalManualPublicationPayload({
+        mode: 'PREVIEW',
+        productId: normalizedProductId,
+        destinationIds: normalizedDestinationIds,
+      }),
+    );
+    const existing = await this.options.requests.findByIdempotencyKey(
+      normalizedKey,
+    );
+    if (existing) {
+      if (
+        !requestMatchesOperation(existing, {
+          mode: 'PREVIEW',
+          productId: normalizedProductId,
+          payloadHash: expectedHash,
+        })
+      ) {
+        return fail(
+          'A chave de idempotencia ja representa outra operacao ou payload',
+          'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
+        );
+      }
+      if (existing.status !== 'PREVIEW_READY') {
+        return fail(
+          'A request de preview possui estado invalido',
+          'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
+        );
+      }
+      return { request: await this.view(existing), created: false };
+    }
+    const requestId = `manual-publication-preview-${randomUUID()}`;
+    const acceptance = await this.buildAcceptance(input, requestId, 'PREVIEW');
+    const accepted = await this.options.requests.accept(acceptance);
+    if (
+      accepted.request.mode !== 'PREVIEW' ||
+      accepted.request.status !== 'PREVIEW_READY'
+    ) {
+      return fail(
+        'A request de preview nao possui estado persistido seguro',
+        'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
+      );
+    }
+    this.options.logger?.info(
+      {
+        event: 'manual-publication.preview.ready',
+        requestId: accepted.request.id,
+        created: accepted.created,
+        targetCount: accepted.request.targets.length,
+      },
+      'Manual publication preview ready',
+    );
+    return {
+      request: await this.view(accepted.request),
+      created: accepted.created,
+    };
+  }
+
   async find(requestId: string) {
     const request = await this.options.requests.findById(
       normalizeId(requestId, 'requestId'),
     );
     if (!request) return fail('Request manual nao encontrada', 'MANUAL_PUBLICATION_NOT_FOUND');
+    if (request.mode === 'PREVIEW') {
+      if (request.status !== 'PREVIEW_READY') {
+        return fail(
+          'A request de preview possui estado invalido',
+          'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
+        );
+      }
+      return this.view(request);
+    }
     return this.view(await this.aggregate(request));
   }
 }

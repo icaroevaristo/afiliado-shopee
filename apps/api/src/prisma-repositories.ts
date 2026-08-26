@@ -58,6 +58,7 @@ import type {
   ManualPublicationQuotaReservation,
   ManualPublicationQuotaReservationInput,
   ManualPublicationRequestCreateData,
+  ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
   ManualPublicationRequestRepository,
   ManualPublicationRequestUpdate,
@@ -4514,6 +4515,7 @@ const mapManualPublicationRequest = (
   id: String(record.id),
   idempotencyKey: String(record.idempotencyKey),
   payloadHash: String(record.payloadHash),
+  mode: record.mode as ManualPublicationRequestMode,
   productId: String(record.productId),
   requestedSnapshotId: String(record.requestedSnapshotId),
   requestedSnapshotRevision: Number(record.requestedSnapshotRevision),
@@ -4531,6 +4533,19 @@ const mapManualPublicationRequest = (
       )
     : [],
 });
+
+const manualPublicationRequestMatches = (
+  record: Record<string, unknown>,
+  input: ManualPublicationRequestCreateData,
+) =>
+  record.mode === input.mode &&
+  record.productId === input.productId &&
+  (record.payloadHash === input.payloadHash ||
+    (input.mode === 'SEND' &&
+      Boolean(input.legacyPayloadHash) &&
+      record.payloadHash === input.legacyPayloadHash));
+
+const MANUAL_PUBLICATION_HTTP_URL = /^https?:\/\//iu;
 
 const loadManualPublicationRequest = (
   client: Pick<DatabaseClient, 'manualPublicationRequest'>,
@@ -4567,6 +4582,7 @@ export class PrismaManualPublicationRequestRepository
             affiliateLink: true,
             productLink: true,
             unavailableAt: true,
+            offerStartsAt: true,
             offerEndsAt: true,
             commercialSnapshotRevision: true,
             commercialSnapshotFingerprint: true,
@@ -4574,7 +4590,15 @@ export class PrismaManualPublicationRequestRepository
         }),
         transaction.commercialOfferSnapshot.findUnique({
           where: { id: input.requestedSnapshotId },
-          select: { id: true, productId: true, revision: true, fingerprint: true },
+          select: {
+            id: true,
+            productId: true,
+            revision: true,
+            fingerprint: true,
+            offerStartsAt: true,
+            offerEndsAt: true,
+            unavailableAt: true,
+          },
         }),
         transaction.whatsAppDestination.findMany({
           where: {
@@ -4617,6 +4641,12 @@ export class PrismaManualPublicationRequestRepository
       (!product.offerEndsAt || product.offerEndsAt > now) &&
       Boolean(product.affiliateLink) &&
       Boolean(product.productLink) &&
+      (input.mode !== 'PREVIEW' ||
+        (MANUAL_PUBLICATION_HTTP_URL.test(product.affiliateLink ?? '') &&
+          MANUAL_PUBLICATION_HTTP_URL.test(product.productLink ?? ''))) &&
+      (input.mode !== 'PREVIEW' ||
+        !product.offerStartsAt ||
+        product.offerStartsAt <= now) &&
       product.commercialSnapshotRevision === input.requestedSnapshotRevision &&
       product.commercialSnapshotFingerprint ===
         input.requestedSnapshotFingerprint;
@@ -4624,7 +4654,11 @@ export class PrismaManualPublicationRequestRepository
       snapshot?.id === input.requestedSnapshotId &&
       snapshot.productId === input.productId &&
       snapshot.revision === input.requestedSnapshotRevision &&
-      snapshot.fingerprint === input.requestedSnapshotFingerprint;
+      snapshot.fingerprint === input.requestedSnapshotFingerprint &&
+      (input.mode !== 'PREVIEW' ||
+        (!snapshot.unavailableAt &&
+          (!snapshot.offerStartsAt || snapshot.offerStartsAt <= now) &&
+          (!snapshot.offerEndsAt || snapshot.offerEndsAt > now)));
     const validTargets = input.targets.every((target) => {
       const destination = destinationById.get(target.destinationId);
       const campaign = campaignById.get(target.campaignId);
@@ -4632,11 +4666,16 @@ export class PrismaManualPublicationRequestRepository
       return Boolean(
         destination &&
           destination.type === 'GROUP' &&
+          (input.mode !== 'PREVIEW' ||
+            (destination.active && destination.available)) &&
           destination.fingerprint === target.logicalGroupFingerprint &&
           destination.assignedInstanceName === target.assignedInstanceName &&
           campaign &&
           campaign.logicalGroupFingerprint === target.logicalGroupFingerprint &&
-          instance,
+          (input.mode !== 'PREVIEW' ||
+            (campaign.active && campaign.niche.active)) &&
+          instance &&
+          (input.mode !== 'PREVIEW' || instance.active),
       );
     });
     if (!validProduct || !validSnapshot || !validTargets) {
@@ -4656,12 +4695,9 @@ export class PrismaManualPublicationRequestRepository
             { idempotencyKey: input.idempotencyKey },
           );
           if (existing) {
-            if (
-              existing.payloadHash !== input.payloadHash ||
-              existing.productId !== input.productId
-            ) {
+            if (!manualPublicationRequestMatches(existing, input)) {
               throw new AppError(
-                'A chave de idempotencia ja representa outro payload',
+                'A chave de idempotencia ja representa outra operacao ou payload',
                 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
               );
             }
@@ -4676,6 +4712,7 @@ export class PrismaManualPublicationRequestRepository
               id: input.id,
               idempotencyKey: input.idempotencyKey,
               payloadHash: input.payloadHash,
+              mode: input.mode,
               productId: input.productId,
               requestedSnapshotId: input.requestedSnapshotId,
               requestedSnapshotRevision: input.requestedSnapshotRevision,
@@ -4711,12 +4748,9 @@ export class PrismaManualPublicationRequestRepository
       if (isUniqueConstraintError(error) || isTransactionConflictError(error)) {
         const existing = await this.findByIdempotencyKey(input.idempotencyKey);
         if (!existing) throw error;
-        if (
-          existing.payloadHash !== input.payloadHash ||
-          existing.productId !== input.productId
-        ) {
+        if (!manualPublicationRequestMatches(existing, input)) {
           throw new AppError(
-            'A chave de idempotencia ja representa outro payload',
+            'A chave de idempotencia ja representa outra operacao ou payload',
             'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
           );
         }

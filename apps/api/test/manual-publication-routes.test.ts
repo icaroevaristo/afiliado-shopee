@@ -10,6 +10,7 @@ const request = {
   idempotencyKey: 'idem-1',
   payloadHash: 'hash-1',
   productId: 'official-product-1',
+  mode: 'SEND' as const,
   requestedSnapshotId: 'snapshot-1',
   requestedSnapshotRevision: 3,
   requestedSnapshotFingerprint: 'snapshot-fingerprint',
@@ -30,6 +31,18 @@ const serializedRequest = {
   ...request,
   createdAt: request.createdAt.toISOString(),
   updatedAt: request.updatedAt.toISOString(),
+};
+
+const previewRequest = {
+  ...request,
+  mode: 'PREVIEW' as const,
+  status: 'PREVIEW_READY' as const,
+};
+
+const serializedPreviewRequest = {
+  ...previewRequest,
+  createdAt: previewRequest.createdAt.toISOString(),
+  updatedAt: previewRequest.updatedAt.toISOString(),
 };
 
 const options = {
@@ -79,15 +92,16 @@ const serializedOptions = {
 const setup = async () => {
   const getOptions = vi.fn().mockResolvedValue(options);
   const create = vi.fn().mockResolvedValue({ created: true, request });
+  const preview = vi.fn().mockResolvedValue({ created: true, request: previewRequest });
   const find = vi.fn().mockResolvedValue(request);
-  const manualPublicationService = { getOptions, create, find };
+  const manualPublicationService = { getOptions, create, preview, find };
   const app = await buildAuthenticatedTestApp({
     logger: false,
     prisma: {} as never,
     manualPublicationService,
   });
   apps.push(app);
-  return { app, getOptions, create, find };
+  return { app, getOptions, create, preview, find };
 };
 
 afterEach(async () => {
@@ -126,6 +140,42 @@ describe('Manual publication API', () => {
     expect(create).toHaveBeenCalledWith(payload);
   });
 
+  it('creates a preview only through the exact preview payload', async () => {
+    const { app, preview } = await setup();
+    const payload = {
+      idempotencyKey: 'preview-idem-1',
+      productId: 'official-product-1',
+      destinationIds: ['group-1'],
+    };
+    const response = await app.inject({
+      method: 'POST',
+      url: '/commercial-publications/manual/preview',
+      payload,
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toEqual(serializedPreviewRequest);
+    expect(preview).toHaveBeenCalledWith(payload);
+  });
+
+  it('rejects preview extras and confirmation before the service', async () => {
+    const { app, preview } = await setup();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/commercial-publications/manual/preview',
+      payload: {
+        idempotencyKey: 'preview-idem-1',
+        productId: 'official-product-1',
+        destinationIds: ['group-1'],
+        confirm: 'ENVIAR_PUBLICACAO_MANUAL',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('MANUAL_PUBLICATION_INVALID');
+    expect(preview).not.toHaveBeenCalled();
+  });
+
   it('rejects an extra field before the service and exposes status read-only', async () => {
     const { app, create, find } = await setup();
     const invalid = await app.inject({
@@ -157,6 +207,7 @@ describe('Manual publication API', () => {
     const service = {
       getOptions: vi.fn().mockRejectedValue(new AppError('Produto ausente', 'OFFER_NOT_FOUND')),
       create: vi.fn(),
+      preview: vi.fn(),
       find: vi.fn(),
     };
     await app.close();
@@ -183,6 +234,7 @@ describe('Manual publication API', () => {
   it('keeps the route behind the existing local auth guard', async () => {
     const getOptions = vi.fn();
     const create = vi.fn();
+    const preview = vi.fn();
     const find = vi.fn();
     const app = await buildApp({
       logger: false,
@@ -191,6 +243,7 @@ describe('Manual publication API', () => {
       manualPublicationService: {
         getOptions,
         create,
+        preview,
         find,
       },
     });
@@ -212,14 +265,68 @@ describe('Manual publication API', () => {
         },
       }),
       app.inject({
+        method: 'POST',
+        url: '/commercial-publications/manual/preview',
+        payload: {
+          idempotencyKey: 'preview-idem-1',
+          productId: 'official-product-1',
+          destinationIds: ['group-1'],
+        },
+      }),
+      app.inject({
         method: 'GET',
         url: '/commercial-publications/manual/manual-request-1',
       }),
     ]);
 
-    expect(responses.map((response) => response.statusCode)).toEqual([401, 401, 401]);
+    expect(responses.map((response) => response.statusCode)).toEqual([401, 401, 401, 401]);
     expect(getOptions).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
     expect(find).not.toHaveBeenCalled();
+  });
+
+  it('requires valid auth for preview and permits the existing bearer token', async () => {
+    const getOptions = vi.fn();
+    const create = vi.fn();
+    const preview = vi.fn().mockResolvedValue({ created: true, request: previewRequest });
+    const find = vi.fn();
+    const app = await buildApp({
+      logger: false,
+      localApiAuthToken: 'local-api-test-token',
+      prisma: {} as never,
+      manualPublicationService: { getOptions, create, preview, find },
+    });
+    apps.push(app);
+
+    const payload = {
+      idempotencyKey: 'preview-idem-2',
+      productId: 'official-product-1',
+      destinationIds: ['group-1'],
+    };
+    const [missing, invalid, valid] = await Promise.all([
+      app.inject({
+        method: 'POST',
+        url: '/commercial-publications/manual/preview',
+        payload,
+      }),
+      app.inject({
+        method: 'POST',
+        url: '/commercial-publications/manual/preview',
+        headers: { authorization: 'Bearer wrong-token' },
+        payload,
+      }),
+      app.inject({
+        method: 'POST',
+        url: '/commercial-publications/manual/preview',
+        headers: { authorization: 'Bearer local-api-test-token' },
+        payload,
+      }),
+    ]);
+
+    expect(missing.statusCode).toBe(401);
+    expect(invalid.statusCode).toBe(401);
+    expect(valid.statusCode).toBe(201);
+    expect(preview).toHaveBeenCalledOnce();
   });
 });

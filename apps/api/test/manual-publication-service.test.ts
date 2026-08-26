@@ -216,10 +216,16 @@ const createSubject = (
     run: CommercialPipelineRunRecord;
     candidate: { id: string; generatedCopyId: string; status: 'COPY_READY' };
   },
+  overrides: {
+    groups?: WhatsAppGroupRecord[];
+    item?: CommercialPromotionCatalogItem;
+    instanceActive?: boolean;
+  } = {},
 ) => {
-  const groups = [group('a'), group('b', false)];
+  const groups = overrides.groups ?? [group('a'), group('b', false)];
   const campaigns = groups.map(campaign);
   const requests = new Map<string, ManualPublicationRequestRecord>();
+  let createdRequestCount = 0;
   const outboxes = new Map<string, { id: string; commercialRunId: string; dispatchId: string; jobId: string; instanceName: string; status: 'PENDING'; failureCode: null; createdAt: Date; publishedAt: null }>();
   const reserveAttempt = vi.fn(async (target: { campaignId: string }) => ({
     kind: 'RESERVED' as const,
@@ -241,6 +247,11 @@ const createSubject = (
     copyPreview: 'copy preview',
     pipeline: {} as never,
   }));
+  const evaluateManualSendSafety = vi.fn(async (target: { groupId: string }) =>
+    target.groupId === 'b'
+      ? { allowed: false, reasons: ['GROUP_DAILY_LIMIT_REACHED'] }
+      : { allowed: true, reasons: [] },
+  );
   const confirm = vi.fn(async (runId: string) => {
     const dispatchId = `commercial-${runId}-dispatch`;
     outboxes.set(`commercial-${runId}-outbox`, {
@@ -261,10 +272,12 @@ const createSubject = (
     accept: async (input) => {
       const existing = requests.get(input.idempotencyKey);
       if (existing) return { request: existing, created: false };
+      createdRequestCount += 1;
       const request: ManualPublicationRequestRecord = {
         id: input.id ?? 'manual-request',
         idempotencyKey: input.idempotencyKey,
         payloadHash: input.payloadHash,
+        mode: input.mode,
         productId: input.productId,
         requestedSnapshotId: input.requestedSnapshotId,
         requestedSnapshotRevision: input.requestedSnapshotRevision,
@@ -347,7 +360,10 @@ const createSubject = (
   const service = new ManualPublicationService({
     requests: requestRepository,
     offers: { findOfferById: async () => offer(source) },
-    catalog: { findOfficialCatalogItem: async () => catalogItem(source) },
+    catalog: {
+      findOfficialCatalogItem: async () =>
+        overrides.item ?? catalogItem(source),
+    },
     groups: {
       findById: async (id: string) => groups.find((candidate) => candidate.id === id) ?? null,
       listAll: async () => groups,
@@ -356,19 +372,21 @@ const createSubject = (
       findByLogicalGroupFingerprint: async (fingerprint: string) => campaigns.find((candidate) => candidate.logicalGroupFingerprint === fingerprint) ?? null,
       list: async () => ({ items: campaigns, total: campaigns.length }),
     },
-    instances: { findByName: async (name: string) => ({ name, active: true, createdAt: NOW, updatedAt: NOW }) },
+    instances: {
+      findByName: async (name: string) => ({
+        name,
+        active: overrides.instanceActive ?? true,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    },
     candidates: { findByCampaignAndProduct: async () => null, listCampaignCandidates: async () => [] },
     copies: {
       loadContext: async () => null,
       findCopyForCandidate: async () => null,
     },
     deliveryHistory: { wasProductSentToGroup: async () => false },
-    policy: {
-      evaluateManualSendSafety: async (target: { groupId: string }) =>
-        target.groupId === 'b'
-          ? { allowed: false, reasons: ['GROUP_DAILY_LIMIT_REACHED'] }
-          : { allowed: true, reasons: [] },
-    },
+    policy: { evaluateManualSendSafety },
     candidateFlow: {
       reserveAttempt,
       releaseAttempt: async () => ({ kind: 'RELEASED' as const, campaignId: 'campaign-a', executionId: 'manual-execution', released: true }),
@@ -396,7 +414,17 @@ const createSubject = (
     clock: () => NOW,
   } as never);
 
-  return { service, reserveAttempt, prepareManual, confirm };
+  return {
+    service,
+    reserveAttempt,
+    prepareManual,
+    confirm,
+    evaluateManualSendSafety,
+    requests,
+    get createdRequestCount() {
+      return createdRequestCount;
+    },
+  };
 };
 
 const requestIdFor = (id: string | undefined) => id ?? 'manual-publication-request';
@@ -408,6 +436,250 @@ describe('ManualPublicationService', () => {
 
     expect(first).toBe(second);
     expect(manualPublicationPayloadHash(first)).toBe(manualPublicationPayloadHash(second));
+  });
+
+  it('inclui o modo da operacao no payload canonico', () => {
+    const preview = canonicalManualPublicationPayload({
+      mode: 'PREVIEW',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+    const send = canonicalManualPublicationPayload({
+      mode: 'SEND',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+
+    expect(preview).not.toBe(send);
+    expect(manualPublicationPayloadHash(preview)).not.toBe(
+      manualPublicationPayloadHash(send),
+    );
+  });
+
+  it('previewOnlyWritesRequestTargets', async () => {
+    const subject = createSubject();
+
+    const result = await subject.service.preview({
+      idempotencyKey: 'preview-only-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.request).toMatchObject({
+      mode: 'PREVIEW',
+      status: 'PREVIEW_READY',
+    });
+    expect(result.request.targets).toHaveLength(1);
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'ACCEPTED',
+      candidateId: null,
+      runId: null,
+      dispatchId: null,
+      outboxId: null,
+    });
+    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.evaluateManualSendSafety).not.toHaveBeenCalled();
+  });
+
+  it('previewNoCandidateWrites previewNoReservation previewNoCopy previewNoRun previewNoDispatch previewNoOutbox previewNoBullMQ previewNoProvider', async () => {
+    const subject = createSubject();
+
+    await subject.service.preview({
+      idempotencyKey: 'preview-boundary-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.createdRequestCount).toBe(1);
+  });
+
+  it('pausedAllowsPreview without consulting send policy', async () => {
+    const subject = createSubject();
+    subject.evaluateManualSendSafety.mockResolvedValue({
+      allowed: false,
+      reasons: ['AUTOMATION_PAUSED'],
+    });
+
+    await expect(
+      subject.service.preview({
+        idempotencyKey: 'preview-paused-key',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ).resolves.toMatchObject({
+      request: { mode: 'PREVIEW', status: 'PREVIEW_READY' },
+    });
+    expect(subject.evaluateManualSendSafety).not.toHaveBeenCalled();
+  });
+
+  it('sourceMockRejected with zero request or target rows', async () => {
+    const subject = createSubject('MOCK');
+
+    await expect(
+      subject.service.preview({
+        idempotencyKey: 'preview-mock-key',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_PUBLICATION_SOURCE_UNSUPPORTED' });
+    expect(subject.createdRequestCount).toBe(0);
+  });
+
+  it('staleRejected before any durable write', async () => {
+    const stale = catalogItem('OFFICIAL');
+    stale.commercialSnapshotFingerprint = 'stale-fingerprint';
+    const subject = createSubject('OFFICIAL', undefined, { item: stale });
+
+    await expect(
+      subject.service.preview({
+        idempotencyKey: 'preview-stale-key',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_PUBLICATION_PRODUCT_INELIGIBLE' });
+    expect(subject.createdRequestCount).toBe(0);
+  });
+
+  it('sameKeyReplay reuses the preview request without extra rows', async () => {
+    const subject = createSubject();
+    const input = {
+      idempotencyKey: 'preview-replay-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    };
+
+    const first = await subject.service.preview(input);
+    const second = await subject.service.preview(input);
+
+    expect(first.request.id).toBe(second.request.id);
+    expect(second.created).toBe(false);
+    expect(subject.createdRequestCount).toBe(1);
+    expect(second.request.targets).toHaveLength(1);
+  });
+
+  it('sameKeyConflict rejects a different preview payload without mutation', async () => {
+    const subject = createSubject();
+    await subject.service.preview({
+      idempotencyKey: 'preview-conflict-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+
+    await expect(
+      subject.service.preview({
+        idempotencyKey: 'preview-conflict-key',
+        productId: 'product-1',
+        destinationIds: ['b'],
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT' });
+    expect(subject.createdRequestCount).toBe(1);
+  });
+
+  it('sameKeyConcurrent creates exactly one logical request', async () => {
+    const subject = createSubject();
+    const input = {
+      idempotencyKey: 'preview-concurrent-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    };
+
+    const [first, second] = await Promise.all([
+      subject.service.preview(input),
+      subject.service.preview(input),
+    ]);
+
+    expect(first.request.id).toBe(second.request.id);
+    expect(subject.createdRequestCount).toBe(1);
+    expect(first.request.targets).toHaveLength(1);
+    expect(second.request.targets).toHaveLength(1);
+  });
+
+  it('restartSafePreview never aggregates or advances a preview request', async () => {
+    const subject = createSubject();
+    const first = await subject.service.preview({
+      idempotencyKey: 'preview-restart-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    });
+
+    const reloaded = await subject.service.find(first.request.id);
+
+    expect(reloaded).toMatchObject({
+      id: first.request.id,
+      mode: 'PREVIEW',
+      status: 'PREVIEW_READY',
+    });
+    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['zero', []],
+    ['six', ['a', 'b', 'c', 'd', 'e', 'f']],
+    ['duplicate', ['a', 'a']],
+  ] as const)('max groups rejects %s with zero rows', async (_label, destinationIds) => {
+    const subject = createSubject();
+
+    await expect(
+      subject.service.preview({
+        idempotencyKey: `preview-groups-${_label}`,
+        productId: 'product-1',
+        destinationIds: [...destinationIds],
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_PUBLICATION_DESTINATION_LIMIT' });
+    expect(subject.createdRequestCount).toBe(0);
+  });
+
+  it('max groups permits one and five valid groups', async () => {
+    const fiveGroups = ['a', 'b', 'c', 'd', 'e'].map((id) => group(id));
+    const one = createSubject('OFFICIAL', undefined, { groups: [group('a')] });
+    const five = createSubject('OFFICIAL', undefined, { groups: fiveGroups });
+
+    await expect(
+      one.service.preview({
+        idempotencyKey: 'preview-one-group',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ).resolves.toMatchObject({ request: { status: 'PREVIEW_READY' } });
+    await expect(
+      five.service.preview({
+        idempotencyKey: 'preview-five-groups',
+        productId: 'product-1',
+        destinationIds: ['e', 'd', 'c', 'b', 'a'],
+      }),
+    ).resolves.toMatchObject({ request: { status: 'PREVIEW_READY' } });
+    expect(five.createdRequestCount).toBe(1);
+  });
+
+  it('previewCannotBecomeSend rejects before the SEND pipeline', async () => {
+    const subject = createSubject();
+    const input = {
+      idempotencyKey: 'preview-send-escalation-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+    };
+    await subject.service.preview(input);
+
+    await expect(
+      subject.service.create({
+        ...input,
+        confirm: MANUAL_PUBLICATION_CONFIRMATION,
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT' });
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.createdRequestCount).toBe(1);
   });
 
   it('bloqueia fonte MOCK antes de reserva, copy ou confirmacao', async () => {

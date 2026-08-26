@@ -508,7 +508,10 @@ export type ManualPublicationRequestStatus =
   | 'PARTIAL'
   | 'BLOCKED'
   | 'FAILED'
-  | 'AMBIGUOUS';
+  | 'AMBIGUOUS'
+  | 'PREVIEW_READY';
+
+export type ManualPublicationRequestMode = 'PREVIEW' | 'SEND';
 
 export type ManualPublicationTargetStatus =
   | 'ACCEPTED'
@@ -533,6 +536,8 @@ export type ManualPublicationRequestCreateData = {
   id?: string;
   idempotencyKey: string;
   payloadHash: string;
+  mode: ManualPublicationRequestMode;
+  legacyPayloadHash?: string;
   productId: string;
   requestedSnapshotId: string;
   requestedSnapshotRevision: number;
@@ -606,6 +611,7 @@ export type ManualPublicationRequestRecord = {
   id: string;
   idempotencyKey: string;
   payloadHash: string;
+  mode: ManualPublicationRequestMode;
   productId: string;
   requestedSnapshotId: string;
   requestedSnapshotRevision: number;

@@ -50,6 +50,7 @@ import {
 import {
   ManualPublicationService,
   type ManualPublicationInput,
+  type ManualPublicationPreviewInput,
 } from './manual-publication-service';
 import type { AnalyticsService } from './analytics-service';
 import { SchedulerStatusService } from './scheduler-status-service';
@@ -143,7 +144,7 @@ export type BuildAppOptions = {
   >;
   manualPublicationService?: Pick<
     ManualPublicationService,
-    'getOptions' | 'create' | 'find'
+    'getOptions' | 'create' | 'preview' | 'find'
   >;
   commercialConfirmationEnvironment?: {
     groupSendEnabled: boolean;
@@ -2054,6 +2055,52 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return reply.status(status).send({
         error: code,
         message: error instanceof AppError ? error.message : 'Falha ao consultar opcoes de publicacao manual',
+      });
+    }
+  });
+
+  app.post('/commercial-publications/manual/preview', async (request, reply) => {
+    const body = request.body;
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).sort().join('|') !== 'destinationIds|idempotencyKey|productId'
+    ) {
+      return reply.status(400).send({
+        error: 'MANUAL_PUBLICATION_INVALID',
+        message: 'Payload de preview manual invalido',
+      });
+    }
+    try {
+      const result = await getManualPublicationService().preview(
+        body as ManualPublicationPreviewInput,
+      );
+      return reply.status(result.created ? 201 : 200).send(result.request);
+    } catch (error) {
+      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      const status =
+        code === 'MANUAL_PUBLICATION_INVALID' ||
+        code === 'MANUAL_PUBLICATION_DESTINATION_LIMIT'
+          ? 400
+          : code === 'OFFER_NOT_FOUND'
+            ? 404
+            : code.startsWith('MANUAL_PUBLICATION_') ||
+                code.startsWith('COMMERCIAL_') ||
+                code === 'CAMPAIGN_INACTIVE' ||
+                code === 'NICHE_INACTIVE'
+              ? 409
+              : 500;
+      request.log.error(
+        { event: 'manual-publication.preview.route.failed', code },
+        'Manual publication preview route failed',
+      );
+      return reply.status(status).send({
+        error: code,
+        message:
+          error instanceof AppError
+            ? error.message
+            : 'Falha segura no preview de publicacao manual',
       });
     }
   });

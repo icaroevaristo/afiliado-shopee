@@ -440,6 +440,7 @@ model ManualPublicationRequest {
   id                         String                         @id @default(cuid())
   idempotencyKey             String                         @unique
   payloadHash                String
+  mode                       ManualPublicationRequestMode  @default(SEND)
   productId                  String
   product                    ProductLead                    @relation("ManualPublicationRequestProduct", fields: [productId], references: [id], onDelete: Restrict)
   requestedSnapshotId        String
@@ -593,6 +594,12 @@ enum ManualPublicationRequestStatus {
   BLOCKED
   FAILED
   AMBIGUOUS
+  PREVIEW_READY
+}
+
+enum ManualPublicationRequestMode {
+  PREVIEW
+  SEND
 }
 
 enum ManualPublicationTargetStatus {
