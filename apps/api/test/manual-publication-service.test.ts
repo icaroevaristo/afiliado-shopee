@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
   canonicalManualPublicationPayload,
@@ -227,6 +228,9 @@ const createSubject = (
     quotaBlocked?: string;
     publishOutboxError?: Error;
     recoverRun?: CommercialPipelineRunRecord;
+    candidateStatus?: 'QUEUED' | 'COPY_READY';
+    prepareManualFailure?: { point: 'PRE_MARKER' | 'POST_MARKER'; error: Error };
+    markerError?: Error;
   } = {},
 ) => {
   const groups = overrides.groups ?? [group('a'), group('b', false)];
@@ -332,8 +336,24 @@ const createSubject = (
       acquired: true,
     });
   });
-  const prepareManual = vi.fn(async (_productId: string, target: { groupId: string; campaignId: string; logicalGroupFingerprint: string }, input: { executionId: string }) => {
+  const prepareManual = vi.fn(async (
+    _productId: string,
+    target: { groupId: string; campaignId: string; logicalGroupFingerprint: string },
+    input: { executionId: string; beforeExternalCopyGeneration?: () => Promise<void> },
+  ) => {
     events.push(`prepare:${input.executionId}`);
+    if (overrides.prepareManualFailure?.point === 'PRE_MARKER') {
+      throw overrides.prepareManualFailure.error;
+    }
+    if (overrides.candidateStatus !== 'COPY_READY') {
+      events.push('beforeExternalMarker');
+      await input.beforeExternalCopyGeneration?.();
+      events.push('externalMarked');
+      if (overrides.prepareManualFailure?.point === 'POST_MARKER') {
+        throw overrides.prepareManualFailure.error;
+      }
+      events.push('copyGenerate');
+    }
     return ({
     runId: `run-${target.groupId}`,
     candidateId: `candidate-${target.groupId}`,
@@ -368,6 +388,26 @@ const createSubject = (
     });
     return {} as never;
   });
+  const releaseSendSlot = vi.fn(async () => undefined);
+  const releaseAttempt = vi.fn(async () => ({
+    kind: 'RELEASED' as const,
+    campaignId: 'campaign-a',
+    executionId: 'manual-execution',
+    released: true,
+  }));
+  const markExternalMayHaveStarted = vi.fn(async (
+    ownership: { executionId: string; ownerId: string },
+  ) => {
+    events.push(`external:${ownership.executionId}`);
+    const execution = executions.find((item) => item.id === ownership.executionId);
+    if (!execution || execution.ownerId !== ownership.ownerId || execution.status !== 'STARTED') {
+      throw new Error('ownership lost');
+    }
+    execution.externalStage = 'EXTERNAL_MAY_HAVE_STARTED';
+    if (overrides.markerError) throw overrides.markerError;
+    return execution;
+  });
+  const logger = { info: vi.fn(), error: vi.fn() };
 
   const requestRepository: ManualPublicationRequestRepository = {
     accept: async (input) => {
@@ -445,7 +485,7 @@ const createSubject = (
       overrides.quotaBlocked
         ? { kind: 'BLOCKED' as const, reason: overrides.quotaBlocked }
         : { kind: 'RESERVED' as const },
-    releaseSendSlot: async () => undefined,
+    releaseSendSlot,
     updateTarget: async (id, data) => {
       const request = [...requests.values()].find((candidate) => candidate.targets.some((target) => target.id === id));
       const target = request?.targets.find((candidate) => candidate.id === id);
@@ -493,7 +533,7 @@ const createSubject = (
     policy: { evaluateManualSendSafety },
     candidateFlow: {
       reserveAttempt,
-      releaseAttempt: async () => ({ kind: 'RELEASED' as const, campaignId: 'campaign-a', executionId: 'manual-execution', released: true }),
+      releaseAttempt,
       renewAttempt: async () => ({ kind: 'RENEWED' as const, campaignId: 'campaign-a', executionId: 'manual-execution', leaseExpiresAt: new Date(NOW.getTime() + 120_000), renewed: true }),
       prepareManual,
     },
@@ -513,17 +553,7 @@ const createSubject = (
         execution.heartbeatAt = input.heartbeatAt;
         execution.leaseExpiresAt = input.leaseExpiresAt;
       },
-      markExternalMayHaveStarted: async (
-        ownership: { executionId: string; ownerId: string },
-      ) => {
-        events.push(`external:${ownership.executionId}`);
-        const execution = executions.find((item) => item.id === ownership.executionId);
-        if (!execution || execution.ownerId !== ownership.ownerId || execution.status !== 'STARTED') {
-          throw new Error('ownership lost');
-        }
-        execution.externalStage = 'EXTERNAL_MAY_HAVE_STARTED';
-        return execution;
-      },
+      markExternalMayHaveStarted,
       finish: async (
         ownership: { executionId: string; ownerId: string },
         input: {
@@ -637,12 +667,16 @@ const createSubject = (
       schedulerEnabled: true,
       maximumMessagesPerRun: 1,
     },
+    logger,
     clock: () => NOW,
   } as never);
 
   return {
     service,
     reserveAttempt,
+    releaseAttempt,
+    releaseSendSlot,
+    markExternalMayHaveStarted,
     prepareManual,
     confirm,
     startExecution,
@@ -650,6 +684,8 @@ const createSubject = (
     events,
     evaluateManualSendSafety,
     requests,
+    outboxes,
+    logger,
     get createdRequestCount() {
       return createdRequestCount;
     },
@@ -965,7 +1001,7 @@ describe('ManualPublicationService', () => {
     });
   });
 
-  it('usa execution real, marca o boundary externo e finaliza QUEUED antes de publicar o outbox', async () => {
+  it('usa execution real, marca o boundary externo imediatamente antes da geracao e finaliza QUEUED antes de publicar o outbox', async () => {
     const subject = createSubject();
 
     await subject.service.create({
@@ -996,13 +1032,201 @@ describe('ManualPublicationService', () => {
       COMMERCIAL_CONFIRMATION_TOKEN,
       expect.objectContaining({ manual: true, deferPublication: true }),
     );
-    expect(subject.events.indexOf(`external:${execution?.id}`)).toBeLessThan(
-      subject.events.indexOf(`prepare:${execution?.id}`),
-    );
+    expect(
+      subject.events.filter((event) =>
+        [
+          'beforeExternalMarker',
+          `external:${execution?.id}`,
+          'externalMarked',
+          'copyGenerate',
+        ].includes(event),
+      ),
+    ).toEqual([
+      'beforeExternalMarker',
+      `external:${execution?.id}`,
+      'externalMarked',
+      'copyGenerate',
+    ]);
+    expect(subject.markExternalMayHaveStarted).toHaveBeenCalledOnce();
     expect(subject.events.indexOf(`finish:QUEUED:${execution?.id}`)).toBeLessThan(
       subject.events.indexOf('publish'),
     );
     expect(subject.events.filter((event: string) => event.startsWith('heartbeat:')).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('libera reserva e slot quando o preparo falha antes do marker e da geracao', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      prepareManualFailure: {
+        point: 'PRE_MARKER',
+        error: new AppError(
+          'Candidate mudou antes da geracao',
+          'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
+        ),
+      },
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-pre-marker-failure',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'BLOCKED',
+      investigationRequired: false,
+      runId: null,
+      dispatchId: null,
+      outboxId: null,
+    });
+    expect(subject.markExternalMayHaveStarted).not.toHaveBeenCalled();
+    expect(subject.events).not.toContain('copyGenerate');
+    expect(subject.releaseAttempt).toHaveBeenCalledOnce();
+    expect(subject.releaseSendSlot).toHaveBeenCalledOnce();
+    expect(subject.executions[0]).toMatchObject({
+      status: 'BLOCKED',
+      externalStage: 'NOT_REACHED',
+    });
+    expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.outboxes.size).toBe(0);
+  });
+
+  it('mantem AMBIGUOUS e nao libera a reserva quando o marker persiste e falha na leitura', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      markerError: new AppError(
+        'Ownership do marker perdida',
+        'MANUAL_PUBLICATION_EXECUTION_CONFLICT',
+      ),
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-marker-failure',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      investigationRequired: true,
+    });
+    expect(subject.markExternalMayHaveStarted).toHaveBeenCalledOnce();
+    expect(subject.events).not.toContain('externalMarked');
+    expect(subject.events).not.toContain('copyGenerate');
+    expect(subject.releaseAttempt).not.toHaveBeenCalled();
+    expect(subject.releaseSendSlot).not.toHaveBeenCalled();
+    expect(subject.executions[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+    });
+  });
+
+  it('mantem AMBIGUOUS sem release ou retry quando a geracao fica incerta apos o marker', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      prepareManualFailure: {
+        point: 'POST_MARKER',
+        error: new AppError(
+          'Resultado do provider incerto',
+          'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+        ),
+      },
+    });
+    const input = {
+      idempotencyKey: 'manual-provider-uncertain',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    };
+
+    const result = await subject.service.create(input);
+    const replay = await subject.service.create(input);
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      investigationRequired: true,
+    });
+    expect(replay.request.targets[0]).toMatchObject({ status: 'AMBIGUOUS' });
+    expect(subject.executions[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+    });
+    expect(subject.releaseAttempt).not.toHaveBeenCalled();
+    expect(subject.releaseSendSlot).not.toHaveBeenCalled();
+    expect(subject.prepareManual).toHaveBeenCalledOnce();
+  });
+
+  it('nao torna ambiguo erro de provider que prova requestMayHaveStarted=false', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      prepareManualFailure: {
+        point: 'POST_MARKER',
+        error: new AppError(
+          'Provider nao iniciou request',
+          'COMMERCIAL_AI_COPY_PROVIDER_NOT_STARTED',
+        ),
+      },
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-provider-not-started',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'BLOCKED',
+      blockedReason: 'COMMERCIAL_AI_COPY_PROVIDER_NOT_STARTED',
+      investigationRequired: false,
+    });
+    expect(subject.releaseAttempt).toHaveBeenCalledOnce();
+    expect(subject.releaseSendSlot).toHaveBeenCalledOnce();
+    expect(subject.executions[0]).toMatchObject({ status: 'BLOCKED' });
+  });
+
+  it('nao marca nem gera quando a selecao manual ja retorna COPY_READY', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      candidateStatus: 'COPY_READY',
+    });
+
+    await subject.service.create({
+      idempotencyKey: 'manual-copy-ready',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(subject.markExternalMayHaveStarted).not.toHaveBeenCalled();
+    expect(subject.events).not.toContain('copyGenerate');
+  });
+
+  it('mapeia erro desconhecido do preparo para codigo estavel sem registrar detalhes sensiveis', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      prepareManualFailure: {
+        point: 'PRE_MARKER',
+        error: new Error('secret provider payload'),
+      },
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-unknown-preparation',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'FAILED',
+      blockedReason: 'MANUAL_PUBLICATION_PREPARATION_FAILED',
+      investigationRequired: false,
+    });
+    const [details, message] = subject.logger.error.mock.calls.at(-1) ?? [];
+    expect(details).toMatchObject({
+      event: 'manual-publication.target.unknown-failure',
+      stage: 'PREPARATION',
+      code: 'MANUAL_PUBLICATION_PREPARATION_FAILED',
+    });
+    expect(JSON.stringify(details)).not.toContain('secret provider payload');
+    expect(message).toBe('Manual publication target failed with an unknown error');
   });
 
   it('marca a execution como AMBIGUOUS se a publicacao falha depois de QUEUED', async () => {

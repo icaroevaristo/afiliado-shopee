@@ -76,6 +76,7 @@ export type CommercialAutomationCandidatePreparationOptions = {
   executionId: string;
   existingRunId?: string;
   manualSelection?: boolean;
+  beforeExternalCopyGeneration?: () => Promise<void>;
   miningReport?: Pick<
     CommercialPromotionMiningReport,
     'rejectionSummary'
@@ -902,6 +903,7 @@ export class CommercialAutomationCandidateFlowService {
     const { group, campaign } = await this.resolveTarget(selection.target);
     if (selection.candidateStatus === 'QUEUED') {
       await this.loadSelectedQueuedCandidate(selection, campaign, group);
+      await options.beforeExternalCopyGeneration?.();
       await this.options.copyGeneration.generate(
         selection.candidateId,
         COMMERCIAL_AI_COPY_CONFIRMATION,
@@ -983,7 +985,7 @@ export class CommercialAutomationCandidateFlowService {
     target: CommercialAutomationTarget,
     options: Pick<
       CommercialAutomationCandidatePreparationOptions,
-      'executionId' | 'existingRunId'
+      'executionId' | 'existingRunId' | 'beforeExternalCopyGeneration'
     >,
   ): Promise<CommercialAutomationCandidateFlowResult> {
     const selectManualCandidate = (
@@ -1023,6 +1025,7 @@ export class CommercialAutomationCandidateFlowService {
         executionId: options.executionId,
         existingRunId: options.existingRunId,
         manualSelection: true,
+        beforeExternalCopyGeneration: options.beforeExternalCopyGeneration,
       },
     );
   }

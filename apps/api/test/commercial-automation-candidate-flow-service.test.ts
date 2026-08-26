@@ -595,6 +595,64 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
   });
 
+  it('executa o callback do marker imediatamente antes de gerar copy para QUEUED', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const events: string[] = [];
+    subject.copyGeneration.generate.mockImplementation(async () => {
+      events.push('copyGenerate');
+      subject.setCandidate({ status: 'COPY_READY', generatedCopyId: 'copy-1' });
+    });
+
+    await subject.service.prepare(selection(subject.target, 'QUEUED'), {
+      ...preparationOptions,
+      beforeExternalCopyGeneration: async () => {
+        events.push('beforeExternalMarker');
+        events.push('externalMarked');
+      },
+    });
+
+    expect(events).toEqual([
+      'beforeExternalMarker',
+      'externalMarked',
+      'copyGenerate',
+    ]);
+    expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+  });
+
+  it('nao chama generate quando o callback do marker falha', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const markerFailure = new Error('marker unavailable');
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED'), {
+        ...preparationOptions,
+        beforeExternalCopyGeneration: async () => {
+          throw markerFailure;
+        },
+      }),
+    ).rejects.toBe(markerFailure);
+
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('ignora o callback do marker e generate quando o candidato ja esta COPY_READY', async () => {
+    const subject = createSubject();
+    const beforeExternalCopyGeneration = vi.fn(async () => undefined);
+
+    await subject.service.prepare(selection(subject.target), {
+      ...preparationOptions,
+      beforeExternalCopyGeneration,
+    });
+
+    expect(beforeExternalCopyGeneration).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
   it('faz preflight de QUEUED somente com leituras antes de minerar ou chamar IA', async () => {
     const subject = createSubject({
       candidate: { status: 'QUEUED', generatedCopyId: null },

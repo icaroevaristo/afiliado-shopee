@@ -374,6 +374,7 @@ const knownBlocker = (error: unknown) =>
       'COMMERCIAL_EXECUTION_IN_PROGRESS',
       'COMMERCIAL_AI_COPY_PROVIDER_DISABLED',
       'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+      'COMMERCIAL_AI_COPY_PROVIDER_NOT_STARTED',
       'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
       'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
       'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
@@ -405,6 +406,24 @@ const isAmbiguousBlocker = (error: unknown) =>
     'COMMERCIAL_DISPATCH_FAILED',
     'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
     'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+  ].includes(error.code);
+
+type ManualPublicationFailureStage =
+  | 'SELECTION'
+  | 'PREPARATION'
+  | 'GENERATION'
+  | 'REVALIDATION';
+
+const unexpectedFailureCodeForStage = (
+  stage: ManualPublicationFailureStage,
+) => `MANUAL_PUBLICATION_${stage}_FAILED`;
+
+const isExplicitPreRequestCopyFailure = (error: unknown) =>
+  error instanceof AppError &&
+  [
+    'COMMERCIAL_AI_COPY_PROVIDER_DISABLED',
+    'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+    'COMMERCIAL_AI_COPY_PROVIDER_NOT_STARTED',
   ].includes(error.code);
 
 export class ManualPublicationService {
@@ -832,18 +851,6 @@ export class ManualPublicationService {
       );
     }
     return target;
-  }
-
-  private async candidateForTarget(
-    request: ManualPublicationRequestRecord,
-    target: ManualPublicationTargetRecord,
-  ) {
-    if (target.candidate) return target.candidate;
-    if (!this.options.candidates.findByCampaignAndProduct) return null;
-    return this.options.candidates.findByCampaignAndProduct(
-      target.campaignId,
-      request.productId,
-    );
   }
 
   private assertRunMatchesTarget(
@@ -1311,8 +1318,10 @@ export class ManualPublicationService {
       | { campaignId: string; executionId: string }
       | null = null;
     let commercialRunId: string | undefined;
+    let externalStageAttempted = false;
     let externalStageReached = false;
     let confirmationAttempted = false;
+    let failureStage: ManualPublicationFailureStage = 'SELECTION';
     const lifecycle = { executionQueued: false };
     try {
       await this.assertRequestSnapshot(request);
@@ -1479,20 +1488,24 @@ export class ManualPublicationService {
         executionId,
       };
       await this.checkpoint(ownership);
-      const candidate = await this.candidateForTarget(request, target);
-      if (candidate?.status !== 'COPY_READY') {
-        await this.options.executions.markExternalMayHaveStarted(ownership, {
-          markedAt: this.clock(),
-        });
-        externalStageReached = true;
-      }
-      await this.checkpoint(ownership);
+      failureStage = 'PREPARATION';
       const prepared = await this.options.candidateFlow.prepareManual(
         request.productId,
         automationTarget,
-        { executionId },
+        {
+          executionId,
+          beforeExternalCopyGeneration: async () => {
+            failureStage = 'GENERATION';
+            externalStageAttempted = true;
+            await this.options.executions.markExternalMayHaveStarted(ownership!, {
+              markedAt: this.clock(),
+            });
+            externalStageReached = true;
+          },
+        },
       );
       commercialRunId = prepared.runId;
+      failureStage = 'REVALIDATION';
       await this.checkpoint(ownership);
       const preparedTarget =
         (await this.options.requests.updateTarget(target.id, {
@@ -1524,9 +1537,27 @@ export class ManualPublicationService {
       );
       return confirmedTarget;
     } catch (error) {
-      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_UNEXPECTED_FAILURE';
+      const code =
+        error instanceof AppError
+          ? error.code
+          : unexpectedFailureCodeForStage(failureStage);
+      if (!(error instanceof AppError)) {
+        this.options.logger?.error(
+          {
+            event: 'manual-publication.target.unknown-failure',
+            stage: failureStage,
+            code,
+            requestId: request.id,
+            targetId: target.id,
+            ...(executionId ? { executionId } : {}),
+          },
+          'Manual publication target failed with an unknown error',
+        );
+      }
+      const explicitlyPreRequest =
+        externalStageReached && isExplicitPreRequestCopyFailure(error);
       let ambiguous =
-        externalStageReached ||
+        (externalStageAttempted && !explicitlyPreRequest) ||
         confirmationAttempted ||
         isAmbiguousBlocker(error) ||
         code === 'COMMERCIAL_EXECUTION_OWNERSHIP_LOST';
