@@ -13,6 +13,11 @@ import {
   type CommercialPipelineConfirmationService,
 } from './commercial-pipeline-confirmation-service';
 import type { CommercialAutomationCandidateFlowService } from './commercial-automation-candidate-flow-service';
+import {
+  COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+  COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS,
+} from './commercial-automation-execution-recovery-service';
+import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
 import type {
   CommercialAutomationPolicyService,
 } from './commercial-automation-policy-service';
@@ -26,6 +31,9 @@ import type {
   CommercialPipelineRunRepository,
   CommercialDispatchOutboxRepository,
   CommercialDeliveryHistoryRepository,
+  CommercialAutomationExecutionOwnership,
+  CommercialAutomationExecutionRecord,
+  CommercialAutomationExecutionRepository,
   ManualPublicationRequestCreateData,
   ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
@@ -151,7 +159,26 @@ type ManualPublicationServiceOptions = {
     CommercialAutomationCandidateFlowService,
     'prepareManual' | 'reserveAttempt' | 'releaseAttempt' | 'renewAttempt'
   >;
-  confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
+  confirmation: Pick<
+    CommercialPipelineConfirmationService,
+    'confirm'
+  > & Partial<Pick<CommercialPipelineConfirmationService, 'publishOutbox'>>;
+  executions: Pick<
+    CommercialAutomationExecutionRepository,
+    | 'start'
+    | 'findBySchedulerJobId'
+    | 'heartbeat'
+    | 'markExternalMayHaveStarted'
+    | 'finish'
+    | 'markQueuedAmbiguous'
+    | 'recoverStale'
+  > &
+    Partial<
+      Pick<
+        CommercialAutomationExecutionRepository,
+        'recoverStalePreMarkerReservation' | 'recoverStalePreConfirmationReservation'
+      >
+    >;
   runs: Pick<
     CommercialPipelineRunRepository,
     'findById' | 'findByExecutionId'
@@ -319,6 +346,8 @@ const knownBlocker = (error: unknown) =>
       'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
       'COMMERCIAL_AUTOMATION_ATTEMPT_RELEASE_UNAVAILABLE',
       'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_UNAVAILABLE',
+      'GLOBAL_DAILY_LIMIT_REACHED',
+      'GROUP_DAILY_LIMIT_REACHED',
       'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
       'COMMERCIAL_AUTOMATION_CANDIDATE_INVALID',
       'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
@@ -765,7 +794,8 @@ export class ManualPublicationService {
   private async updateTargetState(
     target: ManualPublicationTargetRecord,
   ): Promise<ManualPublicationTargetRecord> {
-    let nextStatus = target.status;
+    if (target.status === 'AMBIGUOUS') return target;
+    let nextStatus: ManualPublicationTargetRecord['status'] = target.status;
     let investigationRequired = target.investigationRequired;
     const run = target.runId ? await this.options.runs.findById(target.runId) : null;
     const dispatch = target.dispatchId
@@ -824,6 +854,10 @@ export class ManualPublicationService {
   ) {
     if (
       !run ||
+      (target.runId !== null && target.runId !== run.id) ||
+      (target.dispatchId !== null && target.dispatchId !== run.dispatchId) ||
+      (target.outboxId !== null &&
+        target.outboxId !== commercialConfirmationIds(run.id).outboxId) ||
       run.executionId !== executionId ||
       (run.productId !== null && run.productId !== request.productId) ||
       (run.groupDestinationId !== null &&
@@ -879,18 +913,109 @@ export class ManualPublicationService {
     return this.updateTargetState(updated);
   }
 
+  private manualSchedulerJobId(
+    request: ManualPublicationRequestRecord,
+    target: ManualPublicationTargetRecord,
+  ) {
+    return `manual-publication:${request.id}:${target.id}`;
+  }
+
+  private executionLease(at: Date) {
+    return new Date(at.getTime() + (this.options.leaseSeconds ?? 120) * 1_000);
+  }
+
+  private async checkpoint(ownership: CommercialAutomationExecutionOwnership) {
+    const now = this.clock();
+    await this.options.executions.heartbeat(ownership, {
+      heartbeatAt: now,
+      leaseExpiresAt: this.executionLease(now),
+    });
+  }
+
+  private async queueExecution(
+    ownership: CommercialAutomationExecutionOwnership,
+    runId: string,
+  ) {
+    await this.checkpoint(ownership);
+    const execution = await this.options.executions.finish(ownership, {
+      status: 'QUEUED',
+      commercialRunId: runId,
+      completedAt: this.clock(),
+    });
+    if (
+      execution.mode !== 'SEND' ||
+      execution.status !== 'QUEUED' ||
+      execution.commercialRunId !== runId
+    ) {
+      throw new AppError(
+        'Ownership manual nao foi finalizada antes da publicacao',
+        'COMMERCIAL_OUTBOX_INCONSISTENT',
+      );
+    }
+    return execution;
+  }
+
+  private async publishQueuedOutbox(
+    executionId: string,
+    runId: string,
+    outboxId: string,
+  ) {
+    try {
+      if (!this.options.confirmation.publishOutbox) {
+        throw new AppError(
+          'Publicador de outbox manual indisponivel',
+          'MANUAL_PUBLICATION_OUTBOX_PUBLISHER_UNAVAILABLE',
+        );
+      }
+      return await this.options.confirmation.publishOutbox(outboxId);
+    } catch (error) {
+      const publicationError =
+        error instanceof AppError && isAmbiguousBlocker(error)
+          ? error
+          : new AppError(
+              'Publicacao do outbox manual possui resultado incerto',
+              'COMMERCIAL_OUTBOX_PUBLICATION_UNCERTAIN',
+            );
+      try {
+        const marked = await this.options.executions.markQueuedAmbiguous(
+          executionId,
+          {
+            commercialRunId: runId,
+            failureCode: publicationError.code,
+            completedAt: this.clock(),
+          },
+        );
+        if (
+          marked.status !== 'AMBIGUOUS' ||
+          marked.commercialRunId !== runId
+        ) {
+          throw new AppError(
+            'Ownership manual nao foi marcada como ambigua',
+            'COMMERCIAL_EXECUTION_OWNERSHIP_LOST',
+          );
+        }
+      } catch {
+        // The publication error remains ambiguous even when the CAS follow-up
+        // cannot be observed; no retry is safe in that state.
+      }
+      throw publicationError;
+    }
+  }
+
   private async confirmPreparedTarget(
     target: ManualPublicationTargetRecord,
     runId: string,
     generatedCopyId: string,
+    ownership: CommercialAutomationExecutionOwnership,
+    lifecycle: { executionQueued: boolean },
   ) {
     const run = await this.options.runs.findById(runId);
-    const reconciled = run
+    const existingOutbox = run
       ? await this.reconcileOutboxForRun(target, run, target.candidateId ?? undefined)
       : null;
-    if (reconciled) return reconciled;
     if (
       run &&
+      !existingOutbox &&
       (run.mode !== 'DRY_RUN' ||
         run.status !== 'COMPLETED' ||
         run.confirmedAt ||
@@ -902,32 +1027,17 @@ export class ManualPublicationService {
         'COMMERCIAL_OUTBOX_INCONSISTENT',
       );
     }
-    try {
+    if (!existingOutbox) {
+      await this.checkpoint(ownership);
       await this.options.confirmation.confirm(
         runId,
         COMMERCIAL_CONFIRMATION_TOKEN,
-        { existingGeneratedCopyId: generatedCopyId, manual: true },
+        {
+          existingGeneratedCopyId: generatedCopyId,
+          manual: true,
+          deferPublication: true,
+        },
       );
-    } catch (error) {
-      if (
-        error instanceof AppError &&
-        error.code === 'COMMERCIAL_RUN_ALREADY_CONFIRMED'
-      ) {
-        const afterRace = await this.options.runs.findById(runId);
-        if (afterRace) {
-          const recovered = await this.reconcileOutboxForRun(
-            target,
-            afterRace,
-            target.candidateId ?? undefined,
-          );
-          if (recovered) return recovered;
-        }
-        throw new AppError(
-          'Confirmacao manual possui resultado ambiguo',
-          'COMMERCIAL_OUTBOX_INCONSISTENT',
-        );
-      }
-      throw error;
     }
     const { dispatchId, outboxId } = commercialConfirmationIds(runId);
     const outbox = await this.options.outboxes.findById(outboxId);
@@ -936,138 +1046,201 @@ export class ManualPublicationService {
       outbox.commercialRunId !== runId ||
       outbox.dispatchId !== dispatchId
     ) {
-      return (
-        (await this.options.requests.updateTarget(target.id, {
-          status: 'AMBIGUOUS',
-          blockedReason: 'MANUAL_PUBLICATION_OUTBOX_EVIDENCE_MISSING',
-          investigationRequired: true,
-        })) ?? target
+      throw new AppError(
+        'Confirmacao manual possui evidencia de outbox incompleta',
+        'COMMERCIAL_OUTBOX_INCONSISTENT',
       );
     }
+    await this.queueExecution(ownership, runId);
+    lifecycle.executionQueued = true;
+    if (!this.options.confirmation.publishOutbox) {
+      throw new AppError(
+        'Publicador de outbox manual indisponivel',
+        'MANUAL_PUBLICATION_OUTBOX_PUBLISHER_UNAVAILABLE',
+      );
+    }
+    await this.options.confirmation.publishOutbox(outbox.id);
     return (
       (await this.options.requests.updateTarget(target.id, {
         dispatchId,
         outboxId,
         status: 'QUEUED',
         blockedReason: null,
+      })) ?? existingOutbox ?? target
+    );
+  }
+
+  private async recoverStaleExecution(
+    request: ManualPublicationRequestRecord,
+    target: ManualPublicationTargetRecord,
+    execution: CommercialAutomationExecutionRecord,
+    minimumIntervalMinutes: number,
+  ): Promise<ManualPublicationTargetRecord> {
+    let recovered: CommercialAutomationExecutionRecord | null = null;
+
+    if (
+      execution.externalStage === 'NOT_REACHED' &&
+      execution.commercialRunId === null &&
+      this.options.executions.recoverStalePreMarkerReservation
+    ) {
+      const result =
+        await this.options.executions.recoverStalePreMarkerReservation(
+          execution.id,
+          {
+            completedAt: this.clock(),
+            minimumIntervalMinutes,
+            failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+          },
+        );
+      if (result.outcome === 'RECOVERED' || result.outcome === 'ALREADY_RECOVERED') {
+        recovered = result.execution;
+      }
+    }
+
+    if (
+      !recovered &&
+      execution.externalStage === 'NOT_REACHED' &&
+      execution.commercialRunId
+    ) {
+      const run = await this.options.runs.findById(execution.commercialRunId);
+      const safePreConfirmationRun = Boolean(
+        run &&
+          run.mode === 'DRY_RUN' &&
+          !run.dispatchId &&
+          !run.jobId,
+      );
+      if (
+        safePreConfirmationRun &&
+        this.options.executions.recoverStalePreConfirmationReservation
+      ) {
+        const result =
+          await this.options.executions.recoverStalePreConfirmationReservation(
+            execution.id,
+            {
+              completedAt: this.clock(),
+              failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
+            },
+          );
+        if (result.outcome === 'RECOVERED' || result.outcome === 'ALREADY_RECOVERED') {
+          recovered = result.execution;
+        }
+      }
+    }
+
+    recovered ??= await this.options.executions.recoverStale(execution.id, {
+      status: 'AMBIGUOUS',
+      failureCode: COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS,
+      completedAt: this.clock(),
+    });
+
+    if (recovered.status === 'QUEUED') {
+      return this.reconcileExistingExecution(
+        request,
+        target,
+        recovered,
+        minimumIntervalMinutes,
+      );
+    }
+    if (recovered.status === 'BLOCKED' || recovered.status === 'FAILED') {
+      return (
+        (await this.options.requests.updateTarget(target.id, {
+          status: recovered.status,
+          blockedReason:
+            recovered.failureCode ?? 'MANUAL_PUBLICATION_EXECUTION_TERMINAL',
+          investigationRequired: false,
+        })) ?? target
+      );
+    }
+    return (
+      (await this.options.requests.updateTarget(target.id, {
+        status: 'AMBIGUOUS',
+        blockedReason:
+          recovered.failureCode ?? 'MANUAL_PUBLICATION_EXECUTION_AMBIGUOUS',
+        investigationRequired: true,
       })) ?? target
     );
   }
 
-  private async recoverExistingExecution(
+  private async reconcileExistingExecution(
     request: ManualPublicationRequestRecord,
     target: ManualPublicationTargetRecord,
-    executionId: string,
-  ) {
-    const run = await this.options.runs.findByExecutionId(executionId);
-    if (!run) return null;
-    this.assertRunMatchesTarget(run, request, target, executionId);
-    const candidate = await this.candidateForTarget(request, target);
+    execution: CommercialAutomationExecutionRecord,
+    minimumIntervalMinutes = 60,
+  ): Promise<ManualPublicationTargetRecord> {
+    if (execution.mode !== 'SEND') {
+      throw new AppError(
+        'A execution existente possui modo incompatível',
+        'MANUAL_PUBLICATION_EXECUTION_CONFLICT',
+      );
+    }
+    if (execution.status === 'STARTED') {
+      if (!isCommercialAutomationExecutionStale(execution, this.clock())) {
+        return (
+          (await this.options.requests.updateTarget(target.id, {
+            status: 'PROCESSING',
+            blockedReason: 'COMMERCIAL_EXECUTION_IN_PROGRESS',
+            investigationRequired: false,
+          })) ?? target
+        );
+      }
+      return this.recoverStaleExecution(
+        request,
+        target,
+        execution,
+        minimumIntervalMinutes,
+      );
+    }
+    if (execution.status === 'AMBIGUOUS') {
+      return (
+        (await this.options.requests.updateTarget(target.id, {
+          status: 'AMBIGUOUS',
+          blockedReason:
+            execution.failureCode ?? 'MANUAL_PUBLICATION_EXECUTION_AMBIGUOUS',
+          investigationRequired: true,
+        })) ?? target
+      );
+    }
+    if (execution.status === 'BLOCKED' || execution.status === 'FAILED') {
+      return (
+        (await this.options.requests.updateTarget(target.id, {
+          status: execution.status,
+          blockedReason:
+            execution.failureCode ?? 'MANUAL_PUBLICATION_EXECUTION_TERMINAL',
+          investigationRequired: false,
+        })) ?? target
+      );
+    }
+    if (!execution.commercialRunId) {
+      return (
+        (await this.options.requests.updateTarget(target.id, {
+          status: 'AMBIGUOUS',
+          blockedReason: 'MANUAL_PUBLICATION_EXECUTION_RECOVERY_REQUIRED',
+          investigationRequired: true,
+        })) ?? target
+      );
+    }
+    if (execution.status !== 'QUEUED') {
+      throw new AppError(
+        'A execution manual existente possui estado invalido',
+        'MANUAL_PUBLICATION_EXECUTION_CONFLICT',
+      );
+    }
+    const run = await this.options.runs.findById(execution.commercialRunId);
+    this.assertRunMatchesTarget(run, request, target, execution.id);
     const reconciled = await this.reconcileOutboxForRun(
       target,
-      run,
-      candidate?.id,
-    );
-    if (reconciled) return reconciled;
-    if (
-      run.mode === 'DRY_RUN' &&
-      run.status === 'COMPLETED' &&
-      candidate?.status === 'COPY_READY' &&
-      candidate.generatedCopyId
-    ) {
-      const preparedTarget =
-        (await this.options.requests.updateTarget(target.id, {
-          candidateId: candidate.id,
-          runId: run.id,
-          status: 'PROCESSING',
-        })) ?? target;
-      const renewedAt = this.clock();
-      const renewal = await this.options.candidateFlow.renewAttempt({
-        campaignId: target.campaignId,
-        executionId,
-        renewedAt,
-        leaseExpiresAt: new Date(
-          renewedAt.getTime() + (this.options.leaseSeconds ?? 120) * 1_000,
-        ),
-      });
-      if (renewal.kind === 'CONFLICT') {
-        throw new AppError(
-          'A reserva manual mudou durante a recuperacao',
-          'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
-        );
-      }
-      return this.confirmPreparedTarget(
-        preparedTarget,
-        run.id,
-        candidate.generatedCopyId,
-      );
-    }
-    if (
-      run.mode === 'DRY_RUN' &&
-      ['STARTED', 'FAILED'].includes(run.status) &&
-      !run.confirmedAt &&
-      !run.dispatchId &&
-      !run.jobId &&
-      !run.finalStatus &&
-      !run.investigationRequired
-    ) {
-      if (!candidate) {
-        throw new AppError(
-          'Candidato ausente durante a recuperacao manual',
-          'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
-        );
-      }
-      const prepared = await this.options.candidateFlow.prepareManual(
-        request.productId,
-        targetFromRecord(target),
-        { executionId, existingRunId: run.id },
-      );
-      const preparedTarget =
-        (await this.options.requests.updateTarget(target.id, {
-          candidateId: prepared.candidateId,
-          runId: prepared.runId,
-          status: 'PROCESSING',
-        })) ?? target;
-      const renewedAt = this.clock();
-      const renewal = await this.options.candidateFlow.renewAttempt({
-        campaignId: prepared.campaignId,
-        executionId,
-        renewedAt,
-        leaseExpiresAt: new Date(
-          renewedAt.getTime() + (this.options.leaseSeconds ?? 120) * 1_000,
-        ),
-      });
-      if (renewal.kind === 'CONFLICT') {
-        throw new AppError(
-          'A reserva manual mudou durante a recuperacao',
-          'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
-        );
-      }
-      return this.confirmPreparedTarget(
-        preparedTarget,
-        prepared.runId,
-        prepared.generatedCopyId,
-      );
-    }
-    throw new AppError(
-      'A execucao manual existente nao pode ser reconciliada',
-      'COMMERCIAL_OUTBOX_INCONSISTENT',
-    );
-  }
-
-  private async reconcileExistingExecutionOutbox(
-    request: ManualPublicationRequestRecord,
-    target: ManualPublicationTargetRecord,
-    executionId: string,
-  ) {
-    const run = await this.options.runs.findByExecutionId(executionId);
-    if (!run) return null;
-    this.assertRunMatchesTarget(run, request, target, executionId);
-    return this.reconcileOutboxForRun(
-      target,
-      run,
+      run!,
       target.candidate?.id,
     );
+    if (!reconciled) {
+      throw new AppError(
+        'A execution manual existente nao pode ser reconciliada',
+        'COMMERCIAL_OUTBOX_INCONSISTENT',
+      );
+    }
+    const { outboxId } = commercialConfirmationIds(run!.id);
+    await this.publishQueuedOutbox(execution.id, run!.id, outboxId);
+    return this.updateTargetState(reconciled);
   }
 
   private async aggregate(request: ManualPublicationRequestRecord) {
@@ -1131,46 +1304,17 @@ export class ManualPublicationService {
     options: { deferIfActive?: boolean } = {},
   ) {
     if (['SENT', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(target.status)) return target;
+    let ownership: CommercialAutomationExecutionOwnership | null = null;
+    let executionId: string | null = null;
+    let quotaReserved = false;
+    let candidateReservation:
+      | { campaignId: string; executionId: string }
+      | null = null;
+    let commercialRunId: string | undefined;
+    let externalStageReached = false;
+    let confirmationAttempted = false;
+    const lifecycle = { executionQueued: false };
     try {
-      const executionId = `manual-publication:${request.id}:${target.id}`;
-      const outboxRecovery = await this.reconcileExistingExecutionOutbox(
-        request,
-        target,
-        executionId,
-      );
-      if (outboxRecovery) return outboxRecovery;
-      if (
-        target.runId &&
-        !target.dispatchId &&
-        !target.outboxId &&
-        target.candidate?.generatedCopyId
-      ) {
-        const renewedAt = this.clock();
-        const renewal = await this.options.candidateFlow.renewAttempt({
-          campaignId: target.campaignId,
-          executionId,
-          renewedAt,
-          leaseExpiresAt: new Date(
-            renewedAt.getTime() + (this.options.leaseSeconds ?? 120) * 1_000,
-          ),
-        });
-        if (renewal.kind === 'CONFLICT') {
-          return (
-            (await this.options.requests.updateTarget(target.id, {
-              status: 'BLOCKED',
-              blockedReason: 'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
-            })) ?? target
-          );
-        }
-        return this.confirmPreparedTarget(
-          target,
-          target.runId,
-          target.candidate.generatedCopyId,
-        );
-      }
-      if (target.runId || target.dispatchId || target.outboxId) {
-        return this.updateTargetState(target);
-      }
       await this.assertRequestSnapshot(request);
       const automationTarget = targetFromRecord(target);
       const safety = await this.options.policy.evaluateManualSendSafety(
@@ -1182,6 +1326,31 @@ export class ManualPublicationService {
         safety.reasons[0] === 'COMMERCIAL_EXECUTION_IN_PROGRESS'
       ) {
         return target;
+      }
+      const schedulerJobId = this.manualSchedulerJobId(request, target);
+      const existingExecution =
+        await this.options.executions.findBySchedulerJobId(schedulerJobId);
+      const minimumIntervalMinutes = safety.minimumIntervalMinutes ?? 60;
+      if (
+        existingExecution?.status === 'STARTED' &&
+        isCommercialAutomationExecutionStale(existingExecution, this.clock())
+      ) {
+        const recoveredTarget = await this.reconcileExistingExecution(
+          request,
+          target,
+          existingExecution,
+          minimumIntervalMinutes,
+        );
+        return recoveredTarget;
+      }
+      if (existingExecution?.status === 'STARTED') {
+        const activeTarget = await this.reconcileExistingExecution(
+          request,
+          target,
+          existingExecution,
+          minimumIntervalMinutes,
+        );
+        return activeTarget;
       }
       if (!safety.allowed) {
         return (
@@ -1209,6 +1378,24 @@ export class ManualPublicationService {
       }
       if (options.deferIfActive) return target;
       const now = this.clock();
+      if (existingExecution) {
+        const reconciledTarget = await this.reconcileExistingExecution(
+          request,
+          target,
+          existingExecution,
+          minimumIntervalMinutes,
+        );
+        return reconciledTarget;
+      }
+      if (target.runId || target.dispatchId || target.outboxId) {
+        return (
+          (await this.options.requests.updateTarget(target.id, {
+            status: 'AMBIGUOUS',
+            blockedReason: 'MANUAL_PUBLICATION_EXECUTION_RECOVERY_REQUIRED',
+            investigationRequired: true,
+          })) ?? target
+        );
+      }
       const quotaWindow = getLocalDayRange(now, safety.timezone);
       const quotaReservation = await this.options.requests.reserveSendSlot({
         targetId: target.id,
@@ -1225,9 +1412,46 @@ export class ManualPublicationService {
           (await this.options.requests.updateTarget(target.id, {
             status: 'BLOCKED',
             blockedReason: quotaReservation.reason,
+            investigationRequired: false,
           })) ?? target
         );
       }
+      quotaReserved = true;
+      const started = await this.options.executions.start({
+        schedulerJobId,
+        mode: 'SEND',
+        ownerId: randomUUID(),
+        startedAt: now,
+        heartbeatAt: now,
+        leaseExpiresAt: this.executionLease(now),
+      });
+      if (started.outcome === 'existing') {
+        if (!started.execution.commercialRunId) {
+          await this.options.requests.releaseSendSlot(target.id);
+          quotaReserved = false;
+        }
+        const reconciledTarget = await this.reconcileExistingExecution(
+          request,
+          target,
+          started.execution,
+          minimumIntervalMinutes,
+        );
+        return reconciledTarget;
+      }
+      if (started.outcome === 'concurrent') {
+        await this.options.requests.releaseSendSlot(target.id);
+        quotaReserved = false;
+        return (
+          (await this.options.requests.updateTarget(target.id, {
+            status: 'BLOCKED',
+            blockedReason: 'COMMERCIAL_EXECUTION_IN_PROGRESS',
+            investigationRequired: false,
+          })) ?? target
+        );
+      }
+      ownership = started.ownership;
+      executionId = started.execution.id;
+      await this.checkpoint(ownership);
       const reservation = await this.options.candidateFlow.reserveAttempt(
         automationTarget,
         {
@@ -1239,61 +1463,37 @@ export class ManualPublicationService {
         },
       );
       if (reservation.kind === 'CONFLICT') {
-        await this.options.requests.releaseSendSlot(target.id);
-        return (
-          (await this.options.requests.updateTarget(target.id, {
-            status: 'BLOCKED',
-            blockedReason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
-          })) ?? target
+        throw new AppError(
+          'Target manual ja possui reserva ativa',
+          'MANUAL_PUBLICATION_TARGET_CONFLICT',
         );
       }
       if (reservation.kind === 'INELIGIBLE') {
-        await this.options.requests.releaseSendSlot(target.id);
-        return (
-          (await this.options.requests.updateTarget(target.id, {
-            status: 'BLOCKED',
-            blockedReason: 'MANUAL_PUBLICATION_TARGET_NOT_ELIGIBLE',
-          })) ?? target
+        throw new AppError(
+          'Target manual nao esta elegivel',
+          'MANUAL_PUBLICATION_TARGET_NOT_ELIGIBLE',
         );
       }
-      const recovered = await this.recoverExistingExecution(
-        request,
-        target,
+      candidateReservation = {
+        campaignId: reservation.campaignId,
         executionId,
-      );
-      if (recovered) return recovered;
-      let prepared;
-      try {
-        prepared = await this.options.candidateFlow.prepareManual(
-          request.productId,
-          automationTarget,
-          { executionId },
-        );
-      } catch (error) {
-        const release = await this.options.candidateFlow.releaseAttempt({
-          campaignId: reservation.campaignId,
-          executionId,
+      };
+      await this.checkpoint(ownership);
+      const candidate = await this.candidateForTarget(request, target);
+      if (candidate?.status !== 'COPY_READY') {
+        await this.options.executions.markExternalMayHaveStarted(ownership, {
+          markedAt: this.clock(),
         });
-        if (release.kind !== 'RELEASED' || !release.released) {
-          return (
-            (await this.options.requests.updateTarget(target.id, {
-              status: 'AMBIGUOUS',
-              blockedReason: 'MANUAL_PUBLICATION_RESERVATION_RELEASE_AMBIGUOUS',
-              investigationRequired: true,
-            })) ?? target
-          );
-        }
-        await this.options.requests.releaseSendSlot(target.id);
-        if (knownBlocker(error)) {
-          return (
-            (await this.options.requests.updateTarget(target.id, {
-              status: 'BLOCKED',
-              blockedReason: error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_BLOCKED',
-            })) ?? target
-          );
-        }
-        throw error;
+        externalStageReached = true;
       }
+      await this.checkpoint(ownership);
+      const prepared = await this.options.candidateFlow.prepareManual(
+        request.productId,
+        automationTarget,
+        { executionId },
+      );
+      commercialRunId = prepared.runId;
+      await this.checkpoint(ownership);
       const preparedTarget =
         (await this.options.requests.updateTarget(target.id, {
           candidateId: prepared.candidateId,
@@ -1305,42 +1505,92 @@ export class ManualPublicationService {
         campaignId: prepared.campaignId,
         executionId,
         renewedAt,
-        leaseExpiresAt: new Date(
-          renewedAt.getTime() + (this.options.leaseSeconds ?? 120) * 1_000,
-        ),
+        leaseExpiresAt: this.executionLease(renewedAt),
       });
       if (renewal.kind === 'CONFLICT') {
-        return (
-          (await this.options.requests.updateTarget(preparedTarget.id, {
-            status: 'BLOCKED',
-            blockedReason: 'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
-          })) ?? preparedTarget
+        throw new AppError(
+          'A reserva manual mudou antes da confirmacao',
+          'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
         );
       }
-      return this.confirmPreparedTarget(
+      await this.checkpoint(ownership);
+      confirmationAttempted = true;
+      const confirmedTarget = await this.confirmPreparedTarget(
         preparedTarget,
         prepared.runId,
         prepared.generatedCopyId,
+        ownership,
+        lifecycle,
       );
+      return confirmedTarget;
     } catch (error) {
-      if (knownBlocker(error)) {
-        return (
-          (await this.options.requests.updateTarget(target.id, {
-            status: isAmbiguousBlocker(error) ? 'AMBIGUOUS' : 'BLOCKED',
-            blockedReason: error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_BLOCKED',
-            investigationRequired: isAmbiguousBlocker(error),
-          })) ?? target
-        );
+      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_UNEXPECTED_FAILURE';
+      let ambiguous =
+        externalStageReached ||
+        confirmationAttempted ||
+        isAmbiguousBlocker(error) ||
+        code === 'COMMERCIAL_EXECUTION_OWNERSHIP_LOST';
+      if (!ambiguous && candidateReservation && executionId) {
+        try {
+          const release = await this.options.candidateFlow.releaseAttempt({
+            campaignId: candidateReservation.campaignId,
+            executionId,
+          });
+          if (release.kind !== 'RELEASED' || !release.released) {
+            ambiguous = true;
+          }
+        } catch {
+          ambiguous = true;
+        }
       }
-      this.options.logger?.error(
-        { event: 'manual-publication.target.failed', targetId: target.id },
-        'Manual publication target failed',
-      );
+      if (!ambiguous && quotaReserved) {
+        try {
+          await this.options.requests.releaseSendSlot(target.id);
+        } catch {
+          ambiguous = true;
+        }
+      }
+      if (lifecycle.executionQueued && executionId && commercialRunId) {
+        try {
+          const marked = await this.options.executions.markQueuedAmbiguous(
+            executionId,
+            {
+              commercialRunId,
+              failureCode: code,
+              completedAt: this.clock(),
+            },
+          );
+          if (
+            marked.status !== 'AMBIGUOUS' ||
+            marked.commercialRunId !== commercialRunId
+          ) {
+            ambiguous = true;
+          }
+        } catch {
+          ambiguous = true;
+        }
+      } else if (ownership) {
+        try {
+          await this.checkpoint(ownership);
+          await this.options.executions.finish(ownership, {
+            status: ambiguous
+              ? 'AMBIGUOUS'
+              : knownBlocker(error)
+                ? 'BLOCKED'
+                : 'FAILED',
+            ...(commercialRunId ? { commercialRunId } : {}),
+            failureCode: code,
+            completedAt: this.clock(),
+          });
+        } catch {
+          ambiguous = true;
+        }
+      }
       return (
         (await this.options.requests.updateTarget(target.id, {
-          status: 'AMBIGUOUS',
-          blockedReason: 'MANUAL_PUBLICATION_UNEXPECTED_FAILURE',
-          investigationRequired: true,
+          status: ambiguous ? 'AMBIGUOUS' : knownBlocker(error) ? 'BLOCKED' : 'FAILED',
+          blockedReason: code,
+          investigationRequired: ambiguous,
         })) ?? target
       );
     }

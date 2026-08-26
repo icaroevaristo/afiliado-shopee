@@ -1016,6 +1016,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         logger: app.log,
       }),
       confirmation: getCommercialPipelineConfirmationService(),
+      executions: repositories.commercialAutomationExecutions,
       runs: repositories.commercialRuns,
       outboxes: repositories.commercialDispatchOutboxes,
       dispatches: repositories.whatsappDispatches,

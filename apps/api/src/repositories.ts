@@ -906,6 +906,13 @@ export interface CommercialAutomationExecutionRepository {
     leaseExpiresAt: Date;
     expectedScheduleRevision?: number;
   }): Promise<StartCommercialAutomationExecutionResult>;
+  /**
+   * Manual publication has no BullMQ job at execution acceptance. Its stable
+   * scheduler identity is therefore the recovery key until an outbox job exists.
+   */
+  findBySchedulerJobId(
+    schedulerJobId: string,
+  ): Promise<CommercialAutomationExecutionRecord | null>;
   createBlocked(input: {
     schedulerJobId: string;
     bullMqJobId?: string;
@@ -928,6 +935,14 @@ export interface CommercialAutomationExecutionRepository {
       reasons?: string[];
       commercialRunId?: string;
       failureCode?: string;
+      completedAt: Date;
+    },
+  ): Promise<CommercialAutomationExecutionRecord>;
+  markQueuedAmbiguous(
+    executionId: string,
+    input: {
+      commercialRunId: string;
+      failureCode: string;
       completedAt: Date;
     },
   ): Promise<CommercialAutomationExecutionRecord>;

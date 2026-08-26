@@ -329,6 +329,25 @@ describe('CommercialPipelineConfirmationService', () => {
     expect(state.enqueue).toHaveBeenCalledOnce();
   });
 
+  it('permite ao entrypoint manual adiar a publicacao ate concluir sua ownership', async () => {
+    const state = build({ currentOffer: offer({ source: 'OFFICIAL' }) });
+    const result = await state.service.confirm(
+      'dry-run-id',
+      COMMERCIAL_CONFIRMATION_TOKEN,
+      {
+        manual: true,
+        existingGeneratedCopyId: 'manual-copy-1',
+        deferPublication: true,
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'queued', messageWasSent: false });
+    expect(state.outboxes.records[0]).toMatchObject({ status: 'PENDING' });
+    expect(state.enqueue).not.toHaveBeenCalled();
+    await state.service.publishOutbox(commercialConfirmationIds('dry-run-id').outboxId);
+    expect(state.enqueue).toHaveBeenCalledOnce();
+  });
+
   it('deixa outbox PENDING quando ocorre crash depois do commit e antes do publisher', async () => {
     const state = build();
     const publish = vi

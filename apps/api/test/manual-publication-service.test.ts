@@ -6,6 +6,7 @@ import {
   ManualPublicationService,
   manualPublicationPayloadHash,
 } from '../src/manual-publication-service';
+import { COMMERCIAL_CONFIRMATION_TOKEN } from '../src/commercial-pipeline-confirmation-service';
 import type {
   CommercialGroupCampaignRecord,
   CommercialPipelineRunRecord,
@@ -220,22 +221,120 @@ const createSubject = (
     groups?: WhatsAppGroupRecord[];
     item?: CommercialPromotionCatalogItem;
     instanceActive?: boolean;
+    groupSendEnabled?: boolean;
+    safeMode?: boolean;
+    allowAllGroups?: boolean;
+    quotaBlocked?: string;
+    publishOutboxError?: Error;
+    recoverRun?: CommercialPipelineRunRecord;
   } = {},
 ) => {
   const groups = overrides.groups ?? [group('a'), group('b', false)];
   const campaigns = groups.map(campaign);
   const requests = new Map<string, ManualPublicationRequestRecord>();
+  const events: string[] = [];
   let createdRequestCount = 0;
   const outboxes = new Map<string, { id: string; commercialRunId: string; dispatchId: string; jobId: string; instanceName: string; status: 'PENDING'; failureCode: null; createdAt: Date; publishedAt: null }>();
-  const reserveAttempt = vi.fn(async (target: { campaignId: string }) => ({
+  const executions: Array<{
+    id: string;
+    schedulerJobId: string;
+    bullMqJobId: null;
+    activeKey: string | null;
+    ownerId: string | null;
+    heartbeatAt: Date | null;
+    leaseExpiresAt: Date | null;
+    mode: 'SEND';
+    status: 'STARTED' | 'QUEUED' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+    externalStage: 'NOT_REACHED' | 'EXTERNAL_MAY_HAVE_STARTED';
+    reasons: string[];
+    commercialRunId: string | null;
+    failureCode: string | null;
+    startedAt: Date;
+    completedAt: Date | null;
+  }> = [];
+  const startExecution = vi.fn(async (input: {
+    schedulerJobId: string;
+    ownerId: string;
+    startedAt: Date;
+    heartbeatAt: Date;
+    leaseExpiresAt: Date;
+  }) => {
+    events.push('execution-start');
+    const existing = executions.find(
+      (execution) => execution.schedulerJobId === input.schedulerJobId,
+    );
+    if (existing) return { outcome: 'existing' as const, execution: existing };
+    if (recovery) {
+      const execution = {
+        id: 'manual-execution-recovered',
+        schedulerJobId: input.schedulerJobId,
+        bullMqJobId: null,
+        activeKey: null,
+        ownerId: null,
+        heartbeatAt: input.heartbeatAt,
+        leaseExpiresAt: input.leaseExpiresAt,
+        mode: 'SEND' as const,
+        status: 'QUEUED' as const,
+        externalStage: 'NOT_REACHED' as const,
+        reasons: [],
+        commercialRunId: recovery.run.id,
+        failureCode: null,
+        startedAt: input.startedAt,
+        completedAt: input.startedAt,
+      };
+      recovery.run.executionId = execution.id;
+      executions.push(execution);
+      outboxes.set(`commercial-${recovery.run.id}-outbox`, {
+        id: `commercial-${recovery.run.id}-outbox`,
+        commercialRunId: recovery.run.id,
+        dispatchId: `commercial-${recovery.run.id}-dispatch`,
+        jobId: `commercial-${recovery.run.id}-job`,
+        instanceName: 'instance-a',
+        status: 'PENDING',
+        failureCode: null,
+        createdAt: NOW,
+        publishedAt: null,
+      });
+      return { outcome: 'existing' as const, execution };
+    }
+    const execution = {
+      id: `manual-execution-${executions.length + 1}`,
+      schedulerJobId: input.schedulerJobId,
+      bullMqJobId: null,
+      activeKey: 'commercial-automation',
+      ownerId: input.ownerId,
+      heartbeatAt: input.heartbeatAt,
+      leaseExpiresAt: input.leaseExpiresAt,
+      mode: 'SEND' as const,
+      status: 'STARTED' as const,
+      externalStage: 'NOT_REACHED' as const,
+      reasons: [],
+      commercialRunId: null,
+      failureCode: null,
+      startedAt: input.startedAt,
+      completedAt: null,
+    };
+    executions.push(execution);
+    return {
+      outcome: 'created' as const,
+      execution,
+      ownership: { executionId: execution.id, ownerId: input.ownerId },
+    };
+  });
+  const reserveAttempt = vi.fn(async (target: { campaignId: string }, input: { executionId: string }) => {
+    events.push(`reserve:${input.executionId}`);
+    return ({
     kind: 'RESERVED' as const,
     campaignId: target.campaignId,
-    executionId: 'manual-execution',
+    executionId: input.executionId,
     reservedAt: NOW,
     leaseExpiresAt: new Date(NOW.getTime() + 120_000),
-    acquired: true,
-  }));
-  const prepareManual = vi.fn(async (_productId: string, target: { groupId: string; campaignId: string; logicalGroupFingerprint: string }) => ({
+      acquired: true,
+    });
+  });
+  const prepareManual = vi.fn(async (_productId: string, target: { groupId: string; campaignId: string; logicalGroupFingerprint: string }, input: { executionId: string }) => {
+    events.push(`prepare:${input.executionId}`);
+    return ({
     runId: `run-${target.groupId}`,
     candidateId: `candidate-${target.groupId}`,
     generatedCopyId: `copy-${target.groupId}`,
@@ -245,14 +344,16 @@ const createSubject = (
     nicheId: `niche-${target.groupId}`,
     deliveryMode: 'IMAGE' as const,
     copyPreview: 'copy preview',
-    pipeline: {} as never,
-  }));
+      pipeline: {} as never,
+    });
+  });
   const evaluateManualSendSafety = vi.fn(async (target: { groupId: string }) =>
-    target.groupId === 'b'
+    target.groupId === 'b' && !overrides.allowAllGroups
       ? { allowed: false, reasons: ['GROUP_DAILY_LIMIT_REACHED'] }
       : { allowed: true, reasons: [] },
   );
-  const confirm = vi.fn(async (runId: string) => {
+  const confirm = vi.fn(async (runId: string, _token: string, options?: { deferPublication?: boolean }) => {
+    events.push(options?.deferPublication ? 'confirm-deferred' : 'confirm');
     const dispatchId = `commercial-${runId}-dispatch`;
     outboxes.set(`commercial-${runId}-outbox`, {
       id: `commercial-${runId}-outbox`,
@@ -340,7 +441,10 @@ const createSubject = (
       request.updatedAt = NOW;
       return true;
     },
-    reserveSendSlot: async () => ({ kind: 'RESERVED' as const }),
+    reserveSendSlot: async () =>
+      overrides.quotaBlocked
+        ? { kind: 'BLOCKED' as const, reason: overrides.quotaBlocked }
+        : { kind: 'RESERVED' as const },
     releaseSendSlot: async () => undefined,
     updateTarget: async (id, data) => {
       const request = [...requests.values()].find((candidate) => candidate.targets.some((target) => target.id === id));
@@ -393,10 +497,125 @@ const createSubject = (
       renewAttempt: async () => ({ kind: 'RENEWED' as const, campaignId: 'campaign-a', executionId: 'manual-execution', leaseExpiresAt: new Date(NOW.getTime() + 120_000), renewed: true }),
       prepareManual,
     },
-    confirmation: { confirm },
+    executions: {
+      start: startExecution,
+      findBySchedulerJobId: async (schedulerJobId: string) =>
+        executions.find((execution) => execution.schedulerJobId === schedulerJobId) ?? null,
+      heartbeat: async (
+        ownership: { executionId: string; ownerId: string },
+        input: { heartbeatAt: Date; leaseExpiresAt: Date },
+      ) => {
+        events.push(`heartbeat:${ownership.executionId}`);
+        const execution = executions.find((item) => item.id === ownership.executionId);
+        if (!execution || execution.ownerId !== ownership.ownerId || execution.status !== 'STARTED') {
+          throw new Error('ownership lost');
+        }
+        execution.heartbeatAt = input.heartbeatAt;
+        execution.leaseExpiresAt = input.leaseExpiresAt;
+      },
+      markExternalMayHaveStarted: async (
+        ownership: { executionId: string; ownerId: string },
+      ) => {
+        events.push(`external:${ownership.executionId}`);
+        const execution = executions.find((item) => item.id === ownership.executionId);
+        if (!execution || execution.ownerId !== ownership.ownerId || execution.status !== 'STARTED') {
+          throw new Error('ownership lost');
+        }
+        execution.externalStage = 'EXTERNAL_MAY_HAVE_STARTED';
+        return execution;
+      },
+      finish: async (
+        ownership: { executionId: string; ownerId: string },
+        input: {
+          status: 'QUEUED' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+          commercialRunId?: string;
+          failureCode?: string;
+          completedAt: Date;
+        },
+      ) => {
+        events.push(`finish:${input.status}:${ownership.executionId}`);
+        const execution = executions.find((item) => item.id === ownership.executionId);
+        if (!execution || execution.ownerId !== ownership.ownerId || execution.status !== 'STARTED') {
+          throw new Error('ownership lost');
+        }
+        execution.activeKey = null;
+        execution.status = input.status;
+        execution.commercialRunId = input.commercialRunId ?? null;
+        execution.failureCode = input.failureCode ?? null;
+        execution.completedAt = input.completedAt;
+        return execution;
+      },
+      markQueuedAmbiguous: vi.fn(async (
+        executionId: string,
+        input: { commercialRunId: string; failureCode: string; completedAt: Date },
+      ) => {
+        const execution = executions.find((item) => item.id === executionId);
+        if (
+          !execution ||
+          execution.status !== 'QUEUED' ||
+          execution.commercialRunId !== input.commercialRunId
+        ) {
+          throw new Error('queued execution ownership lost');
+        }
+        execution.activeKey = null;
+        execution.status = 'AMBIGUOUS';
+        execution.failureCode = input.failureCode;
+        execution.completedAt = input.completedAt;
+        return execution;
+      }),
+      recoverStalePreMarkerReservation: vi.fn(async (
+        executionId: string,
+        input: { completedAt: Date; failureCode: string },
+      ) => {
+        const execution = executions.find((item) => item.id === executionId);
+        if (!execution) throw new Error('execution missing');
+        execution.activeKey = null;
+        execution.ownerId = null;
+        execution.status = 'FAILED';
+        execution.failureCode = input.failureCode;
+        execution.completedAt = input.completedAt;
+        return {
+          outcome: 'RECOVERED' as const,
+          execution,
+          campaignId: 'campaign-a',
+          failureCount: 1,
+          nextEligibleAt: input.completedAt,
+        };
+      }),
+      recoverStalePreConfirmationReservation: vi.fn(async (
+        executionId: string,
+        input: { completedAt: Date; failureCode: string },
+      ) => {
+        const execution = executions.find((item) => item.id === executionId);
+        if (!execution) throw new Error('execution missing');
+        execution.activeKey = null;
+        execution.ownerId = null;
+        execution.status = 'FAILED';
+        execution.failureCode = input.failureCode;
+        execution.completedAt = input.completedAt;
+        return { outcome: 'RECOVERED' as const, execution };
+      }),
+      recoverStale: vi.fn(async (
+        executionId: string,
+        input: { status: 'QUEUED' | 'FAILED' | 'AMBIGUOUS'; failureCode?: string; completedAt: Date },
+      ) => {
+        const execution = executions.find((item) => item.id === executionId);
+        if (!execution) throw new Error('execution missing');
+        execution.activeKey = null;
+        execution.ownerId = null;
+        execution.status = input.status;
+        execution.failureCode = input.failureCode ?? null;
+        execution.completedAt = input.completedAt;
+        return execution;
+      }),
+    },
     runs: {
       findById: async (id: string) =>
-        recovery?.run.id === id ? recovery.run : null,
+        recovery?.run.id === id
+          ? recovery.run
+          : overrides.recoverRun?.id === id
+            ? overrides.recoverRun
+            : null,
       findByExecutionId: async (executionId: string) => {
         if (!recovery) return null;
         recovery.run.executionId = executionId;
@@ -405,9 +624,16 @@ const createSubject = (
     },
     outboxes: { findById: async (id: string) => outboxes.get(id) ?? null },
     dispatches: { findByIdWithDetails: async () => null },
+    confirmation: {
+      confirm,
+      publishOutbox: vi.fn(async () => {
+        events.push('publish');
+        if (overrides.publishOutboxError) throw overrides.publishOutboxError;
+      }),
+    },
     environment: {
-      groupSendEnabled: true,
-      safeMode: true,
+      groupSendEnabled: overrides.groupSendEnabled ?? true,
+      safeMode: overrides.safeMode ?? true,
       schedulerEnabled: true,
       maximumMessagesPerRun: 1,
     },
@@ -419,6 +645,9 @@ const createSubject = (
     reserveAttempt,
     prepareManual,
     confirm,
+    startExecution,
+    executions,
+    events,
     evaluateManualSendSafety,
     requests,
     get createdRequestCount() {
@@ -483,6 +712,8 @@ describe('ManualPublicationService', () => {
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
     expect(subject.evaluateManualSendSafety).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.executions).toHaveLength(0);
   });
 
   it('previewNoCandidateWrites previewNoReservation previewNoCopy previewNoRun previewNoDispatch previewNoOutbox previewNoBullMQ previewNoProvider', async () => {
@@ -497,6 +728,8 @@ describe('ManualPublicationService', () => {
     expect(subject.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.executions).toHaveLength(0);
     expect(subject.createdRequestCount).toBe(1);
   });
 
@@ -732,6 +965,140 @@ describe('ManualPublicationService', () => {
     });
   });
 
+  it('usa execution real, marca o boundary externo e finaliza QUEUED antes de publicar o outbox', async () => {
+    const subject = createSubject();
+
+    await subject.service.create({
+      idempotencyKey: 'manual-ownership-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    const [execution] = subject.executions;
+    expect(execution).toMatchObject({
+      mode: 'SEND',
+      status: 'QUEUED',
+      commercialRunId: 'run-a',
+      schedulerJobId: expect.stringMatching(/^manual-publication:/),
+    });
+    expect(subject.reserveAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ executionId: execution?.id }),
+    );
+    expect(subject.prepareManual).toHaveBeenCalledWith(
+      'product-1',
+      expect.anything(),
+      expect.objectContaining({ executionId: execution?.id }),
+    );
+    expect(subject.confirm).toHaveBeenCalledWith(
+      'run-a',
+      COMMERCIAL_CONFIRMATION_TOKEN,
+      expect.objectContaining({ manual: true, deferPublication: true }),
+    );
+    expect(subject.events.indexOf(`external:${execution?.id}`)).toBeLessThan(
+      subject.events.indexOf(`prepare:${execution?.id}`),
+    );
+    expect(subject.events.indexOf(`finish:QUEUED:${execution?.id}`)).toBeLessThan(
+      subject.events.indexOf('publish'),
+    );
+    expect(subject.events.filter((event: string) => event.startsWith('heartbeat:')).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('marca a execution como AMBIGUOUS se a publicacao falha depois de QUEUED', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      publishOutboxError: new Error('publication uncertain'),
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-queued-ambiguous',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      investigationRequired: true,
+    });
+    expect(subject.executions[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      commercialRunId: 'run-a',
+      activeKey: null,
+    });
+    expect(subject.events).toContain('finish:QUEUED:manual-execution-1');
+  });
+
+  it('nao cria execution quando a reserva de quota bloqueia o target', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      quotaBlocked: 'GROUP_DAILY_LIMIT_REACHED',
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: 'manual-quota-blocked',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({
+      status: 'BLOCKED',
+      blockedReason: 'GROUP_DAILY_LIMIT_REACHED',
+    });
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.executions).toHaveLength(0);
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['groupSendDisabled', { groupSendEnabled: false }, 'GROUP_SEND_DISABLED'],
+    ['safeModeFalse', { safeMode: false }, 'COMMERCIAL_SAFE_MODE_REQUIRED'],
+  ])('bloqueia %s antes de criar execution', async (_name, overrides, reason) => {
+    const subject = createSubject('OFFICIAL', undefined, overrides);
+
+    const result = await subject.service.create({
+      idempotencyKey: `manual-blocker-${reason}`,
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.request.targets[0]).toMatchObject({ status: 'BLOCKED', blockedReason: reason });
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.executions).toHaveLength(0);
+  });
+
+  it('mantem execution distinta e schedulerJobId deterministico por target', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      groups: [group('a'), group('b')],
+      allowAllGroups: true,
+    });
+
+    await subject.service.create({
+      idempotencyKey: 'manual-two-targets',
+      productId: 'product-1',
+      destinationIds: ['b', 'a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    const request = subject.requests.get('manual-two-targets');
+    if (!request) throw new Error('request ausente');
+    const firstTarget = request.targets.find((target) => target.destinationId === 'a');
+    if (!firstTarget) throw new Error('target a ausente');
+    firstTarget.status = 'SENT';
+    request.processingLeaseExpiresAt = new Date(NOW.getTime() - 1);
+    await subject.service.create({
+      idempotencyKey: 'manual-two-targets',
+      productId: 'product-1',
+      destinationIds: ['a', 'b'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(subject.executions).toHaveLength(2);
+    expect(new Set(subject.executions.map((execution: { id: string }) => execution.id)).size).toBe(2);
+    expect(new Set(subject.executions.map((execution: { schedulerJobId: string }) => execution.schedulerJobId)).size).toBe(2);
+  });
+
   it('serializa duas criacoes concorrentes com a mesma chave', async () => {
     const subject = createSubject();
     const input = {
@@ -774,6 +1141,185 @@ describe('ManualPublicationService', () => {
       status: 'QUEUED',
     });
     expect(subject.prepareManual).not.toHaveBeenCalled();
-    expect(subject.confirm).toHaveBeenCalledTimes(1);
+    expect(subject.confirm).not.toHaveBeenCalled();
+  });
+
+  it('replaya target com run persistido pela execution logica sem criar outra execution', async () => {
+    const subject = createSubject('OFFICIAL', {
+      run: recoveredRun(),
+      candidate: {
+        id: 'candidate-a',
+        generatedCopyId: 'copy-a',
+        status: 'COPY_READY',
+      },
+    });
+
+    const first = await subject.service.create({
+      idempotencyKey: 'recovery-target-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+    const request = subject.requests.get('recovery-target-key');
+    if (!request) throw new Error('request ausente');
+    const target = request.targets[0];
+    target.status = 'PROCESSING';
+    target.runId = first.request.targets[0]?.runId ?? 'run-a';
+    target.dispatchId = null;
+    target.outboxId = null;
+    request.status = 'PROCESSING';
+    request.processingLeaseExpiresAt = new Date(NOW.getTime() - 1);
+
+    const replay = await subject.service.create({
+      idempotencyKey: 'recovery-target-key',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(replay.request.targets[0]).toMatchObject({
+      runId: 'run-a',
+      status: 'QUEUED',
+    });
+    expect(subject.startExecution).toHaveBeenCalledOnce();
+    expect(subject.confirm).not.toHaveBeenCalled();
+    expect(subject.executions).toHaveLength(1);
+  });
+
+  it('recupera execution STARTED stale pelo contrato seguro antes de criar outra', async () => {
+    const subject = createSubject();
+    const input = {
+      idempotencyKey: 'manual-stale-execution',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    };
+
+    await subject.service.create(input);
+    const request = subject.requests.get(input.idempotencyKey);
+    if (!request) throw new Error('request ausente');
+    const target = request.targets[0];
+    const execution = subject.executions[0];
+    if (!target || !execution) throw new Error('estado ausente');
+    target.status = 'PROCESSING';
+    target.candidateId = null;
+    target.runId = null;
+    target.dispatchId = null;
+    target.outboxId = null;
+    request.status = 'PROCESSING';
+    request.processingLeaseExpiresAt = new Date(NOW.getTime() - 1);
+    execution.status = 'STARTED';
+    execution.activeKey = 'commercial-automation';
+    execution.ownerId = 'stale-owner';
+    execution.heartbeatAt = new Date(NOW.getTime() - 120_000);
+    execution.leaseExpiresAt = new Date(NOW.getTime() - 1);
+    execution.commercialRunId = null;
+    execution.externalStage = 'NOT_REACHED';
+    execution.completedAt = null;
+
+    const replay = await subject.service.create(input);
+
+    expect(replay.request.targets[0]).toMatchObject({
+      status: 'FAILED',
+      investigationRequired: false,
+      blockedReason: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+    });
+    expect(execution).toMatchObject({
+      status: 'FAILED',
+      activeKey: null,
+      ownerId: null,
+    });
+    expect(subject.startExecution).toHaveBeenCalledOnce();
+    expect(subject.reserveAttempt).toHaveBeenCalledOnce();
+  });
+
+  it('marca como AMBIGUOUS a republicacao de execution QUEUED que falha', async () => {
+    const overrides: NonNullable<Parameters<typeof createSubject>[2]> = {};
+    const recovery = {
+      run: recoveredRun({
+        mode: 'CONFIRMED',
+        dispatchId: 'commercial-run-a-dispatch',
+        jobId: 'commercial-run-a-job',
+      }),
+      candidate: {
+        id: 'candidate-a',
+        generatedCopyId: 'copy-a',
+        status: 'COPY_READY' as const,
+      },
+    };
+    const subject = createSubject('OFFICIAL', recovery, overrides);
+    const input = {
+      idempotencyKey: 'manual-queued-replay',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    };
+
+    await subject.service.create(input);
+    overrides.publishOutboxError = new Error('publication uncertain');
+    const request = subject.requests.get(input.idempotencyKey);
+    if (!request) throw new Error('request ausente');
+    request.processingLeaseExpiresAt = new Date(NOW.getTime() - 1);
+    const replay = await subject.service.create(input);
+
+    expect(replay.request.targets[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      investigationRequired: true,
+    });
+    expect(subject.executions[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      commercialRunId: 'run-a',
+      activeKey: null,
+    });
+  });
+
+  it('recupera execution stale pre-confirmacao sem reenviar nem criar execution', async () => {
+    const overrides: NonNullable<Parameters<typeof createSubject>[2]> = {
+      recoverRun: recoveredRun(),
+    };
+    const subject = createSubject('OFFICIAL', undefined, overrides);
+    const input = {
+      idempotencyKey: 'manual-stale-preconfirmation',
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    };
+
+    await subject.service.create(input);
+    const request = subject.requests.get(input.idempotencyKey);
+    if (!request) throw new Error('request ausente');
+    const target = request.targets[0];
+    const execution = subject.executions[0];
+    if (!target || !execution) throw new Error('estado ausente');
+    target.status = 'PROCESSING';
+    target.candidateId = null;
+    target.runId = null;
+    target.dispatchId = null;
+    target.outboxId = null;
+    request.status = 'PROCESSING';
+    request.processingLeaseExpiresAt = new Date(NOW.getTime() - 1);
+    execution.status = 'STARTED';
+    execution.activeKey = 'commercial-automation';
+    execution.ownerId = 'stale-owner';
+    execution.heartbeatAt = new Date(NOW.getTime() - 120_000);
+    execution.leaseExpiresAt = new Date(NOW.getTime() - 1);
+    execution.commercialRunId = 'run-a';
+    execution.externalStage = 'NOT_REACHED';
+    execution.completedAt = null;
+
+    const replay = await subject.service.create(input);
+
+    expect(replay.request.targets[0]).toMatchObject({
+      status: 'FAILED',
+      investigationRequired: false,
+      blockedReason: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+    });
+    expect(execution).toMatchObject({
+      status: 'FAILED',
+      activeKey: null,
+      ownerId: null,
+    });
+    expect(subject.startExecution).toHaveBeenCalledOnce();
+    expect(subject.confirm).toHaveBeenCalledOnce();
   });
 });

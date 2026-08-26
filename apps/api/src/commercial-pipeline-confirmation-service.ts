@@ -60,6 +60,11 @@ export type CommercialPipelineConfirmationResult = {
 export type CommercialPipelineConfirmationOptions = {
   existingGeneratedCopyId?: string;
   manual?: boolean;
+  /**
+   * The manual entrypoint persists confirmation first, establishes execution
+   * ownership as QUEUED, and only then publishes the deterministic outbox job.
+   */
+  deferPublication?: boolean;
 };
 
 export type CommercialPipelineConfirmationServiceOptions = {
@@ -354,14 +359,20 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_RUN_ALREADY_CONFIRMED',
         );
       }
-      await this.options.publisher.publish(outbox.id);
+      if (!options.deferPublication) {
+        await this.options.publisher.publish(outbox.id);
+      }
       this.options.logger.info(
         {
-          event: 'commercial-pipeline.confirmed.queued',
+          event: options.deferPublication
+            ? 'commercial-pipeline.confirmed.pending-publication'
+            : 'commercial-pipeline.confirmed.queued',
           runId: run.id,
           groupFingerprint: group.fingerprint,
         },
-        'Commercial pipeline confirmation queued',
+        options.deferPublication
+          ? 'Commercial pipeline confirmation awaiting publication'
+          : 'Commercial pipeline confirmation queued',
       );
       return {
         runId: run.id,
@@ -415,5 +426,9 @@ export class CommercialPipelineConfirmationService {
       'COMMERCIAL_DISPATCH_FAILED',
       this.clock(),
     );
+  }
+
+  async publishOutbox(outboxId: string) {
+    return this.options.publisher.publish(outboxId);
   }
 }

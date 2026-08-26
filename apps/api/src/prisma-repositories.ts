@@ -5178,8 +5178,26 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
   }
 }
 
+type CommercialAutomationExecutionSource = {
+  id: unknown;
+  schedulerJobId: unknown;
+  bullMqJobId: unknown;
+  activeKey: unknown;
+  ownerId: unknown;
+  heartbeatAt: unknown;
+  leaseExpiresAt: unknown;
+  mode: unknown;
+  status: unknown;
+  externalStage: unknown;
+  reasons: unknown;
+  commercialRunId: unknown;
+  failureCode: unknown;
+  startedAt: unknown;
+  completedAt: unknown;
+};
+
 const mapCommercialAutomationExecution = (
-  record: Record<string, unknown>,
+  record: Record<string, unknown> | CommercialAutomationExecutionSource,
 ): CommercialAutomationExecutionRecord => ({
   id: record.id as string,
   schedulerJobId: record.schedulerJobId as string,
@@ -5282,6 +5300,16 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       : null;
   }
 
+  async findBySchedulerJobId(schedulerJobId: string) {
+    const record = await this.prisma.commercialAutomationExecution.findFirst({
+      where: { schedulerJobId, bullMqJobId: null },
+      orderBy: { startedAt: 'asc' },
+    });
+    return record
+      ? mapCommercialAutomationExecution(record)
+      : null;
+  }
+
   async start(input: {
     schedulerJobId: string;
     bullMqJobId?: string;
@@ -5312,12 +5340,37 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       });
 
     try {
+      // Manual publication has no schema-level unique key for its logical
+      // scheduler identity. Keep the lookup and create in one Serializable
+      // transaction so a concurrent retry cannot create a second execution
+      // after the first one releases the global active key.
       const started =
         input.expectedScheduleRevision === undefined
-          ? {
-              outcome: 'created' as const,
-              record: await createExecution(this.prisma),
-            }
+          ? !input.bullMqJobId
+            ? await this.prisma.$transaction(
+                async (transaction) => {
+                  const existing =
+                    await transaction.commercialAutomationExecution.findFirst({
+                      where: {
+                        schedulerJobId: input.schedulerJobId,
+                        bullMqJobId: null,
+                      },
+                      orderBy: { startedAt: 'asc' },
+                    });
+                  if (existing) {
+                    return { outcome: 'existing' as const, record: existing };
+                  }
+                  return {
+                    outcome: 'created' as const,
+                    record: await createExecution(transaction),
+                  };
+                },
+                { isolationLevel: 'Serializable' },
+              )
+            : {
+                outcome: 'created' as const,
+                record: await createExecution(this.prisma),
+              }
           : await this.prisma.$transaction(
               async (transaction) => {
                 if (input.bullMqJobId) {
@@ -5370,7 +5423,13 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
         },
       };
     } catch (error) {
-      if (!isUniqueConstraintError(error)) throw error;
+      if (!isUniqueConstraintError(error) && !isTransactionConflictError(error)) {
+        throw error;
+      }
+      if (!input.bullMqJobId) {
+        const existing = await this.findBySchedulerJobId(input.schedulerJobId);
+        if (existing) return { outcome: 'existing' as const, execution: existing };
+      }
       const existing = input.bullMqJobId
         ? await this.findByBullMqJobId(input.bullMqJobId)
         : null;
@@ -5481,6 +5540,42 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     });
     if (updated.count !== 1) this.throwOwnershipLost();
     return this.findExecutionAfterMutation(ownership.executionId);
+  }
+
+  async markQueuedAmbiguous(
+    executionId: string,
+    input: {
+      commercialRunId: string;
+      failureCode: string;
+      completedAt: Date;
+    },
+  ) {
+    const updated =
+      await this.prisma.commercialAutomationExecution.updateMany({
+        where: {
+          id: executionId,
+          status: 'QUEUED',
+          commercialRunId: input.commercialRunId,
+        },
+        data: {
+          activeKey: null,
+          status: 'AMBIGUOUS',
+          failureCode: input.failureCode,
+          completedAt: input.completedAt,
+        },
+      });
+    if (updated.count !== 1) {
+      const current = await this.findById(executionId);
+      if (
+        current?.status === 'AMBIGUOUS' &&
+        current.commercialRunId === input.commercialRunId &&
+        current.failureCode === input.failureCode
+      ) {
+        return current;
+      }
+      this.throwOwnershipLost();
+    }
+    return this.findExecutionAfterMutation(executionId);
   }
 
   async findRecoveryContext(

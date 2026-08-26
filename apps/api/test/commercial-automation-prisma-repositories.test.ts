@@ -307,6 +307,42 @@ describe('commercial automation Prisma repositories', () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
+  it('recupera a execution manual pela identidade logica sem inventar bullMqJobId', async () => {
+    const record = {
+      id: 'manual-execution-1',
+      schedulerJobId: 'manual-publication:request-1:target-1',
+      bullMqJobId: null,
+      activeKey: null,
+      ownerId: null,
+      heartbeatAt: null,
+      leaseExpiresAt: null,
+      mode: 'SEND',
+      status: 'QUEUED',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: 'run-1',
+      failureCode: null,
+      startedAt: new Date('2026-08-26T12:00:00.000Z'),
+      completedAt: new Date('2026-08-26T12:00:01.000Z'),
+    };
+    const findFirst = vi.fn().mockResolvedValue(record);
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      commercialAutomationExecution: { findFirst },
+    } as never);
+
+    await expect(
+      repository.findBySchedulerJobId(record.schedulerJobId),
+    ).resolves.toMatchObject({
+      id: record.id,
+      bullMqJobId: null,
+      commercialRunId: record.commercialRunId,
+    });
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { schedulerJobId: record.schedulerJobId, bullMqJobId: null },
+      orderBy: { startedAt: 'asc' },
+    });
+  });
+
   it('cria STARTED com owner, heartbeat e lease na mesma operacao', async () => {
     const record = {
       id: 'execution-1',
@@ -353,6 +389,98 @@ describe('commercial automation Prisma repositories', () => {
         heartbeatAt: record.heartbeatAt,
         leaseExpiresAt: record.leaseExpiresAt,
       }),
+    });
+  });
+
+  it('serializa lookup e create da execution manual na mesma transacao', async () => {
+    const record = {
+      id: 'manual-execution-1',
+      schedulerJobId: 'manual-publication:request-1:target-1',
+      bullMqJobId: null,
+      activeKey: 'commercial-automation',
+      ownerId: 'owner-1',
+      heartbeatAt: new Date('2026-08-26T15:00:00.000Z'),
+      leaseExpiresAt: new Date('2026-08-26T15:02:00.000Z'),
+      mode: 'SEND',
+      status: 'STARTED',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: null,
+      failureCode: null,
+      startedAt: new Date('2026-08-26T15:00:00.000Z'),
+      completedAt: null,
+    };
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const create = vi.fn().mockResolvedValue(record);
+    const transaction = {
+      commercialAutomationExecution: { findFirst, create },
+    };
+    const transactionRunner = vi.fn(
+      async (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    );
+    const rootCreate = vi.fn();
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: transactionRunner,
+      commercialAutomationExecution: { create: rootCreate },
+    } as never);
+
+    await expect(
+      repository.start({
+        schedulerJobId: record.schedulerJobId,
+        mode: 'SEND',
+        startedAt: record.startedAt,
+        ownerId: record.ownerId,
+        heartbeatAt: record.heartbeatAt,
+        leaseExpiresAt: record.leaseExpiresAt,
+      }),
+    ).resolves.toMatchObject({
+      outcome: 'created',
+      execution: { id: record.id, bullMqJobId: null },
+    });
+    expect(transactionRunner).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'Serializable',
+    });
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        schedulerJobId: record.schedulerJobId,
+        bullMqJobId: null,
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+    expect(create).toHaveBeenCalledOnce();
+    expect(rootCreate).not.toHaveBeenCalled();
+  });
+
+  it('converte conflito Serializable da execution manual em concorrencia sem retry', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const findUnique = vi.fn().mockResolvedValue(null);
+    const transactionRunner = vi.fn().mockRejectedValue({ code: 'P2034' });
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: transactionRunner,
+      commercialAutomationExecution: { findFirst, findUnique },
+    } as never);
+
+    await expect(
+      repository.start({
+        schedulerJobId: 'manual-publication:request-2:target-1',
+        mode: 'SEND',
+        startedAt: new Date('2026-08-26T15:00:00.000Z'),
+        ownerId: 'owner-2',
+        heartbeatAt: new Date('2026-08-26T15:00:00.000Z'),
+        leaseExpiresAt: new Date('2026-08-26T15:02:00.000Z'),
+      }),
+    ).resolves.toMatchObject({ outcome: 'concurrent', stale: false });
+    expect(transactionRunner).toHaveBeenCalledOnce();
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        schedulerJobId: 'manual-publication:request-2:target-1',
+        bullMqJobId: null,
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { activeKey: 'commercial-automation' },
     });
   });
 
@@ -572,6 +700,60 @@ describe('commercial automation Prisma repositories', () => {
         }),
       }),
     );
+  });
+
+  it('marca uma execution QUEUED como AMBIGUOUS por CAS do run vinculado', async () => {
+    const record = {
+      id: 'execution-queued',
+      schedulerJobId: 'manual-publication:request-1:target-1',
+      bullMqJobId: null,
+      activeKey: null,
+      ownerId: null,
+      heartbeatAt: null,
+      leaseExpiresAt: null,
+      mode: 'SEND',
+      status: 'QUEUED',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: 'run-1',
+      failureCode: null,
+      startedAt: new Date('2026-08-26T15:00:00.000Z'),
+      completedAt: new Date('2026-08-26T15:00:01.000Z'),
+    };
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const findUnique = vi.fn().mockResolvedValue({
+      ...record,
+      status: 'AMBIGUOUS',
+      failureCode: 'COMMERCIAL_OUTBOX_PUBLICATION_UNCERTAIN',
+    });
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      commercialAutomationExecution: { updateMany, findUnique },
+    } as never);
+
+    await expect(
+      repository.markQueuedAmbiguous(record.id, {
+        commercialRunId: record.commercialRunId,
+        failureCode: 'COMMERCIAL_OUTBOX_PUBLICATION_UNCERTAIN',
+        completedAt: new Date('2026-08-26T15:00:02.000Z'),
+      }),
+    ).resolves.toMatchObject({
+      id: record.id,
+      status: 'AMBIGUOUS',
+      commercialRunId: record.commercialRunId,
+    });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        id: record.id,
+        status: 'QUEUED',
+        commercialRunId: record.commercialRunId,
+      },
+      data: {
+        activeKey: null,
+        status: 'AMBIGUOUS',
+        failureCode: 'COMMERCIAL_OUTBOX_PUBLICATION_UNCERTAIN',
+        completedAt: new Date('2026-08-26T15:00:02.000Z'),
+      },
+    });
   });
 
   it('preserva a identidade da instancia no contexto de recovery sticky', async () => {
