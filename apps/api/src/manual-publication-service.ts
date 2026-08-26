@@ -34,6 +34,7 @@ import type {
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRepository,
+  ManualPublicationSafePreProviderReconciliationResult,
   ManualPublicationRequestCreateData,
   ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
@@ -50,6 +51,10 @@ import type {
 export const MANUAL_PUBLICATION_CONFIRMATION = 'ENVIAR_PUBLICACAO_MANUAL';
 export const MANUAL_PUBLICATION_MAX_GROUPS = 5;
 export const MANUAL_PUBLICATION_CONTRACT_VERSION = 'phase17-manual-v1';
+export const MANUAL_PUBLICATION_RECONCILIATION_RESOLUTION =
+  'SAFE_PRE_PROVIDER_CONFIRMED';
+export const MANUAL_PUBLICATION_RECONCILIATION_CONFIRMATION =
+  'RECONCILIAR_PUBLICACAO_MANUAL_PRE_PROVIDER';
 const MANUAL_PUBLICATION_PROCESSING_LEASE_SECONDS = 300;
 
 export type ManualPublicationInput = {
@@ -112,6 +117,18 @@ export type ManualPublicationOptions = {
 export type ManualPublicationResult = {
   request: ManualPublicationRequestView;
   created: boolean;
+};
+
+export type ManualPublicationReconciliationInput = {
+  targetId: string;
+  executionId: string;
+  resolution: string;
+  confirmation: string;
+};
+
+export type ManualPublicationReconciliationResult = {
+  request: ManualPublicationRequestView;
+  alreadyReconciled: boolean;
 };
 
 export type ManualPublicationTargetView = ManualPublicationTargetRecord & {
@@ -1861,6 +1878,73 @@ export class ManualPublicationService {
     return {
       request: await this.view(accepted.request),
       created: accepted.created,
+    };
+  }
+
+  async reconcileSafePreProviderAmbiguity(
+    requestId: string,
+    input: ManualPublicationReconciliationInput,
+  ): Promise<ManualPublicationReconciliationResult> {
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      Object.keys(input).sort().join('|') !==
+        'confirmation|executionId|resolution|targetId'
+    ) {
+      return fail(
+        'Payload de reconciliation manual invalido',
+        'MANUAL_PUBLICATION_RECOVERY_INVALID',
+      );
+    }
+    if (input.resolution !== MANUAL_PUBLICATION_RECONCILIATION_RESOLUTION) {
+      return fail(
+        'Resolution de recovery manual invalida',
+        'MANUAL_PUBLICATION_RECOVERY_RESOLUTION_INVALID',
+      );
+    }
+    if (
+      input.confirmation !== MANUAL_PUBLICATION_RECONCILIATION_CONFIRMATION
+    ) {
+      return fail(
+        'Confirmacao de recovery manual invalida',
+        'MANUAL_PUBLICATION_RECOVERY_CONFIRMATION_INVALID',
+      );
+    }
+    const repository = this.options.requests;
+    const reconcile = repository.reconcileSafePreProviderAmbiguity;
+    if (!reconcile) {
+      return fail(
+        'Recovery de ambiguidade manual indisponivel',
+        'MANUAL_PUBLICATION_RECOVERY_UNAVAILABLE',
+      );
+    }
+    const normalizedRequestId = normalizeId(requestId, 'requestId');
+    const normalizedTargetId = normalizeId(input.targetId, 'targetId');
+    const normalizedExecutionId = normalizeId(input.executionId, 'executionId');
+    const result: ManualPublicationSafePreProviderReconciliationResult =
+      await reconcile.call(repository, {
+        requestId: normalizedRequestId,
+        targetId: normalizedTargetId,
+        executionId: normalizedExecutionId,
+        now: this.clock(),
+      });
+    const alreadyReconciled = result.outcome === 'ALREADY_RECONCILED';
+    this.options.logger?.info(
+      {
+        event: 'manual-publication.reconcile-safe-pre-provider',
+        requestId: normalizedRequestId,
+        targetId: normalizedTargetId,
+        executionId: normalizedExecutionId,
+        resolution: input.resolution,
+        alreadyReconciled,
+        result: result.outcome,
+      },
+      'Manual publication ambiguity reconciled',
+    );
+    return {
+      request: await this.view(result.request),
+      alreadyReconciled,
     };
   }
 

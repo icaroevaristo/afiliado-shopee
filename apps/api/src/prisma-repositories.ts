@@ -61,6 +61,8 @@ import type {
   ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
   ManualPublicationRequestRepository,
+  ManualPublicationSafePreProviderReconciliationInput,
+  ManualPublicationSafePreProviderReconciliationResult,
   ManualPublicationRequestUpdate,
   ManualPublicationTargetRecord,
   ManualPublicationTargetUpdate,
@@ -4556,6 +4558,260 @@ const loadManualPublicationRequest = (
     include: manualPublicationRequestInclude,
   } as never);
 
+const manualPublicationRecoverySchedulerJobId = (
+  requestId: string,
+  targetId: string,
+) => `manual-publication:${requestId}:${targetId}`;
+
+const aggregateManualPublicationRequestStatus = (
+  statuses: ManualPublicationTargetRecord['status'][],
+): ManualPublicationRequestRecord['status'] => {
+  const hasAmbiguous = statuses.includes('AMBIGUOUS');
+  const hasActive = statuses.some((status) =>
+    ['ACCEPTED', 'PROCESSING', 'QUEUED'].includes(status),
+  );
+  const sentCount = statuses.filter((status) => status === 'SENT').length;
+  const terminalCount = statuses.filter((status) =>
+    ['SENT', 'BLOCKED', 'FAILED'].includes(status),
+  ).length;
+  return hasAmbiguous
+    ? 'AMBIGUOUS'
+    : hasActive
+      ? 'PROCESSING'
+      : sentCount === statuses.length
+        ? 'COMPLETED'
+        : sentCount > 0
+          ? 'PARTIAL'
+          : terminalCount === statuses.length &&
+              statuses.every((status) => status === 'BLOCKED')
+            ? 'BLOCKED'
+            : 'FAILED';
+};
+
+const manualPublicationRequestTerminal = (
+  status: ManualPublicationRequestRecord['status'],
+) => ['COMPLETED', 'PARTIAL', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(status);
+
+type ManualPublicationRecoveryClient = Pick<
+  DatabaseClient,
+  | 'manualPublicationRequest'
+  | 'manualPublicationTarget'
+  | 'commercialAutomationExecution'
+  | 'commercialGroupCampaign'
+  | 'commercialPromotionCandidate'
+  | 'commercialPipelineRun'
+  | 'whatsAppDispatch'
+  | 'commercialDispatchOutbox'
+  | 'commercialCopyGenerationAttempt'
+  | 'generatedCopy'
+>;
+
+type ManualPublicationRecoveryCampaign = {
+  id: string;
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
+};
+
+type ManualPublicationRecoveryCandidate = {
+  id: string;
+  campaignId: string;
+  productId: string;
+  snapshotId: string;
+  generatedCopyId: string | null;
+  status: string;
+};
+
+type ManualPublicationRecoveryReservation = {
+  id: string;
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
+};
+
+type ManualPublicationRecoveryState = {
+  request: ManualPublicationRequestRecord;
+  target: ManualPublicationTargetRecord;
+  execution: CommercialAutomationExecutionRecord;
+  campaign: ManualPublicationRecoveryCampaign;
+  candidate: ManualPublicationRecoveryCandidate | null;
+  campaignReservations: ManualPublicationRecoveryReservation[];
+  linkedRun: { id: string } | null;
+  linkedDispatch: { id: string } | null;
+  linkedOutbox: { id: string } | null;
+  copyAttempt: { id: string } | null;
+  generatedCopy: { id: string } | null;
+};
+
+const readManualPublicationRecoveryState = async (
+  client: ManualPublicationRecoveryClient,
+  input: ManualPublicationSafePreProviderReconciliationInput,
+): Promise<ManualPublicationRecoveryState | null> => {
+  const requestRaw = await loadManualPublicationRequest(client, {
+    id: input.requestId,
+  });
+  if (!requestRaw) return null;
+  const request = mapManualPublicationRequest({ ...requestRaw });
+  const target = request.targets.find(({ id }) => id === input.targetId);
+  if (!target) return null;
+
+  const executionRaw = await client.commercialAutomationExecution.findUnique({
+    where: { id: input.executionId },
+  });
+  if (!executionRaw) return null;
+  const execution = mapCommercialAutomationExecution(executionRaw);
+  const campaignRaw = await client.commercialGroupCampaign.findUnique({
+    where: { id: target.campaignId },
+    select: {
+      id: true,
+      attemptExecutionId: true,
+      attemptReservedAt: true,
+      attemptLeaseExpiresAt: true,
+    },
+  });
+  if (!campaignRaw) return null;
+
+  const candidate = target.candidateId
+    ? await client.commercialPromotionCandidate.findUnique({
+        where: { id: target.candidateId },
+        select: {
+          id: true,
+          campaignId: true,
+          productId: true,
+          snapshotId: true,
+          generatedCopyId: true,
+          status: true,
+        },
+      })
+    : await client.commercialPromotionCandidate.findUnique({
+        where: {
+          campaignId_productId: {
+            campaignId: target.campaignId,
+            productId: request.productId,
+          },
+        },
+        select: {
+          id: true,
+          campaignId: true,
+          productId: true,
+          snapshotId: true,
+          generatedCopyId: true,
+          status: true,
+        },
+      });
+
+  const [campaignReservations, linkedRun, linkedDispatch, linkedOutbox, copyAttempt, generatedCopy] =
+    await Promise.all([
+      client.commercialGroupCampaign.findMany({
+        where: { attemptExecutionId: input.executionId },
+        take: 2,
+        select: {
+          id: true,
+          attemptExecutionId: true,
+          attemptReservedAt: true,
+          attemptLeaseExpiresAt: true,
+        },
+      }),
+      client.commercialPipelineRun.findUnique({
+        where: { executionId: input.executionId },
+        select: { id: true },
+      }),
+      client.whatsAppDispatch.findFirst({
+        where: {
+          productId: request.productId,
+          destinationId: target.destinationId,
+          createdAt: { gte: execution.startedAt },
+        },
+        select: { id: true },
+      }),
+      client.commercialDispatchOutbox.findFirst({
+        where: { commercialRun: { executionId: input.executionId } },
+        select: { id: true },
+      } as never),
+      candidate
+        ? client.commercialCopyGenerationAttempt.findFirst({
+            where: { candidateId: candidate.id },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      candidate
+        ? client.generatedCopy.findFirst({
+            where: { createdFromCandidateId: candidate.id },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+  return {
+    request,
+    target,
+    execution,
+    campaign: campaignRaw,
+    candidate,
+    campaignReservations,
+    linkedRun,
+    linkedDispatch,
+    linkedOutbox,
+    copyAttempt,
+    generatedCopy,
+  };
+};
+
+const safePreProviderReplayMatches = (
+  state: ManualPublicationRecoveryState,
+  input: ManualPublicationSafePreProviderReconciliationInput,
+) => {
+  const { request, target, execution, campaign, candidate } = state;
+  if (
+    request.mode !== 'SEND' ||
+    target.requestId !== input.requestId ||
+    target.status !== 'BLOCKED' ||
+    target.investigationRequired ||
+    target.runId !== null ||
+    target.dispatchId !== null ||
+    target.outboxId !== null ||
+    execution.id !== input.executionId ||
+    execution.mode !== 'SEND' ||
+    execution.status !== 'BLOCKED' ||
+    execution.schedulerJobId !==
+      manualPublicationRecoverySchedulerJobId(input.requestId, input.targetId) ||
+    execution.externalStage !== 'EXTERNAL_MAY_HAVE_STARTED' ||
+    execution.commercialRunId !== null ||
+    !execution.failureCode ||
+    target.blockedReason !== execution.failureCode ||
+    campaign.attemptExecutionId !== null ||
+    campaign.attemptReservedAt !== null ||
+    campaign.attemptLeaseExpiresAt !== null ||
+    state.campaignReservations.length !== 0 ||
+    !candidate ||
+    candidate.id !== (target.candidateId ?? candidate.id) ||
+    candidate.campaignId !== target.campaignId ||
+    candidate.productId !== request.productId ||
+    candidate.snapshotId !== request.requestedSnapshotId ||
+    candidate.status !== 'QUEUED' ||
+    candidate.generatedCopyId !== null ||
+    state.linkedRun ||
+    state.linkedDispatch ||
+    state.linkedOutbox ||
+    state.copyAttempt ||
+    state.generatedCopy ||
+    request.processingOwnerId !== null ||
+    request.processingLeaseExpiresAt !== null ||
+    manualPublicationRequestTerminal(request.status) !==
+      Boolean(request.completedAt)
+  ) {
+    return false;
+  }
+  return (
+    request.status ===
+    aggregateManualPublicationRequestStatus(
+      request.targets.map((item) => item.status),
+    )
+  );
+};
+
+class ManualPublicationRecoveryCasConflictError extends Error {}
+
 export class PrismaManualPublicationRequestRepository
   implements ManualPublicationRequestRepository
 {
@@ -4943,6 +5199,253 @@ export class PrismaManualPublicationRequestRepository
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
       throw error;
+    }
+  }
+
+  async reconcileSafePreProviderAmbiguity(
+    input: ManualPublicationSafePreProviderReconciliationInput,
+  ): Promise<ManualPublicationSafePreProviderReconciliationResult> {
+    const reconcile = async (client: ManualPublicationRecoveryClient) => {
+      const state = await readManualPublicationRecoveryState(client, input);
+      if (!state) {
+        throw new AppError(
+          'Lifecycle de publicacao manual nao encontrado',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (safePreProviderReplayMatches(state, input)) {
+        return {
+          outcome: 'ALREADY_RECONCILED' as const,
+          request: state.request,
+          writes: 0 as const,
+        };
+      }
+
+      const { request, target, execution, campaign, candidate } = state;
+      if (
+        request.mode !== 'SEND' ||
+        request.status !== 'AMBIGUOUS' ||
+        target.requestId !== input.requestId ||
+        target.status !== 'AMBIGUOUS' ||
+        !target.investigationRequired ||
+        target.runId !== null ||
+        target.dispatchId !== null ||
+        target.outboxId !== null ||
+        execution.id !== input.executionId ||
+        execution.mode !== 'SEND' ||
+        execution.status !== 'AMBIGUOUS' ||
+        execution.schedulerJobId !==
+          manualPublicationRecoverySchedulerJobId(
+            input.requestId,
+            input.targetId,
+          ) ||
+        execution.externalStage !== 'EXTERNAL_MAY_HAVE_STARTED' ||
+        execution.commercialRunId !== null ||
+        execution.activeKey !== null ||
+        !execution.failureCode ||
+        target.blockedReason !== execution.failureCode ||
+        request.processingOwnerId !== null ||
+        request.processingLeaseExpiresAt !== null
+      ) {
+        throw new AppError(
+          'Lifecycle ambiguo nao corresponde ao recovery seguro pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (
+        state.linkedRun ||
+        state.linkedDispatch ||
+        state.linkedOutbox ||
+        state.copyAttempt ||
+        state.generatedCopy
+      ) {
+        throw new AppError(
+          'Evidencia downstream impede o recovery pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (
+        !candidate ||
+        candidate.id !== (target.candidateId ?? candidate.id) ||
+        candidate.campaignId !== target.campaignId ||
+        candidate.productId !== request.productId ||
+        candidate.snapshotId !== request.requestedSnapshotId ||
+        candidate.status !== 'QUEUED' ||
+        candidate.generatedCopyId !== null
+      ) {
+        throw new AppError(
+          'Candidate nao esta intacto para o recovery pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (campaign.attemptExecutionId !== input.executionId) {
+        if (campaign.attemptExecutionId) {
+          throw new AppError(
+            'A reservation comercial pertence a outra execution',
+            'RECOVERY_RESERVATION_OWNERSHIP_MISMATCH',
+          );
+        }
+        throw new AppError(
+          'A reservation comercial nao esta presente',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+      if (
+        state.campaignReservations.length !== 1 ||
+        state.campaignReservations[0]?.id !== campaign.id ||
+        !campaign.attemptReservedAt ||
+        !campaign.attemptLeaseExpiresAt ||
+        state.campaignReservations[0]?.attemptReservedAt?.getTime() !==
+          campaign.attemptReservedAt.getTime() ||
+        state.campaignReservations[0]?.attemptLeaseExpiresAt?.getTime() !==
+          campaign.attemptLeaseExpiresAt.getTime() ||
+        campaign.attemptReservedAt.getTime() >
+          campaign.attemptLeaseExpiresAt.getTime()
+      ) {
+        throw new AppError(
+          'A reservation comercial nao e unica ou valida',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+      if (campaign.attemptLeaseExpiresAt.getTime() > input.now.getTime()) {
+        throw new AppError(
+          'A lease da reservation comercial ainda esta ativa',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      const nextRequestStatus = aggregateManualPublicationRequestStatus(
+        request.targets.map((item) =>
+          item.id === target.id ? ('BLOCKED' as const) : item.status,
+        ),
+      );
+      const nextCompletedAt = manualPublicationRequestTerminal(nextRequestStatus)
+        ? request.completedAt ?? input.now
+        : null;
+
+      const campaignUpdated = await client.commercialGroupCampaign.updateMany({
+        where: {
+          id: campaign.id,
+          attemptExecutionId: input.executionId,
+          attemptReservedAt: campaign.attemptReservedAt,
+          attemptLeaseExpiresAt: campaign.attemptLeaseExpiresAt,
+        },
+        data: {
+          attemptExecutionId: null,
+          attemptReservedAt: null,
+          attemptLeaseExpiresAt: null,
+        },
+      });
+      if (campaignUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const executionUpdated =
+        await client.commercialAutomationExecution.updateMany({
+          where: {
+            id: execution.id,
+            schedulerJobId: execution.schedulerJobId,
+            bullMqJobId: execution.bullMqJobId,
+            activeKey: execution.activeKey,
+            ownerId: execution.ownerId,
+            heartbeatAt: execution.heartbeatAt,
+            leaseExpiresAt: execution.leaseExpiresAt,
+            mode: 'SEND',
+            status: 'AMBIGUOUS',
+            externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+            commercialRunId: null,
+            failureCode: execution.failureCode,
+            startedAt: execution.startedAt,
+            completedAt: execution.completedAt,
+          },
+          data: { status: 'BLOCKED' },
+        });
+      if (executionUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const targetUpdated = await client.manualPublicationTarget.updateMany({
+        where: {
+          id: target.id,
+          requestId: input.requestId,
+          candidateId: target.candidateId,
+          runId: null,
+          dispatchId: null,
+          outboxId: null,
+          status: 'AMBIGUOUS',
+          blockedReason: target.blockedReason,
+          investigationRequired: true,
+        },
+        data: { status: 'BLOCKED', investigationRequired: false },
+      });
+      if (targetUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const requestUpdated = await client.manualPublicationRequest.updateMany({
+        where: {
+          id: request.id,
+          mode: 'SEND',
+          productId: request.productId,
+          requestedSnapshotId: request.requestedSnapshotId,
+          requestedSnapshotRevision: request.requestedSnapshotRevision,
+          requestedSnapshotFingerprint: request.requestedSnapshotFingerprint,
+          status: 'AMBIGUOUS',
+          completedAt: request.completedAt,
+          processingOwnerId: null,
+          processingLeaseExpiresAt: null,
+        },
+        data: {
+          status: nextRequestStatus,
+          completedAt: nextCompletedAt,
+        },
+      });
+      if (requestUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const recoveredRaw = await loadManualPublicationRequest(client, {
+        id: request.id,
+      });
+      if (!recoveredRaw) throw new ManualPublicationRecoveryCasConflictError();
+      return {
+        outcome: 'RECONCILED' as const,
+        request: mapManualPublicationRequest({ ...recoveredRaw }),
+        writes: 4 as const,
+      };
+    };
+
+    try {
+      return await this.prisma.$transaction(reconcile, {
+        isolationLevel: 'Serializable',
+      });
+    } catch (error) {
+      if (
+        !(error instanceof ManualPublicationRecoveryCasConflictError) &&
+        !isTransactionConflictError(error)
+      ) {
+        throw error;
+      }
+      try {
+        const state = await readManualPublicationRecoveryState(this.prisma, input);
+        if (state && safePreProviderReplayMatches(state, input)) {
+          return {
+            outcome: 'ALREADY_RECONCILED',
+            request: state.request,
+            writes: 0,
+          };
+        }
+      } catch {
+        // The original CAS/Serializable conflict remains authoritative.
+      }
+      throw new AppError(
+        'O recovery pre-provider perdeu o CAS durante a reconciliacao',
+        'RECOVERY_CAS_CONFLICT',
+      );
     }
   }
 }

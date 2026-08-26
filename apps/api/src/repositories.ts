@@ -625,6 +625,25 @@ export type ManualPublicationRequestRecord = {
   targets: ManualPublicationTargetRecord[];
 };
 
+export type ManualPublicationSafePreProviderReconciliationInput = {
+  requestId: string;
+  targetId: string;
+  executionId: string;
+  now: Date;
+};
+
+export type ManualPublicationSafePreProviderReconciliationResult =
+  | {
+      outcome: 'RECONCILED';
+      request: ManualPublicationRequestRecord;
+      writes: 4;
+    }
+  | {
+      outcome: 'ALREADY_RECONCILED';
+      request: ManualPublicationRequestRecord;
+      writes: 0;
+    };
+
 export type ManualPublicationTargetUpdate = Partial<
   Pick<
     ManualPublicationTargetRecord,
@@ -694,6 +713,9 @@ export interface ManualPublicationRequestRepository {
     id: string,
     data: ManualPublicationRequestUpdate,
   ): Promise<ManualPublicationRequestRecord | null>;
+  reconcileSafePreProviderAmbiguity?(
+    input: ManualPublicationSafePreProviderReconciliationInput,
+  ): Promise<ManualPublicationSafePreProviderReconciliationResult>;
 }
 
 export type CommercialAutomationSettingsRecord = {

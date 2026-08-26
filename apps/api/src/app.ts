@@ -50,6 +50,7 @@ import {
 import {
   ManualPublicationService,
   type ManualPublicationInput,
+  type ManualPublicationReconciliationInput,
   type ManualPublicationPreviewInput,
 } from './manual-publication-service';
 import type { AnalyticsService } from './analytics-service';
@@ -145,7 +146,10 @@ export type BuildAppOptions = {
   manualPublicationService?: Pick<
     ManualPublicationService,
     'getOptions' | 'create' | 'preview' | 'find'
-  >;
+  > &
+    Partial<
+      Pick<ManualPublicationService, 'reconcileSafePreProviderAmbiguity'>
+    >;
   commercialConfirmationEnvironment?: {
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -2162,6 +2166,70 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       });
     }
   });
+
+  app.post(
+    '/commercial-publications/manual/:requestId/reconcile',
+    async (request, reply) => {
+      const body = request.body;
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).sort().join('|') !==
+          'confirmation|executionId|resolution|targetId'
+      ) {
+        return reply.status(400).send({
+          error: 'MANUAL_PUBLICATION_RECOVERY_INVALID',
+          message: 'Payload de reconciliation manual invalido',
+        });
+      }
+      try {
+        const service = getManualPublicationService();
+        if (!service.reconcileSafePreProviderAmbiguity) {
+          throw new AppError(
+            'Recovery de ambiguidade manual indisponivel',
+            'MANUAL_PUBLICATION_RECOVERY_UNAVAILABLE',
+          );
+        }
+        const { requestId } = request.params as { requestId: string };
+        return await service.reconcileSafePreProviderAmbiguity(
+          requestId,
+          body as ManualPublicationReconciliationInput,
+        );
+      } catch (error) {
+        const code =
+          error instanceof AppError
+            ? error.code
+            : 'MANUAL_PUBLICATION_RECOVERY_FAILED';
+        const status =
+          code === 'MANUAL_PUBLICATION_RECOVERY_INVALID' ||
+          code === 'MANUAL_PUBLICATION_RECOVERY_RESOLUTION_INVALID' ||
+          code === 'MANUAL_PUBLICATION_RECOVERY_CONFIRMATION_INVALID' ||
+          code === 'MANUAL_PUBLICATION_INVALID'
+            ? 400
+            : code === 'MANUAL_PUBLICATION_NOT_FOUND'
+              ? 404
+              : code === 'MANUAL_PUBLICATION_RECOVERY_UNAVAILABLE'
+                ? 503
+                : code === 'RECOVERY_NOT_SAFE' ||
+                    code === 'RECOVERY_RESERVATION_OWNERSHIP_MISMATCH' ||
+                    code === 'RECOVERY_CAS_CONFLICT'
+                  ? 409
+                  : 500;
+        request.log.error(
+          { event: 'manual-publication.reconcile.route.failed', code },
+          'Manual publication reconciliation route failed',
+        );
+        return reply.status(status).send({
+          error: code,
+          message:
+            error instanceof AppError
+              ? error.message
+              : 'Falha segura na reconciliation da publicacao manual',
+        });
+      }
+    },
+  );
 
   app.get('/commercial-pipeline/runs', async (request, reply) => {
     try {
