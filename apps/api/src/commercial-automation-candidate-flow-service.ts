@@ -38,7 +38,6 @@ import type {
   CommercialGroupCampaignRepository,
   CommercialDeliveryHistoryRepository,
   CommercialPipelineRejectionCode,
-  CommercialPromotionCandidateRecord,
   CommercialPromotionCandidateRepository,
   CommercialPromotionCopyRepository,
   CommercialPromotionQueueItem,
@@ -163,7 +162,8 @@ type CandidateFlowOptions = {
     CommercialPromotionCopyRepository,
     'loadContext' | 'findCopyForCandidate'
   >;
-  mining: Pick<CommercialPromotionMiningService, 'mine'>;
+  mining: Pick<CommercialPromotionMiningService, 'mine'> &
+    Partial<Pick<CommercialPromotionMiningService, 'selectManualCandidate'>>;
   copyGeneration: Pick<
     CommercialPromotionCopyGenerationService,
     'preview' | 'generate' | 'findCopy'
@@ -988,22 +988,13 @@ export class CommercialAutomationCandidateFlowService {
       'executionId' | 'existingRunId' | 'beforeExternalCopyGeneration'
     >,
   ): Promise<CommercialAutomationCandidateFlowResult> {
-    const selectManualCandidate = (
-      this.options.mining as typeof this.options.mining & {
-        selectManualCandidate?: (input: {
-          campaignId: string;
-          productId: string;
-          logicalGroupFingerprint: string;
-        }) => Promise<CommercialPromotionQueueItem | CommercialPromotionCandidateRecord>;
-      }
-    ).selectManualCandidate;
-    if (!selectManualCandidate) {
+    if (!this.options.mining.selectManualCandidate) {
       throw appError(
         'Selecao manual de candidate indisponivel',
         'MANUAL_PUBLICATION_CANDIDATE_UNAVAILABLE',
       );
     }
-    const candidate = await selectManualCandidate({
+    const candidate = await this.options.mining.selectManualCandidate({
       campaignId: target.campaignId,
       productId,
       logicalGroupFingerprint: target.logicalGroupFingerprint,
