@@ -61,6 +61,8 @@ import type {
   ManualPublicationRequestMode,
   ManualPublicationRequestRecord,
   ManualPublicationRequestRepository,
+  ManualPublicationLifecycleFinalizationInput,
+  ManualPublicationLifecycleFinalizationResult,
   ManualPublicationSafePreProviderReconciliationInput,
   ManualPublicationSafePreProviderReconciliationResult,
   ManualPublicationRequestUpdate,
@@ -118,6 +120,12 @@ import {
   fingerprintCommercialOffer,
   type CommercialOfferFingerprintInput,
 } from './commercial-offer-snapshot';
+import {
+  aggregateManualPublicationRequestStatus,
+  isManualPublicationRequestTerminal,
+  resolveManualPublicationTerminalStatus,
+  type ManualPublicationLifecycleObservation,
+} from './manual-publication-lifecycle-finalizer';
 import {
   assertCompatibleShopeeProductIdentity,
   assertCompleteShopeeProductIdentity,
@@ -4448,6 +4456,45 @@ const manualPublicationRequestInclude = {
   },
 } as const;
 
+const manualPublicationLifecycleTargetSelect = {
+  id: true,
+  requestId: true,
+  destinationId: true,
+  campaignId: true,
+  logicalGroupFingerprint: true,
+  assignedInstanceName: true,
+  candidateId: true,
+  runId: true,
+  dispatchId: true,
+  outboxId: true,
+  status: true,
+  blockedReason: true,
+  investigationRequired: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+const manualPublicationLifecycleRequestSelect = {
+  id: true,
+  idempotencyKey: true,
+  payloadHash: true,
+  mode: true,
+  productId: true,
+  requestedSnapshotId: true,
+  requestedSnapshotRevision: true,
+  requestedSnapshotFingerprint: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  completedAt: true,
+  processingOwnerId: true,
+  processingLeaseExpiresAt: true,
+  targets: {
+    orderBy: { id: 'asc' },
+    select: manualPublicationLifecycleTargetSelect,
+  },
+} as const;
+
 const mapManualPublicationTarget = (
   record: Record<string, unknown>,
 ): ManualPublicationTargetRecord => {
@@ -4558,39 +4605,19 @@ const loadManualPublicationRequest = (
     include: manualPublicationRequestInclude,
   } as never);
 
+const loadManualPublicationLifecycleRequest = (
+  client: Pick<DatabaseClient, 'manualPublicationRequest'>,
+  id: string,
+) =>
+  client.manualPublicationRequest.findUnique({
+    where: { id },
+    select: manualPublicationLifecycleRequestSelect,
+  } as never);
+
 const manualPublicationRecoverySchedulerJobId = (
   requestId: string,
   targetId: string,
 ) => `manual-publication:${requestId}:${targetId}`;
-
-const aggregateManualPublicationRequestStatus = (
-  statuses: ManualPublicationTargetRecord['status'][],
-): ManualPublicationRequestRecord['status'] => {
-  const hasAmbiguous = statuses.includes('AMBIGUOUS');
-  const hasActive = statuses.some((status) =>
-    ['ACCEPTED', 'PROCESSING', 'QUEUED'].includes(status),
-  );
-  const sentCount = statuses.filter((status) => status === 'SENT').length;
-  const terminalCount = statuses.filter((status) =>
-    ['SENT', 'BLOCKED', 'FAILED'].includes(status),
-  ).length;
-  return hasAmbiguous
-    ? 'AMBIGUOUS'
-    : hasActive
-      ? 'PROCESSING'
-      : sentCount === statuses.length
-        ? 'COMPLETED'
-        : sentCount > 0
-          ? 'PARTIAL'
-          : terminalCount === statuses.length &&
-              statuses.every((status) => status === 'BLOCKED')
-            ? 'BLOCKED'
-            : 'FAILED';
-};
-
-const manualPublicationRequestTerminal = (
-  status: ManualPublicationRequestRecord['status'],
-) => ['COMPLETED', 'PARTIAL', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(status);
 
 type ManualPublicationRecoveryClient = Pick<
   DatabaseClient,
@@ -4797,7 +4824,7 @@ const safePreProviderReplayMatches = (
     state.generatedCopy ||
     request.processingOwnerId !== null ||
     request.processingLeaseExpiresAt !== null ||
-    manualPublicationRequestTerminal(request.status) !==
+    isManualPublicationRequestTerminal(request.status) !==
       Boolean(request.completedAt)
   ) {
     return false;
@@ -5202,6 +5229,264 @@ export class PrismaManualPublicationRequestRepository
     }
   }
 
+  async finalizeAfterCommercialDispatch(
+    input: ManualPublicationLifecycleFinalizationInput,
+  ): Promise<ManualPublicationLifecycleFinalizationResult> {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const run = await transaction.commercialPipelineRun.findUnique({
+          where: { dispatchId: input.dispatchId },
+          select: {
+            id: true,
+            dispatchId: true,
+            status: true,
+            finalStatus: true,
+            investigationRequired: true,
+          },
+        });
+        if (!run) {
+          return {
+            outcome: 'NO_MANUAL_LIFECYCLE' as const,
+            writes: 0 as const,
+          };
+        }
+
+        const dispatch = await transaction.whatsAppDispatch.findUnique({
+          where: { id: input.dispatchId },
+          select: {
+            id: true,
+            status: true,
+            attemptCount: true,
+            externalMessageId: true,
+            sentAt: true,
+          },
+        });
+        if (!dispatch) {
+          throw new AppError(
+            'Dispatch comercial ausente durante a finalizacao manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        if (run.dispatchId !== dispatch.id) {
+          throw new AppError(
+            'Run comercial nao corresponde ao dispatch manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const outbox = await transaction.commercialDispatchOutbox.findUnique({
+          where: { dispatchId: dispatch.id },
+          select: {
+            id: true,
+            commercialRunId: true,
+            dispatchId: true,
+            status: true,
+          },
+        });
+        if (
+          outbox &&
+          (outbox.commercialRunId !== run.id ||
+            outbox.dispatchId !== dispatch.id)
+        ) {
+          throw new AppError(
+            'Outbox comercial nao corresponde ao run/dispatch manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const relationFilters = [
+          { runId: run.id },
+          { dispatchId: dispatch.id },
+          ...(outbox ? [{ outboxId: outbox.id }] : []),
+        ];
+        const linkedTargets =
+          await transaction.manualPublicationTarget.findMany({
+            where: { OR: relationFilters },
+            take: 2,
+            orderBy: { id: 'asc' },
+            select: manualPublicationLifecycleTargetSelect,
+          } as never);
+        if (linkedTargets.length === 0) {
+          return {
+            outcome: 'NO_MANUAL_LIFECYCLE' as const,
+            writes: 0 as const,
+          };
+        }
+        if (linkedTargets.length !== 1) {
+          throw new AppError(
+            'Mais de um target manual corresponde ao mesmo dispatch comercial',
+            'MANUAL_PUBLICATION_LIFECYCLE_TARGET_AMBIGUOUS',
+          );
+        }
+
+        const linkedTarget = linkedTargets[0];
+        if (!linkedTarget) {
+          throw new AppError(
+            'Target manual desapareceu durante a finalizacao',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        if (
+          (linkedTarget.runId !== null && linkedTarget.runId !== run.id) ||
+          (linkedTarget.dispatchId !== null &&
+            linkedTarget.dispatchId !== dispatch.id) ||
+          (linkedTarget.outboxId !== null &&
+            (!outbox || linkedTarget.outboxId !== outbox.id))
+        ) {
+          throw new AppError(
+            'Target manual possui vinculos comerciais divergentes',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const requestRaw = await loadManualPublicationLifecycleRequest(
+          transaction,
+          linkedTarget.requestId,
+        );
+        if (!requestRaw) {
+          throw new AppError(
+            'Request manual ausente durante a finalizacao',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        const request = mapManualPublicationRequest({ ...requestRaw });
+        if (request.mode !== 'SEND') {
+          throw new AppError(
+            'Target de preview nao pode ser finalizado pelo worker comercial',
+            'MANUAL_PUBLICATION_LIFECYCLE_MODE_MISMATCH',
+          );
+        }
+        const target = request.targets.find(
+          (item) => item.id === linkedTarget.id,
+        );
+        if (!target || target.requestId !== request.id) {
+          throw new AppError(
+            'Target manual nao pertence a request carregada',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const observation: ManualPublicationLifecycleObservation = {
+          hasRun: true,
+          runStatus: run.status,
+          runFinalStatus: run.finalStatus,
+          runInvestigationRequired: run.investigationRequired,
+          hasDispatch: true,
+          dispatchStatus: dispatch.status,
+          hasOutbox: Boolean(outbox),
+          outboxStatus: outbox?.status ?? null,
+        };
+        const terminalStatus =
+          resolveManualPublicationTerminalStatus(observation);
+        if (!terminalStatus) {
+          return { outcome: 'NOT_TERMINAL' as const, writes: 0 as const };
+        }
+
+        const nextTargetStatus =
+          target.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : terminalStatus;
+        const nextTargetInvestigationRequired =
+          nextTargetStatus === 'AMBIGUOUS';
+        const nextTargets = request.targets.map((item) =>
+          item.id === target.id
+            ? {
+                ...item,
+                status: nextTargetStatus,
+                investigationRequired: nextTargetInvestigationRequired,
+              }
+            : item,
+        );
+        const nextRequestStatus = aggregateManualPublicationRequestStatus(
+          nextTargets.map((item) => item.status),
+        );
+        const requestTerminal =
+          isManualPublicationRequestTerminal(nextRequestStatus);
+        const nextCompletedAt = requestTerminal
+          ? (request.completedAt ?? input.now)
+          : null;
+        const targetNeedsUpdate =
+          target.status !== nextTargetStatus ||
+          target.investigationRequired !== nextTargetInvestigationRequired;
+        const requestNeedsUpdate =
+          request.status !== nextRequestStatus ||
+          request.completedAt?.getTime() !== nextCompletedAt?.getTime() ||
+          (requestTerminal &&
+            (request.processingOwnerId !== null ||
+              request.processingLeaseExpiresAt !== null));
+
+        let writes = 0;
+        if (targetNeedsUpdate) {
+          const updatedTarget =
+            await transaction.manualPublicationTarget.updateMany({
+              where: {
+                id: target.id,
+                requestId: target.requestId,
+                candidateId: target.candidateId,
+                runId: target.runId,
+                dispatchId: target.dispatchId,
+                outboxId: target.outboxId,
+                status: target.status,
+                investigationRequired: target.investigationRequired,
+              },
+              data: {
+                status: nextTargetStatus,
+                investigationRequired: nextTargetInvestigationRequired,
+              },
+            } as never);
+          if (updatedTarget.count !== 1) {
+            throw new AppError(
+              'Target manual mudou durante a finalizacao',
+              'MANUAL_PUBLICATION_LIFECYCLE_CAS_CONFLICT',
+            );
+          }
+          writes += 1;
+        }
+
+        if (requestNeedsUpdate) {
+          const updatedRequest =
+            await transaction.manualPublicationRequest.updateMany({
+              where: {
+                id: request.id,
+                status: request.status,
+                completedAt: request.completedAt,
+                processingOwnerId: request.processingOwnerId,
+                processingLeaseExpiresAt: request.processingLeaseExpiresAt,
+              },
+              data: {
+                status: nextRequestStatus,
+                completedAt: nextCompletedAt,
+                ...(requestTerminal
+                  ? {
+                      processingOwnerId: null,
+                      processingLeaseExpiresAt: null,
+                    }
+                  : {}),
+              },
+            } as never);
+          if (updatedRequest.count !== 1) {
+            throw new AppError(
+              'Request manual mudou durante a finalizacao',
+              'MANUAL_PUBLICATION_LIFECYCLE_CAS_CONFLICT',
+            );
+          }
+          writes += 1;
+        }
+
+        return {
+          outcome:
+            writes === 0
+              ? ('ALREADY_FINALIZED' as const)
+              : ('FINALIZED' as const),
+          requestId: request.id,
+          targetId: target.id,
+          targetStatus: nextTargetStatus,
+          requestStatus: nextRequestStatus,
+          writes,
+        };
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
+  }
+
   async reconcileSafePreProviderAmbiguity(
     input: ManualPublicationSafePreProviderReconciliationInput,
   ): Promise<ManualPublicationSafePreProviderReconciliationResult> {
@@ -5323,7 +5608,7 @@ export class PrismaManualPublicationRequestRepository
           item.id === target.id ? ('BLOCKED' as const) : item.status,
         ),
       );
-      const nextCompletedAt = manualPublicationRequestTerminal(nextRequestStatus)
+      const nextCompletedAt = isManualPublicationRequestTerminal(nextRequestStatus)
         ? request.completedAt ?? input.now
         : null;
 

@@ -18,6 +18,11 @@ import {
   COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS,
 } from './commercial-automation-execution-recovery-service';
 import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
+import {
+  aggregateManualPublicationRequestStatus,
+  deriveManualPublicationTargetState,
+  isManualPublicationRequestTerminal,
+} from './manual-publication-lifecycle-finalizer';
 import type {
   CommercialAutomationPolicyService,
 } from './commercial-automation-policy-service';
@@ -831,31 +836,22 @@ export class ManualPublicationService {
     target: ManualPublicationTargetRecord,
   ): Promise<ManualPublicationTargetRecord> {
     if (target.status === 'AMBIGUOUS') return target;
-    let nextStatus: ManualPublicationTargetRecord['status'] = target.status;
-    let investigationRequired = target.investigationRequired;
     const run = target.runId ? await this.options.runs.findById(target.runId) : null;
     const dispatch = target.dispatchId
       ? await this.options.dispatches.findByIdWithDetails(target.dispatchId)
       : null;
     const outbox = target.outboxId ? await this.options.outboxes.findById(target.outboxId) : null;
-    if (dispatch?.status === 'SENT' || run?.finalStatus === 'SENT') {
-      nextStatus = 'SENT';
-      investigationRequired = false;
-    } else if (
-      outbox?.status === 'AMBIGUOUS' ||
-      run?.finalStatus === 'AMBIGUOUS' ||
-      run?.investigationRequired
-    ) {
-      nextStatus = 'AMBIGUOUS';
-      investigationRequired = true;
-    } else if (dispatch?.status === 'FAILED' || run?.finalStatus === 'FAILED') {
-      nextStatus = 'FAILED';
-      investigationRequired = false;
-    } else if (outbox || dispatch) {
-      nextStatus = 'QUEUED';
-    } else if (run) {
-      nextStatus = 'PROCESSING';
-    }
+    const { status: nextStatus, investigationRequired } =
+      deriveManualPublicationTargetState(target, {
+        hasRun: Boolean(run),
+        runStatus: run?.status ?? null,
+        runFinalStatus: run?.finalStatus ?? null,
+        runInvestigationRequired: run?.investigationRequired ?? false,
+        hasDispatch: Boolean(dispatch),
+        dispatchStatus: dispatch?.status ?? null,
+        hasOutbox: Boolean(outbox),
+        outboxStatus: outbox?.status ?? null,
+      });
     if (
       nextStatus !== target.status ||
       investigationRequired !== target.investigationRequired
@@ -1273,35 +1269,11 @@ export class ManualPublicationService {
     for (const target of request.targets) {
       refreshedTargets.push(await this.updateTargetState(target));
     }
-    const statuses = refreshedTargets.map(({ status }) => status);
-    const hasAmbiguous = statuses.includes('AMBIGUOUS');
-    const hasActive = statuses.some((status) =>
-      ['ACCEPTED', 'PROCESSING', 'QUEUED'].includes(status),
+    const status = aggregateManualPublicationRequestStatus(
+      refreshedTargets.map(({ status }) => status),
     );
-    const sentCount = statuses.filter((status) => status === 'SENT').length;
-    const terminalCount = statuses.filter((status) =>
-      ['SENT', 'BLOCKED', 'FAILED'].includes(status),
-    ).length;
-    const status = hasAmbiguous
-      ? ('AMBIGUOUS' as const)
-      : hasActive
-        ? ('PROCESSING' as const)
-        : sentCount === statuses.length
-          ? ('COMPLETED' as const)
-          : sentCount > 0
-            ? ('PARTIAL' as const)
-            : terminalCount === statuses.length &&
-                statuses.every((value) => value === 'BLOCKED')
-              ? ('BLOCKED' as const)
-              : ('FAILED' as const);
-    const completedAt = ['COMPLETED', 'PARTIAL', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(
-      status,
-    )
-      ? this.clock()
-      : null;
-    const terminal = ['COMPLETED', 'PARTIAL', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(
-      status,
-    );
+    const terminal = isManualPublicationRequestTerminal(status);
+    const completedAt = terminal ? this.clock() : null;
     const updated = await this.options.requests.updateRequest(request.id, {
       status,
       completedAt,

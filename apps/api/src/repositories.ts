@@ -664,6 +664,25 @@ export type ManualPublicationRequestUpdate = Partial<
   >
 >;
 
+export type ManualPublicationLifecycleFinalizationInput = {
+  dispatchId: string;
+  now: Date;
+};
+
+export type ManualPublicationLifecycleFinalizationResult =
+  | {
+      outcome: 'NO_MANUAL_LIFECYCLE' | 'NOT_TERMINAL';
+      writes: 0;
+    }
+  | {
+      outcome: 'FINALIZED' | 'ALREADY_FINALIZED';
+      requestId: string;
+      targetId: string;
+      targetStatus: ManualPublicationTargetStatus;
+      requestStatus: ManualPublicationRequestStatus;
+      writes: number;
+    };
+
 export type ManualPublicationAcceptance = {
   request: ManualPublicationRequestRecord;
   created: boolean;
@@ -713,6 +732,9 @@ export interface ManualPublicationRequestRepository {
     id: string,
     data: ManualPublicationRequestUpdate,
   ): Promise<ManualPublicationRequestRecord | null>;
+  finalizeAfterCommercialDispatch?(
+    input: ManualPublicationLifecycleFinalizationInput,
+  ): Promise<ManualPublicationLifecycleFinalizationResult>;
   reconcileSafePreProviderAmbiguity?(
     input: ManualPublicationSafePreProviderReconciliationInput,
   ): Promise<ManualPublicationSafePreProviderReconciliationResult>;
