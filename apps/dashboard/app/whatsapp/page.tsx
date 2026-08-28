@@ -7,6 +7,7 @@ import { ErrorState } from '../../components/error-state';
 import { LoadingState } from '../../components/loading-state';
 import { PageHeader } from '../../components/page-header';
 import { StatusBadge } from '../../components/status-badge';
+import { OperationalAdminPanel } from '../../components/operational-admin-panel';
 import {
   getDispatch,
   listDestinations,
@@ -105,15 +106,18 @@ export default function WhatsAppPage() {
     <div className="grid gap-6">
       <PageHeader
         title="WhatsApp"
-        description="Diretório e dispatches em modo somente leitura. Não há mutações nem envio manual nesta tela."
+        description="Administração segura de instâncias, grupos e assignments, com dispatches e envio manual preservados em seus fluxos próprios."
       />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        O dashboard consulta o estado persistido. Autorizações de grupos,
-        destinos e operações de envio permanecem fora do Operations Console.
+        O dashboard administra somente estado operacional persistido permitido;
+        disponibilidade, health, próximo/último envio e blockers são derivados
+        pela API. Nenhum segredo ou payload de provider chega ao browser.
       </div>
 
       {error ? <ErrorState message={error} onRetry={load} /> : null}
+
+      <OperationalAdminPanel />
 
       <section className="rounded-lg border border-slate-200 bg-white p-5">
         <div className="flex items-start gap-3">
@@ -302,7 +306,8 @@ export default function WhatsAppPage() {
           <div>
             <h2 className="font-semibold text-slate-950">Dispatches</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Histórico de entregas; nenhuma ação de reprocessamento é oferecida.
+              Histórico de entregas; nenhuma ação de reprocessamento é
+              oferecida.
             </p>
           </div>
           <button
@@ -456,7 +461,10 @@ export default function WhatsAppPage() {
           >
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 id="dispatch-title" className="font-semibold text-slate-950">
+                <h2
+                  id="dispatch-title"
+                  className="font-semibold text-slate-950"
+                >
                   Detalhes do dispatch
                 </h2>
                 <p className="mt-1 break-all text-sm text-slate-500">

@@ -98,7 +98,7 @@ export const assertActiveCommercialInstance = async (
   instanceName: string,
 ) => {
   const instance = await instances?.findByName(instanceName);
-  if (!instance || !instance.active) {
+  if (!instance || !instance.active || instance.paused === true) {
     throw new AppError(
       'Instancia do lifecycle comercial esta ausente ou inativa',
       'COMMERCIAL_INSTANCE_INACTIVE',
@@ -118,12 +118,18 @@ export const filterExecutableCommercialGroups = async (
   );
   if (!instances) return [];
   const activeNames = new Set<string>();
-  const names = [...new Set(assigned.map((group) => group.assignedInstanceName!))];
+  const names = [
+    ...new Set(assigned.map((group) => group.assignedInstanceName!)),
+  ];
   const records = await Promise.all(
     names.map((name) => instances.findByName(name)),
   );
   names.forEach((name, index) => {
-    if (records[index]?.active === true) activeNames.add(name);
+    if (records[index]?.active === true && records[index]?.paused !== true) {
+      activeNames.add(name);
+    }
   });
-  return assigned.filter((group) => activeNames.has(group.assignedInstanceName!));
+  return assigned.filter((group) =>
+    activeNames.has(group.assignedInstanceName!),
+  );
 };

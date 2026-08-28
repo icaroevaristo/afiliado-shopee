@@ -77,6 +77,113 @@ export type CommercialAutomationScheduleSettings = {
   scheduleRevision: number;
 };
 
+export type OperationalAdminBlocker = {
+  scope: 'GLOBAL' | 'INSTANCE' | 'GROUP' | 'CAMPAIGN';
+  code: string;
+  entityId: string | null;
+  message: string;
+  actionHint?: string;
+  nextEligibleAt?: string | null;
+};
+
+export type OperationalAdminQueueCounts = {
+  waiting: number;
+  active: number;
+  delayed: number;
+  prioritized: number;
+};
+
+export type OperationalAdminInstance = {
+  name: string;
+  active: boolean;
+  paused: boolean;
+  health: 'UNKNOWN';
+  assignedGroupCount: number;
+  lastSendAt: string | null;
+  nextSendAt: string | null;
+  blockers: OperationalAdminBlocker[];
+  updatedAt: string;
+};
+
+export type OperationalAdminGroup = {
+  id: string;
+  name: string;
+  active: boolean;
+  paused: boolean;
+  available: boolean;
+  fingerprint: string | null;
+  sourceInstanceName: string | null;
+  assignedInstanceName: string | null;
+  campaign: { id: string; name: string; active: boolean } | null;
+  niche: { id: string; name: string; active: boolean } | null;
+  lastSendAt: string | null;
+  nextSendAt: string | null;
+  blockers: OperationalAdminBlocker[];
+  memberCount: number | null;
+  ownerIsParticipant: boolean | null;
+  discoveredAt: string | null;
+  lastSyncedAt: string | null;
+  updatedAt: string | null;
+};
+
+export type OperationalAdminCampaign = {
+  id: string;
+  name: string;
+  active: boolean;
+  groupId: string | null;
+  groupName: string | null;
+  instanceName: string | null;
+  niche: {
+    id: string;
+    name: string;
+    active: boolean;
+  };
+  lastSendAt: string | null;
+  nextSendAt: string | null;
+  blockers: OperationalAdminBlocker[];
+};
+
+export type OperationalAdmin = {
+  generatedAt: string;
+  automation: {
+    paused: boolean;
+    allowedStartTime: string;
+    allowedEndTime: string;
+    timezone: string;
+    minimumIntervalMinutes: number;
+    staggerMinutes: number;
+    dailyGlobalLimit: number;
+    dailyGroupLimit: number;
+    dailyGlobalLimitOverride: number | null;
+    dailyGroupLimitOverride: number | null;
+    hardCaps: {
+      dailyGlobalLimit: number;
+      dailyGroupLimit: number;
+      maxMessagesPerRun: number;
+    };
+    scheduleRevision: number;
+    updatedAt: string;
+  };
+  nextSendAt: string | null;
+  lastSendAt: string | null;
+  blockers: OperationalAdminBlocker[];
+  queues: {
+    productPipeline: OperationalAdminQueueCounts;
+    whatsappDispatch: OperationalAdminQueueCounts;
+    commercialAutomation: OperationalAdminQueueCounts;
+  };
+  activeExecutions: number;
+  activeReservations: number;
+  ambiguity: number;
+  investigationRequired: number;
+  pendingDispatches: number;
+  pendingOutboxes: number;
+  scheduler: CommercialAutomationSchedulerStatus | null;
+  instances: OperationalAdminInstance[];
+  groups: OperationalAdminGroup[];
+  campaigns: OperationalAdminCampaign[];
+};
+
 export type CommercialAutomationSchedulePreview = {
   scheduleRevision: number | null;
   plannedSlots: number;
@@ -193,6 +300,7 @@ export type WhatsAppDestination = {
   name: string;
   destination: string;
   active: boolean;
+  paused?: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -210,6 +318,7 @@ export type WhatsAppGroup = {
   memberCount: number | null;
   ownerIsParticipant: boolean | null;
   active: boolean;
+  paused?: boolean;
   available: boolean;
   discoveredAt: string;
   lastSyncedAt: string;
@@ -265,12 +374,7 @@ export type CommercialCatalogScore = {
   score: number;
   rankPosition: number | null;
   candidateStatus:
-    | 'QUEUED'
-    | 'COPY_READY'
-    | 'RESERVED'
-    | 'DISPATCHED'
-    | 'BLOCKED'
-    | 'EXPIRED';
+    'QUEUED' | 'COPY_READY' | 'RESERVED' | 'DISPATCHED' | 'BLOCKED' | 'EXPIRED';
 };
 
 export type CommercialStateSummary = {
@@ -439,12 +543,30 @@ export type ManualPublicationTarget = {
   runId: string | null;
   dispatchId: string | null;
   outboxId: string | null;
-  status: 'ACCEPTED' | 'PROCESSING' | 'QUEUED' | 'SENT' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+  status:
+    | 'ACCEPTED'
+    | 'PROCESSING'
+    | 'QUEUED'
+    | 'SENT'
+    | 'BLOCKED'
+    | 'FAILED'
+    | 'AMBIGUOUS';
   blockedReason: string | null;
   investigationRequired: boolean;
   sentAt: string | null;
-  destination?: { id: string; name: string; type: 'GROUP' | 'INDIVIDUAL'; fingerprint: string | null };
-  campaign?: { id: string; name: string; active: boolean; nicheId: string; nicheActive: boolean };
+  destination?: {
+    id: string;
+    name: string;
+    type: 'GROUP' | 'INDIVIDUAL';
+    fingerprint: string | null;
+  };
+  campaign?: {
+    id: string;
+    name: string;
+    active: boolean;
+    nicheId: string;
+    nicheActive: boolean;
+  };
 };
 
 export type ManualPublicationRequest = {
@@ -455,7 +577,14 @@ export type ManualPublicationRequest = {
   requestedSnapshotId: string;
   requestedSnapshotRevision: number;
   requestedSnapshotFingerprint: string;
-  status: 'ACCEPTED' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+  status:
+    | 'ACCEPTED'
+    | 'PROCESSING'
+    | 'COMPLETED'
+    | 'PARTIAL'
+    | 'BLOCKED'
+    | 'FAILED'
+    | 'AMBIGUOUS';
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -717,12 +846,7 @@ export type CommercialCampaignPage = {
 };
 
 export type CommercialCandidateStatus =
-  | 'QUEUED'
-  | 'COPY_READY'
-  | 'RESERVED'
-  | 'DISPATCHED'
-  | 'EXPIRED'
-  | 'BLOCKED';
+  'QUEUED' | 'COPY_READY' | 'RESERVED' | 'DISPATCHED' | 'EXPIRED' | 'BLOCKED';
 
 export type CommercialQueueItem = {
   id: string;

@@ -76,6 +76,17 @@ export type CommercialAutomationScheduleSettings = Pick<
   | 'scheduleRevision'
 >;
 
+const toScheduleSettings = (
+  schedule: CommercialAutomationEffectiveSchedule,
+): CommercialAutomationScheduleSettings => ({
+  timezone: schedule.timezone,
+  allowedStartTime: schedule.allowedStartTime,
+  allowedEndTime: schedule.allowedEndTime,
+  minimumIntervalMinutes: schedule.minimumIntervalMinutes,
+  staggerMinutes: schedule.staggerMinutes,
+  scheduleRevision: schedule.scheduleRevision,
+});
+
 export const resolveCommercialAutomationSchedule = (
   config: CommercialAutomationPolicyConfig,
   settings: CommercialAutomationSettingsRecord,
@@ -83,8 +94,14 @@ export const resolveCommercialAutomationSchedule = (
   timezone: config.timezone,
   allowedStartTime: settings.allowedStartTime ?? config.allowedStartTime,
   allowedEndTime: settings.allowedEndTime ?? config.allowedEndTime,
-  dailyGlobalLimit: config.dailyGlobalLimit,
-  dailyGroupLimit: config.dailyGroupLimit,
+  dailyGlobalLimit: Math.min(
+    config.dailyGlobalLimit,
+    settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
+  ),
+  dailyGroupLimit: Math.min(
+    config.dailyGroupLimit,
+    settings.dailyGroupLimit ?? config.dailyGroupLimit,
+  ),
   minimumIntervalMinutes:
     settings.minimumIntervalMinutes ?? config.minimumIntervalMinutes,
   staggerMinutes: settings.staggerMinutes ?? 0,
@@ -171,7 +188,10 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const assertTime = (value: string | null | undefined, field: string) => {
   if (value !== null && value !== undefined && !TIME_PATTERN.test(value)) {
-    throw new AppError(`${field} invalido`, 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID');
+    throw new AppError(
+      `${field} invalido`,
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
   }
 };
 
@@ -184,6 +204,8 @@ const assertScheduleUpdate = (
     'allowedEndTime',
     'minimumIntervalMinutes',
     'staggerMinutes',
+    'dailyGlobalLimit',
+    'dailyGroupLimit',
   ].some((field) => field in input);
   if (!hasScheduleField) {
     throw new AppError(
@@ -213,6 +235,18 @@ const assertScheduleUpdate = (
       'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
     );
   }
+  for (const [field, value] of [
+    ['dailyGlobalLimit', input.dailyGlobalLimit],
+    ['dailyGroupLimit', input.dailyGroupLimit],
+  ] as const) {
+    if (value === undefined || value === null) continue;
+    if (!Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+      throw new AppError(
+        `${field} invalido`,
+        'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+      );
+    }
+  }
   const staggerMinutes = input.staggerMinutes ?? effective.staggerMinutes;
   if (
     !Number.isSafeInteger(staggerMinutes) ||
@@ -226,7 +260,8 @@ const assertScheduleUpdate = (
   }
   if (
     input.expectedRevision !== undefined &&
-    (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+    (!Number.isSafeInteger(input.expectedRevision) ||
+      input.expectedRevision < 0)
   ) {
     throw new AppError(
       'scheduleRevision esperado invalido',
@@ -301,6 +336,20 @@ export const getLocalDayRange = (now: Date, timezone: string) => {
 
 const isoOrNull = (date: Date | null) => date?.toISOString() ?? null;
 
+const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
+  paused: true,
+  pausedAt: now,
+  resumedAt: null,
+  allowedStartTime: null,
+  allowedEndTime: null,
+  minimumIntervalMinutes: null,
+  staggerMinutes: null,
+  dailyGlobalLimit: null,
+  dailyGroupLimit: null,
+  scheduleRevision: 0,
+  updatedAt: now,
+});
+
 const isValidDailyQuota = (value: number) =>
   Number.isSafeInteger(value) && value > 0;
 
@@ -329,6 +378,14 @@ export class CommercialAutomationPolicyService {
     },
   ) {}
 
+  private async readSettings(now: Date) {
+    const repository = this.dependencies.settings;
+    const current = repository.get
+      ? await repository.get()
+      : await repository.getOrCreate(now);
+    return current ?? fallbackSettings(now);
+  }
+
   async evaluateAutomationReadiness(input?: {
     excludedExecutionId?: string;
     excludedAmbiguousRunId?: string;
@@ -336,7 +393,7 @@ export class CommercialAutomationPolicyService {
   }): Promise<CommercialAutomationStatus> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
     const [settings, context] = await Promise.all([
-      this.dependencies.settings.getOrCreate(now),
+      this.readSettings(now),
       this.loadOperationalContext(
         now,
         input?.excludedExecutionId,
@@ -367,8 +424,10 @@ export class CommercialAutomationPolicyService {
 
   async getScheduleSettings(): Promise<CommercialAutomationScheduleSettings> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
-    const settings = await this.dependencies.settings.getOrCreate(now);
-    return resolveCommercialAutomationSchedule(this.dependencies.config, settings);
+    const settings = await this.readSettings(now);
+    return toScheduleSettings(
+      resolveCommercialAutomationSchedule(this.dependencies.config, settings),
+    );
   }
 
   async updateScheduleSettings(
@@ -382,7 +441,9 @@ export class CommercialAutomationPolicyService {
     );
     assertScheduleUpdate(input, effective);
     const updated = await this.dependencies.settings.updateSchedule(input, now);
-    return resolveCommercialAutomationSchedule(this.dependencies.config, updated);
+    return toScheduleSettings(
+      resolveCommercialAutomationSchedule(this.dependencies.config, updated),
+    );
   }
 
   private async loadOperationalContext(
@@ -400,7 +461,9 @@ export class CommercialAutomationPolicyService {
               active: true,
               available: true,
             }),
-        this.dependencies.history.hasAmbiguousCommercialExecution(excludedAmbiguousRunId),
+        this.dependencies.history.hasAmbiguousCommercialExecution(
+          excludedAmbiguousRunId,
+        ),
         this.dependencies.history.hasActiveCommercialExecution(
           now,
           excludedExecutionId,
@@ -418,9 +481,8 @@ export class CommercialAutomationPolicyService {
       authorizedCandidates,
       this.dependencies.instances,
     );
-    const duplicateFingerprints = duplicateLogicalGroupFingerprints(
-      authorizedGroups,
-    );
+    const duplicateFingerprints =
+      duplicateLogicalGroupFingerprints(authorizedGroups);
     const selectedGroup = target
       ? authorizedGroups.find(
           (group) =>
@@ -529,8 +591,7 @@ export class CommercialAutomationPolicyService {
       history.groupSentToday >= effectiveGroupLimit;
     const intervalEndsAt = groupLastSentAt
       ? new Date(
-          groupLastSentAt.getTime() +
-            effective.minimumIntervalMinutes * 60_000,
+          groupLastSentAt.getTime() + effective.minimumIntervalMinutes * 60_000,
         )
       : null;
     const minimumIntervalNotReached = Boolean(
@@ -566,7 +627,12 @@ export class CommercialAutomationPolicyService {
       const candidates: Date[] = [];
       if (outsideWindow) {
         candidates.push(
-          nextWindowOpeningAtOrAfter(now, targetTimezone, targetStartTime, targetEndTime),
+          nextWindowOpeningAtOrAfter(
+            now,
+            targetTimezone,
+            targetStartTime,
+            targetEndTime,
+          ),
         );
       }
       if (

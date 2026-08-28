@@ -18,6 +18,7 @@ import type { CommercialAutomationPolicyService } from './commercial-automation-
 import type {
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRepository,
+  CommercialAutomationSettingsRecord,
   CommercialAutomationTarget,
   CommercialGroupCampaignRecord,
   CommercialGroupCampaignRepository,
@@ -39,6 +40,26 @@ const PLANNER_HARD_BLOCKING_REASONS = new Set([
   'COMMERCIAL_EXECUTION_IN_PROGRESS',
   'STALE_COMMERCIAL_EXECUTION_EXISTS',
 ]);
+
+const readSettings = async (
+  repository: CommercialAutomationSettingsRepository,
+  now: Date,
+): Promise<CommercialAutomationSettingsRecord> =>
+  (repository.get
+    ? await repository.get()
+    : await repository.getOrCreate(now)) ?? {
+    paused: true,
+    pausedAt: now,
+    resumedAt: null,
+    allowedStartTime: null,
+    allowedEndTime: null,
+    minimumIntervalMinutes: null,
+    staggerMinutes: null,
+    dailyGlobalLimit: null,
+    dailyGroupLimit: null,
+    scheduleRevision: 0,
+    updatedAt: now,
+  };
 
 export type CommercialAutomationPlannerTarget = CommercialAutomationTarget & {
   active: boolean;
@@ -115,8 +136,7 @@ const findNextValidSlot = ({
 }) => {
   let timestamp = roundUpToMinute(candidate.getTime());
   const targetTimezone = target.timezone ?? schedule.timezone;
-  const targetStartTime =
-    target.allowedStartTime ?? schedule.allowedStartTime;
+  const targetStartTime = target.allowedStartTime ?? schedule.allowedStartTime;
   const targetEndTime = target.allowedEndTime ?? schedule.allowedEndTime;
 
   for (let attempt = 0; attempt < PLANNER_HORIZON_MINUTES * 2; attempt += 1) {
@@ -192,10 +212,7 @@ export const planCommercialTargetSlots = ({
       return [];
     }
     const groupLimit = Math.min(target.dailyLimit, schedule.dailyGroupLimit);
-    const remainingForGroup = Math.max(
-      0,
-      groupLimit - target.groupSentToday,
-    );
+    const remainingForGroup = Math.max(0, groupLimit - target.groupSentToday);
     if (remainingForGroup === 0) {
       skippedTargets.push(target.campaignId);
       return [];
@@ -213,10 +230,8 @@ export const planCommercialTargetSlots = ({
             target.lastSentAt
               ? new Date(
                   target.lastSentAt.getTime() +
-                    Math.max(
-                      schedule.minimumIntervalMinutes,
-                      cadenceMinutes,
-                    ) * MINUTE_MS,
+                    Math.max(schedule.minimumIntervalMinutes, cadenceMinutes) *
+                      MINUTE_MS,
                 )
               : null,
             target.nextEligibleAt,
@@ -230,9 +245,7 @@ export const planCommercialTargetSlots = ({
     scheduledFor: Date;
     slotIndex: number;
   }> = [];
-  let cursor = new Date(
-    now.getTime() - schedule.staggerMinutes * MINUTE_MS,
-  );
+  let cursor = new Date(now.getTime() - schedule.staggerMinutes * MINUTE_MS);
   let madeProgress = true;
   while (candidates.length < globalRemaining && madeProgress) {
     madeProgress = false;
@@ -244,12 +257,7 @@ export const planCommercialTargetSlots = ({
           ? cursor.getTime() + schedule.staggerMinutes * MINUTE_MS
           : Number.NEGATIVE_INFINITY;
       const scheduledFor = findNextValidSlot({
-        candidate: new Date(
-          Math.max(
-            state.nextBase.getTime(),
-            staggerFloor,
-          ),
-        ),
+        candidate: new Date(Math.max(state.nextBase.getTime(), staggerFloor)),
         horizonEnd,
         schedule,
         target: state.target,
@@ -342,22 +350,27 @@ const listAllCampaigns = async (
 };
 
 export class CommercialAutomationSchedulerPlanner {
-  constructor(private readonly dependencies: CommercialAutomationPlannerDependencies) {}
+  constructor(
+    private readonly dependencies: CommercialAutomationPlannerDependencies,
+  ) {}
 
   async getScheduleRevision() {
     const now = (this.dependencies.clock ?? (() => new Date()))();
-    const settings = await this.dependencies.settings.getOrCreate(now);
+    const settings = await readSettings(this.dependencies.settings, now);
     return settings.scheduleRevision;
   }
 
   private async buildPlan(now: Date) {
-    const settings = await this.dependencies.settings.getOrCreate(now);
+    const settings = await readSettings(this.dependencies.settings, now);
     const schedule = resolveCommercialAutomationSchedule(
       this.dependencies.config,
       settings,
     );
     if (!this.dependencies.groups.listAll) {
-      return { slots: [], skippedTargets: ['GROUP_DIRECTORY_LIST_ALL_UNAVAILABLE'] };
+      return {
+        slots: [],
+        skippedTargets: ['GROUP_DIRECTORY_LIST_ALL_UNAVAILABLE'],
+      };
     }
     const [campaigns, groups, instances] = await Promise.all([
       listAllCampaigns(this.dependencies.campaigns),
@@ -367,60 +380,68 @@ export class CommercialAutomationSchedulerPlanner {
     const dayRange = getLocalDayRange(now, schedule.timezone);
     const globalHistory = await this.dependencies.history.getSnapshot(dayRange);
     const activeInstances = new Map(
-      instances.filter((instance) => instance.active).map((instance) => [instance.name, instance]),
+      instances
+        .filter((instance) => instance.active && instance.paused !== true)
+        .map((instance) => [instance.name, instance]),
     );
     const targets = (
       await Promise.all(
-        campaigns.map(async (campaign): Promise<CommercialAutomationPlannerTarget | null> => {
-          if (!campaign.active || !campaign.niche.active) return null;
-          const group = groups.find(
-            (candidate) =>
-              candidate.fingerprint === campaign.logicalGroupFingerprint &&
-              (!campaign.anchorDestinationId ||
-                candidate.id === campaign.anchorDestinationId),
-          );
-          if (!group) return null;
-          const assignedInstance = group.assignedInstanceName;
-          const history = await this.dependencies.history.getSnapshot({
-            groupId: group.id,
-            ...dayRange,
-          });
-          const plannerTarget: CommercialAutomationPlannerTarget = {
-            groupId: group.id,
-            groupName: group.name,
-            instanceName: assignedInstance ?? undefined,
-            logicalGroupFingerprint: campaign.logicalGroupFingerprint,
-            campaignId: campaign.id,
-            nicheId: campaign.nicheId,
-            dailyLimit: campaign.dailyLimit,
-            cadenceMinutes: campaign.cadenceMinutes,
-            timezone: campaign.timezone,
-            allowedStartTime: campaign.allowedStartTime,
-            allowedEndTime: campaign.allowedEndTime,
-            nextEligibleAt: campaign.nextEligibleAt,
-            active: campaign.active && group.active,
-            available: group.available,
-            instanceActive: assignedInstance
-              ? activeInstances.has(assignedInstance)
-              : false,
-            lastSentAt: history.groupLastSentAt ?? history.lastSentAt,
-            groupSentToday: history.groupSentToday,
-          };
-          const readiness =
-            await this.dependencies.policy.evaluateAutomationReadiness({
-              target: plannerTarget,
+        campaigns.map(
+          async (
+            campaign,
+          ): Promise<CommercialAutomationPlannerTarget | null> => {
+            if (!campaign.active || !campaign.niche.active) return null;
+            const group = groups.find(
+              (candidate) =>
+                candidate.fingerprint === campaign.logicalGroupFingerprint &&
+                (!campaign.anchorDestinationId ||
+                  candidate.id === campaign.anchorDestinationId),
+            );
+            if (!group) return null;
+            const assignedInstance = group.assignedInstanceName;
+            const history = await this.dependencies.history.getSnapshot({
+              groupId: group.id,
+              ...dayRange,
             });
-          if (
-            readiness.reasons.some((reason) =>
-              PLANNER_HARD_BLOCKING_REASONS.has(reason),
-            )
-          ) {
-            return null;
-          }
-          return plannerTarget;
-        }),
+            const plannerTarget: CommercialAutomationPlannerTarget = {
+              groupId: group.id,
+              groupName: group.name,
+              instanceName: assignedInstance ?? undefined,
+              logicalGroupFingerprint: campaign.logicalGroupFingerprint,
+              campaignId: campaign.id,
+              nicheId: campaign.nicheId,
+              dailyLimit: campaign.dailyLimit,
+              cadenceMinutes: campaign.cadenceMinutes,
+              timezone: campaign.timezone,
+              allowedStartTime: campaign.allowedStartTime,
+              allowedEndTime: campaign.allowedEndTime,
+              nextEligibleAt: campaign.nextEligibleAt,
+              active: campaign.active && group.active && group.paused !== true,
+              available: group.available,
+              instanceActive: assignedInstance
+                ? activeInstances.has(assignedInstance)
+                : false,
+              lastSentAt: history.groupLastSentAt ?? history.lastSentAt,
+              groupSentToday: history.groupSentToday,
+            };
+            const readiness =
+              await this.dependencies.policy.evaluateAutomationReadiness({
+                target: plannerTarget,
+              });
+            if (
+              readiness.reasons.some((reason) =>
+                PLANNER_HARD_BLOCKING_REASONS.has(reason),
+              )
+            ) {
+              return null;
+            }
+            return plannerTarget;
+          },
+        ),
       )
-    ).filter((target): target is CommercialAutomationPlannerTarget => target !== null);
+    ).filter(
+      (target): target is CommercialAutomationPlannerTarget => target !== null,
+    );
 
     const result = planCommercialTargetSlots({
       now,
@@ -432,7 +453,9 @@ export class CommercialAutomationSchedulerPlanner {
   }
 
   async preview(now?: Date) {
-    return this.buildPlan(now ?? (this.dependencies.clock ?? (() => new Date()))());
+    return this.buildPlan(
+      now ?? (this.dependencies.clock ?? (() => new Date()))(),
+    );
   }
 
   async plan(input: {

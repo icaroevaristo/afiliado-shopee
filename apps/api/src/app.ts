@@ -79,6 +79,7 @@ import { CommercialDispatchOutboxService } from './commercial-dispatch-outbox-se
 import { CommercialNicheService } from './commercial-niche-service';
 import { CommercialGroupCampaignService } from './commercial-group-campaign-service';
 import { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
+import { OperationalAdminService } from './operational-admin-service';
 import type { CommercialPromotionMiningService } from './commercial-promotion-mining-service';
 import type {
   CommercialAutomationTarget,
@@ -113,6 +114,9 @@ export type BuildAppOptions = {
       opts?: JobsOptions,
     ) => Promise<{ id?: string | number }>;
     getJob?: (id: string) => Promise<PipelineJobLike | null | undefined>;
+    getJobCounts?: (
+      ...types: Array<'waiting' | 'active' | 'delayed' | 'prioritized'>
+    ) => Promise<Record<string, number>>;
     close?: () => Promise<void>;
   };
   whatsappDispatchQueue?: {
@@ -122,6 +126,9 @@ export type BuildAppOptions = {
       opts?: JobsOptions,
     ) => Promise<{ id?: string | number }>;
     getJob: (id: string) => Promise<unknown | null | undefined>;
+    getJobCounts?: (
+      ...types: Array<'waiting' | 'active' | 'delayed' | 'prioritized'>
+    ) => Promise<Record<string, number>>;
     close?: () => Promise<void>;
   };
   redisUrl?: string;
@@ -163,7 +170,9 @@ export type BuildAppOptions = {
     Partial<
       Pick<
         CommercialAutomationPolicyService,
-        'getScheduleSettings' | 'updateScheduleSettings' | 'evaluateManualSendSafety'
+        | 'getScheduleSettings'
+        | 'updateScheduleSettings'
+        | 'evaluateManualSendSafety'
       >
     >;
   commercialAutomationSchedulePlanner?: Pick<
@@ -200,6 +209,14 @@ export type BuildAppOptions = {
   commercialAutomationSchedulerStatusServiceFactory?: () => {
     getStatus(): Promise<CommercialAutomationSchedulerStatusSnapshot>;
   };
+  operationalAdminService?: Pick<
+    OperationalAdminService,
+    | 'getOverview'
+    | 'createInstance'
+    | 'updateInstance'
+    | 'updateGroup'
+    | 'updateAutomationSettings'
+  >;
   commercialSchedulerConfig?: {
     enabled: boolean;
     cron: string;
@@ -328,11 +345,7 @@ const assertCatalogRange = (
   max: number | Date | undefined,
   label: string,
 ) => {
-  if (
-    min !== undefined &&
-    max !== undefined &&
-    min.valueOf() > max.valueOf()
-  ) {
+  if (min !== undefined && max !== undefined && min.valueOf() > max.valueOf()) {
     throw catalogQueryError(`Faixa inválida: ${label}`);
   }
 };
@@ -394,8 +407,7 @@ const parseCatalogQuery = (query: unknown): OperationalCatalogFilters => {
       CATALOG_DELIVERY_STATUSES,
       'deliveryStatus',
     ) ?? 'any';
-  const sort =
-    parseCatalogEnum(record.sort, CATALOG_SORTS, 'sort') ?? 'recent';
+  const sort = parseCatalogEnum(record.sort, CATALOG_SORTS, 'sort') ?? 'recent';
   const minDiscount = parseCatalogNumber(record.minDiscount, 'minDiscount');
   const maxDiscount = parseCatalogNumber(record.maxDiscount, 'maxDiscount');
   const minScore = parseCatalogNumber(record.minScore, 'minScore');
@@ -438,7 +450,10 @@ const parseCatalogQuery = (query: unknown): OperationalCatalogFilters => {
     minCommission,
     maxCommission,
     deliveryStatus,
-    destinationId: parseCatalogIdentifier(record.destinationId, 'destinationId'),
+    destinationId: parseCatalogIdentifier(
+      record.destinationId,
+      'destinationId',
+    ),
     capturedFrom,
     capturedTo,
     sort,
@@ -969,9 +984,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
   const getManualPublicationService = () => {
     const configuredPolicy = getCommercialAutomationPolicyService();
     const manualPolicy = {
-      evaluateManualSendSafety: async (
-        target: CommercialAutomationTarget,
-      ) => {
+      evaluateManualSendSafety: async (target: CommercialAutomationTarget) => {
         if (!configuredPolicy.evaluateManualSendSafety) {
           throw new AppError(
             'Policy de envio manual indisponivel',
@@ -1046,6 +1059,57 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       config:
         options.commercialAutomationConfig ?? COMMERCIAL_AUTOMATION_DEFAULTS,
     });
+  let operationalAdminService = options.operationalAdminService;
+  const getOperationalAdminService = () => {
+    operationalAdminService ??= new OperationalAdminService({
+      instances: repositories.whatsappInstances,
+      groups: repositories.whatsappGroups,
+      campaigns: repositories.commercialGroupCampaigns,
+      dispatches: repositories.whatsappDispatches,
+      history: repositories.commercialAutomationHistory,
+      settings: repositories.commercialAutomationSettings,
+      status: repositories.operationalStatus,
+      policy: {
+        evaluateAutomationReadiness: async (input) => {
+          const service = getCommercialAutomationPolicyService();
+          if (!service.evaluateAutomationReadiness) {
+            throw new AppError(
+              'Status operacional indisponivel',
+              'OPERATIONAL_STATUS_UNAVAILABLE',
+            );
+          }
+          return service.evaluateAutomationReadiness(input);
+        },
+        updateScheduleSettings: async (input) => {
+          const service = getCommercialAutomationPolicyService();
+          if (!service.updateScheduleSettings) {
+            throw new AppError(
+              'Configuracao operacional indisponivel',
+              'OPERATIONAL_SETTINGS_UNAVAILABLE',
+            );
+          }
+          return service.updateScheduleSettings(input);
+        },
+      },
+      planner: commercialAutomationSchedulePlanner,
+      config:
+        options.commercialAutomationConfig ?? COMMERCIAL_AUTOMATION_DEFAULTS,
+      queues: {
+        productPipeline: getPipelineQueue(),
+        whatsappDispatch: getWhatsAppDispatchQueue(),
+        commercialAutomation: getCommercialAutomationQueue(),
+      },
+      scheduler: commercialSchedulerStatusService,
+      maxMessagesPerRun:
+        options.commercialConfirmationEnvironment?.maximumMessagesPerRun ?? 1,
+      environment: {
+        groupSendEnabled:
+          options.commercialConfirmationEnvironment?.groupSendEnabled ?? false,
+        safeMode: options.commercialConfirmationEnvironment?.safeMode ?? true,
+      },
+    });
+    return operationalAdminService;
+  };
 
   const allowedDashboardOrigin = 'http://127.0.0.1:3000';
   await app.register(cors, {
@@ -1321,6 +1385,226 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     }
   });
 
+  const operationalAdminError = (reply: FastifyReply, error: unknown) => {
+    const code =
+      error instanceof AppError ? error.code : 'OPERATIONAL_ADMIN_UNAVAILABLE';
+    const status = code.endsWith('NOT_FOUND')
+      ? 404
+      : code.includes('CONFLICT') ||
+          code.includes('ACTIVE') ||
+          code.includes('BLOCKED')
+        ? 409
+        : error instanceof AppError
+          ? 400
+          : 503;
+    return reply.status(status).send({
+      error: code,
+      message:
+        error instanceof AppError
+          ? error.message
+          : 'Estado operacional indisponivel',
+    });
+  };
+
+  app.get('/operational-admin', async (request, reply) => {
+    try {
+      return await getOperationalAdminService().getOverview();
+    } catch (error) {
+      request.log.error(
+        {
+          event: 'operational-admin.overview.failed',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Operational admin overview failed',
+      );
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.get('/whatsapp/instances', async (request, reply) => {
+    try {
+      const overview = await getOperationalAdminService().getOverview();
+      return overview.instances;
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.post('/whatsapp/instances', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    if (
+      Object.keys(body).some(
+        (key) => !['name', 'confirmation'].includes(key),
+      ) ||
+      typeof body.name !== 'string' ||
+      (body.confirmation !== undefined && typeof body.confirmation !== 'string')
+    ) {
+      return reply.status(400).send({
+        error: 'OPERATIONAL_INSTANCE_CREATE_INVALID',
+        message: 'Cadastro de instancia invalido',
+      });
+    }
+    try {
+      return reply.status(201).send(
+        await getOperationalAdminService().createInstance({
+          name: body.name,
+          confirmation: body.confirmation as string | undefined,
+        }),
+      );
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.patch('/whatsapp/instances/:name', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const allowed = new Set([
+      'active',
+      'paused',
+      'expectedUpdatedAt',
+      'confirmation',
+    ]);
+    if (
+      Object.keys(body).some((key) => !allowed.has(key)) ||
+      typeof body.expectedUpdatedAt !== 'string' ||
+      (body.active !== undefined && typeof body.active !== 'boolean') ||
+      (body.paused !== undefined && typeof body.paused !== 'boolean') ||
+      (body.confirmation !== undefined && typeof body.confirmation !== 'string')
+    ) {
+      return reply.status(400).send({
+        error: 'OPERATIONAL_INSTANCE_UPDATE_INVALID',
+        message: 'Atualizacao de instancia invalida',
+      });
+    }
+    try {
+      return await getOperationalAdminService().updateInstance({
+        name: (request.params as { name: string }).name,
+        active: body.active as boolean | undefined,
+        paused: body.paused as boolean | undefined,
+        expectedUpdatedAt: body.expectedUpdatedAt,
+        confirmation: body.confirmation as string | undefined,
+      });
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.get('/whatsapp/groups/admin', async (request, reply) => {
+    try {
+      const overview = await getOperationalAdminService().getOverview();
+      return overview.groups;
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.patch('/whatsapp/groups/:id/admin', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const allowed = new Set([
+      'active',
+      'paused',
+      'assignedInstanceName',
+      'expectedUpdatedAt',
+      'confirmation',
+    ]);
+    if (
+      Object.keys(body).some((key) => !allowed.has(key)) ||
+      typeof body.expectedUpdatedAt !== 'string' ||
+      (body.active !== undefined && typeof body.active !== 'boolean') ||
+      (body.paused !== undefined && typeof body.paused !== 'boolean') ||
+      (body.assignedInstanceName !== undefined &&
+        body.assignedInstanceName !== null &&
+        typeof body.assignedInstanceName !== 'string') ||
+      (body.confirmation !== undefined && typeof body.confirmation !== 'string')
+    ) {
+      return reply.status(400).send({
+        error: 'OPERATIONAL_GROUP_UPDATE_INVALID',
+        message: 'Atualizacao de grupo invalida',
+      });
+    }
+    try {
+      return await getOperationalAdminService().updateGroup({
+        id: (request.params as { id: string }).id,
+        active: body.active as boolean | undefined,
+        paused: body.paused as boolean | undefined,
+        assignedInstanceName: body.assignedInstanceName as
+          string | null | undefined,
+        expectedUpdatedAt: body.expectedUpdatedAt,
+        confirmation: body.confirmation as string | undefined,
+      });
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
+  app.patch('/commercial-automation/settings/admin', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const allowed = new Set([
+      'allowedStartTime',
+      'allowedEndTime',
+      'minimumIntervalMinutes',
+      'staggerMinutes',
+      'dailyGlobalLimit',
+      'dailyGroupLimit',
+      'expectedRevision',
+      'confirmation',
+    ]);
+    if (
+      Object.keys(body).some((key) => !allowed.has(key)) ||
+      typeof body.expectedRevision !== 'number' ||
+      typeof body.confirmation !== 'string'
+    ) {
+      return reply.status(400).send({
+        error: 'OPERATIONAL_SETTINGS_UPDATE_INVALID',
+        message: 'Atualizacao de configuracao invalida',
+      });
+    }
+    for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
+      if (
+        body[key] !== undefined &&
+        body[key] !== null &&
+        typeof body[key] !== 'string'
+      ) {
+        return reply.status(400).send({
+          error: 'OPERATIONAL_SETTINGS_UPDATE_INVALID',
+          message: 'Atualizacao de configuracao invalida',
+        });
+      }
+    }
+    for (const key of [
+      'minimumIntervalMinutes',
+      'staggerMinutes',
+      'dailyGlobalLimit',
+      'dailyGroupLimit',
+    ] as const) {
+      if (
+        body[key] !== undefined &&
+        body[key] !== null &&
+        typeof body[key] !== 'number'
+      ) {
+        return reply.status(400).send({
+          error: 'OPERATIONAL_SETTINGS_UPDATE_INVALID',
+          message: 'Atualizacao de configuracao invalida',
+        });
+      }
+    }
+    try {
+      return await getOperationalAdminService().updateAutomationSettings({
+        allowedStartTime: body.allowedStartTime as string | null | undefined,
+        allowedEndTime: body.allowedEndTime as string | null | undefined,
+        minimumIntervalMinutes: body.minimumIntervalMinutes as
+          number | null | undefined,
+        staggerMinutes: body.staggerMinutes as number | null | undefined,
+        dailyGlobalLimit: body.dailyGlobalLimit as number | null | undefined,
+        dailyGroupLimit: body.dailyGroupLimit as number | null | undefined,
+        expectedRevision: body.expectedRevision,
+        confirmation: body.confirmation,
+      });
+    } catch (error) {
+      return operationalAdminError(reply, error);
+    }
+  });
+
   app.get('/commercial-automation/status', async (request, reply) => {
     try {
       return await getCommercialAutomationPolicyService().evaluateAutomationReadiness();
@@ -1417,95 +1701,100 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     }
   });
 
-  app.patch('/commercial-automation/settings/schedule', async (request, reply) => {
-    const service = getCommercialAutomationPolicyService();
-    if (!service.updateScheduleSettings) {
-      return reply.status(503).send({
-        error: 'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
-        message: 'Configuracao persistida da agenda indisponivel',
-      });
-    }
-    const body = request.body;
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return reply.status(400).send({
-        error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
-        message: 'Atualizacao de agenda invalida',
-      });
-    }
-    const record = body as Record<string, unknown>;
-    const allowedKeys = new Set([
-      'allowedStartTime',
-      'allowedEndTime',
-      'minimumIntervalMinutes',
-      'staggerMinutes',
-      'expectedRevision',
-    ]);
-    if (
-      Object.keys(record).length === 0 ||
-      Object.keys(record).some((key) => !allowedKeys.has(key))
-    ) {
-      return reply.status(400).send({
-        error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
-        message: 'Atualizacao de agenda invalida',
-      });
-    }
-    const update: CommercialAutomationScheduleUpdate = {};
-    for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
-      const value = record[key];
-      if (value !== undefined) {
-        if (value !== null && typeof value !== 'string') {
-          return reply.status(400).send({
-            error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
-            message: 'Atualizacao de agenda invalida',
-          });
-        }
-        update[key] = value;
+  app.patch(
+    '/commercial-automation/settings/schedule',
+    async (request, reply) => {
+      const service = getCommercialAutomationPolicyService();
+      if (!service.updateScheduleSettings) {
+        return reply.status(503).send({
+          error: 'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
+          message: 'Configuracao persistida da agenda indisponivel',
+        });
       }
-    }
-    for (const key of ['minimumIntervalMinutes', 'staggerMinutes'] as const) {
-      const value = record[key];
-      if (value !== undefined) {
-        if (value !== null && typeof value !== 'number') {
-          return reply.status(400).send({
-            error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
-            message: 'Atualizacao de agenda invalida',
-          });
-        }
-        update[key] = value;
-      }
-    }
-    if (record.expectedRevision !== undefined) {
-      if (typeof record.expectedRevision !== 'number') {
+      const body = request.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
         return reply.status(400).send({
           error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
           message: 'Atualizacao de agenda invalida',
         });
       }
-      update.expectedRevision = record.expectedRevision;
-    }
-    try {
-      return await service.updateScheduleSettings(update);
-    } catch (error) {
-      if (error instanceof AppError) {
-        const status =
-          error.code === 'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_CONFLICT'
-            ? 409
-            : 400;
-        return reply.status(status).send({ error: error.code, message: error.message });
+      const record = body as Record<string, unknown>;
+      const allowedKeys = new Set([
+        'allowedStartTime',
+        'allowedEndTime',
+        'minimumIntervalMinutes',
+        'staggerMinutes',
+        'expectedRevision',
+      ]);
+      if (
+        Object.keys(record).length === 0 ||
+        Object.keys(record).some((key) => !allowedKeys.has(key))
+      ) {
+        return reply.status(400).send({
+          error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+          message: 'Atualizacao de agenda invalida',
+        });
       }
-      request.log.error(
-        {
-          event: 'commercial-automation.schedule-settings.update-failed',
-          errorType: error instanceof Error ? error.name : 'UnknownError',
-        },
-        'Commercial automation schedule settings update failed',
-      );
-      return reply.status(500).send({
-        error: 'COMMERCIAL_AUTOMATION_SETTINGS_FAILED',
-        message: 'Falha ao atualizar agenda comercial',
-      });
-    }
-  });
+      const update: CommercialAutomationScheduleUpdate = {};
+      for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
+        const value = record[key];
+        if (value !== undefined) {
+          if (value !== null && typeof value !== 'string') {
+            return reply.status(400).send({
+              error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+              message: 'Atualizacao de agenda invalida',
+            });
+          }
+          update[key] = value;
+        }
+      }
+      for (const key of ['minimumIntervalMinutes', 'staggerMinutes'] as const) {
+        const value = record[key];
+        if (value !== undefined) {
+          if (value !== null && typeof value !== 'number') {
+            return reply.status(400).send({
+              error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+              message: 'Atualizacao de agenda invalida',
+            });
+          }
+          update[key] = value;
+        }
+      }
+      if (record.expectedRevision !== undefined) {
+        if (typeof record.expectedRevision !== 'number') {
+          return reply.status(400).send({
+            error: 'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+            message: 'Atualizacao de agenda invalida',
+          });
+        }
+        update.expectedRevision = record.expectedRevision;
+      }
+      try {
+        return await service.updateScheduleSettings(update);
+      } catch (error) {
+        if (error instanceof AppError) {
+          const status =
+            error.code === 'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_CONFLICT'
+              ? 409
+              : 400;
+          return reply
+            .status(status)
+            .send({ error: error.code, message: error.message });
+        }
+        request.log.error(
+          {
+            event: 'commercial-automation.schedule-settings.update-failed',
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'Commercial automation schedule settings update failed',
+        );
+        return reply.status(500).send({
+          error: 'COMMERCIAL_AUTOMATION_SETTINGS_FAILED',
+          message: 'Falha ao atualizar agenda comercial',
+        });
+      }
+    },
+  );
 
   app.get('/commercial-automation/executions', async (request, reply) => {
     try {
@@ -1801,9 +2090,8 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
   app.get('/shopee/offers', async (request, reply) => {
     try {
       const filters = parseCatalogQuery(request.query);
-      const result = await repositories.shopeeOffers.listOperationalCatalog(
-        filters,
-      );
+      const result =
+        await repositories.shopeeOffers.listOperationalCatalog(filters);
       return {
         provider: shopeeOfferProvider.source.toLocaleLowerCase(),
         items: result.items.map((item) => ({
@@ -1850,7 +2138,9 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       pagination = parseCatalogDetailQuery(request.query);
     } catch (error) {
       if (error instanceof AppError && error.code === 'INVALID_CATALOG_QUERY') {
-        return reply.status(400).send({ error: error.code, message: error.message });
+        return reply
+          .status(400)
+          .send({ error: error.code, message: error.message });
       }
       throw error;
     }
@@ -2055,60 +2345,74 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     try {
       return await getManualPublicationService().getOptions(query.productId);
     } catch (error) {
-      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
-      const status = code === 'OFFER_NOT_FOUND' ? 404 : code.startsWith('MANUAL_PUBLICATION_') ? 409 : 500;
-      return reply.status(status).send({
-        error: code,
-        message: error instanceof AppError ? error.message : 'Falha ao consultar opcoes de publicacao manual',
-      });
-    }
-  });
-
-  app.post('/commercial-publications/manual/preview', async (request, reply) => {
-    const body = request.body;
-    if (
-      !body ||
-      typeof body !== 'object' ||
-      Array.isArray(body) ||
-      Object.keys(body).sort().join('|') !== 'destinationIds|idempotencyKey|productId'
-    ) {
-      return reply.status(400).send({
-        error: 'MANUAL_PUBLICATION_INVALID',
-        message: 'Payload de preview manual invalido',
-      });
-    }
-    try {
-      const result = await getManualPublicationService().preview(
-        body as ManualPublicationPreviewInput,
-      );
-      return reply.status(result.created ? 201 : 200).send(result.request);
-    } catch (error) {
-      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      const code =
+        error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
       const status =
-        code === 'MANUAL_PUBLICATION_INVALID' ||
-        code === 'MANUAL_PUBLICATION_DESTINATION_LIMIT'
-          ? 400
-          : code === 'OFFER_NOT_FOUND'
-            ? 404
-            : code.startsWith('MANUAL_PUBLICATION_') ||
-                code.startsWith('COMMERCIAL_') ||
-                code === 'CAMPAIGN_INACTIVE' ||
-                code === 'NICHE_INACTIVE'
-              ? 409
-              : 500;
-      request.log.error(
-        { event: 'manual-publication.preview.route.failed', code },
-        'Manual publication preview route failed',
-      );
+        code === 'OFFER_NOT_FOUND'
+          ? 404
+          : code.startsWith('MANUAL_PUBLICATION_')
+            ? 409
+            : 500;
       return reply.status(status).send({
         error: code,
         message:
           error instanceof AppError
             ? error.message
-            : 'Falha segura no preview de publicacao manual',
+            : 'Falha ao consultar opcoes de publicacao manual',
       });
     }
   });
+
+  app.post(
+    '/commercial-publications/manual/preview',
+    async (request, reply) => {
+      const body = request.body;
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).sort().join('|') !==
+          'destinationIds|idempotencyKey|productId'
+      ) {
+        return reply.status(400).send({
+          error: 'MANUAL_PUBLICATION_INVALID',
+          message: 'Payload de preview manual invalido',
+        });
+      }
+      try {
+        const result = await getManualPublicationService().preview(
+          body as ManualPublicationPreviewInput,
+        );
+        return reply.status(result.created ? 201 : 200).send(result.request);
+      } catch (error) {
+        const code =
+          error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+        const status =
+          code === 'MANUAL_PUBLICATION_INVALID' ||
+          code === 'MANUAL_PUBLICATION_DESTINATION_LIMIT'
+            ? 400
+            : code === 'OFFER_NOT_FOUND'
+              ? 404
+              : code.startsWith('MANUAL_PUBLICATION_') ||
+                  code.startsWith('COMMERCIAL_') ||
+                  code === 'CAMPAIGN_INACTIVE' ||
+                  code === 'NICHE_INACTIVE'
+                ? 409
+                : 500;
+        request.log.error(
+          { event: 'manual-publication.preview.route.failed', code },
+          'Manual publication preview route failed',
+        );
+        return reply.status(status).send({
+          error: code,
+          message:
+            error instanceof AppError
+              ? error.message
+              : 'Falha segura no preview de publicacao manual',
+        });
+      }
+    },
+  );
 
   app.post('/commercial-publications/manual', async (request, reply) => {
     const body = request.body;
@@ -2116,7 +2420,8 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       !body ||
       typeof body !== 'object' ||
       Array.isArray(body) ||
-      Object.keys(body).sort().join('|') !== 'confirm|destinationIds|idempotencyKey|productId'
+      Object.keys(body).sort().join('|') !==
+        'confirm|destinationIds|idempotencyKey|productId'
     ) {
       return reply.status(400).send({
         error: 'MANUAL_PUBLICATION_INVALID',
@@ -2129,7 +2434,8 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       );
       return reply.status(result.created ? 201 : 200).send(result.request);
     } catch (error) {
-      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+      const code =
+        error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
       const status =
         code === 'MANUAL_PUBLICATION_INVALID' ||
         code === 'MANUAL_PUBLICATION_CONFIRMATION_INVALID' ||
@@ -2149,23 +2455,35 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       );
       return reply.status(status).send({
         error: code,
-        message: error instanceof AppError ? error.message : 'Falha segura na publicacao manual',
+        message:
+          error instanceof AppError
+            ? error.message
+            : 'Falha segura na publicacao manual',
       });
     }
   });
 
-  app.get('/commercial-publications/manual/:requestId', async (request, reply) => {
-    try {
-      const { requestId } = request.params as { requestId: string };
-      return await getManualPublicationService().find(requestId);
-    } catch (error) {
-      const code = error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
-      return reply.status(code === 'MANUAL_PUBLICATION_NOT_FOUND' ? 404 : 500).send({
-        error: code,
-        message: error instanceof AppError ? error.message : 'Falha ao consultar publicacao manual',
-      });
-    }
-  });
+  app.get(
+    '/commercial-publications/manual/:requestId',
+    async (request, reply) => {
+      try {
+        const { requestId } = request.params as { requestId: string };
+        return await getManualPublicationService().find(requestId);
+      } catch (error) {
+        const code =
+          error instanceof AppError ? error.code : 'MANUAL_PUBLICATION_FAILED';
+        return reply
+          .status(code === 'MANUAL_PUBLICATION_NOT_FOUND' ? 404 : 500)
+          .send({
+            error: code,
+            message:
+              error instanceof AppError
+                ? error.message
+                : 'Falha ao consultar publicacao manual',
+          });
+      }
+    },
+  );
 
   app.post(
     '/commercial-publications/manual/:requestId/reconcile',

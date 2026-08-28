@@ -44,6 +44,9 @@ export class WhatsAppGroupSendPolicy {
     if (!destination.active) {
       block('Grupo nao autorizado para envio', 'WHATSAPP_GROUP_NOT_AUTHORIZED');
     }
+    if (destination.paused === true) {
+      block('Grupo pausado para operacao', 'WHATSAPP_GROUP_PAUSED');
+    }
     const assignedInstanceName =
       destination.assignedInstanceName ?? destination.sourceInstanceName;
     const instanceName = expectedInstanceName ?? this.options.instanceName;
