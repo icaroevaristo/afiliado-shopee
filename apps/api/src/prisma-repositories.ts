@@ -53,6 +53,21 @@ import type {
   CommercialCopyGenerationAttemptStatusRecord,
   CommercialPromotionMaterializationInput,
   CommercialPromotionSnapshotRecord,
+  CommercialManualCandidateMaterializationInput,
+  ManualPublicationAcceptance,
+  ManualPublicationQuotaReservation,
+  ManualPublicationQuotaReservationInput,
+  ManualPublicationRequestCreateData,
+  ManualPublicationRequestMode,
+  ManualPublicationRequestRecord,
+  ManualPublicationRequestRepository,
+  ManualPublicationLifecycleFinalizationInput,
+  ManualPublicationLifecycleFinalizationResult,
+  ManualPublicationSafePreProviderReconciliationInput,
+  ManualPublicationSafePreProviderReconciliationResult,
+  ManualPublicationRequestUpdate,
+  ManualPublicationTargetRecord,
+  ManualPublicationTargetUpdate,
   CommercialPipelineRunData,
   CommercialPipelineRunFilters,
   CommercialPipelineRunRecord,
@@ -105,6 +120,12 @@ import {
   fingerprintCommercialOffer,
   type CommercialOfferFingerprintInput,
 } from './commercial-offer-snapshot';
+import {
+  aggregateManualPublicationRequestStatus,
+  isManualPublicationRequestTerminal,
+  resolveManualPublicationTerminalStatus,
+  type ManualPublicationLifecycleObservation,
+} from './manual-publication-lifecycle-finalizer';
 import {
   assertCompatibleShopeeProductIdentity,
   assertCompleteShopeeProductIdentity,
@@ -2141,6 +2162,7 @@ const mapCommercialPromotionCandidate = (
   expiresAt: (record.expiresAt as Date | null) ?? null,
   dedupeUntil: (record.dedupeUntil as Date | null) ?? null,
   blockedReason: (record.blockedReason as string | null) ?? null,
+  manualSelectionOverride: Boolean(record.manualSelectionOverride),
   createdAt: record.createdAt as Date,
   updatedAt: record.updatedAt as Date,
 });
@@ -2425,6 +2447,53 @@ export class PrismaCommercialPromotionRepository
     };
   }
 
+  async findOfficialCatalogItem(productId: string) {
+    const product = await this.prisma.productLead.findFirst({
+      where: { id: productId, source: 'OFFICIAL' },
+    });
+    if (!product) return null;
+    const currentRevision = product.commercialSnapshotRevision;
+    const [currentSnapshot, previousSnapshot, latestSnapshotRevision] =
+      await Promise.all([
+        currentRevision > 0
+          ? this.prisma.commercialOfferSnapshot.findUnique({
+              where: {
+                productId_revision: {
+                  productId,
+                  revision: currentRevision,
+                },
+              },
+            })
+          : Promise.resolve(null),
+        currentRevision > 1
+          ? this.prisma.commercialOfferSnapshot.findUnique({
+              where: {
+                productId_revision: {
+                  productId,
+                  revision: currentRevision - 1,
+                },
+              },
+            })
+          : Promise.resolve(null),
+        this.prisma.commercialOfferSnapshot.aggregate({
+          where: { productId },
+          _max: { revision: true },
+        }),
+      ]);
+    return {
+      product: mapShopeeOffer(product),
+      commercialSnapshotRevision: currentRevision,
+      commercialSnapshotFingerprint: product.commercialSnapshotFingerprint,
+      latestSnapshotRevision: latestSnapshotRevision._max.revision ?? null,
+      currentSnapshot: currentSnapshot
+        ? mapCommercialPromotionSnapshot({ ...currentSnapshot })
+        : null,
+      previousSnapshot: previousSnapshot
+        ? mapCommercialPromotionSnapshot({ ...previousSnapshot })
+        : null,
+    };
+  }
+
   async listCampaignCandidates(campaignId: string) {
     const records = await this.prisma.commercialPromotionCandidate.findMany({
       where: { campaignId },
@@ -2435,6 +2504,149 @@ export class PrismaCommercialPromotionRepository
         record as unknown as Record<string, unknown>,
       ),
     );
+  }
+
+  async findByCampaignAndProduct(campaignId: string, productId: string) {
+    const record = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { campaignId_productId: { campaignId, productId } },
+    });
+    return record
+      ? mapCommercialPromotionCandidate({ ...record })
+      : null;
+  }
+
+  async ensureManualCandidate(
+    input: CommercialManualCandidateMaterializationInput,
+  ) {
+    try {
+      const record = await this.prisma.$transaction(
+        async (transaction) => {
+          const [campaign, product, snapshot, current] = await Promise.all([
+            transaction.commercialGroupCampaign.findUnique({
+              where: { id: input.campaignId },
+              include: { niche: { select: { active: true } } },
+            }),
+            transaction.productLead.findUnique({
+              where: { id: input.productId },
+              select: {
+                id: true,
+                source: true,
+                commercialSnapshotRevision: true,
+                commercialSnapshotFingerprint: true,
+                unavailableAt: true,
+                offerEndsAt: true,
+              },
+            }),
+            transaction.commercialOfferSnapshot.findUnique({
+              where: { id: input.snapshotId },
+              select: { id: true, productId: true, revision: true, fingerprint: true },
+            }),
+            transaction.commercialPromotionCandidate.findUnique({
+              where: {
+                campaignId_productId: {
+                  campaignId: input.campaignId,
+                  productId: input.productId,
+                },
+              },
+            }),
+          ]);
+          if (
+            !campaign ||
+            !campaign.active ||
+            !campaign.niche.active ||
+            !product ||
+            product.source !== 'OFFICIAL' ||
+            !snapshot ||
+            snapshot.productId !== input.productId ||
+            snapshot.revision !== input.snapshotRevision ||
+            snapshot.fingerprint !== input.snapshotFingerprint ||
+            product.commercialSnapshotRevision !== input.snapshotRevision ||
+            product.commercialSnapshotFingerprint !== input.snapshotFingerprint
+          ) {
+            throw new AppError(
+              'Produto ou campanha mudou antes da selecao manual',
+              'MANUAL_PUBLICATION_STATE_CHANGED',
+            );
+          }
+          if (product.unavailableAt || (product.offerEndsAt && product.offerEndsAt <= input.now)) {
+            throw new AppError(
+              'Produto oficial indisponivel para publicacao manual',
+              'MANUAL_PUBLICATION_PRODUCT_INELIGIBLE',
+            );
+          }
+          if (current?.status === 'RESERVED') {
+            throw new AppError(
+              'Produto e grupo ja possuem uma reserva ativa',
+              'MANUAL_PUBLICATION_TARGET_CONFLICT',
+            );
+          }
+          if (
+            current?.status === 'DISPATCHED' &&
+            current.dedupeUntil !== null &&
+            current.dedupeUntil > input.now
+          ) {
+            throw new AppError(
+              'Produto ja possui deduplicacao ativa para a campanha',
+              'PRODUCT_ALREADY_SENT',
+            );
+          }
+
+          const data = {
+            snapshotId: input.snapshotId,
+            status:
+              current?.status === 'COPY_READY'
+                ? ('COPY_READY' as const)
+                : ('QUEUED' as const),
+            rankPosition: null,
+            commercialScore: input.commercialScore,
+            scorePolicyVersion: input.scorePolicyVersion,
+            minimumScoreUsed: input.minimumScoreUsed,
+            scoreBreakdown: input.scoreBreakdown as never,
+            promotionSignals: input.promotionSignals,
+            priceDropPercent: input.priceDropPercent,
+            lastEvaluatedAt: input.now,
+            expiresAt: input.expiresAt,
+            dedupeUntil: null,
+            blockedReason: null,
+            manualSelectionOverride: true,
+          };
+          const updated = current
+            ? await transaction.commercialPromotionCandidate.update({
+                where: { id: current.id },
+                data: {
+                  ...data,
+                  generatedCopyId:
+                    current.status === 'COPY_READY'
+                      ? current.generatedCopyId
+                      : null,
+                  queuedAt:
+                    current.status === 'COPY_READY'
+                      ? current.queuedAt
+                      : input.now,
+                },
+              })
+            : await transaction.commercialPromotionCandidate.create({
+                data: {
+                  ...data,
+                  campaignId: input.campaignId,
+                  productId: input.productId,
+                  queuedAt: input.now,
+                },
+              });
+          return updated;
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      return mapCommercialPromotionCandidate({ ...record });
+    } catch (error) {
+      if (isUniqueConstraintError(error) || isTransactionConflictError(error)) {
+        throw new AppError(
+          'Outra selecao manual alterou o mesmo produto e grupo',
+          'MANUAL_PUBLICATION_TARGET_CONFLICT',
+        );
+      }
+      throw error;
+    }
   }
 
   async findRecentlySentProductIds(input: {
@@ -2530,7 +2742,10 @@ export class PrismaCommercialPromotionRepository
               orderBy: { id: 'asc' },
             });
           const protectedCount = currentCandidates.filter(
-            ({ status }) => status === 'COPY_READY' || status === 'RESERVED',
+            ({ status, manualSelectionOverride }) =>
+              status === 'COPY_READY' ||
+              status === 'RESERVED' ||
+              (status === 'QUEUED' && manualSelectionOverride),
           ).length;
           const queuedBefore = currentCandidates.filter(
             ({ status }) => status === 'QUEUED',
@@ -2695,7 +2910,8 @@ export class PrismaCommercialPromotionRepository
           for (const candidate of currentCandidates) {
             if (
               candidate.status !== 'QUEUED' ||
-              selectedIds.has(candidate.productId)
+              selectedIds.has(candidate.productId) ||
+              candidate.manualSelectionOverride
             ) {
               continue;
             }
@@ -3645,6 +3861,17 @@ export class PrismaCommercialPipelineRunRepository
       : null;
   }
 
+  async findByExecutionId(
+    executionId: string,
+  ): Promise<CommercialPipelineRunRecord | null> {
+    const record = await this.prisma.commercialPipelineRun.findUnique({
+      where: { executionId } as never,
+    });
+    return record
+      ? mapCommercialPipelineRun({ ...record })
+      : null;
+  }
+
   async findByDispatchId(
     dispatchId: string,
   ): Promise<CommercialPipelineRunRecord | null> {
@@ -4174,6 +4401,1340 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
   }
 }
 
+const manualPublicationTargetInclude = {
+  destination: {
+    select: {
+      id: true,
+      name: true,
+      type: true,
+      fingerprint: true,
+      active: true,
+      available: true,
+    },
+  },
+  campaign: {
+    select: {
+      id: true,
+      name: true,
+      active: true,
+      niche: { select: { id: true, active: true } },
+      dailyLimit: true,
+      cadenceMinutes: true,
+      timezone: true,
+      allowedStartTime: true,
+      allowedEndTime: true,
+      failureCount: true,
+      nextEligibleAt: true,
+    },
+  },
+  candidate: {
+    select: { id: true, generatedCopyId: true, status: true },
+  },
+  run: {
+    select: {
+      id: true,
+      status: true,
+      finalStatus: true,
+      investigationRequired: true,
+    },
+  },
+  dispatch: {
+    select: { id: true, status: true, sentAt: true },
+  },
+  outbox: {
+    select: { id: true, status: true },
+  },
+} as const;
+
+const manualPublicationRequestInclude = {
+  targets: {
+    orderBy: [
+      { logicalGroupFingerprint: 'asc' },
+      { destinationId: 'asc' },
+    ],
+    include: manualPublicationTargetInclude,
+  },
+} as const;
+
+const manualPublicationLifecycleTargetSelect = {
+  id: true,
+  requestId: true,
+  destinationId: true,
+  campaignId: true,
+  logicalGroupFingerprint: true,
+  assignedInstanceName: true,
+  candidateId: true,
+  runId: true,
+  dispatchId: true,
+  outboxId: true,
+  status: true,
+  blockedReason: true,
+  investigationRequired: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+const manualPublicationLifecycleRequestSelect = {
+  id: true,
+  idempotencyKey: true,
+  payloadHash: true,
+  mode: true,
+  productId: true,
+  requestedSnapshotId: true,
+  requestedSnapshotRevision: true,
+  requestedSnapshotFingerprint: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  completedAt: true,
+  processingOwnerId: true,
+  processingLeaseExpiresAt: true,
+  targets: {
+    orderBy: { id: 'asc' },
+    select: manualPublicationLifecycleTargetSelect,
+  },
+} as const;
+
+const mapManualPublicationTarget = (
+  record: Record<string, unknown>,
+): ManualPublicationTargetRecord => {
+  const destination = record.destination as Record<string, unknown> | null;
+  const campaign = record.campaign as Record<string, unknown> | null;
+  const niche = campaign?.niche as Record<string, unknown> | null;
+  return {
+    id: String(record.id),
+    requestId: String(record.requestId),
+    destinationId: String(record.destinationId),
+    campaignId: String(record.campaignId),
+    logicalGroupFingerprint: String(record.logicalGroupFingerprint),
+    assignedInstanceName: String(record.assignedInstanceName),
+    candidateId: (record.candidateId as string | null) ?? null,
+    runId: (record.runId as string | null) ?? null,
+    dispatchId: (record.dispatchId as string | null) ?? null,
+    outboxId: (record.outboxId as string | null) ?? null,
+    status: record.status as ManualPublicationTargetRecord['status'],
+    blockedReason: (record.blockedReason as string | null) ?? null,
+    investigationRequired: Boolean(record.investigationRequired),
+    createdAt: record.createdAt as Date,
+    updatedAt: record.updatedAt as Date,
+    destination: destination
+      ? {
+          id: String(destination.id),
+          name: String(destination.name),
+          type: destination.type as 'GROUP' | 'INDIVIDUAL',
+          fingerprint: (destination.fingerprint as string | null) ?? null,
+          active: Boolean(destination.active),
+          available: Boolean(destination.available),
+        }
+      : undefined,
+    campaign: campaign
+      ? {
+          id: String(campaign.id),
+          name: String(campaign.name),
+          active: Boolean(campaign.active),
+          nicheId: String(niche?.id),
+          nicheActive: Boolean(niche?.active),
+          dailyLimit: Number(campaign.dailyLimit),
+          cadenceMinutes: Number(campaign.cadenceMinutes),
+          timezone: String(campaign.timezone),
+          allowedStartTime: String(campaign.allowedStartTime),
+          allowedEndTime: String(campaign.allowedEndTime),
+          failureCount: Number(campaign.failureCount),
+          nextEligibleAt: (campaign.nextEligibleAt as Date | null) ?? null,
+        }
+      : undefined,
+    candidate: record.candidate
+      ? (record.candidate as ManualPublicationTargetRecord['candidate'])
+      : null,
+    run: record.run
+      ? (record.run as ManualPublicationTargetRecord['run'])
+      : null,
+    dispatch: record.dispatch
+      ? (record.dispatch as ManualPublicationTargetRecord['dispatch'])
+      : null,
+    outbox: record.outbox
+      ? (record.outbox as ManualPublicationTargetRecord['outbox'])
+      : null,
+  };
+};
+
+const mapManualPublicationRequest = (
+  record: Record<string, unknown>,
+): ManualPublicationRequestRecord => ({
+  id: String(record.id),
+  idempotencyKey: String(record.idempotencyKey),
+  payloadHash: String(record.payloadHash),
+  mode: record.mode as ManualPublicationRequestMode,
+  productId: String(record.productId),
+  requestedSnapshotId: String(record.requestedSnapshotId),
+  requestedSnapshotRevision: Number(record.requestedSnapshotRevision),
+  requestedSnapshotFingerprint: String(record.requestedSnapshotFingerprint),
+  status: record.status as ManualPublicationRequestRecord['status'],
+  createdAt: record.createdAt as Date,
+  updatedAt: record.updatedAt as Date,
+  completedAt: (record.completedAt as Date | null) ?? null,
+  processingOwnerId: (record.processingOwnerId as string | null) ?? null,
+  processingLeaseExpiresAt:
+    (record.processingLeaseExpiresAt as Date | null) ?? null,
+  targets: Array.isArray(record.targets)
+    ? record.targets.map((target) =>
+        mapManualPublicationTarget({ ...target }),
+      )
+    : [],
+});
+
+const manualPublicationRequestMatches = (
+  record: Record<string, unknown>,
+  input: ManualPublicationRequestCreateData,
+) =>
+  record.mode === input.mode &&
+  record.productId === input.productId &&
+  (record.payloadHash === input.payloadHash ||
+    (input.mode === 'SEND' &&
+      Boolean(input.legacyPayloadHash) &&
+      record.payloadHash === input.legacyPayloadHash));
+
+const MANUAL_PUBLICATION_HTTP_URL = /^https?:\/\//iu;
+
+const loadManualPublicationRequest = (
+  client: Pick<DatabaseClient, 'manualPublicationRequest'>,
+  where: { id: string } | { idempotencyKey: string },
+) =>
+  client.manualPublicationRequest.findUnique({
+    where,
+    include: manualPublicationRequestInclude,
+  } as never);
+
+const loadManualPublicationLifecycleRequest = (
+  client: Pick<DatabaseClient, 'manualPublicationRequest'>,
+  id: string,
+) =>
+  client.manualPublicationRequest.findUnique({
+    where: { id },
+    select: manualPublicationLifecycleRequestSelect,
+  } as never);
+
+const manualPublicationRecoverySchedulerJobId = (
+  requestId: string,
+  targetId: string,
+) => `manual-publication:${requestId}:${targetId}`;
+
+type ManualPublicationRecoveryClient = Pick<
+  DatabaseClient,
+  | 'manualPublicationRequest'
+  | 'manualPublicationTarget'
+  | 'commercialAutomationExecution'
+  | 'commercialGroupCampaign'
+  | 'commercialPromotionCandidate'
+  | 'commercialPipelineRun'
+  | 'whatsAppDispatch'
+  | 'commercialDispatchOutbox'
+  | 'commercialCopyGenerationAttempt'
+  | 'generatedCopy'
+>;
+
+type ManualPublicationRecoveryCampaign = {
+  id: string;
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
+};
+
+type ManualPublicationRecoveryCandidate = {
+  id: string;
+  campaignId: string;
+  productId: string;
+  snapshotId: string;
+  generatedCopyId: string | null;
+  status: string;
+};
+
+type ManualPublicationRecoveryReservation = {
+  id: string;
+  attemptExecutionId: string | null;
+  attemptReservedAt: Date | null;
+  attemptLeaseExpiresAt: Date | null;
+};
+
+type ManualPublicationRecoveryState = {
+  request: ManualPublicationRequestRecord;
+  target: ManualPublicationTargetRecord;
+  execution: CommercialAutomationExecutionRecord;
+  campaign: ManualPublicationRecoveryCampaign;
+  candidate: ManualPublicationRecoveryCandidate | null;
+  campaignReservations: ManualPublicationRecoveryReservation[];
+  linkedRun: { id: string } | null;
+  linkedDispatch: { id: string } | null;
+  linkedOutbox: { id: string } | null;
+  copyAttempt: { id: string } | null;
+  generatedCopy: { id: string } | null;
+};
+
+const readManualPublicationRecoveryState = async (
+  client: ManualPublicationRecoveryClient,
+  input: ManualPublicationSafePreProviderReconciliationInput,
+): Promise<ManualPublicationRecoveryState | null> => {
+  const requestRaw = await loadManualPublicationRequest(client, {
+    id: input.requestId,
+  });
+  if (!requestRaw) return null;
+  const request = mapManualPublicationRequest({ ...requestRaw });
+  const target = request.targets.find(({ id }) => id === input.targetId);
+  if (!target) return null;
+
+  const executionRaw = await client.commercialAutomationExecution.findUnique({
+    where: { id: input.executionId },
+  });
+  if (!executionRaw) return null;
+  const execution = mapCommercialAutomationExecution(executionRaw);
+  const campaignRaw = await client.commercialGroupCampaign.findUnique({
+    where: { id: target.campaignId },
+    select: {
+      id: true,
+      attemptExecutionId: true,
+      attemptReservedAt: true,
+      attemptLeaseExpiresAt: true,
+    },
+  });
+  if (!campaignRaw) return null;
+
+  const candidate = target.candidateId
+    ? await client.commercialPromotionCandidate.findUnique({
+        where: { id: target.candidateId },
+        select: {
+          id: true,
+          campaignId: true,
+          productId: true,
+          snapshotId: true,
+          generatedCopyId: true,
+          status: true,
+        },
+      })
+    : await client.commercialPromotionCandidate.findUnique({
+        where: {
+          campaignId_productId: {
+            campaignId: target.campaignId,
+            productId: request.productId,
+          },
+        },
+        select: {
+          id: true,
+          campaignId: true,
+          productId: true,
+          snapshotId: true,
+          generatedCopyId: true,
+          status: true,
+        },
+      });
+
+  const [campaignReservations, linkedRun, linkedDispatch, linkedOutbox, copyAttempt, generatedCopy] =
+    await Promise.all([
+      client.commercialGroupCampaign.findMany({
+        where: { attemptExecutionId: input.executionId },
+        take: 2,
+        select: {
+          id: true,
+          attemptExecutionId: true,
+          attemptReservedAt: true,
+          attemptLeaseExpiresAt: true,
+        },
+      }),
+      client.commercialPipelineRun.findUnique({
+        where: { executionId: input.executionId },
+        select: { id: true },
+      }),
+      client.whatsAppDispatch.findFirst({
+        where: {
+          productId: request.productId,
+          destinationId: target.destinationId,
+          createdAt: { gte: execution.startedAt },
+        },
+        select: { id: true },
+      }),
+      client.commercialDispatchOutbox.findFirst({
+        where: { commercialRun: { executionId: input.executionId } },
+        select: { id: true },
+      } as never),
+      candidate
+        ? client.commercialCopyGenerationAttempt.findFirst({
+            where: { candidateId: candidate.id },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      candidate
+        ? client.generatedCopy.findFirst({
+            where: { createdFromCandidateId: candidate.id },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+  return {
+    request,
+    target,
+    execution,
+    campaign: campaignRaw,
+    candidate,
+    campaignReservations,
+    linkedRun,
+    linkedDispatch,
+    linkedOutbox,
+    copyAttempt,
+    generatedCopy,
+  };
+};
+
+const safePreProviderReplayMatches = (
+  state: ManualPublicationRecoveryState,
+  input: ManualPublicationSafePreProviderReconciliationInput,
+) => {
+  const { request, target, execution, campaign, candidate } = state;
+  if (
+    request.mode !== 'SEND' ||
+    target.requestId !== input.requestId ||
+    target.status !== 'BLOCKED' ||
+    target.investigationRequired ||
+    target.runId !== null ||
+    target.dispatchId !== null ||
+    target.outboxId !== null ||
+    execution.id !== input.executionId ||
+    execution.mode !== 'SEND' ||
+    execution.status !== 'BLOCKED' ||
+    execution.schedulerJobId !==
+      manualPublicationRecoverySchedulerJobId(input.requestId, input.targetId) ||
+    execution.externalStage !== 'EXTERNAL_MAY_HAVE_STARTED' ||
+    execution.commercialRunId !== null ||
+    !execution.failureCode ||
+    target.blockedReason !== execution.failureCode ||
+    campaign.attemptExecutionId !== null ||
+    campaign.attemptReservedAt !== null ||
+    campaign.attemptLeaseExpiresAt !== null ||
+    state.campaignReservations.length !== 0 ||
+    !candidate ||
+    candidate.id !== (target.candidateId ?? candidate.id) ||
+    candidate.campaignId !== target.campaignId ||
+    candidate.productId !== request.productId ||
+    candidate.snapshotId !== request.requestedSnapshotId ||
+    candidate.status !== 'QUEUED' ||
+    candidate.generatedCopyId !== null ||
+    state.linkedRun ||
+    state.linkedDispatch ||
+    state.linkedOutbox ||
+    state.copyAttempt ||
+    state.generatedCopy ||
+    request.processingOwnerId !== null ||
+    request.processingLeaseExpiresAt !== null ||
+    isManualPublicationRequestTerminal(request.status) !==
+      Boolean(request.completedAt)
+  ) {
+    return false;
+  }
+  return (
+    request.status ===
+    aggregateManualPublicationRequestStatus(
+      request.targets.map((item) => item.status),
+    )
+  );
+};
+
+class ManualPublicationRecoveryCasConflictError extends Error {}
+
+export class PrismaManualPublicationRequestRepository
+  implements ManualPublicationRequestRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  private async assertCurrentState(
+    transaction: Pick<
+      DatabaseClient,
+      | 'productLead'
+      | 'commercialOfferSnapshot'
+      | 'whatsAppDestination'
+      | 'commercialGroupCampaign'
+      | 'whatsAppInstance'
+    >,
+    input: ManualPublicationRequestCreateData,
+  ) {
+    const [product, snapshot, destinations, campaigns, instances] =
+      await Promise.all([
+        transaction.productLead.findUnique({
+          where: { id: input.productId },
+          select: {
+            id: true,
+            source: true,
+            affiliateLink: true,
+            productLink: true,
+            unavailableAt: true,
+            offerStartsAt: true,
+            offerEndsAt: true,
+            commercialSnapshotRevision: true,
+            commercialSnapshotFingerprint: true,
+          },
+        }),
+        transaction.commercialOfferSnapshot.findUnique({
+          where: { id: input.requestedSnapshotId },
+          select: {
+            id: true,
+            productId: true,
+            revision: true,
+            fingerprint: true,
+            offerStartsAt: true,
+            offerEndsAt: true,
+            unavailableAt: true,
+          },
+        }),
+        transaction.whatsAppDestination.findMany({
+          where: {
+            id: { in: input.targets.map((target) => target.destinationId) },
+          },
+          select: {
+            id: true,
+            type: true,
+            active: true,
+            available: true,
+            fingerprint: true,
+            assignedInstanceName: true,
+          },
+        }),
+        transaction.commercialGroupCampaign.findMany({
+          where: { id: { in: input.targets.map((target) => target.campaignId) } },
+          select: {
+            id: true,
+            logicalGroupFingerprint: true,
+            active: true,
+            niche: { select: { active: true } },
+          },
+        }),
+        transaction.whatsAppInstance.findMany({
+          where: {
+            name: {
+              in: input.targets.map((target) => target.assignedInstanceName),
+            },
+          },
+          select: { name: true, active: true },
+        }),
+      ]);
+    const destinationById = new Map(destinations.map((row) => [row.id, row]));
+    const campaignById = new Map(campaigns.map((row) => [row.id, row]));
+    const instanceByName = new Map(instances.map((row) => [row.name, row]));
+    const now = new Date();
+    const validProduct =
+      product?.source === 'OFFICIAL' &&
+      !product.unavailableAt &&
+      (!product.offerEndsAt || product.offerEndsAt > now) &&
+      Boolean(product.affiliateLink) &&
+      Boolean(product.productLink) &&
+      (input.mode !== 'PREVIEW' ||
+        (MANUAL_PUBLICATION_HTTP_URL.test(product.affiliateLink ?? '') &&
+          MANUAL_PUBLICATION_HTTP_URL.test(product.productLink ?? ''))) &&
+      (input.mode !== 'PREVIEW' ||
+        !product.offerStartsAt ||
+        product.offerStartsAt <= now) &&
+      product.commercialSnapshotRevision === input.requestedSnapshotRevision &&
+      product.commercialSnapshotFingerprint ===
+        input.requestedSnapshotFingerprint;
+    const validSnapshot =
+      snapshot?.id === input.requestedSnapshotId &&
+      snapshot.productId === input.productId &&
+      snapshot.revision === input.requestedSnapshotRevision &&
+      snapshot.fingerprint === input.requestedSnapshotFingerprint &&
+      (input.mode !== 'PREVIEW' ||
+        (!snapshot.unavailableAt &&
+          (!snapshot.offerStartsAt || snapshot.offerStartsAt <= now) &&
+          (!snapshot.offerEndsAt || snapshot.offerEndsAt > now)));
+    const validTargets = input.targets.every((target) => {
+      const destination = destinationById.get(target.destinationId);
+      const campaign = campaignById.get(target.campaignId);
+      const instance = instanceByName.get(target.assignedInstanceName);
+      return Boolean(
+        destination &&
+          destination.type === 'GROUP' &&
+          (input.mode !== 'PREVIEW' ||
+            (destination.active && destination.available)) &&
+          destination.fingerprint === target.logicalGroupFingerprint &&
+          destination.assignedInstanceName === target.assignedInstanceName &&
+          campaign &&
+          campaign.logicalGroupFingerprint === target.logicalGroupFingerprint &&
+          (input.mode !== 'PREVIEW' ||
+            (campaign.active && campaign.niche.active)) &&
+          instance &&
+          (input.mode !== 'PREVIEW' || instance.active),
+      );
+    });
+    if (!validProduct || !validSnapshot || !validTargets) {
+      throw new AppError(
+        'Produto, snapshot ou destino mudou antes da aceitacao manual',
+        'MANUAL_PUBLICATION_STATE_CHANGED',
+      );
+    }
+  }
+
+  async accept(input: ManualPublicationRequestCreateData): Promise<ManualPublicationAcceptance> {
+    try {
+      const record = await this.prisma.$transaction(
+        async (transaction) => {
+          const existing = await loadManualPublicationRequest(
+            transaction,
+            { idempotencyKey: input.idempotencyKey },
+          );
+          if (existing) {
+            if (!manualPublicationRequestMatches(existing, input)) {
+              throw new AppError(
+                'A chave de idempotencia ja representa outra operacao ou payload',
+                'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
+              );
+            }
+            return {
+              created: false,
+              request: mapManualPublicationRequest({ ...existing }),
+            };
+          }
+          await this.assertCurrentState(transaction, input);
+          const request = await transaction.manualPublicationRequest.create({
+            data: {
+              id: input.id,
+              idempotencyKey: input.idempotencyKey,
+              payloadHash: input.payloadHash,
+              mode: input.mode,
+              productId: input.productId,
+              requestedSnapshotId: input.requestedSnapshotId,
+              requestedSnapshotRevision: input.requestedSnapshotRevision,
+              requestedSnapshotFingerprint: input.requestedSnapshotFingerprint,
+              status: input.status ?? 'ACCEPTED',
+              createdAt: input.createdAt,
+            },
+          });
+          await transaction.manualPublicationTarget.createMany({
+            data: input.targets.map((target) => ({
+              id: target.id,
+              requestId: request.id,
+              destinationId: target.destinationId,
+              campaignId: target.campaignId,
+              logicalGroupFingerprint: target.logicalGroupFingerprint,
+              assignedInstanceName: target.assignedInstanceName,
+              status: target.status ?? 'ACCEPTED',
+            })),
+          });
+          const accepted = await loadManualPublicationRequest(transaction, {
+            id: request.id,
+          });
+          if (!accepted) throw new Error('manual request disappeared');
+          return {
+            created: true,
+            request: mapManualPublicationRequest({ ...accepted }),
+          };
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      return record;
+    } catch (error) {
+      if (isUniqueConstraintError(error) || isTransactionConflictError(error)) {
+        const existing = await this.findByIdempotencyKey(input.idempotencyKey);
+        if (!existing) throw error;
+        if (!manualPublicationRequestMatches(existing, input)) {
+          throw new AppError(
+            'A chave de idempotencia ja representa outra operacao ou payload',
+            'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
+          );
+        }
+        return { request: existing, created: false };
+      }
+      throw error;
+    }
+  }
+
+  async findById(id: string) {
+    const record = await loadManualPublicationRequest(this.prisma, { id });
+    return record
+      ? mapManualPublicationRequest({ ...record })
+      : null;
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string) {
+    const record = await loadManualPublicationRequest(this.prisma, {
+      idempotencyKey,
+    });
+    return record
+      ? mapManualPublicationRequest({ ...record })
+      : null;
+  }
+
+  async claimProcessing(
+    id: string,
+    ownerId: string,
+    now: Date,
+    leaseExpiresAt: Date,
+  ) {
+    const claimed = await this.prisma.manualPublicationRequest.updateMany({
+      where: {
+        id,
+        OR: [
+          { status: 'ACCEPTED' },
+          {
+            status: 'PROCESSING',
+            OR: [
+              { processingLeaseExpiresAt: null },
+              { processingLeaseExpiresAt: { lte: now } },
+            ],
+          },
+        ],
+      },
+      data: {
+        status: 'PROCESSING',
+        processingOwnerId: ownerId,
+        processingLeaseExpiresAt: leaseExpiresAt,
+        completedAt: null,
+      },
+    } as never);
+    if (claimed.count !== 1) return null;
+    return this.findById(id);
+  }
+
+  async renewProcessing(
+    id: string,
+    ownerId: string,
+    leaseExpiresAt: Date,
+  ) {
+    const renewed = await this.prisma.manualPublicationRequest.updateMany({
+      where: {
+        id,
+        status: 'PROCESSING',
+        processingOwnerId: ownerId,
+      },
+      data: { processingLeaseExpiresAt: leaseExpiresAt },
+    } as never);
+    return renewed.count === 1;
+  }
+
+  async reserveSendSlot(
+    input: ManualPublicationQuotaReservationInput,
+  ): Promise<ManualPublicationQuotaReservation> {
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`
+        SELECT "id"
+        FROM "CommercialAutomationSettings"
+        WHERE "id" = 'commercial-automation'
+        FOR UPDATE
+      `;
+      const target = await transaction.manualPublicationTarget.findUnique({
+        where: { id: input.targetId },
+        select: { id: true, destinationId: true, status: true },
+      });
+      if (
+        !target ||
+        !['ACCEPTED', 'PROCESSING'].includes(target.status)
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
+        };
+      }
+      const sentWhere = {
+        status: 'SENT' as const,
+        sentAt: { gte: input.dayStartsAt, lt: input.dayEndsAt },
+        destination: { type: 'GROUP' as const },
+      };
+      const activeWhere = {
+        id: { not: input.targetId },
+        status: { in: ['PROCESSING', 'QUEUED'] as const },
+        OR: [
+          { dispatchId: null },
+          { dispatch: { status: { not: 'SENT' as const } } },
+        ],
+      };
+      const [sentGlobal, sentGroup, activeGlobal, activeGroup] =
+        await Promise.all([
+          transaction.whatsAppDispatch.count({ where: sentWhere }),
+          transaction.whatsAppDispatch.count({
+            where: { ...sentWhere, destinationId: target.destinationId },
+          }),
+          transaction.manualPublicationTarget.count({ where: activeWhere } as never),
+          transaction.manualPublicationTarget.count({
+            where: { ...activeWhere, destinationId: target.destinationId },
+          } as never),
+        ]);
+      if (
+        input.globalDailyLimit <= 0 ||
+        sentGlobal + activeGlobal >= input.globalDailyLimit
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'GLOBAL_DAILY_LIMIT_REACHED',
+        };
+      }
+      if (
+        input.groupDailyLimit <= 0 ||
+        sentGroup + activeGroup >= input.groupDailyLimit
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          reason: 'GROUP_DAILY_LIMIT_REACHED',
+        };
+      }
+      const claimed = await transaction.manualPublicationTarget.updateMany({
+        where: {
+          id: input.targetId,
+          status: { in: ['ACCEPTED', 'PROCESSING'] as const },
+        },
+        data: { status: 'PROCESSING' },
+      });
+      return claimed.count === 1
+        ? { kind: 'RESERVED' as const }
+        : {
+            kind: 'BLOCKED' as const,
+            reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
+          };
+    });
+  }
+
+  async releaseSendSlot(targetId: string): Promise<void> {
+    await this.prisma.manualPublicationTarget.updateMany({
+      where: {
+        id: targetId,
+        status: 'PROCESSING',
+        candidateId: null,
+        runId: null,
+        dispatchId: null,
+        outboxId: null,
+      },
+      data: { status: 'ACCEPTED' },
+    });
+  }
+
+  async updateTarget(id: string, data: ManualPublicationTargetUpdate) {
+    try {
+      const record = await this.prisma.manualPublicationTarget.update({
+        where: { id },
+        data,
+        include: manualPublicationTargetInclude,
+      } as never);
+      return mapManualPublicationTarget({ ...record });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  async updateRequest(id: string, data: ManualPublicationRequestUpdate) {
+    try {
+      const record = await this.prisma.manualPublicationRequest.update({
+        where: { id },
+        data,
+        include: manualPublicationRequestInclude,
+      } as never);
+      return mapManualPublicationRequest({ ...record });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  async finalizeAfterCommercialDispatch(
+    input: ManualPublicationLifecycleFinalizationInput,
+  ): Promise<ManualPublicationLifecycleFinalizationResult> {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const run = await transaction.commercialPipelineRun.findUnique({
+          where: { dispatchId: input.dispatchId },
+          select: {
+            id: true,
+            dispatchId: true,
+            status: true,
+            finalStatus: true,
+            investigationRequired: true,
+          },
+        });
+        if (!run) {
+          return {
+            outcome: 'NO_MANUAL_LIFECYCLE' as const,
+            writes: 0 as const,
+          };
+        }
+
+        const dispatch = await transaction.whatsAppDispatch.findUnique({
+          where: { id: input.dispatchId },
+          select: {
+            id: true,
+            status: true,
+            attemptCount: true,
+            externalMessageId: true,
+            sentAt: true,
+          },
+        });
+        if (!dispatch) {
+          throw new AppError(
+            'Dispatch comercial ausente durante a finalizacao manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        if (run.dispatchId !== dispatch.id) {
+          throw new AppError(
+            'Run comercial nao corresponde ao dispatch manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const outbox = await transaction.commercialDispatchOutbox.findUnique({
+          where: { dispatchId: dispatch.id },
+          select: {
+            id: true,
+            commercialRunId: true,
+            dispatchId: true,
+            status: true,
+          },
+        });
+        if (
+          outbox &&
+          (outbox.commercialRunId !== run.id ||
+            outbox.dispatchId !== dispatch.id)
+        ) {
+          throw new AppError(
+            'Outbox comercial nao corresponde ao run/dispatch manual',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const relationFilters = [
+          { runId: run.id },
+          { dispatchId: dispatch.id },
+          ...(outbox ? [{ outboxId: outbox.id }] : []),
+        ];
+        const linkedTargets =
+          await transaction.manualPublicationTarget.findMany({
+            where: { OR: relationFilters },
+            take: 2,
+            orderBy: { id: 'asc' },
+            select: manualPublicationLifecycleTargetSelect,
+          } as never);
+        if (linkedTargets.length === 0) {
+          return {
+            outcome: 'NO_MANUAL_LIFECYCLE' as const,
+            writes: 0 as const,
+          };
+        }
+        if (linkedTargets.length !== 1) {
+          throw new AppError(
+            'Mais de um target manual corresponde ao mesmo dispatch comercial',
+            'MANUAL_PUBLICATION_LIFECYCLE_TARGET_AMBIGUOUS',
+          );
+        }
+
+        const linkedTarget = linkedTargets[0];
+        if (!linkedTarget) {
+          throw new AppError(
+            'Target manual desapareceu durante a finalizacao',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        if (
+          (linkedTarget.runId !== null && linkedTarget.runId !== run.id) ||
+          (linkedTarget.dispatchId !== null &&
+            linkedTarget.dispatchId !== dispatch.id) ||
+          (linkedTarget.outboxId !== null &&
+            (!outbox || linkedTarget.outboxId !== outbox.id))
+        ) {
+          throw new AppError(
+            'Target manual possui vinculos comerciais divergentes',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const requestRaw = await loadManualPublicationLifecycleRequest(
+          transaction,
+          linkedTarget.requestId,
+        );
+        if (!requestRaw) {
+          throw new AppError(
+            'Request manual ausente durante a finalizacao',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISSING',
+          );
+        }
+        const request = mapManualPublicationRequest({ ...requestRaw });
+        if (request.mode !== 'SEND') {
+          throw new AppError(
+            'Target de preview nao pode ser finalizado pelo worker comercial',
+            'MANUAL_PUBLICATION_LIFECYCLE_MODE_MISMATCH',
+          );
+        }
+        const target = request.targets.find(
+          (item) => item.id === linkedTarget.id,
+        );
+        if (!target || target.requestId !== request.id) {
+          throw new AppError(
+            'Target manual nao pertence a request carregada',
+            'MANUAL_PUBLICATION_LIFECYCLE_CONTEXT_MISMATCH',
+          );
+        }
+
+        const observation: ManualPublicationLifecycleObservation = {
+          hasRun: true,
+          runStatus: run.status,
+          runFinalStatus: run.finalStatus,
+          runInvestigationRequired: run.investigationRequired,
+          hasDispatch: true,
+          dispatchStatus: dispatch.status,
+          hasOutbox: Boolean(outbox),
+          outboxStatus: outbox?.status ?? null,
+        };
+        const terminalStatus =
+          resolveManualPublicationTerminalStatus(observation);
+        if (!terminalStatus) {
+          return { outcome: 'NOT_TERMINAL' as const, writes: 0 as const };
+        }
+
+        const nextTargetStatus =
+          target.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : terminalStatus;
+        const nextTargetInvestigationRequired =
+          nextTargetStatus === 'AMBIGUOUS';
+        const nextTargets = request.targets.map((item) =>
+          item.id === target.id
+            ? {
+                ...item,
+                status: nextTargetStatus,
+                investigationRequired: nextTargetInvestigationRequired,
+              }
+            : item,
+        );
+        const nextRequestStatus = aggregateManualPublicationRequestStatus(
+          nextTargets.map((item) => item.status),
+        );
+        const requestTerminal =
+          isManualPublicationRequestTerminal(nextRequestStatus);
+        const nextCompletedAt = requestTerminal
+          ? (request.completedAt ?? input.now)
+          : null;
+        const targetNeedsUpdate =
+          target.status !== nextTargetStatus ||
+          target.investigationRequired !== nextTargetInvestigationRequired;
+        const requestNeedsUpdate =
+          request.status !== nextRequestStatus ||
+          request.completedAt?.getTime() !== nextCompletedAt?.getTime() ||
+          (requestTerminal &&
+            (request.processingOwnerId !== null ||
+              request.processingLeaseExpiresAt !== null));
+
+        let writes = 0;
+        if (targetNeedsUpdate) {
+          const updatedTarget =
+            await transaction.manualPublicationTarget.updateMany({
+              where: {
+                id: target.id,
+                requestId: target.requestId,
+                candidateId: target.candidateId,
+                runId: target.runId,
+                dispatchId: target.dispatchId,
+                outboxId: target.outboxId,
+                status: target.status,
+                investigationRequired: target.investigationRequired,
+              },
+              data: {
+                status: nextTargetStatus,
+                investigationRequired: nextTargetInvestigationRequired,
+              },
+            } as never);
+          if (updatedTarget.count !== 1) {
+            throw new AppError(
+              'Target manual mudou durante a finalizacao',
+              'MANUAL_PUBLICATION_LIFECYCLE_CAS_CONFLICT',
+            );
+          }
+          writes += 1;
+        }
+
+        if (requestNeedsUpdate) {
+          const updatedRequest =
+            await transaction.manualPublicationRequest.updateMany({
+              where: {
+                id: request.id,
+                status: request.status,
+                completedAt: request.completedAt,
+                processingOwnerId: request.processingOwnerId,
+                processingLeaseExpiresAt: request.processingLeaseExpiresAt,
+              },
+              data: {
+                status: nextRequestStatus,
+                completedAt: nextCompletedAt,
+                ...(requestTerminal
+                  ? {
+                      processingOwnerId: null,
+                      processingLeaseExpiresAt: null,
+                    }
+                  : {}),
+              },
+            } as never);
+          if (updatedRequest.count !== 1) {
+            throw new AppError(
+              'Request manual mudou durante a finalizacao',
+              'MANUAL_PUBLICATION_LIFECYCLE_CAS_CONFLICT',
+            );
+          }
+          writes += 1;
+        }
+
+        return {
+          outcome:
+            writes === 0
+              ? ('ALREADY_FINALIZED' as const)
+              : ('FINALIZED' as const),
+          requestId: request.id,
+          targetId: target.id,
+          targetStatus: nextTargetStatus,
+          requestStatus: nextRequestStatus,
+          writes,
+        };
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
+  }
+
+  async reconcileSafePreProviderAmbiguity(
+    input: ManualPublicationSafePreProviderReconciliationInput,
+  ): Promise<ManualPublicationSafePreProviderReconciliationResult> {
+    const reconcile = async (client: ManualPublicationRecoveryClient) => {
+      const state = await readManualPublicationRecoveryState(client, input);
+      if (!state) {
+        throw new AppError(
+          'Lifecycle de publicacao manual nao encontrado',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (safePreProviderReplayMatches(state, input)) {
+        return {
+          outcome: 'ALREADY_RECONCILED' as const,
+          request: state.request,
+          writes: 0 as const,
+        };
+      }
+
+      const { request, target, execution, campaign, candidate } = state;
+      if (
+        request.mode !== 'SEND' ||
+        request.status !== 'AMBIGUOUS' ||
+        target.requestId !== input.requestId ||
+        target.status !== 'AMBIGUOUS' ||
+        !target.investigationRequired ||
+        target.runId !== null ||
+        target.dispatchId !== null ||
+        target.outboxId !== null ||
+        execution.id !== input.executionId ||
+        execution.mode !== 'SEND' ||
+        execution.status !== 'AMBIGUOUS' ||
+        execution.schedulerJobId !==
+          manualPublicationRecoverySchedulerJobId(
+            input.requestId,
+            input.targetId,
+          ) ||
+        execution.externalStage !== 'EXTERNAL_MAY_HAVE_STARTED' ||
+        execution.commercialRunId !== null ||
+        execution.activeKey !== null ||
+        !execution.failureCode ||
+        target.blockedReason !== execution.failureCode ||
+        request.processingOwnerId !== null ||
+        request.processingLeaseExpiresAt !== null
+      ) {
+        throw new AppError(
+          'Lifecycle ambiguo nao corresponde ao recovery seguro pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (
+        state.linkedRun ||
+        state.linkedDispatch ||
+        state.linkedOutbox ||
+        state.copyAttempt ||
+        state.generatedCopy
+      ) {
+        throw new AppError(
+          'Evidencia downstream impede o recovery pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (
+        !candidate ||
+        candidate.id !== (target.candidateId ?? candidate.id) ||
+        candidate.campaignId !== target.campaignId ||
+        candidate.productId !== request.productId ||
+        candidate.snapshotId !== request.requestedSnapshotId ||
+        candidate.status !== 'QUEUED' ||
+        candidate.generatedCopyId !== null
+      ) {
+        throw new AppError(
+          'Candidate nao esta intacto para o recovery pre-provider',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      if (campaign.attemptExecutionId !== input.executionId) {
+        if (campaign.attemptExecutionId) {
+          throw new AppError(
+            'A reservation comercial pertence a outra execution',
+            'RECOVERY_RESERVATION_OWNERSHIP_MISMATCH',
+          );
+        }
+        throw new AppError(
+          'A reservation comercial nao esta presente',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+      if (
+        state.campaignReservations.length !== 1 ||
+        state.campaignReservations[0]?.id !== campaign.id ||
+        !campaign.attemptReservedAt ||
+        !campaign.attemptLeaseExpiresAt ||
+        state.campaignReservations[0]?.attemptReservedAt?.getTime() !==
+          campaign.attemptReservedAt.getTime() ||
+        state.campaignReservations[0]?.attemptLeaseExpiresAt?.getTime() !==
+          campaign.attemptLeaseExpiresAt.getTime() ||
+        campaign.attemptReservedAt.getTime() >
+          campaign.attemptLeaseExpiresAt.getTime()
+      ) {
+        throw new AppError(
+          'A reservation comercial nao e unica ou valida',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+      if (campaign.attemptLeaseExpiresAt.getTime() > input.now.getTime()) {
+        throw new AppError(
+          'A lease da reservation comercial ainda esta ativa',
+          'RECOVERY_NOT_SAFE',
+        );
+      }
+
+      const nextRequestStatus = aggregateManualPublicationRequestStatus(
+        request.targets.map((item) =>
+          item.id === target.id ? ('BLOCKED' as const) : item.status,
+        ),
+      );
+      const nextCompletedAt = isManualPublicationRequestTerminal(nextRequestStatus)
+        ? request.completedAt ?? input.now
+        : null;
+
+      const campaignUpdated = await client.commercialGroupCampaign.updateMany({
+        where: {
+          id: campaign.id,
+          attemptExecutionId: input.executionId,
+          attemptReservedAt: campaign.attemptReservedAt,
+          attemptLeaseExpiresAt: campaign.attemptLeaseExpiresAt,
+        },
+        data: {
+          attemptExecutionId: null,
+          attemptReservedAt: null,
+          attemptLeaseExpiresAt: null,
+        },
+      });
+      if (campaignUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const executionUpdated =
+        await client.commercialAutomationExecution.updateMany({
+          where: {
+            id: execution.id,
+            schedulerJobId: execution.schedulerJobId,
+            bullMqJobId: execution.bullMqJobId,
+            activeKey: execution.activeKey,
+            ownerId: execution.ownerId,
+            heartbeatAt: execution.heartbeatAt,
+            leaseExpiresAt: execution.leaseExpiresAt,
+            mode: 'SEND',
+            status: 'AMBIGUOUS',
+            externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+            commercialRunId: null,
+            failureCode: execution.failureCode,
+            startedAt: execution.startedAt,
+            completedAt: execution.completedAt,
+          },
+          data: { status: 'BLOCKED' },
+        });
+      if (executionUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const targetUpdated = await client.manualPublicationTarget.updateMany({
+        where: {
+          id: target.id,
+          requestId: input.requestId,
+          candidateId: target.candidateId,
+          runId: null,
+          dispatchId: null,
+          outboxId: null,
+          status: 'AMBIGUOUS',
+          blockedReason: target.blockedReason,
+          investigationRequired: true,
+        },
+        data: { status: 'BLOCKED', investigationRequired: false },
+      });
+      if (targetUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const requestUpdated = await client.manualPublicationRequest.updateMany({
+        where: {
+          id: request.id,
+          mode: 'SEND',
+          productId: request.productId,
+          requestedSnapshotId: request.requestedSnapshotId,
+          requestedSnapshotRevision: request.requestedSnapshotRevision,
+          requestedSnapshotFingerprint: request.requestedSnapshotFingerprint,
+          status: 'AMBIGUOUS',
+          completedAt: request.completedAt,
+          processingOwnerId: null,
+          processingLeaseExpiresAt: null,
+        },
+        data: {
+          status: nextRequestStatus,
+          completedAt: nextCompletedAt,
+        },
+      });
+      if (requestUpdated.count !== 1) {
+        throw new ManualPublicationRecoveryCasConflictError();
+      }
+
+      const recoveredRaw = await loadManualPublicationRequest(client, {
+        id: request.id,
+      });
+      if (!recoveredRaw) throw new ManualPublicationRecoveryCasConflictError();
+      return {
+        outcome: 'RECONCILED' as const,
+        request: mapManualPublicationRequest({ ...recoveredRaw }),
+        writes: 4 as const,
+      };
+    };
+
+    try {
+      return await this.prisma.$transaction(reconcile, {
+        isolationLevel: 'Serializable',
+      });
+    } catch (error) {
+      if (
+        !(error instanceof ManualPublicationRecoveryCasConflictError) &&
+        !isTransactionConflictError(error)
+      ) {
+        throw error;
+      }
+      try {
+        const state = await readManualPublicationRecoveryState(this.prisma, input);
+        if (state && safePreProviderReplayMatches(state, input)) {
+          return {
+            outcome: 'ALREADY_RECONCILED',
+            request: state.request,
+            writes: 0,
+          };
+        }
+      } catch {
+        // The original CAS/Serializable conflict remains authoritative.
+      }
+      throw new AppError(
+        'O recovery pre-provider perdeu o CAS durante a reconciliacao',
+        'RECOVERY_CAS_CONFLICT',
+      );
+    }
+  }
+}
+
 const COMMERCIAL_AUTOMATION_SETTINGS_ID = 'commercial-automation';
 
 export class PrismaCommercialAutomationSettingsRepository implements CommercialAutomationSettingsRepository {
@@ -4405,8 +5966,26 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
   }
 }
 
+type CommercialAutomationExecutionSource = {
+  id: unknown;
+  schedulerJobId: unknown;
+  bullMqJobId: unknown;
+  activeKey: unknown;
+  ownerId: unknown;
+  heartbeatAt: unknown;
+  leaseExpiresAt: unknown;
+  mode: unknown;
+  status: unknown;
+  externalStage: unknown;
+  reasons: unknown;
+  commercialRunId: unknown;
+  failureCode: unknown;
+  startedAt: unknown;
+  completedAt: unknown;
+};
+
 const mapCommercialAutomationExecution = (
-  record: Record<string, unknown>,
+  record: Record<string, unknown> | CommercialAutomationExecutionSource,
 ): CommercialAutomationExecutionRecord => ({
   id: record.id as string,
   schedulerJobId: record.schedulerJobId as string,
@@ -4509,6 +6088,16 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       : null;
   }
 
+  async findBySchedulerJobId(schedulerJobId: string) {
+    const record = await this.prisma.commercialAutomationExecution.findFirst({
+      where: { schedulerJobId, bullMqJobId: null },
+      orderBy: { startedAt: 'asc' },
+    });
+    return record
+      ? mapCommercialAutomationExecution(record)
+      : null;
+  }
+
   async start(input: {
     schedulerJobId: string;
     bullMqJobId?: string;
@@ -4539,12 +6128,37 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       });
 
     try {
+      // Manual publication has no schema-level unique key for its logical
+      // scheduler identity. Keep the lookup and create in one Serializable
+      // transaction so a concurrent retry cannot create a second execution
+      // after the first one releases the global active key.
       const started =
         input.expectedScheduleRevision === undefined
-          ? {
-              outcome: 'created' as const,
-              record: await createExecution(this.prisma),
-            }
+          ? !input.bullMqJobId
+            ? await this.prisma.$transaction(
+                async (transaction) => {
+                  const existing =
+                    await transaction.commercialAutomationExecution.findFirst({
+                      where: {
+                        schedulerJobId: input.schedulerJobId,
+                        bullMqJobId: null,
+                      },
+                      orderBy: { startedAt: 'asc' },
+                    });
+                  if (existing) {
+                    return { outcome: 'existing' as const, record: existing };
+                  }
+                  return {
+                    outcome: 'created' as const,
+                    record: await createExecution(transaction),
+                  };
+                },
+                { isolationLevel: 'Serializable' },
+              )
+            : {
+                outcome: 'created' as const,
+                record: await createExecution(this.prisma),
+              }
           : await this.prisma.$transaction(
               async (transaction) => {
                 if (input.bullMqJobId) {
@@ -4597,7 +6211,13 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
         },
       };
     } catch (error) {
-      if (!isUniqueConstraintError(error)) throw error;
+      if (!isUniqueConstraintError(error) && !isTransactionConflictError(error)) {
+        throw error;
+      }
+      if (!input.bullMqJobId) {
+        const existing = await this.findBySchedulerJobId(input.schedulerJobId);
+        if (existing) return { outcome: 'existing' as const, execution: existing };
+      }
       const existing = input.bullMqJobId
         ? await this.findByBullMqJobId(input.bullMqJobId)
         : null;
@@ -4708,6 +6328,42 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     });
     if (updated.count !== 1) this.throwOwnershipLost();
     return this.findExecutionAfterMutation(ownership.executionId);
+  }
+
+  async markQueuedAmbiguous(
+    executionId: string,
+    input: {
+      commercialRunId: string;
+      failureCode: string;
+      completedAt: Date;
+    },
+  ) {
+    const updated =
+      await this.prisma.commercialAutomationExecution.updateMany({
+        where: {
+          id: executionId,
+          status: 'QUEUED',
+          commercialRunId: input.commercialRunId,
+        },
+        data: {
+          activeKey: null,
+          status: 'AMBIGUOUS',
+          failureCode: input.failureCode,
+          completedAt: input.completedAt,
+        },
+      });
+    if (updated.count !== 1) {
+      const current = await this.findById(executionId);
+      if (
+        current?.status === 'AMBIGUOUS' &&
+        current.commercialRunId === input.commercialRunId &&
+        current.failureCode === input.failureCode
+      ) {
+        return current;
+      }
+      this.throwOwnershipLost();
+    }
+    return this.findExecutionAfterMutation(executionId);
   }
 
   async findRecoveryContext(

@@ -18,6 +18,10 @@ import {
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 import { finalizeCommercialPipelineRun } from '../../api/src/commercial-pipeline-run-finalizer';
+import {
+  ManualPublicationLifecycleFinalizer,
+  type ManualPublicationLifecycleFinalizerPort,
+} from '../../api/src/manual-publication-lifecycle-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { ApplicationRepositories } from '../../api/src/application-services';
 import { assertCommercialStickyIdentity } from '../../api/src/commercial-instance-stickiness';
@@ -51,6 +55,10 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
     ApplicationRepositories['commercialDispatchOutboxes'],
     'findByDispatchId'
   >;
+  manualPublicationRequests?: Pick<
+    ApplicationRepositories['manualPublicationRequests'],
+    'finalizeAfterCommercialDispatch'
+  >;
   whatsappInstances?: Pick<
     ApplicationRepositories['whatsappInstances'],
     'findByName'
@@ -76,6 +84,7 @@ type WhatsAppDispatchProcessorBaseOptions = {
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   clock?: () => Date;
   reservationLeaseMilliseconds?: number;
+  manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
 };
 
 export type WhatsAppDispatchProcessorOptions =
@@ -100,6 +109,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   reservationLeaseMilliseconds?: number;
+  manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
 };
 
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
@@ -362,6 +372,52 @@ export const processWhatsAppDispatchJob = async (
 
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  const clock = options.clock ?? (() => new Date());
+  const supportsLifecycleTransactions =
+    !options.prisma || typeof options.prisma.$transaction === 'function';
+  const finalizeAfterCommercialDispatch = supportsLifecycleTransactions
+    ? repositories.manualPublicationRequests?.finalizeAfterCommercialDispatch
+    : undefined;
+  const manualLifecycleFinalizer =
+    options.manualLifecycleFinalizer ??
+    (finalizeAfterCommercialDispatch
+      ? new ManualPublicationLifecycleFinalizer(
+          {
+            finalizeAfterCommercialDispatch:
+              finalizeAfterCommercialDispatch.bind(
+                repositories.manualPublicationRequests,
+              ),
+          },
+          { clock, logger: options.logger },
+        )
+      : undefined);
+  const finalizeManualLifecycle = async (
+    dispatchId: string,
+    providerAlreadyCalled: boolean,
+  ) => {
+    if (!manualLifecycleFinalizer) return;
+    try {
+      await manualLifecycleFinalizer.finalizeAfterDispatch(dispatchId);
+    } catch (error) {
+      options.logger.error(
+        {
+          event: providerAlreadyCalled
+            ? 'manual-publication.lifecycle.finalization.failed-after-send'
+            : 'manual-publication.lifecycle.finalization.failed-after-provider-error',
+          dispatchId,
+          providerAlreadyCalled,
+          providerRetryAllowed: false,
+          requeueAllowed: false,
+          errorType: errorType(error),
+          errorCode: errorCode(error),
+        },
+        providerAlreadyCalled
+          ? 'Manual publication lifecycle finalization failed after dispatch SENT'
+          : 'Manual publication lifecycle finalization failed after provider error',
+      );
+      throw error;
+    }
+  };
   const resolvedProvider = await resolveCommercialDispatchProvider({
     job,
     repositories,
@@ -371,7 +427,7 @@ export const processWhatsAppDispatchJob = async (
   await renewCommercialReservationForDispatch({
     dispatchId: job.data.dispatchId,
     repositories,
-    clock: options.clock ?? (() => new Date()),
+    clock,
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
   });
   const sender = createSenderService({
@@ -420,6 +476,29 @@ export const processWhatsAppDispatchJob = async (
         );
         throw preserveCause(finalizationError, error);
       }
+      if (manualLifecycleFinalizer) {
+        try {
+          await finalizeManualLifecycle(
+            failedDispatch.id,
+            failedDispatch.status !== 'PENDING',
+          );
+        } catch (manualFinalizationError) {
+          options.logger.error(
+            {
+              event:
+                'manual-publication.lifecycle.finalization.failure-path-preserved',
+              dispatchId: failedDispatch.id,
+              senderErrorType: errorType(error),
+              senderErrorCode: errorCode(error),
+              finalizationErrorType: errorType(manualFinalizationError),
+              finalizationErrorCode: errorCode(manualFinalizationError),
+              providerRetryAllowed: false,
+              requeueAllowed: false,
+            },
+            'Manual publication lifecycle finalization failed after provider error',
+          );
+        }
+      }
     }
     throw error;
   }
@@ -430,6 +509,7 @@ export const processWhatsAppDispatchJob = async (
     failed: false,
     logger: options.logger,
   });
+  await finalizeManualLifecycle(dispatch.id, true);
   return dispatch;
 };
 
@@ -450,6 +530,7 @@ export const createWhatsAppDispatchWorker = (
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService,
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
+    manualLifecycleFinalizer: options.manualLifecycleFinalizer,
   };
   const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,

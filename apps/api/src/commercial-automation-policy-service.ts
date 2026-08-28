@@ -348,6 +348,23 @@ export class CommercialAutomationPolicyService {
     return this.buildStatus({ now, settings, ...context });
   }
 
+  async evaluateManualSendSafety(target: CommercialAutomationTarget) {
+    const status = await this.evaluateAutomationReadiness({ target });
+    const schedulingOnly = new Set<CommercialAutomationReason>([
+      'AUTOMATION_DISABLED',
+      'AUTOMATION_PAUSED',
+      'OUTSIDE_ALLOWED_WINDOW',
+    ]);
+    const reasons = status.reasons.filter(
+      (reason) => !schedulingOnly.has(reason),
+    );
+    return {
+      ...status,
+      allowed: reasons.length === 0,
+      reasons,
+    };
+  }
+
   async getScheduleSettings(): Promise<CommercialAutomationScheduleSettings> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
     const settings = await this.dependencies.settings.getOrCreate(now);

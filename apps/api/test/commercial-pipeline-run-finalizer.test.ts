@@ -89,6 +89,7 @@ const build = (
     create: vi.fn(),
     list: vi.fn(),
     findById: vi.fn(),
+    findByExecutionId: vi.fn(),
     findByDispatchId: async (id: string) => (id === 'dispatch-id' ? run : null),
     findExecutionById,
     update,

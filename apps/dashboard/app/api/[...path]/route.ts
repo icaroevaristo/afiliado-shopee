@@ -23,12 +23,18 @@ const READ_PATHS: readonly PathPattern[] = [
   ['whatsapp', 'dispatches'],
   ['whatsapp', 'dispatches', '*'],
   ['whatsapp', 'groups'],
+  ['commercial-publications', 'manual', 'options'],
+  ['commercial-publications', 'manual', '*'],
 ];
 
 const PATCH_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'settings'],
   ['commercial-automation', 'settings', 'schedule'],
   ['commercial', 'campaigns', '*'],
+];
+
+const POST_PATHS: readonly PathPattern[] = [
+  ['commercial-publications', 'manual'],
 ];
 
 const matchesPath = (path: readonly string[], pattern: PathPattern) =>
@@ -38,6 +44,7 @@ const matchesPath = (path: readonly string[], pattern: PathPattern) =>
 const isAllowedPath = (method: string, path: readonly string[]) => {
   if (method === 'GET') return READ_PATHS.some((pattern) => matchesPath(path, pattern));
   if (method === 'PATCH') return PATCH_PATHS.some((pattern) => matchesPath(path, pattern));
+  if (method === 'POST') return POST_PATHS.some((pattern) => matchesPath(path, pattern));
   return false;
 };
 
@@ -198,6 +205,6 @@ const rejectUnsupportedMethod = (request: Request, context: RouteContext) => {
 
 export const GET = proxyRequest;
 export const PATCH = proxyRequest;
-export const POST = rejectUnsupportedMethod;
+export const POST = proxyRequest;
 export const PUT = rejectUnsupportedMethod;
 export const DELETE = rejectUnsupportedMethod;

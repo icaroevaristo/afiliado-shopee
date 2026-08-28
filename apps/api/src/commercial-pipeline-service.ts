@@ -107,6 +107,7 @@ export type CommercialPipelineDryRunResult = {
 
 export type CommercialPromotionCandidatePipelineSelection = {
   executionId: string;
+  existingRunId?: string;
   instanceName?: string | null;
   candidate: Pick<
     CommercialPromotionCandidateRecord,
@@ -126,6 +127,7 @@ export type CommercialPromotionCandidatePipelineSelection = {
     'id' | 'name' | 'fingerprint' | 'assignedInstanceName'
   >;
   campaign: string;
+  manualSelection?: boolean;
   copyPreview: string;
   candidateCount: number;
   eligibleCount: number;
@@ -665,11 +667,15 @@ export class CommercialPipelineService {
       tracking,
     );
     const selectionReasons = [
-      'Candidato selecionado pela fila de promocoes comerciais',
+      input.manualSelection
+        ? 'Produto selecionado manualmente pelo proprietario; ranking nao utilizado'
+        : 'Candidato selecionado pela fila de promocoes comerciais',
       `Politica de score: ${input.candidate.scorePolicyVersion}`,
       `Score final: ${input.candidate.commercialScore}`,
       `Score minimo: ${input.candidate.minimumScoreUsed}`,
-      `Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`,
+      ...(input.manualSelection
+        ? []
+        : [`Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`]),
     ];
     const assignedInstanceName = requireAssignedInstanceName(input.group);
     if (input.instanceName && input.instanceName !== assignedInstanceName) {
@@ -682,20 +688,39 @@ export class CommercialPipelineService {
       this.options.instances,
       assignedInstanceName,
     );
-    const run = await this.options.runs.create({
-      mode: 'DRY_RUN',
-      status: 'STARTED',
-      executionId: input.executionId,
-      instanceName: assignedInstanceName,
-      candidateCount: input.candidateCount,
-      eligibleCount: input.eligibleCount,
-      rejectedCount: input.rejectedCount,
-      rejectionSummary: input.rejectionSummary,
-      selectionReasons: [],
-      plannedSubIds: [],
-      createdAt: startedAt,
-      completedAt: null,
-    });
+    const run = input.existingRunId
+      ? await this.options.runs.findById(input.existingRunId)
+      : await this.options.runs.create({
+          mode: 'DRY_RUN',
+          status: 'STARTED',
+          executionId: input.executionId,
+          instanceName: assignedInstanceName,
+          candidateCount: input.candidateCount,
+          eligibleCount: input.eligibleCount,
+          rejectedCount: input.rejectedCount,
+          rejectionSummary: input.rejectionSummary,
+          selectionReasons: [],
+          plannedSubIds: [],
+          createdAt: startedAt,
+          completedAt: null,
+        });
+    if (
+      !run ||
+      run.id !== (input.existingRunId ?? run.id) ||
+      run.mode !== 'DRY_RUN' ||
+      !['STARTED', 'FAILED'].includes(run.status) ||
+      run.executionId !== input.executionId ||
+      run.confirmedAt ||
+      run.dispatchId ||
+      run.jobId ||
+      run.finalStatus ||
+      run.investigationRequired
+    ) {
+      throw new AppError(
+        'Run comercial existente nao pode ser recuperado com seguranca',
+        'COMMERCIAL_PIPELINE_RUN_RECOVERY_CONFLICT',
+      );
+    }
 
     try {
       await this.options.runs.update(run.id, {

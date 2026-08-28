@@ -59,6 +59,12 @@ export type CommercialPipelineConfirmationResult = {
 
 export type CommercialPipelineConfirmationOptions = {
   existingGeneratedCopyId?: string;
+  manual?: boolean;
+  /**
+   * The manual entrypoint persists confirmation first, establishes execution
+   * ownership as QUEUED, and only then publishes the deterministic outbox job.
+   */
+  deferPublication?: boolean;
 };
 
 export type CommercialPipelineConfirmationServiceOptions = {
@@ -80,7 +86,10 @@ const changed = (message: string, code: string): never => {
   throw new AppError(message, code);
 };
 
-const assertEnvironment = (environment: CommercialConfirmationEnvironment) => {
+const assertEnvironment = (
+  environment: CommercialConfirmationEnvironment,
+  options: { manual?: boolean } = {},
+) => {
   if (!environment.groupSendEnabled) {
     changed(
       'Envio comercial para grupos esta desativado',
@@ -93,7 +102,7 @@ const assertEnvironment = (environment: CommercialConfirmationEnvironment) => {
       'COMMERCIAL_SAFE_MODE_REQUIRED',
     );
   }
-  if (environment.schedulerEnabled) {
+  if (environment.schedulerEnabled && !options.manual) {
     changed(
       'Scheduler deve permanecer desativado',
       'COMMERCIAL_SCHEDULER_BLOCKED',
@@ -172,9 +181,15 @@ export class CommercialPipelineConfirmationService {
         'COMMERCIAL_CONFIRMATION_INVALID',
       );
     }
-    assertEnvironment(this.options.environment);
+    assertEnvironment(this.options.environment, { manual: options.manual });
     const existingGeneratedCopyId = options.existingGeneratedCopyId;
     const hasExistingGeneratedCopy = existingGeneratedCopyId !== undefined;
+    if (options.manual && !hasExistingGeneratedCopy) {
+      changed(
+        'Publicacao manual exige copy vinculada ao candidate',
+        'MANUAL_PUBLICATION_CANDIDATE_COPY_REQUIRED',
+      );
+    }
     if (existingGeneratedCopyId !== undefined && !existingGeneratedCopyId.trim()) {
       changed(
         'Copy candidate-scoped invalida',
@@ -191,6 +206,7 @@ export class CommercialPipelineConfirmationService {
       if (
         !product ||
         !['MOCK', 'MANUAL', 'OFFICIAL'].includes(product.source) ||
+        (options.manual && product.source !== 'OFFICIAL') ||
         commercialProductRejections(product, this.clock()).length > 0 ||
         product.productName !== run.productName ||
         product.price !== run.productPrice ||
@@ -343,14 +359,20 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_RUN_ALREADY_CONFIRMED',
         );
       }
-      await this.options.publisher.publish(outbox.id);
+      if (!options.deferPublication) {
+        await this.options.publisher.publish(outbox.id);
+      }
       this.options.logger.info(
         {
-          event: 'commercial-pipeline.confirmed.queued',
+          event: options.deferPublication
+            ? 'commercial-pipeline.confirmed.pending-publication'
+            : 'commercial-pipeline.confirmed.queued',
           runId: run.id,
           groupFingerprint: group.fingerprint,
         },
-        'Commercial pipeline confirmation queued',
+        options.deferPublication
+          ? 'Commercial pipeline confirmation awaiting publication'
+          : 'Commercial pipeline confirmation queued',
       );
       return {
         runId: run.id,
@@ -404,5 +426,9 @@ export class CommercialPipelineConfirmationService {
       'COMMERCIAL_DISPATCH_FAILED',
       this.clock(),
     );
+  }
+
+  async publishOutbox(outboxId: string) {
+    return this.options.publisher.publish(outboxId);
   }
 }

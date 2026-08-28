@@ -113,6 +113,15 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
     return execution;
   }
 
+  async findBySchedulerJobId(schedulerJobId: string) {
+    return (
+      this.records.find(
+        (record) =>
+          record.schedulerJobId === schedulerJobId && record.bullMqJobId === null,
+      ) ?? null
+    );
+  }
+
   async heartbeat(
     ownership: { executionId: string; ownerId: string },
     input: { heartbeatAt: Date; leaseExpiresAt: Date },
@@ -187,6 +196,29 @@ class MemoryExecutions implements CommercialAutomationExecutionRepository {
       activeKey: null,
     };
     return this.records[index];
+  }
+
+  async markQueuedAmbiguous(
+    executionId: string,
+    input: {
+      commercialRunId: string;
+      failureCode: string;
+      completedAt: Date;
+    },
+  ) {
+    const record = this.records.find((candidate) => candidate.id === executionId);
+    if (
+      !record ||
+      record.status !== 'QUEUED' ||
+      record.commercialRunId !== input.commercialRunId
+    ) {
+      throw new AppError('ownership lost', COMMERCIAL_EXECUTION_OWNERSHIP_LOST);
+    }
+    record.activeKey = null;
+    record.status = 'AMBIGUOUS';
+    record.failureCode = input.failureCode;
+    record.completedAt = input.completedAt;
+    return record;
   }
 
   async list() {

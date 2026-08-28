@@ -7,8 +7,11 @@ import {
   JOB_NAMES,
   type WhatsAppDispatchJob,
 } from '@shopee-auto-affiliate-ai/queue';
-import type { WhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
-import { fingerprintWhatsAppGroupId } from '@shopee-auto-affiliate-ai/providers';
+import {
+  fingerprintWhatsAppGroupId,
+  WhatsAppSendError,
+  type WhatsAppProvider,
+} from '@shopee-auto-affiliate-ai/providers';
 import type { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type { Job } from 'bullmq';
@@ -319,6 +322,7 @@ const createHandoffRepositories = (input: {
       update: vi.fn(),
       list: vi.fn(),
       findById: vi.fn(),
+      findByExecutionId: vi.fn(),
       findByDispatchId: vi.fn().mockResolvedValue(run),
       finalizeByDispatchId: vi.fn().mockResolvedValue({
         kind: 'SENT',
@@ -419,6 +423,7 @@ describe('processWhatsAppDispatchJob', () => {
         update: vi.fn(),
         list: vi.fn(),
         findById: vi.fn(),
+        findByExecutionId: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
         finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
@@ -658,6 +663,7 @@ describe('processWhatsAppDispatchJob', () => {
         update: vi.fn(),
         list: vi.fn(),
         findById: vi.fn(),
+        findByExecutionId: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
         finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
@@ -711,6 +717,7 @@ describe('processWhatsAppDispatchJob', () => {
         update: vi.fn(),
         list: vi.fn(),
         findById: vi.fn(),
+        findByExecutionId: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
         finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
@@ -782,6 +789,7 @@ describe('processWhatsAppDispatchJob', () => {
         update: vi.fn(),
         list: vi.fn(),
         findById: vi.fn(),
+        findByExecutionId: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
         finalizeByDispatchId: vi.fn().mockResolvedValue(null),
       },
@@ -852,6 +860,7 @@ describe('processWhatsAppDispatchJob', () => {
         update: vi.fn(),
         list: vi.fn(),
         findById: vi.fn(),
+        findByExecutionId: vi.fn(),
         findByDispatchId: vi.fn().mockResolvedValue(null),
         finalizeByDispatchId: vi.fn().mockRejectedValue(finalizationError),
       },
@@ -1432,5 +1441,229 @@ describe('processWhatsAppDispatchJob', () => {
     expect(renewAttempt).not.toHaveBeenCalled();
     expect(provider.beginRun).not.toHaveBeenCalled();
     expect(provider.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('finaliza o lifecycle manual somente depois da finalizacao comercial', async () => {
+    const events: string[] = [];
+    const dispatch = {
+      ...commercialDispatch,
+      id: 'dispatch-manual-finalization',
+      generatedCopy: {
+        ...commercialDispatch.generatedCopy,
+        createdFromCandidateId: 'candidate-123',
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch, events });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(() => events.push('begin')),
+      sendMessage: vi.fn(async () => {
+        events.push('send');
+        return {
+          status: 'sent' as const,
+          externalMessageId: 'external-manual-finalization',
+          sentAt: handoffNow,
+        };
+      }),
+    };
+    const manualLifecycleFinalizer = {
+      finalizeAfterDispatch: vi.fn(async () => {
+        events.push('manual-finalize');
+        return {
+          outcome: 'FINALIZED' as const,
+          requestId: 'manual-request-1',
+          targetId: 'manual-target-1',
+          targetStatus: 'SENT' as const,
+          requestStatus: 'COMPLETED' as const,
+          writes: 2,
+        };
+      }),
+    };
+
+    await processWhatsAppDispatchJob(
+      {
+        id: 'job-manual-finalization',
+        name: JOB_NAMES.whatsappDispatch,
+        data: { dispatchId: dispatch.id, instanceName: 'instance' },
+      },
+      {
+        repositories,
+        whatsAppProvider: provider,
+        whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+        logger: { info: vi.fn(), error: vi.fn() },
+        groupSendPolicy: commercialGroupSendPolicy(),
+        draftService: {
+          createDraft: vi.fn().mockReturnValue({
+            candidateId: 'candidate-123',
+            generatedCopyId: 'copy-123',
+            caption: 'draft text',
+            deliveryMode: 'TEXT',
+            warnings: [],
+          }),
+        },
+        clock: () => handoffNow,
+        reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+        manualLifecycleFinalizer,
+      },
+    );
+
+    expect(events).toEqual([
+      'renew',
+      'begin',
+      'mark',
+      'send',
+      'manual-finalize',
+    ]);
+    expect(
+      manualLifecycleFinalizer.finalizeAfterDispatch,
+    ).toHaveBeenCalledOnce();
+    expect(manualLifecycleFinalizer.finalizeAfterDispatch).toHaveBeenCalledWith(
+      dispatch.id,
+    );
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
+  });
+
+  it('finaliza lifecycle manual apos falha segura sem repetir o provider', async () => {
+    const dispatch = {
+      ...commercialDispatch,
+      id: 'dispatch-manual-safe-failure',
+      generatedCopy: {
+        ...commercialDispatch.generatedCopy,
+        createdFromCandidateId: 'candidate-123',
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn().mockRejectedValue(
+        new WhatsAppSendError(
+          'blocked before request',
+          'WHATSAPP_PROVIDER_BLOCKED',
+          { deliveryMayHaveStarted: false },
+        ),
+      ),
+    };
+    const manualLifecycleFinalizer = {
+      finalizeAfterDispatch: vi.fn().mockResolvedValue({
+        outcome: 'FINALIZED' as const,
+        requestId: 'manual-request-1',
+        targetId: 'manual-target-1',
+        targetStatus: 'FAILED' as const,
+        requestStatus: 'FAILED' as const,
+        writes: 2,
+      }),
+    };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-manual-safe-failure',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: dispatch.id, instanceName: 'instance' },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger: { info: vi.fn(), error: vi.fn() },
+          groupSendPolicy: commercialGroupSendPolicy(),
+          draftService: {
+            createDraft: vi.fn().mockReturnValue({
+              candidateId: 'candidate-123',
+              generatedCopyId: 'copy-123',
+              caption: 'draft text',
+              deliveryMode: 'TEXT',
+              warnings: [],
+            }),
+          },
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+          manualLifecycleFinalizer,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'WHATSAPP_PROVIDER_BLOCKED' });
+
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markFailed).toHaveBeenCalledOnce();
+    expect(
+      repositories.commercialRuns.finalizeByDispatchId,
+    ).toHaveBeenCalledOnce();
+    expect(
+      manualLifecycleFinalizer.finalizeAfterDispatch,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it('não repete provider quando o finalizer manual falha depois de SENT', async () => {
+    const dispatch = {
+      ...commercialDispatch,
+      id: 'dispatch-manual-finalization-failure',
+      generatedCopy: {
+        ...commercialDispatch.generatedCopy,
+        createdFromCandidateId: 'candidate-123',
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue({
+        status: 'sent' as const,
+        externalMessageId: 'external-manual-finalization-failure',
+        sentAt: handoffNow,
+      }),
+    };
+    const finalizerError = new Error('manual lifecycle unavailable');
+    const manualLifecycleFinalizer = {
+      finalizeAfterDispatch: vi.fn().mockRejectedValue(finalizerError),
+    };
+    const logger = { info: vi.fn(), error: vi.fn() };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-manual-finalization-failure',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: dispatch.id, instanceName: 'instance' },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger,
+          groupSendPolicy: commercialGroupSendPolicy(),
+          draftService: {
+            createDraft: vi.fn().mockReturnValue({
+              candidateId: 'candidate-123',
+              generatedCopyId: 'copy-123',
+              caption: 'draft text',
+              deliveryMode: 'TEXT',
+              warnings: [],
+            }),
+          },
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+          manualLifecycleFinalizer,
+        },
+      ),
+    ).rejects.toBe(finalizerError);
+
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markFailed).not.toHaveBeenCalled();
+    expect(
+      repositories.commercialRuns.finalizeByDispatchId,
+    ).toHaveBeenCalledOnce();
+    expect(
+      manualLifecycleFinalizer.finalizeAfterDispatch,
+    ).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'manual-publication.lifecycle.finalization.failed-after-send',
+        dispatchId: dispatch.id,
+        providerAlreadyCalled: true,
+        providerRetryAllowed: false,
+        requeueAllowed: false,
+      }),
+      expect.any(String),
+    );
   });
 });

@@ -122,6 +122,10 @@ class MemoryRuns implements CommercialPipelineRunRepository {
     return this.records.find((record) => record.id === id) ?? null;
   }
 
+  async findByExecutionId(executionId: string) {
+    return this.records.find((record) => record.executionId === executionId) ?? null;
+  }
+
   async findByDispatchId(dispatchId: string) {
     return (
       this.records.find((record) => record.dispatchId === dispatchId) ?? null
@@ -322,6 +326,25 @@ describe('CommercialPipelineConfirmationService', () => {
       jobId: ids.jobId,
       finalStatus: 'PENDING',
     });
+    expect(state.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it('permite ao entrypoint manual adiar a publicacao ate concluir sua ownership', async () => {
+    const state = build({ currentOffer: offer({ source: 'OFFICIAL' }) });
+    const result = await state.service.confirm(
+      'dry-run-id',
+      COMMERCIAL_CONFIRMATION_TOKEN,
+      {
+        manual: true,
+        existingGeneratedCopyId: 'manual-copy-1',
+        deferPublication: true,
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'queued', messageWasSent: false });
+    expect(state.outboxes.records[0]).toMatchObject({ status: 'PENDING' });
+    expect(state.enqueue).not.toHaveBeenCalled();
+    await state.service.publishOutbox(commercialConfirmationIds('dry-run-id').outboxId);
     expect(state.enqueue).toHaveBeenCalledOnce();
   });
 

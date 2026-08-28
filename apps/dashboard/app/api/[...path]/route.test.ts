@@ -137,6 +137,43 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('encaminha somente o POST de publicacao manual autorizado', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'COMPLETED' }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await POST(
+      new Request('http://dashboard.local/api/commercial-publications/manual', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ productId: 'offer-1' }),
+      }),
+      { params: Promise.resolve({ path: ['commercial-publications', 'manual'] }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'http://127.0.0.1:3334/commercial-publications/manual',
+    );
+    expect(fetchMock.mock.calls[1][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
+    );
+  });
+
   it('bloqueia PUT sem chamar o upstream', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

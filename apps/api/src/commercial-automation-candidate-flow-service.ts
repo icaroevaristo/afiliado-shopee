@@ -73,6 +73,9 @@ export type CommercialAutomationCandidateFlowResult = {
 
 export type CommercialAutomationCandidatePreparationOptions = {
   executionId: string;
+  existingRunId?: string;
+  manualSelection?: boolean;
+  beforeExternalCopyGeneration?: () => Promise<void>;
   miningReport?: Pick<
     CommercialPromotionMiningReport,
     'rejectionSummary'
@@ -159,7 +162,8 @@ type CandidateFlowOptions = {
     CommercialPromotionCopyRepository,
     'loadContext' | 'findCopyForCandidate'
   >;
-  mining: Pick<CommercialPromotionMiningService, 'mine'>;
+  mining: Pick<CommercialPromotionMiningService, 'mine'> &
+    Partial<Pick<CommercialPromotionMiningService, 'selectManualCandidate'>>;
   copyGeneration: Pick<
     CommercialPromotionCopyGenerationService,
     'preview' | 'generate' | 'findCopy'
@@ -899,6 +903,7 @@ export class CommercialAutomationCandidateFlowService {
     const { group, campaign } = await this.resolveTarget(selection.target);
     if (selection.candidateStatus === 'QUEUED') {
       await this.loadSelectedQueuedCandidate(selection, campaign, group);
+      await options.beforeExternalCopyGeneration?.();
       await this.options.copyGeneration.generate(
         selection.candidateId,
         COMMERCIAL_AI_COPY_CONFIRMATION,
@@ -940,8 +945,10 @@ export class CommercialAutomationCandidateFlowService {
       },
       group,
       executionId: options.executionId,
+      existingRunId: options.existingRunId,
       instanceName: requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
+      manualSelection: options.manualSelection ?? false,
       copyPreview: draft.caption,
       candidateCount: selection.queue.candidateCount,
       eligibleCount: selection.queue.eligibleCount,
@@ -971,6 +978,47 @@ export class CommercialAutomationCandidateFlowService {
       copyPreview: draft.caption,
       pipeline,
     };
+  }
+
+  async prepareManual(
+    productId: string,
+    target: CommercialAutomationTarget,
+    options: Pick<
+      CommercialAutomationCandidatePreparationOptions,
+      'executionId' | 'existingRunId' | 'beforeExternalCopyGeneration'
+    >,
+  ): Promise<CommercialAutomationCandidateFlowResult> {
+    if (!this.options.mining.selectManualCandidate) {
+      throw appError(
+        'Selecao manual de candidate indisponivel',
+        'MANUAL_PUBLICATION_CANDIDATE_UNAVAILABLE',
+      );
+    }
+    const candidate = await this.options.mining.selectManualCandidate({
+      campaignId: target.campaignId,
+      productId,
+      logicalGroupFingerprint: target.logicalGroupFingerprint,
+    });
+    if (candidate.status !== 'QUEUED' && candidate.status !== 'COPY_READY') {
+      throw appError(
+        'Candidate manual nao esta pronto para preparacao',
+        'MANUAL_PUBLICATION_CANDIDATE_NOT_READY',
+      );
+    }
+    return this.prepare(
+      {
+        target,
+        candidateId: candidate.id,
+        candidateStatus: candidate.status,
+        queue: { candidateCount: 1, eligibleCount: 1, rejectedCount: 0 },
+      },
+      {
+        executionId: options.executionId,
+        existingRunId: options.existingRunId,
+        manualSelection: true,
+        beforeExternalCopyGeneration: options.beforeExternalCopyGeneration,
+      },
+    );
   }
 
   async revalidate(input: CommercialAutomationCandidateRevalidation) {

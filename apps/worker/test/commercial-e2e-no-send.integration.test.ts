@@ -927,6 +927,7 @@ describe('Phase 9 E2E local sem SEND', () => {
       }),
       list: vi.fn(),
       findById: vi.fn(async (id) => (id === run.id ? run : null)),
+      findByExecutionId: vi.fn(async (id) => (id === run.id ? run : null)),
       findByDispatchId: vi.fn(async (id) =>
         id === (dispatch?.id ?? 'dispatch-1') ? run : null,
       ),

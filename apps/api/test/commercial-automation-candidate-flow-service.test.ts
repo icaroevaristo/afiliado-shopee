@@ -6,6 +6,7 @@ import {
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
+import type { CommercialPromotionMiningService } from '../src/commercial-promotion-mining-service';
 import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-service';
 import type {
   CommercialGroupCampaignRecord,
@@ -270,11 +271,15 @@ const pipelineResult = (): CommercialPipelineDryRunResult => ({
   messageWillBeSent: false,
 });
 
+type CandidateFlowMining = Pick<CommercialPromotionMiningService, 'mine'> &
+  Partial<Pick<CommercialPromotionMiningService, 'selectManualCandidate'>>;
+
 const createSubject = (input: {
   candidate?: Partial<CommercialPromotionCandidateRecord>;
   product?: Partial<CommercialPromotionCopyContext['product']>;
   campaign?: Partial<CommercialGroupCampaignRecord>;
   group?: Partial<WhatsAppGroupRecord>;
+  mining?: CandidateFlowMining;
   useListAll?: boolean;
 } = {}) => {
   let currentCandidate = candidateRecord(input.candidate);
@@ -375,10 +380,11 @@ const createSubject = (input: {
       });
       return undefined;
   });
-  const mining = {
+  const defaultMining = {
     mine: vi.fn(),
   };
-  mining.mine.mockResolvedValue({ rejectionSummary: {} });
+  defaultMining.mine.mockResolvedValue({ rejectionSummary: {} });
+  const mining = input.mining ?? defaultMining;
   const deliveryHistory = {
     wasProductSentToGroup: vi.fn<
       (productId: string, groupId: string) => Promise<boolean>
@@ -593,6 +599,109 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(result.generatedCopyId).toBe('copy-1');
     expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
     expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+  });
+
+  it('executa o callback do marker imediatamente antes de gerar copy para QUEUED', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const events: string[] = [];
+    subject.copyGeneration.generate.mockImplementation(async () => {
+      events.push('copyGenerate');
+      subject.setCandidate({ status: 'COPY_READY', generatedCopyId: 'copy-1' });
+    });
+
+    await subject.service.prepare(selection(subject.target, 'QUEUED'), {
+      ...preparationOptions,
+      beforeExternalCopyGeneration: async () => {
+        events.push('beforeExternalMarker');
+        events.push('externalMarked');
+      },
+    });
+
+    expect(events).toEqual([
+      'beforeExternalMarker',
+      'externalMarked',
+      'copyGenerate',
+    ]);
+    expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+  });
+
+  it('preserva o receiver do selector manual durante o preparo de candidate QUEUED', async () => {
+    let receiverPreserved = false;
+    const mining = {
+      receiverToken: 'candidate-mining',
+      mine: vi.fn(async () => {
+        throw new Error('mine nao deve ser chamado');
+      }),
+      async selectManualCandidate(input: {
+        campaignId: string;
+        productId: string;
+        logicalGroupFingerprint: string;
+      }) {
+        receiverPreserved = this.receiverToken === 'candidate-mining';
+        expect(input).toEqual({
+          campaignId: 'campaign-1',
+          productId: 'product-1',
+          logicalGroupFingerprint: GROUP_FINGERPRINT,
+        });
+        return candidateRecord({
+          status: 'QUEUED',
+          generatedCopyId: null,
+        });
+      },
+    };
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+      mining,
+    });
+    const events: string[] = [];
+    subject.copyGeneration.generate.mockImplementation(async () => {
+      events.push('generate');
+      subject.setCandidate({ status: 'COPY_READY', generatedCopyId: 'copy-1' });
+    });
+
+    await subject.service.prepareManual('product-1', subject.target, {
+      executionId: 'execution-1',
+      beforeExternalCopyGeneration: async () => {
+        events.push('marker');
+      },
+    });
+
+    expect(receiverPreserved).toBe(true);
+    expect(events).toEqual(['marker', 'generate']);
+  });
+
+  it('nao chama generate quando o callback do marker falha', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const markerFailure = new Error('marker unavailable');
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED'), {
+        ...preparationOptions,
+        beforeExternalCopyGeneration: async () => {
+          throw markerFailure;
+        },
+      }),
+    ).rejects.toBe(markerFailure);
+
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('ignora o callback do marker e generate quando o candidato ja esta COPY_READY', async () => {
+    const subject = createSubject();
+    const beforeExternalCopyGeneration = vi.fn(async () => undefined);
+
+    await subject.service.prepare(selection(subject.target), {
+      ...preparationOptions,
+      beforeExternalCopyGeneration,
+    });
+
+    expect(beforeExternalCopyGeneration).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
   });
 
   it('faz preflight de QUEUED somente com leituras antes de minerar ou chamar IA', async () => {

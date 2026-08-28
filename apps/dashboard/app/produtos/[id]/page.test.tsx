@@ -5,6 +5,7 @@ import ProductDetailPage from './page';
 
 const detailMock = vi.fn();
 const categoriesMock = vi.fn();
+const manualOptionsMock = vi.fn();
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'offer-1' }),
@@ -13,6 +14,9 @@ vi.mock('next/navigation', () => ({
 vi.mock('../../../lib/api', () => ({
   getShopeeOffer: (...args: unknown[]) => detailMock(...args),
   listShopeeCategories: (...args: unknown[]) => categoriesMock(...args),
+  getManualPublicationOptions: (...args: unknown[]) => manualOptionsMock(...args),
+  createManualPublication: vi.fn(),
+  getManualPublication: vi.fn(),
 }));
 
 const detail = {
@@ -141,10 +145,40 @@ beforeEach(() => {
     ],
     hierarchyStatus: 'NOT_AVAILABLE_FROM_CURRENT_PROVIDER_CONTRACT',
   });
+  manualOptionsMock.mockReset().mockResolvedValue({
+    product: {
+      id: 'offer-1',
+      name: 'Produto oficial',
+      source: 'OFFICIAL',
+      price: '99.90',
+      affiliateLinkPresent: true,
+      available: true,
+      snapshot: {
+        id: 'snapshot-2',
+        revision: 2,
+        fingerprint: 'fingerprint-current',
+        capturedAt: '2026-08-24T00:00:00.000Z',
+      },
+    },
+    candidate: { available: true, copyReady: false },
+    groups: [
+      {
+        destinationId: 'destination-1',
+        displayName: 'Grupo oficial',
+        fingerprint: 'group-fingerprint',
+        campaignId: 'campaign-1',
+        assignedInstanceName: 'instance-1',
+        eligible: true,
+        blockers: [],
+        copyStatus: 'AVAILABLE',
+        draftPreview: null,
+      },
+    ],
+  });
 });
 
 describe('ProductDetailPage', () => {
-  it('exibe histórico e snapshots sem introduzir qualquer ação de envio', async () => {
+  it('exibe histórico, snapshots e a ação manual somente para oferta OFFICIAL', async () => {
     const screen = await render(<ProductDetailPage />);
 
     expect(screen.container.textContent).toContain('Produto oficial');
@@ -153,7 +187,9 @@ describe('ProductDetailPage', () => {
     expect(screen.container.textContent).toContain('Grupo oficial');
     expect(screen.container.textContent).toContain('Revisão 2');
     expect(screen.container.textContent).toContain('Ofertas Relâmpago: não suportado');
-    expect(screen.container.textContent).not.toContain('Enviar');
+    expect(screen.container.textContent).toContain('Enviar publicacao manual');
+    expect(screen.container.textContent).toContain('Somente OFFICIAL');
+    expect(manualOptionsMock).toHaveBeenCalledWith('offer-1');
     expect(detailMock).toHaveBeenCalledWith(
       'offer-1',
       expect.objectContaining({ dispatchPage: 1, snapshotPage: 1 }),
