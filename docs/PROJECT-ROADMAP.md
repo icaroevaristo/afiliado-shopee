@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `68dee99eebbde03d78e881fd55d5675a974b3dd3`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25 e Fase 17 certificada como concluída em 2026-08-28.
+> Estado auditado contra `main` em `27aac26a59434cd1dbc0cdeb55c733d814a397ed`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25, Fase 17 certificada como concluída em 2026-08-28 e Fase 18 certificada como concluída em 2026-08-28.
 
 ## 1. Objetivo final
 
@@ -63,7 +63,7 @@ Princípios obrigatórios:
 
 ### Estado atual
 
-**Fase 14 DONE para registry, assignments e lifecycle sticky.** A operação multi-instância/multi-grupo real foi certificada com duas instâncias e dois grupos. A configuração temporal e o stagger da Fase 15 foram certificados; pausa individual e administração completa pelo painel permanecem na Fase 18.
+**Fase 14 DONE para registry, assignments e lifecycle sticky.** A operação multi-instância/multi-grupo real foi certificada com duas instâncias e dois grupos. A configuração temporal e o stagger da Fase 15 foram certificados; a administração operacional de instâncias no painel, incluindo active/inactive e pausa individual, foi concluída na Fase 18. Health permanece derivado/sanitizado, com próximo/último envio e blockers disponíveis operacionalmente.
 
 ### Requisito oficial
 
@@ -82,7 +82,7 @@ Uma instância indisponível não pode provocar troca silenciosa para outra se i
 
 ### Estado atual
 
-**Fase 14 DONE para operação multi-grupo real controlada.** Assignments, isolamento de nicho/dedupe/quota/cooldown e dois grupos reais foram certificados. Cadência e stagger da Fase 15 foram certificados; configuração completa pelo painel permanece planejada para a Fase 18.
+**Fase 14 DONE para operação multi-grupo real controlada.** Assignments, isolamento de nicho/dedupe/quota/cooldown e dois grupos reais foram certificados. Cadência e stagger da Fase 15 foram certificados; a administração completa pelo painel foi concluída na Fase 18, incluindo active/inactive, pausa, assignment grupo → instância, CAS e status operacional.
 
 ### Requisito oficial
 
@@ -182,9 +182,9 @@ Não criar endpoint direto de send para o painel e não permitir retry cego apó
 
 ### Estado atual
 
-**Parcial para administração, com envio manual seguro já operacional desde a Fase 17.** Existem páginas para visão geral, envios, fila, produtos, campanhas, automação, WhatsApp, copies e pipelines, e o fluxo manual reutiliza o mesmo pipeline comercial seguro do automático.
+**DONE para os requisitos administrativos da Fase 18, com o envio manual seguro da Fase 17 preservado.** O painel suporta cadastro/listagem de instâncias, active/inactive, pause/unpause, administração de grupos, assignment, horários, intervalos, stagger, limites, hard caps, próximo envio, último envio, blockers, executions/reservations, status de filas, catálogo e envio manual.
 
-`docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Campanhas/grupos, administração completa de instâncias, pausas individuais, configuração operacional completa e blockers/observabilidade administrativa exigida pelo MVP permanecem na Fase 18.
+`docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Health é derivado/sanitizado; `nextSend` vem do planner, `lastSend` de `WhatsAppDispatch=SENT` e blockers são derivados, sem tabelas duplicadas para esses estados.
 
 ### Painel exigido pelo MVP
 
@@ -341,7 +341,7 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Planner e identidade:** scheduler lógico `scheduled-commercial-automation`; jobs carregam identidade do target e revision. A identidade determinística é `scheduleRevision + canonical target identity + scheduledFor -> slotKey/jobId`; ticks sobrepostos e restart/replan convergiram para os mesmos jobs, com `duplicateLogicalJobs=0`.
 - **Cadência, stagger e constraints:** o primeiro slot usa `max(cadenceMinutes, minimumIntervalMinutes)`; o stagger é persistido/configurável, determinístico e distinto do cooldown. O target constraint valida campaign/group/assignment/instance/fingerprint/policy/provenance e ranking pós-sync; target inválido falha fechado, com `silentReroute=0`.
 - **Race de revision:** o commit `8c55e811e5cfe30a641e7203f8d58f9827d072fd` (`fix(scheduler): atomically accept schedule revision`) formaliza `FREEZE_AT_EXECUTION_ACCEPTANCE`; `expectedScheduleRevision` é validado dentro da transação `Serializable` antes da criação da execution. Revision stale cria execution/lifecycle/provider `0`; settings ausente equivale a revision `0`. P1 resolvido.
-- **Dashboard/API:** superfícies mínimas permitem consultar e alterar janela, minimum interval, stagger e cadence/window de campaign sem `.env` ou restart; administração completa de instâncias/grupos permanece na Fase 18.
+- **Dashboard/API:** superfícies mínimas permitem consultar e alterar janela, minimum interval, stagger e cadence/window de campaign sem `.env` ou restart; a administração completa de instâncias e grupos foi concluída na Fase 18.
 - **Regressão offline certificada:** planner `13/13`; API `1170 passed / 9 skipped`; worker `229`; dashboard `78`; database `46`; config `63`; queue `11`; providers `165`; Turbo `15/15`; typecheck `15/15`; build `10/10`; Prisma validate PASS; lint dos arquivos alterados PASS; `git diff --check` PASS. Permaneceram `9` erros de lint repository-wide preexistentes, fora do escopo.
 - **Soak controlado:** `PHASE_15_CONTROLLED_SOAK_SUCCESS=true`; PostgreSQL `51/90`, Redis/BullMQ `13/22`, scheduler writes `2/2`, enqueue attempts `3/8`, unique target jobs `2/4`, executeTick PREVIEW `1/2`; Shopee/OpenAI/Evolution/WhatsApp SEND `0`.
 - **Revision 1 e quotas:** janela `16:05–16:35` em `America/Sao_Paulo`, minimum interval `5`, stagger `7`. Campaign A foi planejada em `2026-08-24T19:05:00Z`, com slotKey `8651e376a7662043fb899456f31ad753a55b363ddea49c2d224e7f36ab9338ae`; Campaign B ficou `GROUP_DAILY_LIMIT_REACHED`, sem reroute e sem slot aceito.
@@ -401,7 +401,7 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13, 14, 15, 16 e 17 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14, 15, 16, 17 e 18 estão certificadas como concluídas.** As Fases 19 e 20 permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
 
 ### Fase 17 — Envio manual seguro pelo mesmo pipeline
 - **Estado:** `DONE`.
@@ -418,9 +418,15 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
 
 ### Fase 18 — Painel de configuração e observabilidade operacional
-- **Estado:** `NOT_STARTED` como administração completa; dashboard observacional é uma base.
+- **Estado:** `DONE`.
 - **Objetivo:** controlar números, grupos, automação, catálogo e blockers sem DB/Redis/BullMQ.
-- **Evidência principal:** console atual possui páginas/polling, mas campanhas/grupos são read-only e faltam controles persistidos do MVP.
+- **Implementação mergeada:** PR #105, `feat(ops): add operational admin dashboard`; feature HEAD `f918d8ea064ab0628a141ace217a13e002482c56`; merge commit `27aac26a59434cd1dbc0cdeb55c733d814a397ed`.
+- **Migration:** `20260828120000_phase18_operational_admin_controls`, SHA-256 `351d4e5140137e955d5d2e6480d884e10cd1b2df009af1992f3f21b941966758`, aplicada com `pending=0`, `unresolved=0`, aditiva, `destructive=false` e `backfill=false`. Adiciona `WhatsAppInstance.paused`, `WhatsAppDestination.paused`, `CommercialAutomationSettings.dailyGlobalLimit` e `dailyGroupLimit`.
+- **Backup certificado:** `phase18-pre-operational-admin-container-20260828-120636435.dump`, `size=176157`, SHA-256 `A963AB0D82B63B1D432DC174F05A1A5A7F459BF03C9003D878597CAB098DF7D7`, formato `PGDMP/custom`, `pg_restore --list=PASS`.
+- **Certificação operacional:** pause/restore de instância e grupo com blockers `INSTANCE_PAUSED` e `GROUP_PAUSED`; assignment same-value com CAS, reroute `0`, fingerprint/sticky preservados e stale CAS `409 OPERATIONAL_CAS_CONFLICT`; limites `1/1` sob hard caps `60/60`, `scheduleRevision` `3→4→5` e restore completo. Writes autorizadas `7/7` (`WhatsAppInstance=2`, `WhatsAppDestination=3`, `CommercialAutomationSettings=2`, `unexpectedWrites=0`).
+- **Observabilidade e segurança:** aggregate read-only com filas, executions, reservations, next/last send e blockers; `nextSend` derivado do planner, `lastSend` de `WhatsAppDispatch=SENT`, health `UNKNOWN` sem prova externa recente; PostgreSQL/RedisWrites do aggregate `0`, `EvolutionHTTP=0`; Bearer auth, proxy server-side, confirmações, CAS, hard caps e redaction preservados. Não foi criado scheduler, fila ou SEND boundary novo.
+- **Validação:** `20/20 PASS`; API `1297 passed / 12 skipped`; Worker `234 passed`; Database `48 passed`; Queue `11 passed`; Dashboard `86 passed`; typecheck `15/15`; lint `10/10`; build `10/10`; Prisma validate/generate PASS; Design Review e `SOL_REVIEW=APPROVED`, P0/P1/P2 `0`, Ship Gate `APPROVED`.
+- **Estado final certificado:** `paused=true`, `activeExecutions=0`, `activeReservations=0`, `ambiguity=0`, `investigationRequired=0`, `pendingDispatches=0`, `pendingOutboxes=0`, filas quiescentes e providers/SEND `0` durante a certificação.
 - **Dependências:** modelos/config APIs das Fases 14–17.
 - **Critério objetivo:** proprietário cadastra/ativa/pausa instâncias e grupos, atribui rotas, configura horários/intervalos/limites/stagger, vê próximo/último envio/blocker e usa catálogo/manual SEND sem shell/DB.
 ### Fase 19 — Recovery/restart e autonomia contínua
@@ -500,5 +506,5 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Categorias reais no painel | DONE | Registry dinâmico com 101 IDs oficiais; nomes/hierarchy ainda indisponíveis |
 | Ofertas Relâmpago confiáveis | EXPLICITLY_UNSUPPORTED | Sem sinal oficial do provider; heurísticas bloqueadas fail-closed |
 | Envio manual seguro | DONE | Fase 17 certificada: painel, pipeline único, Preview/idempotência e SEND real controlado |
-| Painel administrativo | NOT_STARTED | Console atual predominantemente read-only |
+| Painel administrativo | DONE | Fase 18 certificada: instâncias, grupos, assignments, settings, status operacional, catálogo e envio manual |
 | Soak/restart/autonomia | NOT_STARTED | Soak e restart/replan da Fase 15 certificados; autonomia contínua final permanece planejada |
