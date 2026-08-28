@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `39805eee865eec04cc29b944c3ad4ce8704e1be8`; Fase 15 certificada como concluída e Fase 16 certificada como concluída em 2026-08-25.
+> Estado auditado contra `main` em `68dee99eebbde03d78e881fd55d5675a974b3dd3`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25 e Fase 17 certificada como concluída em 2026-08-28.
 
 ## 1. Objetivo final
 
@@ -166,7 +166,7 @@ Antes de implementar a área **OFERTAS RELÂMPAGO**, a integração oficial deve
 
 ### Estado atual
 
-**NOT_STARTED como feature do painel.** `docs/dashboard-design.md` afirma explicitamente que a versão atual não possui ação de SEND manual. CLIs e serviços técnicos de pipeline não equivalem a um fluxo de produto para o proprietário.
+**DONE.** A Fase 17 entregou o envio manual iniciado pelo painel, reutilizando o mesmo pipeline comercial seguro do automático e mantendo um único boundary de SEND.
 
 ### Requisito oficial
 
@@ -401,17 +401,21 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13, 14, 15 e 16 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14, 15, 16 e 17 estão certificadas como concluídas.** As fases restantes permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+
+### Fase 17 — Envio manual seguro pelo mesmo pipeline
+- **Estado:** `DONE`.
+- **Implementação mergeada:** PR #103, feature HEAD `a587349d031f160923dcfd6096987cd1cc8e1923` e merge commit `68dee99eebbde03d78e881fd55d5675a974b3dd3`.
+- **Escopo certificado:** envio manual seguro pelo painel; seleção de produto `OFFICIAL`; seleção de até múltiplos grupos autorizados; reutilização do mesmo pipeline comercial do automático; provenance/snapshot/eligibility; copy/cache/validation; policy/quota/cooldown; dedupe; reservation; dispatch/outbox; Sender/worker existentes; lifecycle/finalizer; idempotência persistente; Preview persistente com zero provider; ambiguity fail-closed; recovery humano seguro pré-provider; nenhum segundo boundary de SEND.
+- **P1s resolvidos:** ownership real de `CommercialAutomationExecution`; external marker somente no boundary externo correto; finalização assíncrona do lifecycle manual pós-worker; GET/status read-only; replay terminal sem writes; `completedAt` preservado.
+- **Evidência operacional certificada em 2026-08-28:** Preview/idempotência em PostgreSQL real; SEND manual real exatamente uma vez; `OpenAI=1`; `Evolution/WhatsApp SEND=1`; `retry=0`; `requeue=0`; `secondSend=0`; request `COMPLETED`; target `SENT`; run `COMPLETED/SENT`; dispatch `SENT` com `attemptCount=1`; candidate `DISPATCHED`; outbox `PUBLISHED`; reservation `0`; ambiguity `0`; duplicatas `0`.
+- **Migrations:** `20260825180000_phase17_manual_publication_requests` e `20260826100000_phase17_manual_publication_preview_mode`, ambas aditivas, aplicadas, `pending=0`, `unresolved=0` e sem backfill requerido.
+- **Validação:** critérios `20/20 PASS`; API `1287 passed / 12 skipped`; Worker `234 passed`; Database `48 passed`; Queue `11 passed`; typecheck `15/15`; lint/build PASS; Prisma validate/generate PASS; `SOL_REVIEW=APPROVED`, P0/P1/P2 = 0.
+- **Critério objetivo preservado:** produto e grupos autorizados atravessam provenance/copy/policy/dedupe/reservation/dispatch/outbox/Sender/finalizer; a idempotency key impede duplicidade; resultados incertos permanecem fail-closed e exigem recovery humano seguro.
+
 ## 12. Fases restantes
 
 As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
-
-### Fase 17 — Envio manual seguro pelo mesmo pipeline
-- **Estado:** `NOT_STARTED`
-- **Objetivo:** permitir publicação iniciada pelo proprietário sem segundo boundary de SEND.
-- **Evidência principal:** dashboard atual proíbe manual SEND; pipeline seguro já existe e deve ser reutilizado.
-- **Dependências:** Fases 13–16 concluídas.
-- **Critério objetivo:** produto/grupos selecionados no painel atravessam provenance/copy/draft/policy/dedupe/reservation/dispatch/outbox/Sender/finalizer; idempotency key impede duplo clique/retry duplicado; ambiguous result bloqueia nova tentativa automática.
 
 ### Fase 18 — Painel de configuração e observabilidade operacional
 - **Estado:** `NOT_STARTED` como administração completa; dashboard observacional é uma base.
@@ -495,6 +499,6 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Catálogo operacional completo | DONE | Catálogo read-only, detalhe, filtros, paginação e histórico certificados |
 | Categorias reais no painel | DONE | Registry dinâmico com 101 IDs oficiais; nomes/hierarchy ainda indisponíveis |
 | Ofertas Relâmpago confiáveis | EXPLICITLY_UNSUPPORTED | Sem sinal oficial do provider; heurísticas bloqueadas fail-closed |
-| Envio manual seguro | NOT_STARTED | Deve reutilizar pipeline atual |
+| Envio manual seguro | DONE | Fase 17 certificada: painel, pipeline único, Preview/idempotência e SEND real controlado |
 | Painel administrativo | NOT_STARTED | Console atual predominantemente read-only |
 | Soak/restart/autonomia | NOT_STARTED | Soak e restart/replan da Fase 15 certificados; autonomia contínua final permanece planejada |
