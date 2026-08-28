@@ -23,6 +23,9 @@ const READ_PATHS: readonly PathPattern[] = [
   ['whatsapp', 'dispatches'],
   ['whatsapp', 'dispatches', '*'],
   ['whatsapp', 'groups'],
+  ['whatsapp', 'groups', 'admin'],
+  ['whatsapp', 'instances'],
+  ['operational-admin'],
   ['commercial-publications', 'manual', 'options'],
   ['commercial-publications', 'manual', '*'],
 ];
@@ -31,10 +34,14 @@ const PATCH_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'settings'],
   ['commercial-automation', 'settings', 'schedule'],
   ['commercial', 'campaigns', '*'],
+  ['whatsapp', 'groups', '*', 'admin'],
+  ['whatsapp', 'instances', '*'],
+  ['commercial-automation', 'settings', 'admin'],
 ];
 
 const POST_PATHS: readonly PathPattern[] = [
   ['commercial-publications', 'manual'],
+  ['whatsapp', 'instances'],
 ];
 
 const matchesPath = (path: readonly string[], pattern: PathPattern) =>
@@ -42,9 +49,12 @@ const matchesPath = (path: readonly string[], pattern: PathPattern) =>
   pattern.every((segment, index) => segment === '*' || segment === path[index]);
 
 const isAllowedPath = (method: string, path: readonly string[]) => {
-  if (method === 'GET') return READ_PATHS.some((pattern) => matchesPath(path, pattern));
-  if (method === 'PATCH') return PATCH_PATHS.some((pattern) => matchesPath(path, pattern));
-  if (method === 'POST') return POST_PATHS.some((pattern) => matchesPath(path, pattern));
+  if (method === 'GET')
+    return READ_PATHS.some((pattern) => matchesPath(path, pattern));
+  if (method === 'PATCH')
+    return PATCH_PATHS.some((pattern) => matchesPath(path, pattern));
+  if (method === 'POST')
+    return POST_PATHS.some((pattern) => matchesPath(path, pattern));
   return false;
 };
 
@@ -145,17 +155,19 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
             ? 'DASHBOARD_API_URL precisa ser configurada no processo do servidor.'
             : errorCode === 'DASHBOARD_API_AUTH_NOT_CONFIGURED'
               ? 'A autenticacao local da API precisa ser configurada no processo do servidor.'
-            : errorCode === 'DASHBOARD_API_TARGET_INCOMPATIBLE'
-              ? 'O destino local nao respondeu como a API operacional.'
-              : errorCode === 'DASHBOARD_API_TARGET_UNAVAILABLE'
-                ? 'A API local configurada esta indisponivel.'
-                : 'O destino local da API nao e valido.',
+              : errorCode === 'DASHBOARD_API_TARGET_INCOMPATIBLE'
+                ? 'O destino local nao respondeu como a API operacional.'
+                : errorCode === 'DASHBOARD_API_TARGET_UNAVAILABLE'
+                  ? 'A API local configurada esta indisponivel.'
+                  : 'O destino local da API nao e valido.',
       },
       { status: 503 },
     );
   }
 
-  const upstreamPath = path.map((segment) => encodeURIComponent(segment)).join('/');
+  const upstreamPath = path
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
   const requestUrl = new URL(request.url);
   const upstreamUrl = `${apiServerUrl}/${upstreamPath}${requestUrl.search}`;
   const headers = new Headers();
@@ -166,7 +178,8 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
   if (contentType) headers.set('content-type', contentType);
   headers.set('authorization', authorization);
 
-  const body = request.method === 'GET' ? undefined : await request.arrayBuffer();
+  const body =
+    request.method === 'GET' ? undefined : await request.arrayBuffer();
 
   let response: Response;
   try {
@@ -188,7 +201,8 @@ const proxyRequest = async (request: Request, context: RouteContext) => {
 
   const responseHeaders = new Headers();
   const responseContentType = response.headers.get('content-type');
-  if (responseContentType) responseHeaders.set('content-type', responseContentType);
+  if (responseContentType)
+    responseHeaders.set('content-type', responseContentType);
 
   return new Response(response.body, {
     status: response.status,

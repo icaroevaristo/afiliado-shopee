@@ -7,6 +7,7 @@ const getStatusMock = vi.fn();
 const getSchedulerMock = vi.fn();
 const getScheduleMock = vi.fn();
 const getPreviewMock = vi.fn();
+const getOperationalAdminMock = vi.fn();
 const pauseMock = vi.fn();
 const resumeMock = vi.fn();
 
@@ -18,6 +19,7 @@ vi.mock('../../lib/api', () => ({
     getScheduleMock(...args),
   getCommercialAutomationSchedulePreview: (...args: unknown[]) =>
     getPreviewMock(...args),
+  getOperationalAdmin: (...args: unknown[]) => getOperationalAdminMock(...args),
   pauseCommercialAutomation: (...args: unknown[]) => pauseMock(...args),
   resumeCommercialAutomation: (...args: unknown[]) => resumeMock(...args),
 }));
@@ -83,6 +85,50 @@ beforeEach(() => {
       logicalGroupFingerprint: 'fingerprint-1',
       instanceName: 'affiliate-bot',
     },
+  });
+  getOperationalAdminMock.mockReset().mockResolvedValue({
+    generatedAt: '2026-08-10T12:00:00.000Z',
+    automation: {
+      paused: false,
+      allowedStartTime: '08:00',
+      allowedEndTime: '23:00',
+      timezone: 'America/Sao_Paulo',
+      minimumIntervalMinutes: 14,
+      staggerMinutes: 5,
+      dailyGlobalLimit: 60,
+      dailyGroupLimit: 60,
+      dailyGlobalLimitOverride: 60,
+      dailyGroupLimitOverride: 60,
+      hardCaps: {
+        dailyGlobalLimit: 60,
+        dailyGroupLimit: 60,
+        maxMessagesPerRun: 1,
+      },
+      scheduleRevision: 0,
+      updatedAt: '2026-08-10T12:00:00.000Z',
+    },
+    nextSendAt: '2026-08-10T12:15:00.000Z',
+    lastSendAt: '2026-08-10T12:00:00.000Z',
+    blockers: [],
+    queues: {
+      productPipeline: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+      whatsappDispatch: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+      commercialAutomation: {
+        waiting: 0,
+        active: 0,
+        delayed: 0,
+        prioritized: 0,
+      },
+    },
+    activeExecutions: 0,
+    activeReservations: 0,
+    ambiguity: 0,
+    investigationRequired: 0,
+    pendingDispatches: 0,
+    pendingOutboxes: 0,
+    scheduler,
+    instances: [],
+    groups: [],
   });
   pauseMock.mockReset();
   resumeMock.mockReset();

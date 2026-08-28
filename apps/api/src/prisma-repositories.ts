@@ -13,6 +13,8 @@ import type {
   CommercialAutomationSettingsRecord,
   CommercialAutomationScheduleUpdate,
   CommercialAutomationSettingsRepository,
+  OperationalStatusCounts,
+  OperationalStatusRepository,
   CommercialDeliveryHistoryRepository,
   CommercialConfirmationPersistenceInput,
   CommercialDispatchOutboxFilters,
@@ -2510,9 +2512,7 @@ export class PrismaCommercialPromotionRepository
     const record = await this.prisma.commercialPromotionCandidate.findUnique({
       where: { campaignId_productId: { campaignId, productId } },
     });
-    return record
-      ? mapCommercialPromotionCandidate({ ...record })
-      : null;
+    return record ? mapCommercialPromotionCandidate({ ...record }) : null;
   }
 
   async ensureManualCandidate(
@@ -2539,7 +2539,12 @@ export class PrismaCommercialPromotionRepository
             }),
             transaction.commercialOfferSnapshot.findUnique({
               where: { id: input.snapshotId },
-              select: { id: true, productId: true, revision: true, fingerprint: true },
+              select: {
+                id: true,
+                productId: true,
+                revision: true,
+                fingerprint: true,
+              },
             }),
             transaction.commercialPromotionCandidate.findUnique({
               where: {
@@ -2568,7 +2573,10 @@ export class PrismaCommercialPromotionRepository
               'MANUAL_PUBLICATION_STATE_CHANGED',
             );
           }
-          if (product.unavailableAt || (product.offerEndsAt && product.offerEndsAt <= input.now)) {
+          if (
+            product.unavailableAt ||
+            (product.offerEndsAt && product.offerEndsAt <= input.now)
+          ) {
             throw new AppError(
               'Produto oficial indisponivel para publicacao manual',
               'MANUAL_PUBLICATION_PRODUCT_INELIGIBLE',
@@ -3867,9 +3875,7 @@ export class PrismaCommercialPipelineRunRepository
     const record = await this.prisma.commercialPipelineRun.findUnique({
       where: { executionId } as never,
     });
-    return record
-      ? mapCommercialPipelineRun({ ...record })
-      : null;
+    return record ? mapCommercialPipelineRun({ ...record }) : null;
   }
 
   async findByDispatchId(
@@ -4448,10 +4454,7 @@ const manualPublicationTargetInclude = {
 
 const manualPublicationRequestInclude = {
   targets: {
-    orderBy: [
-      { logicalGroupFingerprint: 'asc' },
-      { destinationId: 'asc' },
-    ],
+    orderBy: [{ logicalGroupFingerprint: 'asc' }, { destinationId: 'asc' }],
     include: manualPublicationTargetInclude,
   },
 } as const;
@@ -4577,9 +4580,7 @@ const mapManualPublicationRequest = (
   processingLeaseExpiresAt:
     (record.processingLeaseExpiresAt as Date | null) ?? null,
   targets: Array.isArray(record.targets)
-    ? record.targets.map((target) =>
-        mapManualPublicationTarget({ ...target }),
-      )
+    ? record.targets.map((target) => mapManualPublicationTarget({ ...target }))
     : [],
 });
 
@@ -4727,47 +4728,53 @@ const readManualPublicationRecoveryState = async (
         },
       });
 
-  const [campaignReservations, linkedRun, linkedDispatch, linkedOutbox, copyAttempt, generatedCopy] =
-    await Promise.all([
-      client.commercialGroupCampaign.findMany({
-        where: { attemptExecutionId: input.executionId },
-        take: 2,
-        select: {
-          id: true,
-          attemptExecutionId: true,
-          attemptReservedAt: true,
-          attemptLeaseExpiresAt: true,
-        },
-      }),
-      client.commercialPipelineRun.findUnique({
-        where: { executionId: input.executionId },
-        select: { id: true },
-      }),
-      client.whatsAppDispatch.findFirst({
-        where: {
-          productId: request.productId,
-          destinationId: target.destinationId,
-          createdAt: { gte: execution.startedAt },
-        },
-        select: { id: true },
-      }),
-      client.commercialDispatchOutbox.findFirst({
-        where: { commercialRun: { executionId: input.executionId } },
-        select: { id: true },
-      } as never),
-      candidate
-        ? client.commercialCopyGenerationAttempt.findFirst({
-            where: { candidateId: candidate.id },
-            select: { id: true },
-          })
-        : Promise.resolve(null),
-      candidate
-        ? client.generatedCopy.findFirst({
-            where: { createdFromCandidateId: candidate.id },
-            select: { id: true },
-          })
-        : Promise.resolve(null),
-    ]);
+  const [
+    campaignReservations,
+    linkedRun,
+    linkedDispatch,
+    linkedOutbox,
+    copyAttempt,
+    generatedCopy,
+  ] = await Promise.all([
+    client.commercialGroupCampaign.findMany({
+      where: { attemptExecutionId: input.executionId },
+      take: 2,
+      select: {
+        id: true,
+        attemptExecutionId: true,
+        attemptReservedAt: true,
+        attemptLeaseExpiresAt: true,
+      },
+    }),
+    client.commercialPipelineRun.findUnique({
+      where: { executionId: input.executionId },
+      select: { id: true },
+    }),
+    client.whatsAppDispatch.findFirst({
+      where: {
+        productId: request.productId,
+        destinationId: target.destinationId,
+        createdAt: { gte: execution.startedAt },
+      },
+      select: { id: true },
+    }),
+    client.commercialDispatchOutbox.findFirst({
+      where: { commercialRun: { executionId: input.executionId } },
+      select: { id: true },
+    } as never),
+    candidate
+      ? client.commercialCopyGenerationAttempt.findFirst({
+          where: { candidateId: candidate.id },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+    candidate
+      ? client.generatedCopy.findFirst({
+          where: { createdFromCandidateId: candidate.id },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+  ]);
 
   return {
     request,
@@ -4801,7 +4808,10 @@ const safePreProviderReplayMatches = (
     execution.mode !== 'SEND' ||
     execution.status !== 'BLOCKED' ||
     execution.schedulerJobId !==
-      manualPublicationRecoverySchedulerJobId(input.requestId, input.targetId) ||
+      manualPublicationRecoverySchedulerJobId(
+        input.requestId,
+        input.targetId,
+      ) ||
     execution.externalStage !== 'EXTERNAL_MAY_HAVE_STARTED' ||
     execution.commercialRunId !== null ||
     !execution.failureCode ||
@@ -4839,9 +4849,7 @@ const safePreProviderReplayMatches = (
 
 class ManualPublicationRecoveryCasConflictError extends Error {}
 
-export class PrismaManualPublicationRequestRepository
-  implements ManualPublicationRequestRepository
-{
+export class PrismaManualPublicationRequestRepository implements ManualPublicationRequestRepository {
   constructor(private readonly prisma: DatabaseClient) {}
 
   private async assertCurrentState(
@@ -4891,13 +4899,16 @@ export class PrismaManualPublicationRequestRepository
             id: true,
             type: true,
             active: true,
+            paused: true,
             available: true,
             fingerprint: true,
             assignedInstanceName: true,
           },
         }),
         transaction.commercialGroupCampaign.findMany({
-          where: { id: { in: input.targets.map((target) => target.campaignId) } },
+          where: {
+            id: { in: input.targets.map((target) => target.campaignId) },
+          },
           select: {
             id: true,
             logicalGroupFingerprint: true,
@@ -4948,17 +4959,17 @@ export class PrismaManualPublicationRequestRepository
       const instance = instanceByName.get(target.assignedInstanceName);
       return Boolean(
         destination &&
-          destination.type === 'GROUP' &&
-          (input.mode !== 'PREVIEW' ||
-            (destination.active && destination.available)) &&
-          destination.fingerprint === target.logicalGroupFingerprint &&
-          destination.assignedInstanceName === target.assignedInstanceName &&
-          campaign &&
-          campaign.logicalGroupFingerprint === target.logicalGroupFingerprint &&
-          (input.mode !== 'PREVIEW' ||
-            (campaign.active && campaign.niche.active)) &&
-          instance &&
-          (input.mode !== 'PREVIEW' || instance.active),
+        destination.type === 'GROUP' &&
+        (input.mode !== 'PREVIEW' ||
+          (destination.active && destination.available)) &&
+        destination.fingerprint === target.logicalGroupFingerprint &&
+        destination.assignedInstanceName === target.assignedInstanceName &&
+        campaign &&
+        campaign.logicalGroupFingerprint === target.logicalGroupFingerprint &&
+        (input.mode !== 'PREVIEW' ||
+          (campaign.active && campaign.niche.active)) &&
+        instance &&
+        (input.mode !== 'PREVIEW' || instance.active),
       );
     });
     if (!validProduct || !validSnapshot || !validTargets) {
@@ -4969,14 +4980,15 @@ export class PrismaManualPublicationRequestRepository
     }
   }
 
-  async accept(input: ManualPublicationRequestCreateData): Promise<ManualPublicationAcceptance> {
+  async accept(
+    input: ManualPublicationRequestCreateData,
+  ): Promise<ManualPublicationAcceptance> {
     try {
       const record = await this.prisma.$transaction(
         async (transaction) => {
-          const existing = await loadManualPublicationRequest(
-            transaction,
-            { idempotencyKey: input.idempotencyKey },
-          );
+          const existing = await loadManualPublicationRequest(transaction, {
+            idempotencyKey: input.idempotencyKey,
+          });
           if (existing) {
             if (!manualPublicationRequestMatches(existing, input)) {
               throw new AppError(
@@ -5045,18 +5057,14 @@ export class PrismaManualPublicationRequestRepository
 
   async findById(id: string) {
     const record = await loadManualPublicationRequest(this.prisma, { id });
-    return record
-      ? mapManualPublicationRequest({ ...record })
-      : null;
+    return record ? mapManualPublicationRequest({ ...record }) : null;
   }
 
   async findByIdempotencyKey(idempotencyKey: string) {
     const record = await loadManualPublicationRequest(this.prisma, {
       idempotencyKey,
     });
-    return record
-      ? mapManualPublicationRequest({ ...record })
-      : null;
+    return record ? mapManualPublicationRequest({ ...record }) : null;
   }
 
   async claimProcessing(
@@ -5090,11 +5098,7 @@ export class PrismaManualPublicationRequestRepository
     return this.findById(id);
   }
 
-  async renewProcessing(
-    id: string,
-    ownerId: string,
-    leaseExpiresAt: Date,
-  ) {
+  async renewProcessing(id: string, ownerId: string, leaseExpiresAt: Date) {
     const renewed = await this.prisma.manualPublicationRequest.updateMany({
       where: {
         id,
@@ -5120,10 +5124,7 @@ export class PrismaManualPublicationRequestRepository
         where: { id: input.targetId },
         select: { id: true, destinationId: true, status: true },
       });
-      if (
-        !target ||
-        !['ACCEPTED', 'PROCESSING'].includes(target.status)
-      ) {
+      if (!target || !['ACCEPTED', 'PROCESSING'].includes(target.status)) {
         return {
           kind: 'BLOCKED' as const,
           reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
@@ -5148,7 +5149,9 @@ export class PrismaManualPublicationRequestRepository
           transaction.whatsAppDispatch.count({
             where: { ...sentWhere, destinationId: target.destinationId },
           }),
-          transaction.manualPublicationTarget.count({ where: activeWhere } as never),
+          transaction.manualPublicationTarget.count({
+            where: activeWhere,
+          } as never),
           transaction.manualPublicationTarget.count({
             where: { ...activeWhere, destinationId: target.destinationId },
           } as never),
@@ -5608,8 +5611,10 @@ export class PrismaManualPublicationRequestRepository
           item.id === target.id ? ('BLOCKED' as const) : item.status,
         ),
       );
-      const nextCompletedAt = isManualPublicationRequestTerminal(nextRequestStatus)
-        ? request.completedAt ?? input.now
+      const nextCompletedAt = isManualPublicationRequestTerminal(
+        nextRequestStatus,
+      )
+        ? (request.completedAt ?? input.now)
         : null;
 
       const campaignUpdated = await client.commercialGroupCampaign.updateMany({
@@ -5716,7 +5721,10 @@ export class PrismaManualPublicationRequestRepository
         throw error;
       }
       try {
-        const state = await readManualPublicationRecoveryState(this.prisma, input);
+        const state = await readManualPublicationRecoveryState(
+          this.prisma,
+          input,
+        );
         if (state && safePreProviderReplayMatches(state, input)) {
           return {
             outcome: 'ALREADY_RECONCILED',
@@ -5758,6 +5766,8 @@ export class PrismaCommercialAutomationSettingsRepository implements CommercialA
         id: COMMERCIAL_AUTOMATION_SETTINGS_ID,
         paused: true,
         pausedAt: now,
+        dailyGlobalLimit: null,
+        dailyGroupLimit: null,
       },
       update: {},
     });
@@ -5832,6 +5842,111 @@ const ownedCommercialExecutionWhere = (
   activeKey: { not: null },
   leaseExpiresAt: { gt: at },
 });
+
+export class PrismaOperationalStatusRepository implements OperationalStatusRepository {
+  constructor(
+    private readonly prisma: Pick<
+      DatabaseClient,
+      | 'commercialAutomationExecution'
+      | 'commercialGroupCampaign'
+      | 'commercialPipelineRun'
+      | 'whatsAppDispatch'
+      | 'commercialDispatchOutbox'
+      | 'manualPublicationTarget'
+    >,
+  ) {}
+
+  async getCounts(now: Date): Promise<OperationalStatusCounts> {
+    const [
+      activeExecutions,
+      activeReservations,
+      ambiguity,
+      investigationRequired,
+      pendingDispatches,
+      pendingOutboxes,
+    ] = await Promise.all([
+      this.prisma.commercialAutomationExecution.count({
+        where: {
+          status: 'STARTED',
+          activeKey: { not: null },
+          leaseExpiresAt: { gt: now },
+        },
+      }),
+      this.prisma.commercialGroupCampaign.count({
+        where: {
+          attemptExecutionId: { not: null },
+          attemptLeaseExpiresAt: { gt: now },
+        },
+      }),
+      this.prisma.commercialPipelineRun.count({
+        where: {
+          OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+        },
+      }),
+      this.prisma.commercialPipelineRun.count({
+        where: { investigationRequired: true },
+      }),
+      this.prisma.whatsAppDispatch.count({
+        where: { status: { in: ['PENDING', 'PROCESSING'] } },
+      }),
+      this.prisma.commercialDispatchOutbox.count({
+        where: { status: 'PENDING' },
+      }),
+    ]);
+
+    return {
+      activeExecutions,
+      activeReservations,
+      ambiguity,
+      investigationRequired,
+      pendingDispatches,
+      pendingOutboxes,
+    };
+  }
+
+  async hasActiveGroupLifecycle(
+    destinationId: string,
+    now: Date,
+  ): Promise<boolean> {
+    const [dispatches, runs, outboxes, reservations, manualTargets] =
+      await Promise.all([
+        this.prisma.whatsAppDispatch.count({
+          where: {
+            destinationId,
+            status: { in: ['PENDING', 'PROCESSING'] },
+          },
+        }),
+        this.prisma.commercialPipelineRun.count({
+          where: {
+            groupDestinationId: destinationId,
+            status: 'STARTED',
+          },
+        }),
+        this.prisma.commercialDispatchOutbox.count({
+          where: {
+            dispatch: {
+              destinationId,
+              status: { in: ['PENDING', 'PROCESSING'] },
+            },
+          },
+        }),
+        this.prisma.commercialGroupCampaign.count({
+          where: {
+            anchorDestinationId: destinationId,
+            attemptExecutionId: { not: null },
+            attemptLeaseExpiresAt: { gt: now },
+          },
+        }),
+        this.prisma.manualPublicationTarget.count({
+          where: {
+            destinationId,
+            status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+          },
+        }),
+      ]);
+    return dispatches + runs + outboxes + reservations + manualTargets > 0;
+  }
+}
 
 export class PrismaCommercialAutomationHistoryRepository implements CommercialAutomationHistoryRepository {
   constructor(
@@ -6093,9 +6208,7 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       where: { schedulerJobId, bullMqJobId: null },
       orderBy: { startedAt: 'asc' },
     });
-    return record
-      ? mapCommercialAutomationExecution(record)
-      : null;
+    return record ? mapCommercialAutomationExecution(record) : null;
   }
 
   async start(input: {
@@ -6211,12 +6324,16 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
         },
       };
     } catch (error) {
-      if (!isUniqueConstraintError(error) && !isTransactionConflictError(error)) {
+      if (
+        !isUniqueConstraintError(error) &&
+        !isTransactionConflictError(error)
+      ) {
         throw error;
       }
       if (!input.bullMqJobId) {
         const existing = await this.findBySchedulerJobId(input.schedulerJobId);
-        if (existing) return { outcome: 'existing' as const, execution: existing };
+        if (existing)
+          return { outcome: 'existing' as const, execution: existing };
       }
       const existing = input.bullMqJobId
         ? await this.findByBullMqJobId(input.bullMqJobId)
@@ -6338,20 +6455,19 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
       completedAt: Date;
     },
   ) {
-    const updated =
-      await this.prisma.commercialAutomationExecution.updateMany({
-        where: {
-          id: executionId,
-          status: 'QUEUED',
-          commercialRunId: input.commercialRunId,
-        },
-        data: {
-          activeKey: null,
-          status: 'AMBIGUOUS',
-          failureCode: input.failureCode,
-          completedAt: input.completedAt,
-        },
-      });
+    const updated = await this.prisma.commercialAutomationExecution.updateMany({
+      where: {
+        id: executionId,
+        status: 'QUEUED',
+        commercialRunId: input.commercialRunId,
+      },
+      data: {
+        activeKey: null,
+        status: 'AMBIGUOUS',
+        failureCode: input.failureCode,
+        completedAt: input.completedAt,
+      },
+    });
     if (updated.count !== 1) {
       const current = await this.findById(executionId);
       if (
@@ -7113,6 +7229,7 @@ export class PrismaWhatsAppDestinationRepository implements WhatsAppDestinationR
   async assignToInstance(
     destinationId: string,
     instanceName: string,
+    expectedUpdatedAt?: Date,
   ): Promise<WhatsAppDestinationRecord | null> {
     if (!this.prisma.whatsAppInstance) return null;
     const instance = await this.prisma.whatsAppInstance.findUnique({
@@ -7125,10 +7242,48 @@ export class PrismaWhatsAppDestinationRepository implements WhatsAppDestinationR
       select: { id: true, type: true },
     });
     if (!destination || destination.type !== 'GROUP') return null;
-    return (await this.prisma.whatsAppDestination.update({
-      where: { id: destinationId },
+    if (!expectedUpdatedAt) {
+      try {
+        return (await this.prisma.whatsAppDestination.update({
+          where: { id: destinationId },
+          data: { assignedInstanceName: instanceName },
+        })) as WhatsAppDestinationRecord;
+      } catch {
+        return null;
+      }
+    }
+    const result = await this.prisma.whatsAppDestination.updateMany({
+      where: {
+        id: destinationId,
+        type: 'GROUP',
+        ...(expectedUpdatedAt ? { updatedAt: expectedUpdatedAt } : {}),
+      },
       data: { assignedInstanceName: instanceName },
-    })) as WhatsAppDestinationRecord;
+    });
+    if (result.count !== 1) return null;
+    return (await this.prisma.whatsAppDestination.findFirst({
+      where: { id: destinationId, type: 'GROUP' },
+    })) as WhatsAppDestinationRecord | null;
+  }
+
+  async updateAdministrative(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName?: string | null;
+      expectedUpdatedAt: Date;
+    },
+  ): Promise<WhatsAppDestinationRecord | null> {
+    const { expectedUpdatedAt, ...changes } = data;
+    const result = await this.prisma.whatsAppDestination.updateMany({
+      where: { id, type: 'GROUP', updatedAt: expectedUpdatedAt },
+      data: changes,
+    });
+    if (result.count !== 1) return null;
+    return (await this.prisma.whatsAppDestination.findFirst({
+      where: { id, type: 'GROUP' },
+    })) as WhatsAppDestinationRecord | null;
   }
 }
 
@@ -7157,19 +7312,71 @@ export class PrismaWhatsAppInstanceRepository implements WhatsAppInstanceReposit
     })) as WhatsAppInstanceRecord;
   }
 
+  async create(name: string): Promise<WhatsAppInstanceRecord> {
+    return (await this.prisma.whatsAppInstance.create({
+      // A newly registered provider is not trusted until an operator activates it.
+      data: { name, active: false, paused: false },
+    })) as WhatsAppInstanceRecord;
+  }
+
   async setActive(
     name: string,
     active: boolean,
+    expectedUpdatedAt?: Date,
   ): Promise<WhatsAppInstanceRecord | null> {
     try {
-      return (await this.prisma.whatsAppInstance.update({
-        where: { name },
+      if (!expectedUpdatedAt) {
+        return (await this.prisma.whatsAppInstance.update({
+          where: { name },
+          data: { active },
+        })) as WhatsAppInstanceRecord;
+      }
+      const result = await this.prisma.whatsAppInstance.updateMany({
+        where: {
+          name,
+          ...(expectedUpdatedAt ? { updatedAt: expectedUpdatedAt } : {}),
+        },
         data: { active },
-      })) as WhatsAppInstanceRecord;
+      });
+      if (result.count !== 1) return null;
+      return (await this.findByName(name)) as WhatsAppInstanceRecord | null;
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
       throw error;
     }
+  }
+
+  async setPaused(
+    name: string,
+    paused: boolean,
+    expectedUpdatedAt?: Date,
+  ): Promise<WhatsAppInstanceRecord | null> {
+    const result = await this.prisma.whatsAppInstance.updateMany({
+      where: {
+        name,
+        ...(expectedUpdatedAt ? { updatedAt: expectedUpdatedAt } : {}),
+      },
+      data: { paused },
+    });
+    if (result.count !== 1) return null;
+    return (await this.findByName(name)) as WhatsAppInstanceRecord | null;
+  }
+
+  async updateAdministrative(
+    name: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      expectedUpdatedAt: Date;
+    },
+  ): Promise<WhatsAppInstanceRecord | null> {
+    const { expectedUpdatedAt, ...changes } = data;
+    const result = await this.prisma.whatsAppInstance.updateMany({
+      where: { name, updatedAt: expectedUpdatedAt },
+      data: changes,
+    });
+    if (result.count !== 1) return null;
+    return (await this.findByName(name)) as WhatsAppInstanceRecord | null;
   }
 }
 
@@ -7261,6 +7468,24 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
       data,
     })) as WhatsAppGroupRecord;
   }
+
+  async updateAdministrative(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName?: string | null;
+      expectedUpdatedAt: Date;
+    },
+  ): Promise<WhatsAppGroupRecord | null> {
+    const { expectedUpdatedAt, ...changes } = data;
+    const result = await this.prisma.whatsAppDestination.updateMany({
+      where: { id, type: 'GROUP', updatedAt: expectedUpdatedAt },
+      data: changes,
+    });
+    if (result.count !== 1) return null;
+    return (await this.findById(id)) as WhatsAppGroupRecord | null;
+  }
 }
 
 export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchRepository {
@@ -7305,6 +7530,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
             destination: true,
             type: true,
             active: true,
+            paused: true,
             available: true,
             fingerprint: true,
             sourceInstanceName: true,

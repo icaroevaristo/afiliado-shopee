@@ -277,9 +277,10 @@ const resolveCommercialDispatchProvider = async (input: {
       'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
     );
   }
-  const outbox = await input.repositories.commercialDispatchOutboxes?.findByDispatchId?.(
-    dispatch.id,
-  );
+  const outbox =
+    await input.repositories.commercialDispatchOutboxes?.findByDispatchId?.(
+      dispatch.id,
+    );
   const stickyInstanceName = assertCommercialStickyIdentity({
     runInstanceName: run.instanceName,
     dispatchInstanceName: dispatch.instanceName,
@@ -295,10 +296,7 @@ const resolveCommercialDispatchProvider = async (input: {
       'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
     );
   }
-  if (
-    outbox.commercialRunId !== run.id ||
-    outbox.dispatchId !== dispatch.id
-  ) {
+  if (outbox.commercialRunId !== run.id || outbox.dispatchId !== dispatch.id) {
     throw reservationHandoffError(
       'Outbox comercial nao pertence ao run/dispatch do lifecycle',
       'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
@@ -313,8 +311,9 @@ const resolveCommercialDispatchProvider = async (input: {
       'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',
     );
   }
-  const instance = await input.repositories.whatsappInstances?.findByName(stickyInstanceName);
-  if (!instance || !instance.active) {
+  const instance =
+    await input.repositories.whatsappInstances?.findByName(stickyInstanceName);
+  if (!instance || !instance.active || instance.paused === true) {
     throw reservationHandoffError(
       'Instancia do lifecycle comercial esta ausente ou inativa',
       'COMMERCIAL_INSTANCE_INACTIVE',

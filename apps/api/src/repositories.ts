@@ -396,9 +396,7 @@ export interface CommercialPipelineRunRepository {
 }
 
 export type CommercialPipelineRunFinalizationKind =
-  | 'SENT'
-  | 'FAILED'
-  | 'AMBIGUOUS';
+  'SENT' | 'FAILED' | 'AMBIGUOUS';
 
 export type CommercialPipelineRunFinalization = {
   kind: CommercialPipelineRunFinalizationKind;
@@ -698,8 +696,7 @@ export type ManualPublicationQuotaReservationInput = {
 };
 
 export type ManualPublicationQuotaReservation =
-  | { kind: 'RESERVED' }
-  | { kind: 'BLOCKED'; reason: string };
+  { kind: 'RESERVED' } | { kind: 'BLOCKED'; reason: string };
 
 export interface ManualPublicationRequestRepository {
   accept(
@@ -748,6 +745,8 @@ export type CommercialAutomationSettingsRecord = {
   allowedEndTime: string | null;
   minimumIntervalMinutes: number | null;
   staggerMinutes: number | null;
+  dailyGlobalLimit?: number | null;
+  dailyGroupLimit?: number | null;
   scheduleRevision: number;
   updatedAt: Date;
 };
@@ -757,6 +756,8 @@ export type CommercialAutomationScheduleUpdate = {
   allowedEndTime?: string | null;
   minimumIntervalMinutes?: number | null;
   staggerMinutes?: number | null;
+  dailyGlobalLimit?: number | null;
+  dailyGroupLimit?: number | null;
   expectedRevision?: number;
 };
 
@@ -812,12 +813,25 @@ export interface CommercialAutomationHistoryRepository {
   hasStaleCommercialExecution(now: Date): Promise<boolean>;
 }
 
+export type OperationalStatusCounts = {
+  activeExecutions: number;
+  activeReservations: number;
+  ambiguity: number;
+  investigationRequired: number;
+  pendingDispatches: number;
+  pendingOutboxes: number;
+};
+
+export interface OperationalStatusRepository {
+  getCounts(now: Date): Promise<OperationalStatusCounts>;
+  hasActiveGroupLifecycle?(destinationId: string, now: Date): Promise<boolean>;
+}
+
 export type CommercialAutomationExecutionMode = 'PREVIEW' | 'SEND';
 export type CommercialAutomationExecutionStatus =
   'STARTED' | 'BLOCKED' | 'PREVIEW_READY' | 'QUEUED' | 'FAILED' | 'AMBIGUOUS';
 export type CommercialAutomationExecutionExternalStage =
-  | 'NOT_REACHED'
-  | 'EXTERNAL_MAY_HAVE_STARTED';
+  'NOT_REACHED' | 'EXTERNAL_MAY_HAVE_STARTED';
 
 export type CommercialAutomationExecutionRecord = {
   id: string;
@@ -855,14 +869,16 @@ export type CommercialAutomationExecutionRecoveryContext = {
         | 'finalStatus'
         | 'investigationRequired'
       > & {
-        dispatch: Pick<
-          WhatsAppDispatchRecord,
-          'id' | 'status' | 'attemptCount' | 'instanceName'
-        > & {
-          destinationId?: string;
-          destinationType?: 'INDIVIDUAL' | 'GROUP';
-          destinationAssignedInstanceName?: string | null;
-        } | null;
+        dispatch:
+          | (Pick<
+              WhatsAppDispatchRecord,
+              'id' | 'status' | 'attemptCount' | 'instanceName'
+            > & {
+              destinationId?: string;
+              destinationType?: 'INDIVIDUAL' | 'GROUP';
+              destinationAssignedInstanceName?: string | null;
+            })
+          | null;
         outbox: CommercialDispatchOutboxRecord | null;
       })
     | null;
@@ -1246,7 +1262,12 @@ export type CommercialPromotionCampaignFailureReset =
 export type CommercialPromotionAttemptContext =
   | { kind: 'NONE' }
   | { kind: 'AMBIGUOUS' }
-  | { kind: 'FOUND'; candidateId: string; campaignId: string; attemptExecutionId: string | null };
+  | {
+      kind: 'FOUND';
+      candidateId: string;
+      campaignId: string;
+      attemptExecutionId: string | null;
+    };
 
 export type CommercialPromotionSignal =
   'PRICE_DROP' | 'DISCOUNT_INCREASE' | 'NEWLY_OBSERVED' | 'CURRENT_DISCOUNT';
@@ -1302,7 +1323,9 @@ export interface CommercialPromotionCatalogRepository {
     items: CommercialPromotionCatalogItem[];
     hasMore: boolean;
   }>;
-  findOfficialCatalogItem?(productId: string): Promise<CommercialPromotionCatalogItem | null>;
+  findOfficialCatalogItem?(
+    productId: string,
+  ): Promise<CommercialPromotionCatalogItem | null>;
 }
 
 export type CommercialPromotionCandidateRecord = {
@@ -1689,6 +1712,7 @@ export type WhatsAppDestinationData = {
   name: string;
   destination: string;
   active: boolean;
+  paused?: boolean;
   type?: 'INDIVIDUAL' | 'GROUP';
   available?: boolean;
   fingerprint?: string | null;
@@ -1728,6 +1752,7 @@ export type WhatsAppGroupUpdate = Partial<
     WhatsAppGroupRecord,
     | 'name'
     | 'active'
+    | 'paused'
     | 'available'
     | 'fingerprint'
     | 'memberCount'
@@ -1774,7 +1799,10 @@ export type CommercialDispatchCandidateDetails = Omit<
   'generatedCopy' | 'product' | 'snapshot'
 > & {
   campaignId: string;
-  campaign: Pick<CommercialGroupCampaignRecord, 'id' | 'logicalGroupFingerprint'>;
+  campaign: Pick<
+    CommercialGroupCampaignRecord,
+    'id' | 'logicalGroupFingerprint'
+  >;
   product: CommercialPromotionCopyContext['product'] & { urlImagem: string };
   snapshot: Pick<
     CommercialPromotionSnapshotRecord,
@@ -1809,6 +1837,7 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'destination'
     | 'type'
     | 'active'
+    | 'paused'
     | 'available'
     | 'fingerprint'
     | 'sourceInstanceName'
@@ -1855,12 +1884,23 @@ export interface WhatsAppDestinationRepository {
   assignToInstance?(
     destinationId: string,
     instanceName: string,
+    expectedUpdatedAt?: Date,
+  ): Promise<WhatsAppDestinationRecord | null>;
+  updateAdministrative?(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName?: string | null;
+      expectedUpdatedAt: Date;
+    },
   ): Promise<WhatsAppDestinationRecord | null>;
 }
 
 export type WhatsAppInstanceRecord = {
   name: string;
   active: boolean;
+  paused?: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -1869,9 +1909,24 @@ export interface WhatsAppInstanceRepository {
   list(): Promise<WhatsAppInstanceRecord[]>;
   findByName(name: string): Promise<WhatsAppInstanceRecord | null>;
   upsert(name: string): Promise<WhatsAppInstanceRecord>;
+  create?(name: string): Promise<WhatsAppInstanceRecord>;
   setActive(
     name: string,
     active: boolean,
+    expectedUpdatedAt?: Date,
+  ): Promise<WhatsAppInstanceRecord | null>;
+  setPaused?(
+    name: string,
+    paused: boolean,
+    expectedUpdatedAt?: Date,
+  ): Promise<WhatsAppInstanceRecord | null>;
+  updateAdministrative?(
+    name: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      expectedUpdatedAt: Date;
+    },
   ): Promise<WhatsAppInstanceRecord | null>;
 }
 
@@ -1891,6 +1946,15 @@ export interface WhatsAppGroupDirectoryRepository {
   update(
     id: string,
     data: WhatsAppGroupUpdate,
+  ): Promise<WhatsAppGroupRecord | null>;
+  updateAdministrative?(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName?: string | null;
+      expectedUpdatedAt: Date;
+    },
   ): Promise<WhatsAppGroupRecord | null>;
 }
 

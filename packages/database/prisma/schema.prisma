@@ -131,6 +131,7 @@ model WhatsAppDestination {
   destination            String
   type                   WhatsAppDestinationType @default(INDIVIDUAL)
   active                 Boolean                 @default(true)
+  paused                 Boolean                 @default(false)
   available              Boolean                 @default(true)
   fingerprint            String?
   sourceInstanceName     String?
@@ -155,6 +156,7 @@ model WhatsAppDestination {
 model WhatsAppInstance {
   name                      String                       @id
   active                    Boolean                      @default(true)
+  paused                    Boolean                      @default(false)
   destinations              WhatsAppDestination[]
   commercialPipelineRuns    CommercialPipelineRun[]
   whatsappDispatches        WhatsAppDispatch[]
@@ -502,6 +504,8 @@ model CommercialAutomationSettings {
   allowedEndTime           String?
   minimumIntervalMinutes   Int?
   staggerMinutes            Int?
+  dailyGlobalLimit         Int?
+  dailyGroupLimit          Int?
   scheduleRevision         Int       @default(0)
   updatedAt                DateTime  @default(now()) @updatedAt
 }

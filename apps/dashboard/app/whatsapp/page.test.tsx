@@ -7,12 +7,14 @@ const listDestinationsMock = vi.fn();
 const listDispatchesMock = vi.fn();
 const getDispatchMock = vi.fn();
 const listWhatsAppGroupsMock = vi.fn();
+const getOperationalAdminMock = vi.fn();
 
 vi.mock('../../lib/api', () => ({
   listDestinations: (...args: unknown[]) => listDestinationsMock(...args),
   listDispatches: (...args: unknown[]) => listDispatchesMock(...args),
   getDispatch: (...args: unknown[]) => getDispatchMock(...args),
   listWhatsAppGroups: (...args: unknown[]) => listWhatsAppGroupsMock(...args),
+  getOperationalAdmin: (...args: unknown[]) => getOperationalAdminMock(...args),
 }));
 
 beforeEach(() => {
@@ -20,12 +22,58 @@ beforeEach(() => {
   listDispatchesMock.mockReset().mockResolvedValue([]);
   getDispatchMock.mockReset();
   listWhatsAppGroupsMock.mockReset().mockResolvedValue([]);
+  getOperationalAdminMock.mockReset().mockResolvedValue({
+    generatedAt: '2026-08-28T12:00:00.000Z',
+    automation: {
+      paused: true,
+      allowedStartTime: '08:00',
+      allowedEndTime: '22:00',
+      timezone: 'America/Sao_Paulo',
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 5,
+      dailyGlobalLimit: 10,
+      dailyGroupLimit: 5,
+      dailyGlobalLimitOverride: null,
+      dailyGroupLimitOverride: null,
+      hardCaps: {
+        dailyGlobalLimit: 10,
+        dailyGroupLimit: 5,
+        maxMessagesPerRun: 1,
+      },
+      scheduleRevision: 0,
+      updatedAt: '2026-08-28T12:00:00.000Z',
+    },
+    nextSendAt: null,
+    lastSendAt: null,
+    blockers: [],
+    queues: {
+      productPipeline: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+      whatsappDispatch: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+      commercialAutomation: {
+        waiting: 0,
+        active: 0,
+        delayed: 0,
+        prioritized: 0,
+      },
+    },
+    activeExecutions: 0,
+    activeReservations: 0,
+    ambiguity: 0,
+    investigationRequired: 0,
+    pendingDispatches: 0,
+    pendingOutboxes: 0,
+    scheduler: null,
+    instances: [],
+    groups: [],
+  });
 });
 
 describe('WhatsAppPage', () => {
   it('aplica filtros de dispatches por leitura', async () => {
     const screen = await render(<WhatsAppPage />);
-    const form = screen.container.querySelector('form') as HTMLFormElement;
+    const form = Array.from(screen.container.querySelectorAll('form')).find(
+      (candidate) => candidate.textContent?.includes('Destination ID'),
+    ) as HTMLFormElement;
     const statusSelect = form.querySelector('select');
     const productInput = form.querySelectorAll('input')[1];
 
@@ -47,12 +95,12 @@ describe('WhatsAppPage', () => {
       'Esta conta ainda não participa de nenhum grupo disponível.',
     );
     expect(screen.container.textContent).toContain(
-      'não sincroniza, autoriza ou desautoriza destinos',
+      'Health, próximo envio, último envio e blockers são derivados',
     );
     await screen.unmount();
   });
 
-  it('exibe grupos e destinos sem controles de mutação', async () => {
+  it('exibe grupos e destinos com administração separada e identificadores seguros', async () => {
     listWhatsAppGroupsMock.mockResolvedValue([
       {
         id: 'group-1',
@@ -80,10 +128,9 @@ describe('WhatsAppPage', () => {
     expect(screen.container.textContent).toContain('Grupo controlado');
     expect(screen.container.textContent).toContain('Destino controlado');
     expect(screen.container.textContent).not.toContain('Sincronizar grupos');
-    expect(screen.container.textContent).not.toContain('Autorizar');
-    expect(screen.container.textContent).not.toContain('Desautorizar');
+    expect(screen.container.textContent).toContain('Administração operacional');
+    expect(screen.container.textContent).toContain('Cadastrar instância');
     expect(screen.container.textContent).not.toContain('Novo destino');
-    expect(screen.container.textContent).not.toContain('Salvar');
     await screen.unmount();
   });
 

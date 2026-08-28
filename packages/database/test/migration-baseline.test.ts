@@ -60,6 +60,7 @@ const POSTERIOR_MIGRATIONS = [
   '20260824130000_shopee_category_registry',
   '20260825180000_phase17_manual_publication_requests',
   '20260826100000_phase17_manual_publication_preview_mode',
+  '20260828120000_phase18_operational_admin_controls',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
@@ -119,6 +120,8 @@ const HISTORICAL_HASHES: Record<string, string> = {
     '6d7c4ca24e60a8cea5a212f6e9a55017fcef9684f4aa348521c6da6a97726eb7',
   '20260826100000_phase17_manual_publication_preview_mode':
     '66958923a6f72dca7909ab8bb7e72c1371605177bcddd3c8601c54b5040743f8',
+  '20260828120000_phase18_operational_admin_controls':
+    '351d4e5140137e955d5d2e6480d884e10cd1b2df009af1992f3f21b941966758',
 };
 
 const migration = (migrationName: string, finished = true) => ({
@@ -318,64 +321,132 @@ describe('Prisma legacy baseline', () => {
   });
 
   it('uses node plus pnpm.cjs on Windows without Corepack or direct .cmd execution', async () => {
-    const commandRunner = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
-    const environment = { Path: 'C:\\pnpm-home;C:\\other', DATABASE_URL: 'postgresql://not-used' };
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: '',
+      stderr: '',
+    }));
+    const environment = {
+      Path: 'C:\\pnpm-home;C:\\other',
+      DATABASE_URL: 'postgresql://not-used',
+    };
     const pnpmCommand = 'C:\\pnpm-home\\pnpm.cmd';
     const pnpmEntrypoint = 'C:\\pnpm-home\\node_modules\\pnpm\\bin\\pnpm.cjs';
-    const fileExists = vi.fn((path: string) => path === pnpmCommand || path === pnpmEntrypoint);
+    const fileExists = vi.fn(
+      (path: string) => path === pnpmCommand || path === pnpmEntrypoint,
+    );
     await runPrismaCommand(
-      ['migrate', 'diff', '--from-schema-datasource', 'prisma/schema.prisma', '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'],
+      [
+        'migrate',
+        'diff',
+        '--from-schema-datasource',
+        'prisma/schema.prisma',
+        '--to-schema-datamodel',
+        'prisma/schema.prisma',
+        '--exit-code',
+      ],
       { root: 'C:\\repo', environment },
       commandRunner,
       { platform: 'win32', execPath: 'C:\\node\\node.exe', fileExists },
     );
     expect(commandRunner).toHaveBeenCalledWith(
       'C:\\node\\node.exe',
-      [pnpmEntrypoint, '--filter', '@shopee-auto-affiliate-ai/database', 'exec', 'prisma', 'migrate', 'diff', '--from-schema-datasource', 'prisma/schema.prisma', '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'],
+      [
+        pnpmEntrypoint,
+        '--filter',
+        '@shopee-auto-affiliate-ai/database',
+        'exec',
+        'prisma',
+        'migrate',
+        'diff',
+        '--from-schema-datasource',
+        'prisma/schema.prisma',
+        '--to-schema-datamodel',
+        'prisma/schema.prisma',
+        '--exit-code',
+      ],
       { cwd: 'C:\\repo', env: environment },
     );
-    expect(JSON.stringify(commandRunner.mock.calls[0])).not.toMatch(/corepack/i);
+    expect(JSON.stringify(commandRunner.mock.calls[0])).not.toMatch(
+      /corepack/i,
+    );
     expect(commandRunner.mock.calls[0]?.[0]).not.toMatch(/\.cmd$/i);
   });
 
-  it.each(['linux', 'darwin'] as const)('uses pnpm directly on %s', async (platform) => {
-    const commandRunner = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
-    const fileExists = vi.fn(() => false);
-    await runPrismaCommand(
-      ['migrate', 'diff', '--exit-code'],
-      { root: '/repo', environment: { PATH: '/tools' } },
-      commandRunner,
-      { platform, execPath: '/node', fileExists },
-    );
-    expect(commandRunner).toHaveBeenCalledWith(
-      'pnpm',
-      ['--filter', '@shopee-auto-affiliate-ai/database', 'exec', 'prisma', 'migrate', 'diff', '--exit-code'],
-      { cwd: '/repo', env: { PATH: '/tools' } },
-    );
-    expect(fileExists).not.toHaveBeenCalled();
-  });
+  it.each(['linux', 'darwin'] as const)(
+    'uses pnpm directly on %s',
+    async (platform) => {
+      const commandRunner = vi.fn(async () => ({
+        code: 0,
+        stdout: '',
+        stderr: '',
+      }));
+      const fileExists = vi.fn(() => false);
+      await runPrismaCommand(
+        ['migrate', 'diff', '--exit-code'],
+        { root: '/repo', environment: { PATH: '/tools' } },
+        commandRunner,
+        { platform, execPath: '/node', fileExists },
+      );
+      expect(commandRunner).toHaveBeenCalledWith(
+        'pnpm',
+        [
+          '--filter',
+          '@shopee-auto-affiliate-ai/database',
+          'exec',
+          'prisma',
+          'migrate',
+          'diff',
+          '--exit-code',
+        ],
+        { cwd: '/repo', env: { PATH: '/tools' } },
+      );
+      expect(fileExists).not.toHaveBeenCalled();
+    },
+  );
 
   it('fails closed when Windows pnpm.cjs cannot be resolved', () => {
-    const commandRunner = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: '',
+      stderr: '',
+    }));
     let error: unknown;
     try {
       runPrismaCommand(
         ['migrate', 'diff', '--exit-code'],
-        { root: 'C:\\sensitive-root', environment: { Path: 'C:\\sensitive-user\\pnpm-home', DATABASE_URL: 'postgresql://user:password@host/db?token=secret' } },
+        {
+          root: 'C:\\sensitive-root',
+          environment: {
+            Path: 'C:\\sensitive-user\\pnpm-home',
+            DATABASE_URL: 'postgresql://user:password@host/db?token=secret',
+          },
+        },
         commandRunner,
-        { platform: 'win32', execPath: 'C:\\node\\node.exe', fileExists: () => false },
+        {
+          platform: 'win32',
+          execPath: 'C:\\node\\node.exe',
+          fileExists: () => false,
+        },
       );
     } catch (caught: unknown) {
       error = caught;
     }
     expect(error).toBeInstanceOf(DatabaseBaselineError);
-    expect(error).toMatchObject({ code: 'DATABASE_BASELINE_DRIFT_CHECK_FAILED' });
+    expect(error).toMatchObject({
+      code: 'DATABASE_BASELINE_DRIFT_CHECK_FAILED',
+    });
     expect(commandRunner).not.toHaveBeenCalled();
-    expect(JSON.stringify(error)).not.toMatch(/sensitive-user|sensitive-root|password|token|secret|postgresql:\/\//i);
+    expect(JSON.stringify(error)).not.toMatch(
+      /sensitive-user|sensitive-root|password|token|secret|postgresql:\/\//i,
+    );
   });
 
   it('keeps shell, stdio, cwd and env fixed in the sanitized subprocess', async () => {
-    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
     const spawnProcess = vi.fn(() => child);
     const environment = { SAFE_TEST_VALUE: 'kept-in-memory' };
     const pending = runSanitizedCommand(
@@ -389,34 +460,68 @@ describe('Prisma legacy baseline', () => {
     expect(spawnProcess).toHaveBeenCalledWith(
       'C:\\node\\node.exe',
       ['C:\\pnpm\\pnpm.cjs', '--version'],
-      { cwd: 'C:\\repo', env: environment, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        cwd: 'C:\\repo',
+        env: environment,
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     );
   });
 
   it('does not serialize sensitive spawn failures', async () => {
-    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
     const pending = runSanitizedCommand(
-      'node', [],
+      'node',
+      [],
       { cwd: 'C:\\repo', env: { TOKEN: 'secret-token' } },
       vi.fn(() => child),
     ).catch((value: unknown) => value);
-    queueMicrotask(() => child.emit('error', new Error('C:\\secret\\path token=secret-token')));
+    queueMicrotask(() =>
+      child.emit('error', new Error('C:\\secret\\path token=secret-token')),
+    );
     const error = await pending;
     expect(error).toBeInstanceOf(Error);
     expect(JSON.stringify(error)).not.toMatch(/secret|token/i);
   });
 
   it('marks inspect failures with the inspect substage without serializing the cause', async () => {
-    const originalError = Object.assign(new Error('postgresql://secret SELECT token'), { code: 'P1001' });
-    const query = vi.spyOn(PrismaClient.prototype, '$queryRawUnsafe').mockRejectedValue(originalError);
-    const disconnect = vi.spyOn(PrismaClient.prototype, '$disconnect').mockResolvedValue(undefined);
-    const commandRunner = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
-    const baselineRuntime = createBaselineRuntime({ root: ROOT, environment: { DATABASE_URL: 'postgresql://not-used' }, commandRunner });
+    const originalError = Object.assign(
+      new Error('postgresql://secret SELECT token'),
+      { code: 'P1001' },
+    );
+    const query = vi
+      .spyOn(PrismaClient.prototype, '$queryRawUnsafe')
+      .mockRejectedValue(originalError);
+    const disconnect = vi
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockResolvedValue(undefined);
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: '',
+      stderr: '',
+    }));
+    const baselineRuntime = createBaselineRuntime({
+      root: ROOT,
+      environment: { DATABASE_URL: 'postgresql://not-used' },
+      commandRunner,
+    });
     try {
-      const error = await baselineRuntime.inspect().catch((value: unknown) => value);
+      const error = await baselineRuntime
+        .inspect()
+        .catch((value: unknown) => value);
       expect(error).toBeInstanceOf(MigrationBaselineSubstageError);
-      expect(error).toMatchObject({ substage: 'inspect', cause: originalError });
-      expect(JSON.stringify(error)).not.toMatch(/secret|SELECT|token|postgresql:\/\//i);
+      expect(error).toMatchObject({
+        substage: 'inspect',
+        cause: originalError,
+      });
+      expect(JSON.stringify(error)).not.toMatch(
+        /secret|SELECT|token|postgresql:\/\//i,
+      );
     } finally {
       await baselineRuntime.close();
       query.mockRestore();
@@ -425,13 +530,24 @@ describe('Prisma legacy baseline', () => {
   });
 
   it('marks migrate diff failures with the diff substage and preserves its command', async () => {
-    const originalError = Object.assign(new Error('sensitive stderr'), { code: 'ENOENT' });
-    const query = vi.spyOn(PrismaClient.prototype, '$queryRawUnsafe').mockResolvedValue([]);
-    const disconnect = vi.spyOn(PrismaClient.prototype, '$disconnect').mockResolvedValue(undefined);
-    const commandRunner = vi.fn(async () => { throw originalError; });
+    const originalError = Object.assign(new Error('sensitive stderr'), {
+      code: 'ENOENT',
+    });
+    const query = vi
+      .spyOn(PrismaClient.prototype, '$queryRawUnsafe')
+      .mockResolvedValue([]);
+    const disconnect = vi
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockResolvedValue(undefined);
+    const commandRunner = vi.fn(async () => {
+      throw originalError;
+    });
     const baselineRuntime = createBaselineRuntime({
       root: ROOT,
-      environment: { Path: 'C:\\pnpm-home', DATABASE_URL: 'postgresql://not-used' },
+      environment: {
+        Path: 'C:\\pnpm-home',
+        DATABASE_URL: 'postgresql://not-used',
+      },
       commandRunner,
       commandDependencies: {
         platform: 'win32',
@@ -442,15 +558,25 @@ describe('Prisma legacy baseline', () => {
       },
     });
     try {
-      const error = await baselineRuntime.inspect().catch((value: unknown) => value);
+      const error = await baselineRuntime
+        .inspect()
+        .catch((value: unknown) => value);
       expect(error).toBeInstanceOf(MigrationBaselineSubstageError);
       expect(error).toMatchObject({ substage: 'diff', cause: originalError });
       expect(commandRunner.mock.calls[0]?.[0]).toBe('C:\\node\\node.exe');
       expect(commandRunner.mock.calls[0]?.[1]).toEqual([
         'C:\\pnpm-home\\node_modules\\pnpm\\bin\\pnpm.cjs',
-        '--filter', '@shopee-auto-affiliate-ai/database', 'exec', 'prisma',
-        'migrate', 'diff', '--from-schema-datasource', 'prisma/schema.prisma',
-        '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code',
+        '--filter',
+        '@shopee-auto-affiliate-ai/database',
+        'exec',
+        'prisma',
+        'migrate',
+        'diff',
+        '--from-schema-datasource',
+        'prisma/schema.prisma',
+        '--to-schema-datamodel',
+        'prisma/schema.prisma',
+        '--exit-code',
       ]);
     } finally {
       await baselineRuntime.close();
@@ -460,12 +586,23 @@ describe('Prisma legacy baseline', () => {
   });
 
   it('keeps runtime.inspect success compatible with the existing result', async () => {
-    const query = vi.spyOn(PrismaClient.prototype, '$queryRawUnsafe').mockResolvedValue([]);
-    const disconnect = vi.spyOn(PrismaClient.prototype, '$disconnect').mockResolvedValue(undefined);
-    const commandRunner = vi.fn(async () => ({ code: 0, stdout: '', stderr: '' }));
+    const query = vi
+      .spyOn(PrismaClient.prototype, '$queryRawUnsafe')
+      .mockResolvedValue([]);
+    const disconnect = vi
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockResolvedValue(undefined);
+    const commandRunner = vi.fn(async () => ({
+      code: 0,
+      stdout: '',
+      stderr: '',
+    }));
     const baselineRuntime = createBaselineRuntime({
       root: ROOT,
-      environment: { Path: 'C:\\pnpm-home', DATABASE_URL: 'postgresql://not-used' },
+      environment: {
+        Path: 'C:\\pnpm-home',
+        DATABASE_URL: 'postgresql://not-used',
+      },
       commandRunner,
       commandDependencies: {
         platform: 'win32',
@@ -476,7 +613,11 @@ describe('Prisma legacy baseline', () => {
       },
     });
     try {
-      await expect(baselineRuntime.inspect()).resolves.toMatchObject({ migrationRows: [], applicationTables: [], schemaMatchesCurrent: true });
+      await expect(baselineRuntime.inspect()).resolves.toMatchObject({
+        migrationRows: [],
+        applicationTables: [],
+        schemaMatchesCurrent: true,
+      });
     } finally {
       await baselineRuntime.close();
       query.mockRestore();
@@ -485,21 +626,35 @@ describe('Prisma legacy baseline', () => {
   });
 
   it('keeps migrate diff exit code 2 as an expected non-error result', async () => {
-    const query = vi.spyOn(PrismaClient.prototype, '$queryRawUnsafe').mockResolvedValue([]);
-    const disconnect = vi.spyOn(PrismaClient.prototype, '$disconnect').mockResolvedValue(undefined);
-    const commandRunner = vi.fn(async () => ({ code: 2, stdout: '', stderr: '' }));
+    const query = vi
+      .spyOn(PrismaClient.prototype, '$queryRawUnsafe')
+      .mockResolvedValue([]);
+    const disconnect = vi
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockResolvedValue(undefined);
+    const commandRunner = vi.fn(async () => ({
+      code: 2,
+      stdout: '',
+      stderr: '',
+    }));
     const baselineRuntime = createBaselineRuntime({
       root: ROOT,
-      environment: { Path: 'C:\\pnpm-home', DATABASE_URL: 'postgresql://not-used' },
+      environment: {
+        Path: 'C:\\pnpm-home',
+        DATABASE_URL: 'postgresql://not-used',
+      },
       commandRunner,
       commandDependencies: {
         platform: 'win32',
         execPath: 'C:\\node\\node.exe',
-        fileExists: (path) => path.endsWith('pnpm.cmd') || path.endsWith('pnpm.cjs'),
+        fileExists: (path) =>
+          path.endsWith('pnpm.cmd') || path.endsWith('pnpm.cjs'),
       },
     });
     try {
-      await expect(baselineRuntime.inspect()).resolves.toMatchObject({ schemaMatchesCurrent: false });
+      await expect(baselineRuntime.inspect()).resolves.toMatchObject({
+        schemaMatchesCurrent: false,
+      });
     } finally {
       await baselineRuntime.close();
       query.mockRestore();
@@ -508,21 +663,35 @@ describe('Prisma legacy baseline', () => {
   });
 
   it('keeps unexpected migrate diff exit codes as DatabaseBaselineError', async () => {
-    const query = vi.spyOn(PrismaClient.prototype, '$queryRawUnsafe').mockResolvedValue([]);
-    const disconnect = vi.spyOn(PrismaClient.prototype, '$disconnect').mockResolvedValue(undefined);
-    const commandRunner = vi.fn(async () => ({ code: 1, stdout: '', stderr: 'sensitive stderr' }));
+    const query = vi
+      .spyOn(PrismaClient.prototype, '$queryRawUnsafe')
+      .mockResolvedValue([]);
+    const disconnect = vi
+      .spyOn(PrismaClient.prototype, '$disconnect')
+      .mockResolvedValue(undefined);
+    const commandRunner = vi.fn(async () => ({
+      code: 1,
+      stdout: '',
+      stderr: 'sensitive stderr',
+    }));
     const baselineRuntime = createBaselineRuntime({
       root: ROOT,
-      environment: { Path: 'C:\\pnpm-home', DATABASE_URL: 'postgresql://not-used' },
+      environment: {
+        Path: 'C:\\pnpm-home',
+        DATABASE_URL: 'postgresql://not-used',
+      },
       commandRunner,
       commandDependencies: {
         platform: 'win32',
         execPath: 'C:\\node\\node.exe',
-        fileExists: (path) => path.endsWith('pnpm.cmd') || path.endsWith('pnpm.cjs'),
+        fileExists: (path) =>
+          path.endsWith('pnpm.cmd') || path.endsWith('pnpm.cjs'),
       },
     });
     try {
-      const error = await baselineRuntime.inspect().catch((value: unknown) => value);
+      const error = await baselineRuntime
+        .inspect()
+        .catch((value: unknown) => value);
       expect(error).toBeInstanceOf(MigrationBaselineSubstageError);
       expect(error).toMatchObject({
         substage: 'diff',

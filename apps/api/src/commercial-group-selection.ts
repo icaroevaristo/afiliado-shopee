@@ -8,6 +8,7 @@ export const isCommercialAuthorizedGroup = (
 ) =>
   group.type === 'GROUP' &&
   group.active === true &&
+  group.paused !== true &&
   group.available === true &&
   group.sourceInstanceName === instanceName &&
   (group.assignedInstanceName === undefined ||
@@ -21,6 +22,7 @@ export const isCommercialAssignedGroup = (
 ) =>
   group.type === 'GROUP' &&
   group.active === true &&
+  group.paused !== true &&
   group.available === true &&
   group.assignedInstanceName === instanceName &&
   COMMERCIAL_GROUP_FINGERPRINT.test(group.fingerprint);
