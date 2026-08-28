@@ -182,9 +182,9 @@ Não criar endpoint direto de send para o painel e não permitir retry cego apó
 
 ### Estado atual
 
-**Parcial e predominantemente observacional.** Existem páginas para visão geral, envios, fila, produtos, campanhas, automação, WhatsApp, copies e pipelines. `docs/dashboard-design.md` registra que campanhas/grupos são somente leitura e que não existem controles para editar `.env`, cron, limites/retries ou envio manual.
+**Parcial para administração, com envio manual seguro já operacional desde a Fase 17.** Existem páginas para visão geral, envios, fila, produtos, campanhas, automação, WhatsApp, copies e pipelines, e o fluxo manual reutiliza o mesmo pipeline comercial seguro do automático.
 
-Essa documentação continua válida como descrição histórica da console atual, mas está **desatualizada como definição do MVP final**, porque o MVP oficial exige administração operacional.
+`docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Campanhas/grupos, administração completa de instâncias, pausas individuais, configuração operacional completa e blockers/observabilidade administrativa exigida pelo MVP permanecem na Fase 18.
 
 ### Painel exigido pelo MVP
 
