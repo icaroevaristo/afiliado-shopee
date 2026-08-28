@@ -1273,7 +1273,16 @@ export class ManualPublicationService {
       refreshedTargets.map(({ status }) => status),
     );
     const terminal = isManualPublicationRequestTerminal(status);
-    const completedAt = terminal ? this.clock() : null;
+    const completedAt = terminal ? request.completedAt ?? this.clock() : null;
+    const requestNeedsUpdate =
+      request.status !== status ||
+      request.completedAt?.getTime() !== completedAt?.getTime() ||
+      (terminal &&
+        (request.processingOwnerId !== null ||
+          request.processingLeaseExpiresAt !== null));
+    if (!requestNeedsUpdate) {
+      return { ...request, targets: refreshedTargets };
+    }
     const updated = await this.options.requests.updateRequest(request.id, {
       status,
       completedAt,
@@ -1765,7 +1774,7 @@ export class ManualPublicationService {
         )
       ) {
         return {
-          request: await this.view(await this.aggregate(existing)),
+          request: await this.view(existing),
           created: false,
         };
       }
@@ -1934,6 +1943,6 @@ export class ManualPublicationService {
       }
       return this.view(request);
     }
-    return this.view(await this.aggregate(request));
+    return this.view(request);
   }
 }

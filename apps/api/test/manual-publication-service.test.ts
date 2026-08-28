@@ -15,7 +15,9 @@ import type {
   CommercialPromotionSnapshotRecord,
   ManualPublicationRequestRecord,
   ManualPublicationRequestRepository,
+  ManualPublicationRequestUpdate,
   ManualPublicationTargetRecord,
+  ManualPublicationTargetUpdate,
   ShopeeOfferRecord,
   WhatsAppGroupRecord,
 } from '../src/repositories';
@@ -408,6 +410,19 @@ const createSubject = (
     return execution;
   });
   const logger = { info: vi.fn(), error: vi.fn() };
+  const updateTarget = vi.fn(async (id: string, data: ManualPublicationTargetUpdate) => {
+    const request = [...requests.values()].find((candidate) => candidate.targets.some((target) => target.id === id));
+    const target = request?.targets.find((candidate) => candidate.id === id);
+    if (!target) return null;
+    Object.assign(target, data, { updatedAt: NOW });
+    return target;
+  });
+  const updateRequest = vi.fn(async (id: string, data: ManualPublicationRequestUpdate) => {
+    const request = requests.get(id);
+    if (!request) return null;
+    Object.assign(request, data, { updatedAt: NOW });
+    return request;
+  });
 
   const requestRepository: ManualPublicationRequestRepository = {
     accept: async (input) => {
@@ -486,19 +501,8 @@ const createSubject = (
         ? { kind: 'BLOCKED' as const, reason: overrides.quotaBlocked }
         : { kind: 'RESERVED' as const },
     releaseSendSlot,
-    updateTarget: async (id, data) => {
-      const request = [...requests.values()].find((candidate) => candidate.targets.some((target) => target.id === id));
-      const target = request?.targets.find((candidate) => candidate.id === id);
-      if (!target) return null;
-      Object.assign(target, data, { updatedAt: NOW });
-      return target;
-    },
-    updateRequest: async (id, data) => {
-      const request = requests.get(id);
-      if (!request) return null;
-      Object.assign(request, data, { updatedAt: NOW });
-      return request;
-    },
+    updateTarget,
+    updateRequest,
   };
 
   const service = new ManualPublicationService({
@@ -683,6 +687,8 @@ const createSubject = (
     executions,
     events,
     evaluateManualSendSafety,
+    updateTarget,
+    updateRequest,
     requests,
     outboxes,
     logger,
@@ -693,6 +699,85 @@ const createSubject = (
 };
 
 const requestIdFor = (id: string | undefined) => id ?? 'manual-publication-request';
+
+const TERMINAL_COMPLETED_AT = new Date('2026-08-25T15:01:00.000Z');
+const TERMINAL_UPDATED_AT = new Date('2026-08-25T15:02:00.000Z');
+
+const seedPersistedRequest = (
+  subject: ReturnType<typeof createSubject>,
+  options: {
+    id?: string;
+    idempotencyKey?: string;
+    status?: ManualPublicationRequestRecord['status'];
+    targetStatus?: ManualPublicationTargetRecord['status'];
+    investigationRequired?: boolean;
+    completedAt?: Date | null;
+    updatedAt?: Date;
+    processingOwnerId?: string | null;
+    processingLeaseExpiresAt?: Date | null;
+  } = {},
+) => {
+  const id = options.id ?? 'manual-terminal-request';
+  const idempotencyKey = options.idempotencyKey ?? 'manual-terminal-key';
+  const status = options.status ?? 'COMPLETED';
+  const selectedGroup = group('a');
+  const selectedCampaign = campaign(selectedGroup);
+  const targetStatus =
+    options.targetStatus ??
+    (status === 'PROCESSING'
+      ? 'QUEUED'
+      : status === 'AMBIGUOUS'
+        ? 'AMBIGUOUS'
+        : 'SENT');
+  const request: ManualPublicationRequestRecord = {
+    id,
+    idempotencyKey,
+    payloadHash: manualPublicationPayloadHash(
+      canonicalManualPublicationPayload({
+        mode: 'SEND',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ),
+    mode: 'SEND',
+    productId: 'product-1',
+    requestedSnapshotId: 'snapshot-1',
+    requestedSnapshotRevision: 1,
+    requestedSnapshotFingerprint: 'snapshot-fingerprint',
+    status,
+    createdAt: NOW,
+    updatedAt: options.updatedAt ?? TERMINAL_UPDATED_AT,
+    completedAt:
+      options.completedAt !== undefined
+        ? options.completedAt
+        : status === 'PROCESSING'
+          ? null
+          : TERMINAL_COMPLETED_AT,
+    processingOwnerId:
+      options.processingOwnerId !== undefined
+        ? options.processingOwnerId
+        : status === 'PROCESSING'
+          ? 'owner-1'
+          : null,
+    processingLeaseExpiresAt:
+      options.processingLeaseExpiresAt !== undefined
+        ? options.processingLeaseExpiresAt
+        : status === 'PROCESSING'
+          ? new Date(NOW.getTime() + 60_000)
+          : null,
+    targets: [
+      {
+        ...targetRecord(id, selectedGroup, selectedCampaign),
+        status: targetStatus,
+        investigationRequired:
+          options.investigationRequired ?? status === 'AMBIGUOUS',
+      },
+    ],
+  };
+  subject.requests.set(request.id, request);
+  subject.requests.set(request.idempotencyKey, request);
+  return request;
+};
 
 describe('ManualPublicationService', () => {
   it('canonicaliza destinos e produz o mesmo hash independentemente da ordem', () => {
@@ -886,6 +971,115 @@ describe('ManualPublicationService', () => {
       status: 'PREVIEW_READY',
     });
     expect(subject.createdRequestCount).toBe(1);
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+  });
+
+  it('find de SEND terminal permanece read-only e preserva completedAt', async () => {
+    const subject = createSubject();
+    const persisted = seedPersistedRequest(subject);
+
+    const result = await subject.service.find(persisted.id);
+
+    expect(result).toMatchObject({
+      id: persisted.id,
+      status: 'COMPLETED',
+      completedAt: TERMINAL_COMPLETED_AT,
+      updatedAt: TERMINAL_UPDATED_AT,
+    });
+    expect(subject.updateRequest).not.toHaveBeenCalled();
+    expect(subject.updateTarget).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+  });
+
+  it('duas leituras de status consecutivas retornam a mesma view sem writes', async () => {
+    const subject = createSubject();
+    const persisted = seedPersistedRequest(subject);
+
+    const first = await subject.service.find(persisted.id);
+    const second = await subject.service.find(persisted.id);
+
+    expect(second).toEqual(first);
+    expect(subject.updateRequest).not.toHaveBeenCalled();
+    expect(subject.updateTarget).not.toHaveBeenCalled();
+  });
+
+  it('find de request ativa também não reconcilia nem escreve lifecycle', async () => {
+    const subject = createSubject();
+    const persisted = seedPersistedRequest(subject, {
+      id: 'manual-active-request',
+      idempotencyKey: 'manual-active-key',
+      status: 'PROCESSING',
+      targetStatus: 'QUEUED',
+    });
+
+    const result = await subject.service.find(persisted.id);
+
+    expect(result).toMatchObject({ id: persisted.id, status: 'PROCESSING' });
+    expect(subject.updateRequest).not.toHaveBeenCalled();
+    expect(subject.updateTarget).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+  });
+
+  it('replay de idempotencia terminal nao reagrega nem altera timestamps', async () => {
+    const subject = createSubject();
+    const persisted = seedPersistedRequest(subject);
+
+    const result = await subject.service.create({
+      idempotencyKey: persisted.idempotencyKey,
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.created).toBe(false);
+    expect(result.request).toMatchObject({
+      id: persisted.id,
+      status: 'COMPLETED',
+      completedAt: TERMINAL_COMPLETED_AT,
+      updatedAt: TERMINAL_UPDATED_AT,
+    });
+    expect(subject.updateRequest).not.toHaveBeenCalled();
+    expect(subject.updateTarget).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
+    expect(subject.reserveAttempt).not.toHaveBeenCalled();
+    expect(subject.prepareManual).not.toHaveBeenCalled();
+    expect(subject.confirm).not.toHaveBeenCalled();
+  });
+
+  it('replay de AMBIGUOUS terminal nao tenta curar o lifecycle', async () => {
+    const subject = createSubject();
+    const persisted = seedPersistedRequest(subject, {
+      id: 'manual-ambiguous-request',
+      idempotencyKey: 'manual-ambiguous-key',
+      status: 'AMBIGUOUS',
+      targetStatus: 'AMBIGUOUS',
+      investigationRequired: true,
+    });
+
+    const result = await subject.service.create({
+      idempotencyKey: persisted.idempotencyKey,
+      productId: 'product-1',
+      destinationIds: ['a'],
+      confirm: MANUAL_PUBLICATION_CONFIRMATION,
+    });
+
+    expect(result.created).toBe(false);
+    expect(result.request).toMatchObject({
+      id: persisted.id,
+      status: 'AMBIGUOUS',
+      completedAt: TERMINAL_COMPLETED_AT,
+      updatedAt: TERMINAL_UPDATED_AT,
+      targets: [{ status: 'AMBIGUOUS', investigationRequired: true }],
+    });
+    expect(subject.updateRequest).not.toHaveBeenCalled();
+    expect(subject.updateTarget).not.toHaveBeenCalled();
+    expect(subject.startExecution).not.toHaveBeenCalled();
     expect(subject.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
