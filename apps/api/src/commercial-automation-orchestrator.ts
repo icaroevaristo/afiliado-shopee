@@ -526,15 +526,9 @@ export class CommercialAutomationOrchestrator {
             }),
           );
         }
-        await syncOffers();
-      }
-      if (!this.dependencies.candidateFlow) {
-        await this.dependencies.executions.markExternalMayHaveStarted(
-          ownership,
-          { markedAt: this.clock() },
-        );
-        await this.dependencies.syncOffers.run();
-        await heartbeat.checkpoint();
+        if (input.mode === 'send') {
+          await syncOffers();
+        }
       }
       if (input.mode === 'send') {
         if (!selectedTarget || !selectedCandidateSelection) {

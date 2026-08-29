@@ -46,12 +46,33 @@ const manualCatalogSync = {
   },
 };
 
+const previewCatalogSync = {
+  async run() {
+    return {
+      source: 'manual' as const,
+      fetched: 0,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      expired: 0,
+    };
+  },
+};
+
 export const createCommercialAutomationOrchestratorRuntime = (
   config: AppEnv,
   options: {
     prisma?: ReturnType<typeof createPrismaClient>;
     logger?: CommercialAutomationRuntimeLogger;
     confirmationQueue?: CommercialDispatchOutboxQueue;
+    officialShopeeProviderFactory?: (
+      options: ConstructorParameters<
+        typeof OfficialShopeeAffiliateOfferProvider
+      >[0],
+    ) => InstanceType<typeof OfficialShopeeAffiliateOfferProvider>;
+    openAiCommercialAiCopyProviderFactory?: (
+      options: ConstructorParameters<typeof OpenAiCommercialAiCopyProvider>[0],
+    ) => InstanceType<typeof OpenAiCommercialAiCopyProvider>;
   } = {},
 ) => {
   const prisma = options.prisma ?? createPrismaClient();
@@ -66,12 +87,17 @@ export const createCommercialAutomationOrchestratorRuntime = (
     maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
     logger,
   });
+  const openAiCommercialAiCopyProviderFactory =
+    options.openAiCommercialAiCopyProviderFactory ??
+    ((providerOptions: ConstructorParameters<
+      typeof OpenAiCommercialAiCopyProvider
+    >[0]) => new OpenAiCommercialAiCopyProvider(providerOptions));
   const commercialAiCopyProvider =
     config.COMMERCIAL_AUTOMATION_MODE === 'send' &&
     config.COMMERCIAL_AI_COPY_ENABLED &&
     config.OPENAI_API_KEY &&
     config.COMMERCIAL_AI_COPY_MODEL
-      ? new OpenAiCommercialAiCopyProvider({
+      ? openAiCommercialAiCopyProviderFactory({
           apiKey: config.OPENAI_API_KEY,
           model: config.COMMERCIAL_AI_COPY_MODEL,
           timeoutMs: config.COMMERCIAL_AI_COPY_TIMEOUT_MS,
@@ -138,23 +164,30 @@ export const createCommercialAutomationOrchestratorRuntime = (
     config: commercialPolicyConfig,
   });
 
+  const officialShopeeProviderFactory =
+    options.officialShopeeProviderFactory ??
+    ((providerOptions: ConstructorParameters<
+      typeof OfficialShopeeAffiliateOfferProvider
+    >[0]) => new OfficialShopeeAffiliateOfferProvider(providerOptions));
   const syncOffers =
-    config.SHOPEE_AFFILIATE_PROVIDER === 'manual'
-      ? manualCatalogSync
-      : new ShopeeOfferSyncService({
-          provider:
-            config.SHOPEE_AFFILIATE_PROVIDER === 'official'
-              ? new OfficialShopeeAffiliateOfferProvider({
-                  apiEnabled: config.SHOPEE_AFFILIATE_API_ENABLED,
-                  apiUrl: config.SHOPEE_AFFILIATE_API_URL,
-                  appId: config.SHOPEE_AFFILIATE_APP_ID,
-                  secret: config.SHOPEE_AFFILIATE_SECRET,
-                })
-              : new MockShopeeAffiliateOfferProvider(),
-          offers: repositories.shopeeOffers,
-          maxOffersPerSync: config.SHOPEE_AFFILIATE_SYNC_LIMIT,
-          logger,
-        });
+    config.COMMERCIAL_AUTOMATION_MODE === 'preview'
+      ? previewCatalogSync
+      : config.SHOPEE_AFFILIATE_PROVIDER === 'manual'
+        ? manualCatalogSync
+        : new ShopeeOfferSyncService({
+            provider:
+              config.SHOPEE_AFFILIATE_PROVIDER === 'official'
+                ? officialShopeeProviderFactory({
+                    apiEnabled: config.SHOPEE_AFFILIATE_API_ENABLED,
+                    apiUrl: config.SHOPEE_AFFILIATE_API_URL,
+                    appId: config.SHOPEE_AFFILIATE_APP_ID,
+                    secret: config.SHOPEE_AFFILIATE_SECRET,
+                  })
+                : new MockShopeeAffiliateOfferProvider(),
+            offers: repositories.shopeeOffers,
+            maxOffersPerSync: config.SHOPEE_AFFILIATE_SYNC_LIMIT,
+            logger,
+          });
 
   const confirmation = options.confirmationQueue
     ? createCommercialPipelineConfirmationService({

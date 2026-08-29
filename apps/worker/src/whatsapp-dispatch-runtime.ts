@@ -91,6 +91,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     config.REDIS_URL,
     {
       logger,
+      commercialAutomationMode: config.COMMERCIAL_AUTOMATION_MODE,
       whatsAppProvider: provider,
       whatsAppProviderResolver: providerResolver,
       groupSendPolicy,

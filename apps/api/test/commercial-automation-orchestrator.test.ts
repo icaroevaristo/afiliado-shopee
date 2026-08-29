@@ -1027,10 +1027,10 @@ describe('CommercialAutomationOrchestrator', () => {
       leaseExpiresAt: new Date('2026-07-26T15:02:00.000Z'),
       activeKey: null,
     });
-    expect(subject.executions.heartbeatCalls).toBe(2);
+    expect(subject.executions.heartbeatCalls).toBe(1);
     expect(clearIntervalSpy).toHaveBeenCalled();
   });
-  it('persiste EXTERNAL_MAY_HAVE_STARTED antes de syncOffers', async () => {
+  it('persiste EXTERNAL_MAY_HAVE_STARTED antes de syncOffers em SEND', async () => {
     const subject = createSubject();
     subject.syncOffers.run.mockImplementation(async () => {
       expect(subject.executions.records[0].externalStage).toBe(
@@ -1039,7 +1039,11 @@ describe('CommercialAutomationOrchestrator', () => {
       return { synced: 1 };
     });
 
-    await subject.orchestrator.executeTick(tick);
+    await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
 
     expect(subject.executions.records[0].externalStage).toBe(
       'EXTERNAL_MAY_HAVE_STARTED',
@@ -1113,7 +1117,7 @@ describe('CommercialAutomationOrchestrator', () => {
     );
   });
 
-  it('sincroniza e executa exatamente um dry-run no modo preview sem confirmar', async () => {
+  it('executa exatamente um dry-run no modo preview sem sincronizar nem confirmar', async () => {
     const subject = createSubject();
 
     await expect(subject.orchestrator.executeTick(tick)).resolves.toMatchObject(
@@ -1125,7 +1129,8 @@ describe('CommercialAutomationOrchestrator', () => {
         messageSent: false,
       },
     );
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
     expect(subject.pipeline.dryRun).toHaveBeenCalledOnce();
     expect(subject.pipeline.dryRun).toHaveBeenCalledWith({
       executionId: 'execution-1',
@@ -1308,7 +1313,7 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(second).toEqual(first);
     expect(subject.executions.records).toHaveLength(1);
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRun).toHaveBeenCalledOnce();
   });
 
@@ -1342,9 +1347,13 @@ describe('CommercialAutomationOrchestrator', () => {
     const subject = createSubject();
     subject.executions.loseAfterHeartbeats = 1;
 
-    await expect(subject.orchestrator.executeTick(tick)).rejects.toMatchObject({
-      code: COMMERCIAL_EXECUTION_OWNERSHIP_LOST,
-    });
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).rejects.toMatchObject({ code: COMMERCIAL_EXECUTION_OWNERSHIP_LOST });
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
     expect(subject.executions.records[0].status).toBe('STARTED');
@@ -1376,12 +1385,16 @@ describe('CommercialAutomationOrchestrator', () => {
     const subject = createSubject();
     subject.syncOffers.run.mockRejectedValue(new Error('offline'));
 
-    await expect(subject.orchestrator.executeTick(tick)).resolves.toMatchObject(
-      {
-        status: 'failed',
-        commercialRunId: null,
-      },
-    );
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      commercialRunId: null,
+    });
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
   });
 

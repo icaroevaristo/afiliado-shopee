@@ -13,13 +13,22 @@ import {
   JOB_NAMES,
 } from '@shopee-auto-affiliate-ai/queue';
 
-import { processWhatsAppDispatchJob, startWorker } from '../src/index';
+import {
+  processWhatsAppDispatchJob,
+  startLegacyWorkerEntrypoint,
+  startWorker,
+} from '../src/index';
 
 const baseEnv = {
   NODE_ENV: 'test',
   DATABASE_URL: 'postgresql://localhost:5432/app',
   REDIS_URL: 'redis://localhost:6379',
 };
+
+const legacyWorkerConfig = (config: AppEnv): AppEnv => ({
+  ...config,
+  COMMERCIAL_AUTOMATION_MODE: 'send',
+});
 
 const SAFE_TEST_DESTINATION = '0000000000000';
 
@@ -127,7 +136,7 @@ const bootstrapProvider = async (
     return createWorkerRuntime();
   });
 
-  await startWorker(config, {
+  await startWorker(legacyWorkerConfig(config), {
     logger,
     providerFactoryOptions,
     infrastructureFactory: () => infrastructure,
@@ -143,6 +152,67 @@ const bootstrapProvider = async (
 
 describe('WhatsApp provider worker bootstrap', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it('bloqueia o entrypoint legado direto antes de construir qualquer topologia em preview perigoso', async () => {
+    const config = loadConfig({
+      ...baseEnv,
+      COMMERCIAL_AUTOMATION_MODE: 'preview',
+      COMMERCIAL_AI_COPY_ENABLED: 'true',
+      OPENAI_API_KEY: 'preview-only-key',
+      COMMERCIAL_AI_COPY_MODEL: 'preview-only-model',
+      SHOPEE_AFFILIATE_PROVIDER: 'official',
+      SHOPEE_AFFILIATE_API_ENABLED: 'true',
+      SHOPEE_AFFILIATE_API_URL: 'https://example.invalid/shopee',
+      SHOPEE_AFFILIATE_APP_ID: 'preview-only-app',
+      SHOPEE_AFFILIATE_SECRET: 'preview-only-secret',
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080',
+      EVOLUTION_API_KEY: 'preview-only-key',
+      EVOLUTION_INSTANCE_NAME: 'preview-only-instance',
+      WHATSAPP_GROUP_SEND_ENABLED: 'true',
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(startLegacyWorkerEntrypoint(config)).rejects.toMatchObject({
+      code: 'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejeita preview perigoso antes de chamar factories de infraestrutura, provider ou worker', async () => {
+    const config = loadConfig({
+      ...baseEnv,
+      COMMERCIAL_AUTOMATION_MODE: 'preview',
+      SHOPEE_AFFILIATE_PROVIDER: 'official',
+      SHOPEE_AFFILIATE_API_ENABLED: 'true',
+      SHOPEE_AFFILIATE_API_URL: 'https://example.invalid/shopee',
+      SHOPEE_AFFILIATE_APP_ID: 'preview-only-app',
+      SHOPEE_AFFILIATE_SECRET: 'preview-only-secret',
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080',
+      EVOLUTION_API_KEY: 'preview-only-key',
+      EVOLUTION_INSTANCE_NAME: 'preview-only-instance',
+      WHATSAPP_GROUP_SEND_ENABLED: 'true',
+    });
+    const providerFactory = vi.fn();
+    const infrastructureFactory = vi.fn();
+    const workerFactory = vi.fn();
+
+    await expect(
+      startWorker(config, {
+        providerFactory: providerFactory as never,
+        infrastructureFactory: infrastructureFactory as never,
+        workerFactory: workerFactory as never,
+      }),
+    ).rejects.toMatchObject({
+      code: 'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
+    });
+
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(infrastructureFactory).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+  });
 
   it('inicia em mock por padrao e registra a fila sem chamar HTTP', async () => {
     const httpClient = vi.fn();
@@ -242,7 +312,9 @@ describe('WhatsApp provider worker bootstrap', () => {
         WHATSAPP_PROVIDER: 'evolution',
         EVOLUTION_API_KEY: secret,
       });
-      startWorker(config, { workerFactory: workerFactory as never });
+      startWorker(legacyWorkerConfig(config), {
+        workerFactory: workerFactory as never,
+      });
     } catch (error) {
       caught = error;
     }
@@ -258,7 +330,7 @@ describe('WhatsApp provider worker bootstrap', () => {
     let provider: WhatsAppProvider | undefined;
 
     const infrastructure = createInfrastructure();
-    await startWorker(config, {
+    await startWorker(legacyWorkerConfig(config), {
       logger,
       providerFactory,
       infrastructureFactory: () => infrastructure,

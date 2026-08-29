@@ -393,6 +393,43 @@ const createHandoffRepositories = (input: {
   return { repositories, renewAttempt, markAttemptPending, events };
 };
 describe('processWhatsAppDispatchJob', () => {
+  it('rejeita dispatch antes do provider quando o processor esta em preview', async () => {
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'must-not-send',
+        sentAt: handoffNow,
+      })),
+    };
+    const logger = { info: vi.fn(), error: vi.fn() };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'preview-job',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'preview-dispatch' },
+          opts: { attempts: 1 },
+        },
+        {
+          prisma: {} as never,
+          commercialAutomationMode: 'preview',
+          whatsAppProvider: provider,
+          logger,
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'UnrecoverableError' });
+
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-dispatch.preview-fence-rejected',
+        providerCallAllowed: false,
+      }),
+      expect.any(String),
+    );
+  });
+
   it('bloqueia um job comercial configurado com mais de uma tentativa antes do provider', async () => {
     const provider: WhatsAppProvider = {
       sendMessage: vi.fn(async () => ({

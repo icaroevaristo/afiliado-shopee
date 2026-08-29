@@ -13,6 +13,13 @@ const baseEnv = {
   REDIS_URL: 'redis://localhost:6379',
 };
 
+const legacyWorkerConfig = (env: NodeJS.ProcessEnv = baseEnv): ReturnType<
+  typeof loadConfig
+> => ({
+  ...loadConfig(env),
+  COMMERCIAL_AUTOMATION_MODE: 'send',
+});
+
 const schedulerState = (
   status: PipelineSchedulerState['status'],
 ): PipelineSchedulerState => ({
@@ -58,7 +65,7 @@ describe('worker scheduler bootstrap', () => {
 
   it('mantem o scheduler desativado por padrao e remove somente o ID conhecido', async () => {
     const harness = createHarness();
-    const config = loadConfig(baseEnv);
+    const config = legacyWorkerConfig();
 
     await expect(
       startWorker(config, {
@@ -80,7 +87,7 @@ describe('worker scheduler bootstrap', () => {
   it('tolera scheduler inexistente e registra o estado desativado', async () => {
     const harness = createHarness();
 
-    await startWorker(loadConfig(baseEnv), {
+    await startWorker(legacyWorkerConfig(), {
       logger: harness.logger,
       infrastructureFactory: harness.infrastructureFactory,
       workerFactory: harness.workerFactory,
@@ -100,7 +107,7 @@ describe('worker scheduler bootstrap', () => {
 
   it('registra uma vez com cron, timezone e jobId estavel quando habilitado', async () => {
     const harness = createHarness();
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -138,7 +145,7 @@ describe('worker scheduler bootstrap', () => {
   it('nao executa pipeline nem recria scheduler durante o bootstrap ou por job ignorado', async () => {
     const harness = createHarness();
     const hunterProvider = { buscarProdutos: vi.fn() };
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -176,7 +183,7 @@ describe('worker scheduler bootstrap', () => {
     harness.scheduler.register.mockRejectedValueOnce(
       new Error('redis://user:scheduler-secret@localhost:6379 unavailable'),
     );
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -213,7 +220,7 @@ describe('worker scheduler bootstrap', () => {
     );
 
     await expect(
-      startWorker(loadConfig(baseEnv), {
+      startWorker(legacyWorkerConfig(), {
         logger: harness.logger,
         infrastructureFactory: harness.infrastructureFactory,
         workerFactory: harness.workerFactory,
@@ -231,7 +238,7 @@ describe('worker scheduler bootstrap', () => {
   it('fecha workers e infraestrutura sem remover o agendamento no shutdown', async () => {
     const harness = createHarness();
     const runtime = await startWorker(
-      loadConfig({
+      legacyWorkerConfig({
         ...baseEnv,
         SCHEDULER_ENABLED: 'true',
         SCHEDULER_CRON: '0 9 * * *',
@@ -256,7 +263,7 @@ describe('worker scheduler bootstrap', () => {
     const harness = createHarness();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
-    await startWorker(loadConfig(baseEnv), {
+    await startWorker(legacyWorkerConfig(), {
       logger: harness.logger,
       infrastructureFactory: harness.infrastructureFactory,
       workerFactory: harness.workerFactory,
@@ -283,7 +290,7 @@ describe('worker scheduler bootstrap', () => {
       return harness.workers;
     });
 
-    await startWorker(loadConfig(baseEnv), {
+    await startWorker(legacyWorkerConfig(), {
       recoveryCoordinator: {
         run: vi.fn(async () => {
           order.push('recovery');

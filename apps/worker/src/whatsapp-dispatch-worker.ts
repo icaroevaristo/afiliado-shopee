@@ -68,6 +68,7 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
 type WhatsAppDispatchProcessorBaseOptions = {
   logger: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode?: 'preview' | 'send';
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -109,6 +110,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   prisma?: ReturnType<typeof createPrismaClient>;
   logger?: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode?: 'preview' | 'send';
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -377,6 +379,22 @@ export const processWhatsAppDispatchJob = async (
 ) => {
   if (job.name !== JOB_NAMES.whatsappDispatch) return { skipped: true };
 
+  if (options.commercialAutomationMode === 'preview') {
+    options.logger.error(
+      {
+        event: 'commercial-dispatch.preview-fence-rejected',
+        dispatchId: job.data.dispatchId,
+        providerCallAllowed: false,
+        retryAllowed: false,
+        requeueAllowed: false,
+      },
+      'WhatsApp dispatch rejected before provider because preview mode is active',
+    );
+    throw new UnrecoverableError(
+      'Dispatch WhatsApp comercial indisponivel em modo preview',
+    );
+  }
+
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
   const commercialRun = await repositories.commercialRuns.findByDispatchId(
@@ -547,6 +565,12 @@ export const createWhatsAppDispatchWorker = (
   redisUrl: string,
   options: CreateWhatsAppDispatchWorkerOptions,
 ) => {
+  if (options.commercialAutomationMode === 'preview') {
+    throw new AppError(
+      'O worker de dispatch WhatsApp nao pode iniciar em modo preview',
+      'WHATSAPP_DISPATCH_WORKER_PREVIEW_MODE_FORBIDDEN',
+    );
+  }
   const ownsConnection = !options.connection;
   const ownsPrisma = !options.prisma;
   const connection = options.connection ?? createRedisConnection(redisUrl);
@@ -554,6 +578,7 @@ export const createWhatsAppDispatchWorker = (
   const processorOptions: WhatsAppDispatchProcessorOptions = {
     prisma,
     logger: options.logger ?? consoleLogger,
+    commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProvider: options.whatsAppProvider,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
     messageBuilder: options.messageBuilder,

@@ -3,6 +3,7 @@ import type { Job } from 'bullmq';
 import { Worker } from 'bullmq';
 import { loadConfig, type AppEnv } from '@shopee-auto-affiliate-ai/config';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   createWhatsAppProvider,
   MockShopeeProvider,
@@ -48,6 +49,7 @@ type CreatePipelineProductWorkerOptions = {
   hunterProvider?: HunterProvider;
   logger?: WorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode: AppEnv['COMMERCIAL_AUTOMATION_MODE'];
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -62,6 +64,7 @@ type WorkerProcessorOptions = Required<
     | 'groupSendPolicy'
     | 'reservationLeaseMilliseconds'
     | 'whatsAppProviderResolver'
+    | 'commercialAutomationMode'
   >
 > &
   Pick<
@@ -140,6 +143,12 @@ export const createPipelineProductWorker = (
   redisUrl: string,
   options: CreatePipelineProductWorkerOptions,
 ) => {
+  if (options.commercialAutomationMode === 'preview') {
+    throw new AppError(
+      'O worker legado de pipeline nao pode iniciar em modo preview',
+      'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
+    );
+  }
   const ownsConnection = !options.connection;
   const connection = options.connection ?? createRedisConnection(redisUrl);
   const prisma = options.prisma ?? createPrismaClient();
@@ -148,6 +157,7 @@ export const createPipelineProductWorker = (
     hunterProvider: options.hunterProvider ?? new MockShopeeProvider(),
     logger: options.logger ?? consoleLogger,
     whatsAppProvider: options.whatsAppProvider,
+    commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
     groupSendPolicy: options.groupSendPolicy,
   };
@@ -232,6 +242,12 @@ export const startWorker = async (
   config: AppEnv,
   options: StartWorkerOptions = {},
 ) => {
+  if (config.COMMERCIAL_AUTOMATION_MODE === 'preview') {
+    throw new AppError(
+      'O entrypoint legado de worker nao pode iniciar em modo preview',
+      'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
+    );
+  }
   const logger = options.logger ?? consoleLogger;
   const infrastructureFactory =
     options.infrastructureFactory ?? createWorkerInfrastructure;
@@ -381,6 +397,7 @@ export const startWorker = async (
       prisma,
       hunterProvider: options.hunterProvider,
       logger,
+      commercialAutomationMode: config.COMMERCIAL_AUTOMATION_MODE,
       whatsAppProvider,
       whatsAppProviderResolver: providerResolver,
       groupSendPolicy,
@@ -407,11 +424,7 @@ export const startWorker = async (
   };
 };
 
-if (
-  process.env.NODE_ENV !== 'test' &&
-  isMainModule(import.meta.url)
-) {
-  const config = loadConfig();
+export const startLegacyWorkerEntrypoint = async (config = loadConfig()) => {
   const runtime = await startWorker(config);
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = () => {
@@ -430,4 +443,12 @@ if (
 
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
+  return runtime;
+};
+
+if (
+  process.env.NODE_ENV !== 'test' &&
+  isMainModule(import.meta.url)
+) {
+  await startLegacyWorkerEntrypoint();
 }
