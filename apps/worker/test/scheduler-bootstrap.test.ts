@@ -13,9 +13,9 @@ const baseEnv = {
   REDIS_URL: 'redis://localhost:6379',
 };
 
-const legacyWorkerConfig = (env: NodeJS.ProcessEnv = baseEnv): ReturnType<
-  typeof loadConfig
-> => ({
+const legacyWorkerConfig = (
+  env: NodeJS.ProcessEnv = baseEnv,
+): ReturnType<typeof loadConfig> => ({
   ...loadConfig(env),
   COMMERCIAL_AUTOMATION_MODE: 'send',
 });
@@ -304,6 +304,7 @@ describe('worker scheduler bootstrap', () => {
             jobsCreated: 0,
             reservationsReleased: 0,
             finalizersReplayed: 0,
+            historicalIgnored: 0,
             ambiguitiesPreserved: 0,
           };
         }),

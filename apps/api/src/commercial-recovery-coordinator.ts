@@ -10,16 +10,14 @@ import type {
 } from './repositories';
 
 export type CommercialRecoveryCategory =
-  | 'SAFE_DB_RECOVERY'
-  | 'SAFE_QUEUE_RECOVERY'
-  | 'NO_ACTION'
-  | 'HUMAN_REQUIRED';
+  'SAFE_DB_RECOVERY' | 'SAFE_QUEUE_RECOVERY' | 'NO_ACTION' | 'HUMAN_REQUIRED';
 
 export type CommercialRecoveryReport = {
   scanned: number;
   safeDbRecovered: number;
   safeQueueRecovered: number;
   noAction: number;
+  historicalIgnored: number;
   humanRequired: number;
   jobsReused: number;
   jobsCreated: number;
@@ -66,9 +64,9 @@ type RecoveryDependencies = {
     'list' | 'findPublicationContext'
   >;
   queue?: CommercialRecoveryQueue;
-  recoverExecution?: (
-    executionId: string,
-  ) => Promise<{ outcome: 'recovered' | 'already-terminal' | 'investigation-required' }>;
+  recoverExecution?: (executionId: string) => Promise<{
+    outcome: 'recovered' | 'already-terminal' | 'investigation-required';
+  }>;
   publishOutbox?: (
     outboxId: string,
   ) => Promise<CommercialRecoveryPublishResult>;
@@ -83,6 +81,7 @@ const emptyReport = (): CommercialRecoveryReport => ({
   safeDbRecovered: 0,
   safeQueueRecovered: 0,
   noAction: 0,
+  historicalIgnored: 0,
   humanRequired: 0,
   jobsReused: 0,
   jobsCreated: 0,
@@ -92,7 +91,10 @@ const emptyReport = (): CommercialRecoveryReport => ({
 });
 
 const readAllPages = async <T>(
-  loader: (page: number, limit: number) => Promise<{
+  loader: (
+    page: number,
+    limit: number,
+  ) => Promise<{
     items: T[];
     total: number;
   }>,
@@ -121,21 +123,20 @@ const hasExternalUncertainty = (
   const dispatch = run?.dispatch;
   const dispatchEvidenceIsUnknown = Boolean(
     dispatch &&
-      (dispatch.externalMessageId === undefined ||
-        dispatch.sentAt === undefined),
+    (dispatch.externalMessageId === undefined || dispatch.sentAt === undefined),
   );
   const dispatchHasExternalEvidence = Boolean(
     dispatch &&
-      (dispatch.externalMessageId !== null || dispatch.sentAt !== null),
+    (dispatch.externalMessageId !== null || dispatch.sentAt !== null),
   );
   return Boolean(
     context.execution.externalStage === 'EXTERNAL_MAY_HAVE_STARTED' ||
-      run?.investigationRequired ||
-      run?.finalStatus === 'AMBIGUOUS' ||
-      dispatchEvidenceIsUnknown ||
-      dispatchHasExternalEvidence ||
-      dispatch?.status === 'PROCESSING' ||
-      run?.outbox?.status === 'AMBIGUOUS',
+    run?.investigationRequired ||
+    run?.finalStatus === 'AMBIGUOUS' ||
+    dispatchEvidenceIsUnknown ||
+    dispatchHasExternalEvidence ||
+    dispatch?.status === 'PROCESSING' ||
+    run?.outbox?.status === 'AMBIGUOUS',
   );
 };
 
@@ -207,26 +208,43 @@ const pendingContextIsSafe = (
   context.dispatch.sentAt === null &&
   (context.run.jobId === null || context.run.jobId === context.outbox.jobId);
 
-const isSafeSentDispatch = (
+const hasValidSentEvidence = (
+  context: CommercialDispatchOutboxPublicationContext,
+) =>
+  context.dispatch.status === 'SENT' &&
+  typeof context.dispatch.externalMessageId === 'string' &&
+  context.dispatch.externalMessageId.trim().length > 0 &&
+  context.dispatch.sentAt instanceof Date &&
+  !Number.isNaN(context.dispatch.sentAt.getTime());
+
+const isTerminalSentHistory = (
+  context: CommercialDispatchOutboxPublicationContext,
+) => {
+  const { outbox, run } = context;
+  return (
+    lifecycleIdentitiesAreConsistent(context) &&
+    outbox.status === 'PUBLISHED' &&
+    run.status === 'COMPLETED' &&
+    run.finalStatus === 'SENT' &&
+    !run.investigationRequired &&
+    run.jobId === outbox.jobId &&
+    hasValidSentEvidence(context)
+  );
+};
+
+const isSafePostSendFinalization = (
   context: CommercialDispatchOutboxPublicationContext,
 ) => {
   const { outbox, run, dispatch } = context;
   return (
     lifecycleIdentitiesAreConsistent(context) &&
     outbox.status === 'PUBLISHED' &&
-    run.mode === 'CONFIRMED' &&
-    run.dispatchId === dispatch.id &&
+    run.status === 'STARTED' &&
+    run.finalStatus === 'PENDING' &&
     !run.investigationRequired &&
-    run.finalStatus !== 'AMBIGUOUS' &&
-    run.finalStatus !== 'FAILED' &&
-    dispatch.status === 'SENT' &&
     dispatch.attemptCount === 1 &&
-    typeof dispatch.externalMessageId === 'string' &&
-    dispatch.externalMessageId.length > 0 &&
-    dispatch.sentAt instanceof Date &&
     run.jobId === outbox.jobId &&
-    ((run.status === 'COMPLETED' && run.finalStatus === 'SENT') ||
-      (run.status === 'STARTED' && run.finalStatus === 'PENDING'))
+    hasValidSentEvidence(context)
   );
 };
 
@@ -300,7 +318,11 @@ export class CommercialRecoveryCoordinator {
         this.markHuman(report, false);
         continue;
       }
-      if (isSafeSentDispatch(context)) {
+      if (isTerminalSentHistory(context)) {
+        report.historicalIgnored += 1;
+        continue;
+      }
+      if (isSafePostSendFinalization(context)) {
         await this.replayFinalizer(
           context.dispatch.id,
           finalizedDispatches,
@@ -308,16 +330,19 @@ export class CommercialRecoveryCoordinator {
         );
         continue;
       }
-      if (context.dispatch.status === 'SENT' || hasPublicationUncertainty(context)) {
+      if (context.dispatch.attemptCount > 1) {
+        this.markHuman(report, true);
+        continue;
+      }
+      if (
+        context.dispatch.status === 'SENT' ||
+        hasPublicationUncertainty(context)
+      ) {
         this.markHuman(report, true);
         continue;
       }
       if (context.outbox.status === 'PENDING') {
-        await this.recoverPendingOutbox(
-          context,
-          automationPaused,
-          report,
-        );
+        await this.recoverPendingOutbox(context, automationPaused, report);
         continue;
       }
       await this.classifyPublishedOutbox(context, report);
@@ -441,7 +466,8 @@ export class CommercialRecoveryCoordinator {
       }
       report.safeQueueRecovered += 1;
       if (result.jobCreated) report.jobsCreated += 1;
-      if (result.jobReused || (!result.jobCreated && job)) report.jobsReused += 1;
+      if (result.jobReused || (!result.jobCreated && job))
+        report.jobsReused += 1;
     } catch (error) {
       this.dependencies.logger.error(
         {
@@ -489,8 +515,7 @@ export class CommercialRecoveryCoordinator {
         linkedOutbox.id !== context.outbox.id ||
         linkedOutbox.status !== 'PENDING' ||
         linkedOutbox.jobId !== context.outbox.jobId ||
-        (linkedRun?.jobId !== null &&
-          linkedRun?.jobId !== context.outbox.jobId)
+        (linkedRun?.jobId !== null && linkedRun?.jobId !== context.outbox.jobId)
       ) {
         this.markHuman(report, true);
         return false;
@@ -522,7 +547,10 @@ export class CommercialRecoveryCoordinator {
       const job = this.dependencies.queue.getJob
         ? await this.dependencies.queue.getJob(context.outbox.jobId)
         : null;
-      if (!job && (await this.dependencies.queue.hasJob(context.outbox.jobId))) {
+      if (
+        !job &&
+        (await this.dependencies.queue.hasJob(context.outbox.jobId))
+      ) {
         this.markHuman(report, false);
         return;
       }

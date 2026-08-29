@@ -61,13 +61,12 @@ describe('isolated WhatsApp dispatch worker', () => {
       })),
     };
     const close = vi.fn(async () => undefined);
-    const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => provider);
-    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(
-      () =>
-        ({
-          close,
-        }),
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(
+      () => provider,
     );
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => ({
+      close,
+    }));
     const logger = { info: vi.fn(), error: vi.fn() };
 
     const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
@@ -110,6 +109,7 @@ describe('isolated WhatsApp dispatch worker', () => {
           jobsCreated: 0,
           reservationsReleased: 0,
           finalizersReplayed: 0,
+          historicalIgnored: 0,
           ambiguitiesPreserved: 0,
         };
       }),

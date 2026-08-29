@@ -59,6 +59,7 @@ describe('commercial automation worker bootstrap', () => {
           jobsCreated: 0,
           reservationsReleased: 0,
           finalizersReplayed: 0,
+          historicalIgnored: 0,
           ambiguitiesPreserved: 0,
         };
       }),

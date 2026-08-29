@@ -110,15 +110,10 @@ const createSubject = (input: {
     CommercialAutomationExecutionRecoveryContext | null
   >;
   outboxes?: CommercialDispatchOutboxRecord[];
-  publicationContexts?: Map<
-    string,
-    CommercialDispatchOutboxPublicationContext
-  >;
+  publicationContexts?: Map<string, CommercialDispatchOutboxPublicationContext>;
   queueJobs?: Map<string, CommercialRecoveryJob>;
   queueAvailable?: boolean;
-  recoverExecution?: (
-    executionId: string,
-  ) => Promise<{
+  recoverExecution?: (executionId: string) => Promise<{
     outcome: 'recovered' | 'already-terminal' | 'investigation-required';
   }>;
   publishOutbox?: (
@@ -153,9 +148,8 @@ const createSubject = (input: {
       list: async () => ({ items: outboxes, total: outboxes.length }),
       findPublicationContext: async (id) => publicationContexts.get(id) ?? null,
     },
-    queue: input.queueAvailable === false
-      ? undefined
-      : { hasJob, getJob, enqueue },
+    queue:
+      input.queueAvailable === false ? undefined : { hasJob, getJob, enqueue },
     recoverExecution,
     publishOutbox,
     finalizeAfterDispatch,
@@ -313,27 +307,32 @@ describe('commercial recovery coordinator', () => {
     }));
     const harness = createSubject({
       paused: false,
-      executionContexts: new Map([[linkedExecution.id, {
-        execution: linkedExecution,
-        run: {
-          id: currentOutbox.commercialRunId,
-          mode: 'CONFIRMED',
-          dispatchId: currentOutbox.dispatchId,
-          jobId: null,
-          instanceName: currentOutbox.instanceName,
-          finalStatus: 'PENDING',
-          investigationRequired: false,
-          dispatch: {
-            id: currentOutbox.dispatchId,
-            status: 'PENDING',
-            attemptCount: 0,
-            instanceName: currentOutbox.instanceName,
-            externalMessageId: null,
-            sentAt: null,
+      executionContexts: new Map([
+        [
+          linkedExecution.id,
+          {
+            execution: linkedExecution,
+            run: {
+              id: currentOutbox.commercialRunId,
+              mode: 'CONFIRMED',
+              dispatchId: currentOutbox.dispatchId,
+              jobId: null,
+              instanceName: currentOutbox.instanceName,
+              finalStatus: 'PENDING',
+              investigationRequired: false,
+              dispatch: {
+                id: currentOutbox.dispatchId,
+                status: 'PENDING',
+                attemptCount: 0,
+                instanceName: currentOutbox.instanceName,
+                externalMessageId: null,
+                sentAt: null,
+              },
+              outbox: currentOutbox,
+            },
           },
-          outbox: currentOutbox,
-        },
-      }]]),
+        ],
+      ]),
       outboxes: [currentOutbox],
       publicationContexts: new Map([[currentOutbox.id, context]]),
       publishOutbox,
@@ -360,10 +359,15 @@ describe('commercial recovery coordinator', () => {
     const harness = createSubject({
       paused: false,
       executions: [],
-      executionContexts: new Map([[linkedExecution.id, {
-        execution: linkedExecution,
-        run: null,
-      }]]),
+      executionContexts: new Map([
+        [
+          linkedExecution.id,
+          {
+            execution: linkedExecution,
+            run: null,
+          },
+        ],
+      ]),
       outboxes: [currentOutbox],
       publicationContexts: new Map([[currentOutbox.id, context]]),
     });
@@ -411,11 +415,14 @@ describe('commercial recovery coordinator', () => {
       outboxes: [currentOutbox],
       publicationContexts: new Map([[currentOutbox.id, context]]),
       queueJobs: new Map([
-        [currentOutbox.jobId, {
-          id: currentOutbox.jobId,
-          dispatchId: currentOutbox.dispatchId,
-          instanceName: currentOutbox.instanceName,
-        }],
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+          },
+        ],
       ]),
     });
 
@@ -441,11 +448,14 @@ describe('commercial recovery coordinator', () => {
       outboxes: [currentOutbox],
       publicationContexts: new Map([[currentOutbox.id, unknownContext]]),
       queueJobs: new Map([
-        [currentOutbox.jobId, {
-          id: currentOutbox.jobId,
-          dispatchId: currentOutbox.dispatchId,
-          instanceName: currentOutbox.instanceName,
-        }],
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+          },
+        ],
       ]),
     });
 
@@ -456,13 +466,230 @@ describe('commercial recovery coordinator', () => {
     });
   });
 
-  it('replays a SENT finalizer once when the same coordinator is concurrently started twice', async () => {
+  it('ignores terminal SENT history with an external marker and attemptCount greater than one', async () => {
     const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
     const context = publicationContext({
       outbox: currentOutbox,
       run: {
         status: 'COMPLETED',
         finalStatus: 'SENT',
+        jobId: currentOutbox.jobId,
+      },
+      dispatch: {
+        status: 'SENT',
+        attemptCount: 2,
+        externalMessageId: 'external-id',
+        sentAt: now,
+      },
+    });
+    const finalizeAfterDispatch = vi.fn(async () => undefined);
+    const harness = createSubject({
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, context]]),
+      finalizeAfterDispatch,
+    });
+
+    const report = await harness.subject.run();
+
+    expect(report).toMatchObject({
+      scanned: 1,
+      historicalIgnored: 1,
+      safeDbRecovered: 0,
+      safeQueueRecovered: 0,
+      noAction: 0,
+      humanRequired: 0,
+      finalizersReplayed: 0,
+      ambiguitiesPreserved: 0,
+    });
+    expect(finalizeAfterDispatch).not.toHaveBeenCalled();
+  });
+
+  it('ignores a completed QUEUED execution when its downstream SENT history is terminal', async () => {
+    const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
+    const terminalExecution = execution({
+      id: 'execution-terminal-history',
+      status: 'QUEUED',
+      activeKey: null,
+      completedAt: now,
+      commercialRunId: currentOutbox.commercialRunId,
+      externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+    });
+    const context = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        executionId: terminalExecution.id,
+        status: 'COMPLETED',
+        finalStatus: 'SENT',
+        jobId: currentOutbox.jobId,
+      },
+      dispatch: {
+        status: 'SENT',
+        attemptCount: 1,
+        externalMessageId: 'external-id',
+        sentAt: now,
+      },
+    });
+    const harness = createSubject({
+      executions: [terminalExecution],
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, context]]),
+    });
+
+    const report = await harness.subject.run();
+
+    expect(report).toMatchObject({
+      scanned: 1,
+      historicalIgnored: 1,
+      safeDbRecovered: 0,
+      humanRequired: 0,
+      ambiguitiesPreserved: 0,
+      finalizersReplayed: 0,
+    });
+    expect(harness.recoverExecution).not.toHaveBeenCalled();
+    expect(terminalExecution.externalStage).toBe('EXTERNAL_MAY_HAVE_STARTED');
+  });
+
+  it('keeps a non-terminal SENT dispatch with attemptCount greater than one human-required', async () => {
+    const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
+    const context = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        status: 'STARTED',
+        finalStatus: 'PENDING',
+        jobId: currentOutbox.jobId,
+      },
+      dispatch: {
+        status: 'SENT',
+        attemptCount: 2,
+        externalMessageId: 'external-id',
+        sentAt: now,
+      },
+    });
+    const finalizeAfterDispatch = vi.fn(async () => undefined);
+    const harness = createSubject({
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, context]]),
+      finalizeAfterDispatch,
+    });
+
+    const report = await harness.subject.run();
+
+    expect(report).toMatchObject({
+      scanned: 1,
+      historicalIgnored: 0,
+      humanRequired: 1,
+      ambiguitiesPreserved: 1,
+      safeDbRecovered: 0,
+      finalizersReplayed: 0,
+    });
+    expect(finalizeAfterDispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps non-terminal attempt overflow human-required even when a job exists', async () => {
+    const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
+    const context = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        status: 'STARTED',
+        finalStatus: 'PENDING',
+        jobId: currentOutbox.jobId,
+      },
+      dispatch: {
+        status: 'FAILED',
+        attemptCount: 2,
+      },
+    });
+    const harness = createSubject({
+      paused: false,
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, context]]),
+      queueJobs: new Map([
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+          },
+        ],
+      ]),
+    });
+
+    await expect(harness.subject.run()).resolves.toMatchObject({
+      humanRequired: 1,
+      ambiguitiesPreserved: 1,
+      noAction: 0,
+      safeQueueRecovered: 0,
+    });
+    expect(harness.enqueue).not.toHaveBeenCalled();
+    expect(harness.publishOutbox).not.toHaveBeenCalled();
+  });
+
+  it('does not ignore terminal-shaped history with invalid identity or SENT evidence', async () => {
+    const mismatchedOutbox = outbox({
+      id: 'outbox-mismatched',
+      status: 'PUBLISHED',
+      publishedAt: now,
+    });
+    const mismatchedContext = publicationContext({
+      outbox: mismatchedOutbox,
+      run: {
+        id: 'different-run',
+        status: 'COMPLETED',
+        finalStatus: 'SENT',
+        jobId: mismatchedOutbox.jobId,
+      },
+      dispatch: {
+        status: 'SENT',
+        attemptCount: 2,
+        externalMessageId: 'external-id',
+        sentAt: now,
+      },
+    });
+    const invalidEvidenceOutbox = outbox({
+      id: 'outbox-invalid-evidence',
+      status: 'PUBLISHED',
+      publishedAt: now,
+    });
+    const invalidEvidenceContext = publicationContext({
+      outbox: invalidEvidenceOutbox,
+      run: {
+        status: 'COMPLETED',
+        finalStatus: 'SENT',
+        jobId: invalidEvidenceOutbox.jobId,
+      },
+      dispatch: {
+        status: 'SENT',
+        attemptCount: 1,
+        externalMessageId: '   ',
+        sentAt: new Date('invalid'),
+      },
+    });
+    const harness = createSubject({
+      outboxes: [mismatchedOutbox, invalidEvidenceOutbox],
+      publicationContexts: new Map([
+        [mismatchedOutbox.id, mismatchedContext],
+        [invalidEvidenceOutbox.id, invalidEvidenceContext],
+      ]),
+    });
+
+    await expect(harness.subject.run()).resolves.toMatchObject({
+      scanned: 2,
+      historicalIgnored: 0,
+      humanRequired: 2,
+      ambiguitiesPreserved: 2,
+      finalizersReplayed: 0,
+    });
+    expect(harness.finalizeAfterDispatch).not.toHaveBeenCalled();
+  });
+
+  it('replays a SENT finalizer once when the same coordinator is concurrently started twice', async () => {
+    const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
+    const context = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        status: 'STARTED',
+        finalStatus: 'PENDING',
         jobId: currentOutbox.jobId,
       },
       dispatch: {
@@ -477,11 +704,14 @@ describe('commercial recovery coordinator', () => {
       outboxes: [currentOutbox],
       publicationContexts: new Map([[currentOutbox.id, context]]),
       queueJobs: new Map([
-        [currentOutbox.jobId, {
-          id: currentOutbox.jobId,
-          dispatchId: currentOutbox.dispatchId,
-          instanceName: currentOutbox.instanceName,
-        }],
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+          },
+        ],
       ]),
       finalizeAfterDispatch,
     });
@@ -493,8 +723,87 @@ describe('commercial recovery coordinator', () => {
 
     expect(finalizeAfterDispatch).toHaveBeenCalledTimes(1);
     expect(first.finalizersReplayed).toBe(1);
+    expect(first.historicalIgnored).toBe(0);
     expect(second).toEqual(first);
     expect(first.safeDbRecovered).toBe(1);
+  });
+
+  it('ignores the complete historical outbox shape without replay or human-required noise', async () => {
+    const historicalExecutionIds = Array.from(
+      { length: 17 },
+      (_, index) => `execution-history-${index + 1}`,
+    );
+    const historicalOutboxes = Array.from({ length: 19 }, (_, index) => {
+      const suffix = index + 1;
+      const currentOutbox = outbox({
+        id: `outbox-history-${suffix}`,
+        commercialRunId: `run-history-${suffix}`,
+        dispatchId: `dispatch-history-${suffix}`,
+        jobId: `job-history-${suffix}`,
+        status: 'PUBLISHED',
+        publishedAt: now,
+      });
+      const context = publicationContext({
+        outbox: currentOutbox,
+        run: {
+          executionId: historicalExecutionIds[index] ?? null,
+          status: 'COMPLETED',
+          finalStatus: 'SENT',
+          jobId: currentOutbox.jobId,
+        },
+        dispatch: {
+          status: 'SENT',
+          attemptCount: index === 9 ? 2 : 1,
+          externalMessageId: `external-history-${suffix}`,
+          sentAt: now,
+        },
+      });
+      return { outbox: currentOutbox, context };
+    });
+    const executions = historicalOutboxes
+      .slice(0, 17)
+      .map(({ outbox: currentOutbox }, index) =>
+        execution({
+          id: historicalExecutionIds[index],
+          status: 'QUEUED',
+          activeKey: null,
+          completedAt: now,
+          commercialRunId: currentOutbox.commercialRunId,
+          externalStage:
+            index === 9 ? 'NOT_REACHED' : 'EXTERNAL_MAY_HAVE_STARTED',
+        }),
+      );
+    const harness = createSubject({
+      executions,
+      outboxes: historicalOutboxes.map(
+        ({ outbox: currentOutbox }) => currentOutbox,
+      ),
+      publicationContexts: new Map(
+        historicalOutboxes.map(({ outbox: currentOutbox, context }) => [
+          currentOutbox.id,
+          context,
+        ]),
+      ),
+    });
+
+    const report = await harness.subject.run();
+
+    expect(report).toEqual({
+      scanned: 19,
+      safeDbRecovered: 0,
+      safeQueueRecovered: 0,
+      noAction: 0,
+      historicalIgnored: 19,
+      humanRequired: 0,
+      jobsReused: 0,
+      jobsCreated: 0,
+      reservationsReleased: 0,
+      finalizersReplayed: 0,
+      ambiguitiesPreserved: 0,
+    });
+    expect(harness.recoverExecution).not.toHaveBeenCalled();
+    expect(harness.finalizeAfterDispatch).not.toHaveBeenCalled();
+    expect(harness.enqueue).not.toHaveBeenCalled();
   });
 
   it('duas instancias concorrentes convergem para um unico job deterministico', async () => {
@@ -502,7 +811,11 @@ describe('commercial recovery coordinator', () => {
     const context = publicationContext({ outbox: currentOutbox });
     const jobs = new Map<string, CommercialRecoveryJob>();
     const enqueue = vi.fn(
-      async (dispatchId: string, jobId: string, instanceName?: string | null) => {
+      async (
+        dispatchId: string,
+        jobId: string,
+        instanceName?: string | null,
+      ) => {
         if (!jobs.has(jobId)) {
           jobs.set(jobId, {
             id: jobId,
