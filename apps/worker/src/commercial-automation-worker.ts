@@ -25,6 +25,7 @@ import {
   type CommercialAutomationRuntimeLogger,
 } from './commercial-automation-runtime';
 import {
+  assertCommercialRecoveryStartupSafe,
   CommercialRecoveryCoordinator,
 } from '../../api/src/commercial-recovery-coordinator';
 import { createCommercialRecoveryCoordinator } from './commercial-recovery-bootstrap';
@@ -338,6 +339,19 @@ export const startCommercialAutomationWorker = async (
   try {
     if (recoveryCoordinator) {
       const recovery = await recoveryCoordinator.run();
+      try {
+        assertCommercialRecoveryStartupSafe(recovery);
+      } catch (error) {
+        logger.error(
+          {
+            event: 'commercial-recovery.coordinator.startup-blocked',
+            ...recovery,
+            errorCode: error instanceof AppError ? error.code : 'APP_ERROR',
+          },
+          'Commercial recovery requires human intervention before startup',
+        );
+        throw error;
+      }
       logger.info(
         {
           event: 'commercial-recovery.coordinator.startup-complete',

@@ -13,6 +13,24 @@ const baseEnv = {
   REDIS_URL: 'redis://localhost:6379',
 };
 
+const recoveryReport = (overrides: {
+  humanRequired?: number;
+  ambiguitiesPreserved?: number;
+} = {}) => ({
+  scanned: 0,
+  safeDbRecovered: 0,
+  safeQueueRecovered: 0,
+  noAction: 0,
+  humanRequired: 0,
+  jobsReused: 0,
+  jobsCreated: 0,
+  reservationsReleased: 0,
+  finalizersReplayed: 0,
+  historicalIgnored: 0,
+  ambiguitiesPreserved: 0,
+  ...overrides,
+});
+
 const legacyWorkerConfig = (
   env: NodeJS.ProcessEnv = baseEnv,
 ): ReturnType<typeof loadConfig> => ({
@@ -315,5 +333,70 @@ describe('worker scheduler bootstrap', () => {
     });
 
     expect(order).toEqual(['recovery', 'scheduler', 'workers']);
+  });
+
+  it('bloqueia o entrypoint legado antes de scheduler, provider e workers quando recovery exige intervencao humana', async () => {
+    const harness = createHarness();
+    const providerFactory = vi.fn(() => new MockWhatsAppProvider());
+    const recoveryCoordinator = {
+      run: vi.fn(async () =>
+        recoveryReport({ humanRequired: 1, ambiguitiesPreserved: 1 }),
+      ),
+    };
+    const config = legacyWorkerConfig({
+      ...baseEnv,
+      SCHEDULER_ENABLED: 'true',
+      SCHEDULER_CRON: '0 9 * * *',
+      SCHEDULER_TIMEZONE: 'America/Sao_Paulo',
+    });
+
+    await expect(
+      startWorker(config, {
+        recoveryCoordinator,
+        providerFactory,
+        logger: harness.logger,
+        infrastructureFactory: harness.infrastructureFactory,
+        workerFactory: harness.workerFactory,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
+    expect(harness.scheduler.register).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.infrastructure.close).toHaveBeenCalledOnce();
+  });
+
+  it('bloqueia o entrypoint legado com humanRequired mesmo quando nao ha ambiguity reportada', async () => {
+    const harness = createHarness();
+    const providerFactory = vi.fn(() => new MockWhatsAppProvider());
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ humanRequired: 1 })),
+    };
+    const config = legacyWorkerConfig({
+      ...baseEnv,
+      SCHEDULER_ENABLED: 'true',
+      SCHEDULER_CRON: '0 9 * * *',
+      SCHEDULER_TIMEZONE: 'America/Sao_Paulo',
+    });
+
+    await expect(
+      startWorker(config, {
+        recoveryCoordinator,
+        providerFactory,
+        logger: harness.logger,
+        infrastructureFactory: harness.infrastructureFactory,
+        workerFactory: harness.workerFactory,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(harness.scheduler.register).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.infrastructure.close).toHaveBeenCalledOnce();
   });
 });

@@ -34,7 +34,10 @@ import {
   createCommercialRecoveryCoordinator,
   createCommercialRecoveryQueue,
 } from './commercial-recovery-bootstrap';
-import type { CommercialRecoveryCoordinator } from '../../api/src/commercial-recovery-coordinator';
+import {
+  assertCommercialRecoveryStartupSafe,
+  type CommercialRecoveryCoordinator,
+} from '../../api/src/commercial-recovery-coordinator';
 
 export { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
 
@@ -277,6 +280,19 @@ export const startWorker = async (
     if (recoveryCoordinator) {
       try {
         const recovery = await recoveryCoordinator.run();
+        try {
+          assertCommercialRecoveryStartupSafe(recovery);
+        } catch (error) {
+          logger.error(
+            {
+              event: 'commercial-recovery.coordinator.startup-blocked',
+              ...recovery,
+              errorCode: error instanceof AppError ? error.code : 'APP_ERROR',
+            },
+            'Commercial recovery requires human intervention before startup',
+          );
+          throw error;
+        }
         logger.info(
           {
             event: 'commercial-recovery.coordinator.startup-complete',

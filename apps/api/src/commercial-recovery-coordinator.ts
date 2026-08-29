@@ -1,3 +1,5 @@
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
+
 import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
 import type {
   CommercialAutomationExecutionRecord,
@@ -24,6 +26,23 @@ export type CommercialRecoveryReport = {
   reservationsReleased: number;
   finalizersReplayed: number;
   ambiguitiesPreserved: number;
+};
+
+export const COMMERCIAL_RECOVERY_HUMAN_REQUIRED_CODE =
+  'COMMERCIAL_RECOVERY_HUMAN_REQUIRED';
+
+export const assertCommercialRecoveryStartupSafe = (
+  report: Pick<
+    CommercialRecoveryReport,
+    'humanRequired' | 'ambiguitiesPreserved'
+  >,
+) => {
+  if (report.humanRequired > 0 || report.ambiguitiesPreserved > 0) {
+    throw new AppError(
+      'Recuperacao comercial exige intervencao humana antes do startup',
+      COMMERCIAL_RECOVERY_HUMAN_REQUIRED_CODE,
+    );
+  }
 };
 
 export type CommercialRecoveryLogger = {
