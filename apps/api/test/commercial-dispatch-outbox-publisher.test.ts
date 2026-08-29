@@ -16,6 +16,9 @@ const build = ({
   runJobId = null,
   jobExists = false,
   instanceName = null,
+  useGetJob = false,
+  jobDispatchId = 'dispatch-id',
+  jobInstanceName = instanceName,
 }: {
   outboxStatus?: CommercialDispatchOutboxRecord['status'];
   dispatchStatus?: CommercialDispatchOutboxPublicationContext['dispatch']['status'];
@@ -23,6 +26,9 @@ const build = ({
   runJobId?: string | null;
   jobExists?: boolean;
   instanceName?: string | null;
+  useGetJob?: boolean;
+  jobDispatchId?: string;
+  jobInstanceName?: string | null;
 } = {}) => {
   const record: CommercialDispatchOutboxRecord = {
     id: 'outbox-id',
@@ -52,21 +58,28 @@ const build = ({
       status: dispatchStatus,
       attemptCount,
       instanceName,
+      externalMessageId: dispatchStatus === 'SENT' ? 'external-id' : null,
+      sentAt: dispatchStatus === 'SENT' ? now : null,
     },
   };
   const jobs = new Set(jobExists ? ['job-id'] : []);
   const enqueue = vi.fn(
     async (_dispatchId: string, jobId: string, queuedInstanceName?: string | null) => {
       expect(queuedInstanceName ?? null).toBe(instanceName);
-    jobs.add(jobId);
+      jobs.add(jobId);
     },
   );
-  const markPublished = vi.fn(async (_id: string, publishedAt: Date) => {
-    record.status = 'PUBLISHED';
-    record.publishedAt = publishedAt;
-    context.run.jobId = record.jobId;
-    return record;
-  });
+  const markPublished = vi.fn(
+    async (
+      _id: string,
+      publishedAt: Date,
+    ): Promise<CommercialDispatchOutboxRecord | null> => {
+      record.status = 'PUBLISHED';
+      record.publishedAt = publishedAt;
+      context.run.jobId = record.jobId;
+      return record;
+    },
+  );
   const markAmbiguous = vi.fn(async (_id: string, failureCode: string) => {
     record.status = 'AMBIGUOUS';
     record.failureCode = failureCode;
@@ -79,9 +92,22 @@ const build = ({
     markAmbiguous,
   } as unknown as CommercialDispatchOutboxRepository;
   const hasJob = vi.fn(async (jobId: string) => jobs.has(jobId));
+  const getJob = vi.fn(async (jobId: string) =>
+    jobs.has(jobId)
+      ? {
+          id: jobId,
+          dispatchId: jobDispatchId,
+          instanceName: jobInstanceName,
+        }
+      : null,
+  );
   const publisher = new CommercialDispatchOutboxPublisher({
     outboxes,
-    queue: { hasJob, enqueue },
+    queue: {
+      hasJob,
+      ...(useGetJob ? { getJob } : {}),
+      enqueue,
+    },
     logger: { info: vi.fn(), error: vi.fn() },
     clock: () => now,
   });
@@ -92,6 +118,7 @@ const build = ({
     jobs,
     enqueue,
     hasJob,
+    getJob,
     markPublished,
     markAmbiguous,
   };
@@ -167,6 +194,39 @@ describe('CommercialDispatchOutboxPublisher', () => {
     expect(state.enqueue).toHaveBeenCalledWith('dispatch-id', 'job-id');
   });
 
+  it('converge quando perde o CAS de publicacao para outro publisher', async () => {
+    const state = build();
+    state.markPublished.mockImplementationOnce(async (_id, publishedAt) => {
+      state.record.status = 'PUBLISHED';
+      state.record.publishedAt = publishedAt;
+      state.context.run.jobId = state.record.jobId;
+      return null;
+    });
+
+    await expect(state.publisher.publish('outbox-id')).resolves.toMatchObject({
+      status: 'PUBLISHED',
+    });
+    expect(state.markAmbiguous).not.toHaveBeenCalled();
+  });
+
+  it('nao marca AMBIGUOUS quando o provider ja persistiu SENT durante a corrida', async () => {
+    const state = build();
+    state.markPublished.mockImplementationOnce(async () => {
+      state.record.status = 'PENDING';
+      state.context.dispatch.status = 'SENT';
+      state.context.dispatch.attemptCount = 1;
+      state.context.dispatch.externalMessageId = 'external-id';
+      state.context.dispatch.sentAt = now;
+      return null;
+    });
+
+    await expect(state.publisher.publish('outbox-id')).rejects.toMatchObject({
+      code: 'COMMERCIAL_OUTBOX_SENT_METADATA_PENDING',
+    });
+    expect(state.markAmbiguous).not.toHaveBeenCalled();
+    expect(state.record.status).toBe('PENDING');
+  });
+
   it('recupera crash depois do enqueue sem duplicar o job', async () => {
     const state = build();
     state.markPublished.mockRejectedValueOnce(
@@ -198,19 +258,23 @@ describe('CommercialDispatchOutboxPublisher', () => {
   });
 
   it.each([
-    ['PROCESSING', 1],
-    ['FAILED', 1],
-    ['SENT', 1],
-    ['PENDING', 1],
+    ['PROCESSING', 1, 'COMMERCIAL_OUTBOX_AMBIGUOUS'],
+    ['FAILED', 1, 'COMMERCIAL_OUTBOX_AMBIGUOUS'],
+    ['SENT', 1, 'COMMERCIAL_OUTBOX_SENT_METADATA_PENDING'],
+    ['PENDING', 1, 'COMMERCIAL_OUTBOX_AMBIGUOUS'],
   ] as const)(
     'bloqueia dispatch %s com attemptCount %i',
-    async (dispatchStatus, attemptCount) => {
+    async (dispatchStatus, attemptCount, expectedCode) => {
       const state = build({ dispatchStatus, attemptCount });
       await expect(state.publisher.publish('outbox-id')).rejects.toMatchObject({
-        code: 'COMMERCIAL_OUTBOX_AMBIGUOUS',
+        code: expectedCode,
       });
       expect(state.enqueue).not.toHaveBeenCalled();
-      expect(state.markAmbiguous).toHaveBeenCalledOnce();
+      if (dispatchStatus === 'SENT') {
+        expect(state.markAmbiguous).not.toHaveBeenCalled();
+      } else {
+        expect(state.markAmbiguous).toHaveBeenCalledOnce();
+      }
     },
   );
 
@@ -253,5 +317,35 @@ describe('CommercialDispatchOutboxPublisher', () => {
     });
     expect(state.enqueue).not.toHaveBeenCalled();
     expect(state.markAmbiguous).not.toHaveBeenCalled();
+  });
+
+  it('preserva SENT quando o job deterministico desaparece', async () => {
+    const state = build({
+      outboxStatus: 'PUBLISHED',
+      dispatchStatus: 'SENT',
+      attemptCount: 1,
+      runJobId: 'job-id',
+      jobExists: false,
+    });
+
+    await expect(state.publisher.publish('outbox-id')).rejects.toMatchObject({
+      code: 'COMMERCIAL_OUTBOX_SENT_METADATA_PENDING',
+    });
+    expect(state.markAmbiguous).not.toHaveBeenCalled();
+    expect(state.record.status).toBe('PUBLISHED');
+  });
+
+  it('falha fechado quando o job existente possui dispatch diferente', async () => {
+    const state = build({
+      jobExists: true,
+      useGetJob: true,
+      jobDispatchId: 'other-dispatch',
+    });
+
+    await expect(state.publisher.publish('outbox-id')).rejects.toMatchObject({
+      code: 'COMMERCIAL_OUTBOX_AMBIGUOUS',
+    });
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.markAmbiguous).toHaveBeenCalledOnce();
   });
 });

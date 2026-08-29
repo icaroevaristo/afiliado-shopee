@@ -946,6 +946,31 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         queue: {
           hasJob: async (jobId) =>
             Boolean(await getWhatsAppDispatchQueue().getJob(jobId)),
+          getJob: async (jobId) => {
+            const job: unknown = await getWhatsAppDispatchQueue().getJob(jobId);
+            if (typeof job !== 'object' || job === null) {
+              return null;
+            }
+            const rawJob = job as { data?: unknown; id?: unknown };
+            if (
+              typeof rawJob.data !== 'object' ||
+              rawJob.data === null
+            ) {
+              return null;
+            }
+            const data = rawJob.data as {
+              dispatchId?: unknown;
+              instanceName?: unknown;
+            };
+            if (typeof data.dispatchId !== 'string') return null;
+            return {
+              id: String(rawJob.id ?? jobId),
+              dispatchId: data.dispatchId,
+              ...(typeof data.instanceName === 'string'
+                ? { instanceName: data.instanceName }
+                : {}),
+            };
+          },
           enqueue: async (dispatchId, jobId, instanceName) => {
             await enqueueControlledWhatsAppDispatch(
               getWhatsAppDispatchQueue() as ReturnType<

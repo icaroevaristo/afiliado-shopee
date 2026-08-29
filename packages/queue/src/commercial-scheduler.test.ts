@@ -122,6 +122,56 @@ describe('BullMqCommercialAutomationScheduler', () => {
     expect(queue.upsertJobScheduler).toHaveBeenCalledOnce();
   });
 
+  it('converge dois startups concorrentes no mesmo scheduler e slot logico', async () => {
+    const logicalSchedulers = new Map<
+      string,
+      Awaited<
+        ReturnType<BullMqCommercialAutomationSchedulerQueue['getJobScheduler']>
+      >
+    >();
+    const concurrentQueue: BullMqCommercialAutomationSchedulerQueue = {
+      upsertJobScheduler: vi.fn(async (id, repeat, template) => {
+        logicalSchedulers.set(id, {
+          key: id,
+          name: template.name,
+          pattern: repeat.pattern,
+          tz: repeat.tz,
+          next: Date.parse('2026-07-27T12:00:00.000Z'),
+          template: { data: template.data, opts: template.opts },
+        });
+      }),
+      getJobScheduler: vi.fn(async (id) => logicalSchedulers.get(id)),
+      removeJobScheduler: vi.fn(async () => true),
+    };
+    const config = {
+      enabled: true,
+      cronExpression: '0 9 * * *',
+      timezone: 'America/Sao_Paulo',
+      mode: 'send' as const,
+      jobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+    };
+
+    await Promise.all([
+      new BullMqCommercialAutomationScheduler(concurrentQueue).register(config),
+      new BullMqCommercialAutomationScheduler(concurrentQueue).register(config),
+    ]);
+
+    expect(concurrentQueue.upsertJobScheduler).toHaveBeenCalledTimes(2);
+    expect(logicalSchedulers.size).toBe(1);
+    expect(logicalSchedulers.get(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID)).toMatchObject(
+      {
+        key: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+        name: JOB_NAMES.commercialAutomationTick,
+        pattern: '0 9 * * *',
+        tz: 'America/Sao_Paulo',
+        template: {
+          data: { mode: 'send' },
+          opts: COMMERCIAL_AUTOMATION_JOB_OPTIONS,
+        },
+      },
+    );
+  });
+
   it('remove somente o ID comercial informado', async () => {
     const scheduler = new BullMqCommercialAutomationScheduler(queue);
     await scheduler.remove(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID);

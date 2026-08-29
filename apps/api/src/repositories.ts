@@ -448,11 +448,14 @@ export type CommercialDispatchOutboxPublicationContext = {
     | 'instanceName'
     | 'finalStatus'
     | 'investigationRequired'
-  >;
+  > & { executionId?: string | null };
   dispatch: Pick<
     WhatsAppDispatchRecord,
     'id' | 'status' | 'attemptCount' | 'instanceName'
-  >;
+  > & {
+    externalMessageId?: string | null;
+    sentAt?: Date | null;
+  };
 };
 
 type CommercialConfirmationPersistenceInputBase = {
@@ -877,6 +880,8 @@ export type CommercialAutomationExecutionRecoveryContext = {
               destinationId?: string;
               destinationType?: 'INDIVIDUAL' | 'GROUP';
               destinationAssignedInstanceName?: string | null;
+              externalMessageId?: string | null;
+              sentAt?: Date | null;
             })
           | null;
         outbox: CommercialDispatchOutboxRecord | null;

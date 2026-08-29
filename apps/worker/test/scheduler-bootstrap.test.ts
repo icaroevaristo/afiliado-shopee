@@ -3,7 +3,6 @@ import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
 import {
   DEFAULT_PIPELINE_SCHEDULER_JOB_ID,
-  JOB_NAMES,
   type PipelineSchedulerState,
 } from '@shopee-auto-affiliate-ai/queue';
 import { processPipelineProductJob, startWorker } from '../src/index';
@@ -270,5 +269,43 @@ describe('worker scheduler bootstrap', () => {
         whatsAppProvider: expect.any(MockWhatsAppProvider),
       }),
     );
+  });
+
+  it('executa recovery antes do scheduler e dos consumidores no entrypoint legado', async () => {
+    const harness = createHarness();
+    const order: string[] = [];
+    harness.scheduler.remove.mockImplementation(async () => {
+      order.push('scheduler');
+      return schedulerState('not-registered');
+    });
+    harness.workerFactory.mockImplementation(() => {
+      order.push('workers');
+      return harness.workers;
+    });
+
+    await startWorker(loadConfig(baseEnv), {
+      recoveryCoordinator: {
+        run: vi.fn(async () => {
+          order.push('recovery');
+          return {
+            scanned: 0,
+            safeDbRecovered: 0,
+            safeQueueRecovered: 0,
+            noAction: 0,
+            humanRequired: 0,
+            jobsReused: 0,
+            jobsCreated: 0,
+            reservationsReleased: 0,
+            finalizersReplayed: 0,
+            ambiguitiesPreserved: 0,
+          };
+        }),
+      },
+      logger: harness.logger,
+      infrastructureFactory: harness.infrastructureFactory,
+      workerFactory: harness.workerFactory,
+    });
+
+    expect(order).toEqual(['recovery', 'scheduler', 'workers']);
   });
 });

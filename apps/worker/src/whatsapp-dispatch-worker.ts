@@ -1,5 +1,5 @@
 import type { Job } from 'bullmq';
-import { Worker } from 'bullmq';
+import { UnrecoverableError, Worker } from 'bullmq';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import type {
   HunterProvider,
@@ -96,6 +96,13 @@ export type WhatsAppDispatchProcessorOptions =
       prisma?: never;
       repositories: WhatsAppDispatchProcessorRepositories;
     });
+
+type WhatsAppDispatchJobInput = Pick<
+  Job<WhatsAppDispatchJob>,
+  'id' | 'name' | 'data'
+> & {
+  opts?: Pick<Job<WhatsAppDispatchJob>['opts'], 'attempts'>;
+};
 
 type CreateWhatsAppDispatchWorkerOptions = {
   connection?: ReturnType<typeof createRedisConnection>;
@@ -239,6 +246,7 @@ const renewCommercialReservationForDispatch = async (input: {
     renewedAt: now,
     leaseExpiresAt,
   });
+
   if (renewal.kind === 'CONFLICT') {
     throw reservationHandoffError(
       'Reserva comercial pertence a outro owner ou nao esta mais valida',
@@ -364,13 +372,36 @@ const revalidateCommercialDispatchBeforeSend = async (input: {
 };
 
 export const processWhatsAppDispatchJob = async (
-  job: Pick<Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
+  job: WhatsAppDispatchJobInput,
   options: WhatsAppDispatchProcessorOptions,
 ) => {
   if (job.name !== JOB_NAMES.whatsappDispatch) return { skipped: true };
 
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  const commercialRun = await repositories.commercialRuns.findByDispatchId(
+    job.data.dispatchId,
+  );
+  if (
+    commercialRun?.mode === 'CONFIRMED' &&
+    job.opts?.attempts !== undefined &&
+    job.opts.attempts > 1
+  ) {
+    options.logger.error(
+      {
+        event: 'commercial-dispatch.attempt-policy-rejected',
+        dispatchId: job.data.dispatchId,
+        configuredAttempts: job.opts.attempts,
+        providerCallAllowed: false,
+        retryAllowed: false,
+        requeueAllowed: false,
+      },
+      'Commercial dispatch job rejected before provider because attempts exceed one',
+    );
+    throw new UnrecoverableError(
+      'Dispatch comercial exige exatamente uma tentativa BullMQ',
+    );
+  }
   const clock = options.clock ?? (() => new Date());
   const supportsLifecycleTransactions =
     !options.prisma || typeof options.prisma.$transaction === 'function';

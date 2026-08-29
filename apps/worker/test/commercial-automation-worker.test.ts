@@ -39,6 +39,56 @@ const createInfrastructure = () => {
 };
 
 describe('commercial automation worker bootstrap', () => {
+  it('executa o coordenador de recovery antes do Scheduler e do consumer', async () => {
+    const { scheduler, infrastructure } = createInfrastructure();
+    const events: string[] = [];
+    scheduler.register.mockImplementation(async () => {
+      events.push('scheduler');
+      return { status: 'registered' };
+    });
+    const recoveryCoordinator = {
+      run: vi.fn(async () => {
+        events.push('recovery');
+        return {
+          scanned: 0,
+          safeDbRecovered: 0,
+          safeQueueRecovered: 0,
+          noAction: 0,
+          humanRequired: 0,
+          jobsReused: 0,
+          jobsCreated: 0,
+          reservationsReleased: 0,
+          finalizersReplayed: 0,
+          ambiguitiesPreserved: 0,
+        };
+      }),
+    };
+    const workerFactory = vi.fn(() => {
+      events.push('worker');
+      return {
+        worker: { name: 'commercial-worker' },
+        close: vi.fn(async () => undefined),
+      };
+    });
+
+    const runtime = await startCommercialAutomationWorker(
+      loadConfig({
+        ...baseEnv,
+        COMMERCIAL_SCHEDULER_ENABLED: 'true',
+      }),
+      {
+        infrastructureFactory: () => infrastructure as never,
+        workerFactory: workerFactory as never,
+        recoveryCoordinator,
+        logger: { info: vi.fn(), error: vi.fn() },
+      },
+    );
+
+    expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
+    expect(events).toEqual(['recovery', 'scheduler', 'worker']);
+    await runtime.close();
+  });
+
   it('registra apenas o Scheduler comercial sem executar tick no bootstrap', async () => {
     const { scheduler, infrastructure } = createInfrastructure();
     const workerFactory = vi.fn(() => ({

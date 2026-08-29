@@ -14,6 +14,7 @@ import {
   createBullMqPipelineScheduler,
   createProductPipelineQueue,
   createRedisConnection,
+  createWhatsAppDispatchQueue,
   DEFAULT_PIPELINE_SCHEDULER_JOB_ID,
   JOB_NAMES,
   QUEUE_NAMES,
@@ -28,6 +29,11 @@ import {
 } from '../../api/src/application-services';
 import { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
+import {
+  createCommercialRecoveryCoordinator,
+  createCommercialRecoveryQueue,
+} from './commercial-recovery-bootstrap';
+import type { CommercialRecoveryCoordinator } from '../../api/src/commercial-recovery-coordinator';
 
 export { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
 
@@ -70,6 +76,7 @@ type WorkerFactory = typeof createPipelineProductWorker;
 type WorkerInfrastructure = {
   connection: ReturnType<typeof createRedisConnection>;
   scheduler: PipelineScheduler;
+  recoveryQueue?: ReturnType<typeof createWhatsAppDispatchQueue>;
   close: () => Promise<void>;
 };
 
@@ -81,6 +88,7 @@ type StartWorkerOptions = {
   providerFactoryOptions?: WhatsAppProviderFactoryOptions;
   infrastructureFactory?: (redisUrl: string) => WorkerInfrastructure;
   workerFactory?: WorkerFactory;
+  recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
 };
 
 const consoleLogger: WorkerLogger = {
@@ -194,15 +202,18 @@ export const createWorkerInfrastructure = (
 ): WorkerInfrastructure => {
   const connection = createRedisConnection(redisUrl);
   const productPipelineQueue = createProductPipelineQueue(connection);
+  const recoveryQueue = createWhatsAppDispatchQueue(connection);
   const scheduler = createBullMqPipelineScheduler(productPipelineQueue);
   let closePromise: Promise<void> | undefined;
 
   return {
     connection,
     scheduler,
+    recoveryQueue,
     close: () => {
       closePromise ??= closeResources([
         () => productPipelineQueue.close(),
+        () => recoveryQueue.close(),
         () => connection.quit().then(() => undefined),
       ]);
       return closePromise;
@@ -222,43 +233,57 @@ export const startWorker = async (
   options: StartWorkerOptions = {},
 ) => {
   const logger = options.logger ?? consoleLogger;
-  const providerFactory = options.providerFactory ?? createWhatsAppProvider;
-  const whatsAppProvider = providerFactory(config, {
-    ...options.providerFactoryOptions,
-    logger,
-  });
-  const groupSendPolicy = new WhatsAppGroupSendPolicy({
-    enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
-    safeMode: config.EVOLUTION_SAFE_MODE,
-    instanceName: config.EVOLUTION_INSTANCE_NAME,
-  });
-  const providerResolver = (instanceName: string) =>
-    providerFactory(
-      { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
-      {
-        ...options.providerFactoryOptions,
-        logger,
-      },
-    );
-
-  logger.info(
-    {
-      event: 'worker.whatsapp-provider.selected',
-      provider: config.WHATSAPP_PROVIDER,
-      queue: QUEUE_NAMES.whatsappDispatch,
-      ...(config.WHATSAPP_PROVIDER === 'evolution'
-        ? {
-            instanceName: config.EVOLUTION_INSTANCE_NAME,
-            baseUrl: safeBaseUrl(config.EVOLUTION_API_URL as string),
-          }
-        : {}),
-    },
-    'WhatsApp provider selected',
-  );
-
   const infrastructureFactory =
     options.infrastructureFactory ?? createWorkerInfrastructure;
   const infrastructure = infrastructureFactory(config.REDIS_URL);
+  const defaultRecoveryEnabled = process.env.NODE_ENV !== 'test';
+  let prisma = options.prisma;
+  let ownsPrisma = false;
+  let workers: ReturnType<WorkerFactory>;
+
+  try {
+    if (!prisma && defaultRecoveryEnabled) {
+      prisma = createPrismaClient(config.DATABASE_URL);
+      ownsPrisma = true;
+    }
+    const recoveryCoordinator =
+      options.recoveryCoordinator ??
+      (defaultRecoveryEnabled && prisma
+        ? createCommercialRecoveryCoordinator({
+            config,
+            logger,
+            prisma,
+            queue: infrastructure.recoveryQueue
+              ? createCommercialRecoveryQueue(infrastructure.recoveryQueue)
+              : undefined,
+          })
+        : undefined);
+    if (recoveryCoordinator) {
+      try {
+        const recovery = await recoveryCoordinator.run();
+        logger.info(
+          {
+            event: 'commercial-recovery.coordinator.startup-complete',
+            ...recovery,
+          },
+          'Commercial recovery coordinator completed before scheduler startup',
+        );
+      } catch (error) {
+        logger.error(
+          {
+            event: 'commercial-recovery.coordinator.failed',
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'Commercial recovery coordinator failed before scheduler startup',
+        );
+        throw error;
+      }
+    }
+  } catch (error) {
+    await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
+    throw error;
+  }
 
   try {
     if (config.SCHEDULER_ENABLED) {
@@ -310,16 +335,50 @@ export const startWorker = async (
       'Pipeline scheduler configuration failed',
     );
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
 
   const workerFactory = options.workerFactory ?? createPipelineProductWorker;
-  let workers: ReturnType<WorkerFactory>;
 
   try {
+    const providerFactory = options.providerFactory ?? createWhatsAppProvider;
+    const whatsAppProvider = providerFactory(config, {
+      ...options.providerFactoryOptions,
+      logger,
+    });
+    const groupSendPolicy = new WhatsAppGroupSendPolicy({
+      enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
+      safeMode: config.EVOLUTION_SAFE_MODE,
+      instanceName: config.EVOLUTION_INSTANCE_NAME,
+    });
+    const providerResolver = (instanceName: string) =>
+      providerFactory(
+        { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
+        {
+          ...options.providerFactoryOptions,
+          logger,
+        },
+      );
+
+    logger.info(
+      {
+        event: 'worker.whatsapp-provider.selected',
+        provider: config.WHATSAPP_PROVIDER,
+        queue: QUEUE_NAMES.whatsappDispatch,
+        ...(config.WHATSAPP_PROVIDER === 'evolution'
+          ? {
+              instanceName: config.EVOLUTION_INSTANCE_NAME,
+              baseUrl: safeBaseUrl(config.EVOLUTION_API_URL as string),
+            }
+          : {}),
+      },
+      'WhatsApp provider selected',
+    );
+
     workers = workerFactory(config.REDIS_URL, {
       connection: infrastructure.connection,
-      prisma: options.prisma,
+      prisma,
       hunterProvider: options.hunterProvider,
       logger,
       whatsAppProvider,
@@ -330,6 +389,7 @@ export const startWorker = async (
     });
   } catch (error) {
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
 
@@ -340,6 +400,7 @@ export const startWorker = async (
       closePromise ??= closeResources([
         () => workers.close(),
         () => infrastructure.close(),
+        ...(ownsPrisma && prisma ? [() => prisma.$disconnect()] : []),
       ]);
       return closePromise;
     },

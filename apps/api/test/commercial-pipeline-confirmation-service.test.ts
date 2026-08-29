@@ -166,6 +166,8 @@ class MemoryOutboxes implements CommercialDispatchOutboxRepository {
       ...input.dispatch,
       status: 'PENDING',
       attemptCount: 0,
+      externalMessageId: null,
+      sentAt: null,
     });
     this.records.push(record);
     await this.runs.update(input.runId, {
