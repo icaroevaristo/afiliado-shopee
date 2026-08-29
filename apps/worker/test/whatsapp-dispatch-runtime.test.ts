@@ -5,8 +5,10 @@ import {
   type WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
 
-import { startIsolatedWhatsAppDispatchWorker } from '../src/whatsapp-dispatch-runtime';
-import { createWhatsAppDispatchWorker } from '../src/whatsapp-dispatch-worker';
+import {
+  startIsolatedWhatsAppDispatchWorker,
+  type WhatsAppDispatchWorkerFactory,
+} from '../src/whatsapp-dispatch-runtime';
 
 const previewConfig = loadConfig({
   NODE_ENV: 'test',
@@ -33,15 +35,15 @@ const sendConfig = loadConfig({
 });
 
 describe('isolated WhatsApp dispatch worker', () => {
-  it('fails closed in preview before creating provider or worker', () => {
+  it('fails closed in preview before creating provider or worker', async () => {
     const providerFactory = vi.fn();
     const workerFactory = vi.fn();
-    expect(() =>
+    await expect(
       startIsolatedWhatsAppDispatchWorker(previewConfig, {
         providerFactory,
         workerFactory,
       }),
-    ).toThrowError(
+    ).rejects.toThrowError(
       expect.objectContaining({
         code: 'WHATSAPP_DISPATCH_WORKER_SEND_MODE_REQUIRED',
       }),
@@ -60,21 +62,14 @@ describe('isolated WhatsApp dispatch worker', () => {
     };
     const close = vi.fn(async () => undefined);
     const providerFactory = vi.fn<typeof createWhatsAppProvider>(
-      (_config, _options) => provider,
+      () => provider,
     );
-    const workerFactory = vi.fn(
-      (
-        _redisUrl: string,
-        _options: Parameters<typeof createWhatsAppDispatchWorker>[1],
-      ) =>
-        ({
-          whatsappDispatchWorker: { name: 'whatsapp-dispatch' },
-          close,
-        }) as unknown as ReturnType<typeof createWhatsAppDispatchWorker>,
-    );
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => ({
+      close,
+    }));
     const logger = { info: vi.fn(), error: vi.fn() };
 
-    const runtime = startIsolatedWhatsAppDispatchWorker(sendConfig, {
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
       providerFactory,
       workerFactory,
       logger,
@@ -97,5 +92,52 @@ describe('isolated WhatsApp dispatch worker', () => {
     );
     await runtime.close();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('executa recovery antes de criar provider ou consumer', async () => {
+    const events: string[] = [];
+    const recoveryCoordinator = {
+      run: vi.fn(async () => {
+        events.push('recovery');
+        return {
+          scanned: 0,
+          safeDbRecovered: 0,
+          safeQueueRecovered: 0,
+          noAction: 0,
+          humanRequired: 0,
+          jobsReused: 0,
+          jobsCreated: 0,
+          reservationsReleased: 0,
+          finalizersReplayed: 0,
+          historicalIgnored: 0,
+          ambiguitiesPreserved: 0,
+        };
+      }),
+    };
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn(),
+    };
+    const close = vi.fn(async () => undefined);
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => {
+      events.push('provider');
+      return provider;
+    });
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => {
+      events.push('worker');
+      return {
+        close,
+      };
+    });
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory,
+      workerFactory,
+      recoveryCoordinator,
+      logger: { info: vi.fn(), error: vi.fn() },
+    });
+
+    expect(events).toEqual(['recovery', 'provider', 'worker']);
+    expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
+    await runtime.close();
   });
 });

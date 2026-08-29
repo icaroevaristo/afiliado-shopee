@@ -3,6 +3,7 @@ import type { Job } from 'bullmq';
 import { Worker } from 'bullmq';
 import { loadConfig, type AppEnv } from '@shopee-auto-affiliate-ai/config';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   createWhatsAppProvider,
   MockShopeeProvider,
@@ -14,6 +15,7 @@ import {
   createBullMqPipelineScheduler,
   createProductPipelineQueue,
   createRedisConnection,
+  createWhatsAppDispatchQueue,
   DEFAULT_PIPELINE_SCHEDULER_JOB_ID,
   JOB_NAMES,
   QUEUE_NAMES,
@@ -28,6 +30,14 @@ import {
 } from '../../api/src/application-services';
 import { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
+import {
+  createCommercialRecoveryCoordinator,
+  createCommercialRecoveryQueue,
+} from './commercial-recovery-bootstrap';
+import {
+  assertCommercialRecoveryStartupSafe,
+  type CommercialRecoveryCoordinator,
+} from '../../api/src/commercial-recovery-coordinator';
 
 export { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
 
@@ -42,6 +52,7 @@ type CreatePipelineProductWorkerOptions = {
   hunterProvider?: HunterProvider;
   logger?: WorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode: AppEnv['COMMERCIAL_AUTOMATION_MODE'];
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -56,6 +67,7 @@ type WorkerProcessorOptions = Required<
     | 'groupSendPolicy'
     | 'reservationLeaseMilliseconds'
     | 'whatsAppProviderResolver'
+    | 'commercialAutomationMode'
   >
 > &
   Pick<
@@ -70,6 +82,7 @@ type WorkerFactory = typeof createPipelineProductWorker;
 type WorkerInfrastructure = {
   connection: ReturnType<typeof createRedisConnection>;
   scheduler: PipelineScheduler;
+  recoveryQueue?: ReturnType<typeof createWhatsAppDispatchQueue>;
   close: () => Promise<void>;
 };
 
@@ -81,6 +94,7 @@ type StartWorkerOptions = {
   providerFactoryOptions?: WhatsAppProviderFactoryOptions;
   infrastructureFactory?: (redisUrl: string) => WorkerInfrastructure;
   workerFactory?: WorkerFactory;
+  recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
 };
 
 const consoleLogger: WorkerLogger = {
@@ -132,6 +146,12 @@ export const createPipelineProductWorker = (
   redisUrl: string,
   options: CreatePipelineProductWorkerOptions,
 ) => {
+  if (options.commercialAutomationMode === 'preview') {
+    throw new AppError(
+      'O worker legado de pipeline nao pode iniciar em modo preview',
+      'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
+    );
+  }
   const ownsConnection = !options.connection;
   const connection = options.connection ?? createRedisConnection(redisUrl);
   const prisma = options.prisma ?? createPrismaClient();
@@ -140,6 +160,7 @@ export const createPipelineProductWorker = (
     hunterProvider: options.hunterProvider ?? new MockShopeeProvider(),
     logger: options.logger ?? consoleLogger,
     whatsAppProvider: options.whatsAppProvider,
+    commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
     groupSendPolicy: options.groupSendPolicy,
   };
@@ -194,15 +215,18 @@ export const createWorkerInfrastructure = (
 ): WorkerInfrastructure => {
   const connection = createRedisConnection(redisUrl);
   const productPipelineQueue = createProductPipelineQueue(connection);
+  const recoveryQueue = createWhatsAppDispatchQueue(connection);
   const scheduler = createBullMqPipelineScheduler(productPipelineQueue);
   let closePromise: Promise<void> | undefined;
 
   return {
     connection,
     scheduler,
+    recoveryQueue,
     close: () => {
       closePromise ??= closeResources([
         () => productPipelineQueue.close(),
+        () => recoveryQueue.close(),
         () => connection.quit().then(() => undefined),
       ]);
       return closePromise;
@@ -221,44 +245,77 @@ export const startWorker = async (
   config: AppEnv,
   options: StartWorkerOptions = {},
 ) => {
-  const logger = options.logger ?? consoleLogger;
-  const providerFactory = options.providerFactory ?? createWhatsAppProvider;
-  const whatsAppProvider = providerFactory(config, {
-    ...options.providerFactoryOptions,
-    logger,
-  });
-  const groupSendPolicy = new WhatsAppGroupSendPolicy({
-    enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
-    safeMode: config.EVOLUTION_SAFE_MODE,
-    instanceName: config.EVOLUTION_INSTANCE_NAME,
-  });
-  const providerResolver = (instanceName: string) =>
-    providerFactory(
-      { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
-      {
-        ...options.providerFactoryOptions,
-        logger,
-      },
+  if (config.COMMERCIAL_AUTOMATION_MODE === 'preview') {
+    throw new AppError(
+      'O entrypoint legado de worker nao pode iniciar em modo preview',
+      'LEGACY_WORKER_PREVIEW_MODE_FORBIDDEN',
     );
-
-  logger.info(
-    {
-      event: 'worker.whatsapp-provider.selected',
-      provider: config.WHATSAPP_PROVIDER,
-      queue: QUEUE_NAMES.whatsappDispatch,
-      ...(config.WHATSAPP_PROVIDER === 'evolution'
-        ? {
-            instanceName: config.EVOLUTION_INSTANCE_NAME,
-            baseUrl: safeBaseUrl(config.EVOLUTION_API_URL as string),
-          }
-        : {}),
-    },
-    'WhatsApp provider selected',
-  );
-
+  }
+  const logger = options.logger ?? consoleLogger;
   const infrastructureFactory =
     options.infrastructureFactory ?? createWorkerInfrastructure;
   const infrastructure = infrastructureFactory(config.REDIS_URL);
+  const defaultRecoveryEnabled = process.env.NODE_ENV !== 'test';
+  let prisma = options.prisma;
+  let ownsPrisma = false;
+  let workers: ReturnType<WorkerFactory>;
+
+  try {
+    if (!prisma && defaultRecoveryEnabled) {
+      prisma = createPrismaClient(config.DATABASE_URL);
+      ownsPrisma = true;
+    }
+    const recoveryCoordinator =
+      options.recoveryCoordinator ??
+      (defaultRecoveryEnabled && prisma
+        ? createCommercialRecoveryCoordinator({
+            config,
+            logger,
+            prisma,
+            queue: infrastructure.recoveryQueue
+              ? createCommercialRecoveryQueue(infrastructure.recoveryQueue)
+              : undefined,
+          })
+        : undefined);
+    if (recoveryCoordinator) {
+      try {
+        const recovery = await recoveryCoordinator.run();
+        try {
+          assertCommercialRecoveryStartupSafe(recovery);
+        } catch (error) {
+          logger.error(
+            {
+              event: 'commercial-recovery.coordinator.startup-blocked',
+              ...recovery,
+              errorCode: error instanceof AppError ? error.code : 'APP_ERROR',
+            },
+            'Commercial recovery requires human intervention before startup',
+          );
+          throw error;
+        }
+        logger.info(
+          {
+            event: 'commercial-recovery.coordinator.startup-complete',
+            ...recovery,
+          },
+          'Commercial recovery coordinator completed before scheduler startup',
+        );
+      } catch (error) {
+        logger.error(
+          {
+            event: 'commercial-recovery.coordinator.failed',
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'Commercial recovery coordinator failed before scheduler startup',
+        );
+        throw error;
+      }
+    }
+  } catch (error) {
+    await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
+    throw error;
+  }
 
   try {
     if (config.SCHEDULER_ENABLED) {
@@ -310,18 +367,53 @@ export const startWorker = async (
       'Pipeline scheduler configuration failed',
     );
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
 
   const workerFactory = options.workerFactory ?? createPipelineProductWorker;
-  let workers: ReturnType<WorkerFactory>;
 
   try {
+    const providerFactory = options.providerFactory ?? createWhatsAppProvider;
+    const whatsAppProvider = providerFactory(config, {
+      ...options.providerFactoryOptions,
+      logger,
+    });
+    const groupSendPolicy = new WhatsAppGroupSendPolicy({
+      enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
+      safeMode: config.EVOLUTION_SAFE_MODE,
+      instanceName: config.EVOLUTION_INSTANCE_NAME,
+    });
+    const providerResolver = (instanceName: string) =>
+      providerFactory(
+        { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
+        {
+          ...options.providerFactoryOptions,
+          logger,
+        },
+      );
+
+    logger.info(
+      {
+        event: 'worker.whatsapp-provider.selected',
+        provider: config.WHATSAPP_PROVIDER,
+        queue: QUEUE_NAMES.whatsappDispatch,
+        ...(config.WHATSAPP_PROVIDER === 'evolution'
+          ? {
+              instanceName: config.EVOLUTION_INSTANCE_NAME,
+              baseUrl: safeBaseUrl(config.EVOLUTION_API_URL as string),
+            }
+          : {}),
+      },
+      'WhatsApp provider selected',
+    );
+
     workers = workerFactory(config.REDIS_URL, {
       connection: infrastructure.connection,
-      prisma: options.prisma,
+      prisma,
       hunterProvider: options.hunterProvider,
       logger,
+      commercialAutomationMode: config.COMMERCIAL_AUTOMATION_MODE,
       whatsAppProvider,
       whatsAppProviderResolver: providerResolver,
       groupSendPolicy,
@@ -330,6 +422,7 @@ export const startWorker = async (
     });
   } catch (error) {
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma && prisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
 
@@ -340,17 +433,14 @@ export const startWorker = async (
       closePromise ??= closeResources([
         () => workers.close(),
         () => infrastructure.close(),
+        ...(ownsPrisma && prisma ? [() => prisma.$disconnect()] : []),
       ]);
       return closePromise;
     },
   };
 };
 
-if (
-  process.env.NODE_ENV !== 'test' &&
-  isMainModule(import.meta.url)
-) {
-  const config = loadConfig();
+export const startLegacyWorkerEntrypoint = async (config = loadConfig()) => {
   const runtime = await startWorker(config);
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = () => {
@@ -369,4 +459,12 @@ if (
 
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
+  return runtime;
+};
+
+if (
+  process.env.NODE_ENV !== 'test' &&
+  isMainModule(import.meta.url)
+) {
+  await startLegacyWorkerEntrypoint();
 }

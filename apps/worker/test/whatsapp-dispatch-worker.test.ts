@@ -393,6 +393,177 @@ const createHandoffRepositories = (input: {
   return { repositories, renewAttempt, markAttemptPending, events };
 };
 describe('processWhatsAppDispatchJob', () => {
+  it('rejeita dispatch antes do provider quando o processor esta em preview', async () => {
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'must-not-send',
+        sentAt: handoffNow,
+      })),
+    };
+    const logger = { info: vi.fn(), error: vi.fn() };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'preview-job',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'preview-dispatch' },
+          opts: { attempts: 1 },
+        },
+        {
+          prisma: {} as never,
+          commercialAutomationMode: 'preview',
+          whatsAppProvider: provider,
+          logger,
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'UnrecoverableError' });
+
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-dispatch.preview-fence-rejected',
+        providerCallAllowed: false,
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('bloqueia um job comercial configurado com mais de uma tentativa antes do provider', async () => {
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'should-not-send',
+        sentAt: handoffNow,
+      })),
+    };
+    const { repositories } = createHandoffRepositories({
+      dispatch: commercialDispatch,
+    });
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-with-retries',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: commercialDispatch.id },
+          opts: { attempts: 3 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          logger: { info: vi.fn(), error: vi.fn() },
+          groupSendPolicy: commercialGroupSendPolicy(),
+          draftService: {
+            createDraft: vi.fn(),
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'UnrecoverableError' });
+
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(repositories.commercialRuns.findByDispatchId).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markAttemptPending).not.toHaveBeenCalled();
+  });
+
+  it('mantem um unico processamento quando dois consumers disputam o mesmo job comercial', async () => {
+    const fixture = createHandoffRepositories({ dispatch: commercialDispatch });
+    let currentDispatch: WhatsAppDispatchDetails = commercialDispatch;
+    const markAttemptPending = vi.fn(async () => {
+      if (currentDispatch.status !== 'PENDING' || currentDispatch.attemptCount !== 0) {
+        return false;
+      }
+      currentDispatch = {
+        ...currentDispatch,
+        status: 'PROCESSING',
+        attemptCount: 1,
+      };
+      return true;
+    });
+    const markSent = vi.fn(
+      async (
+        _dispatchId: string,
+        input: { externalMessageId: string; sentAt: Date },
+      ) => {
+        currentDispatch = {
+          ...currentDispatch,
+          status: 'SENT',
+          externalMessageId: input.externalMessageId,
+          sentAt: input.sentAt,
+        };
+        return currentDispatch;
+      },
+    );
+    fixture.repositories.whatsappDispatches.findByIdForSending = vi.fn(
+      async () => currentDispatch,
+    );
+    fixture.repositories.whatsappDispatches.findByIdWithDetails = vi.fn(
+      async () => currentDispatch,
+    );
+    fixture.repositories.whatsappDispatches.markAttemptPending =
+      markAttemptPending;
+    fixture.repositories.whatsappDispatches.markSent = markSent;
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'external-single-processing',
+        sentAt: handoffNow,
+      })),
+    };
+    const options = {
+      repositories: fixture.repositories,
+      whatsAppProvider: provider,
+      whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+      logger: { info: vi.fn(), error: vi.fn() },
+      groupSendPolicy: commercialGroupSendPolicy(),
+      draftService: {
+        createDraft: vi.fn().mockReturnValue({
+          candidateId: 'candidate-123',
+          generatedCopyId: 'copy-123',
+          caption: 'draft text',
+          deliveryMode: 'TEXT',
+          warnings: [],
+        }),
+      },
+      clock: () => handoffNow,
+      reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+    };
+
+    const results = await Promise.allSettled([
+      processWhatsAppDispatchJob(
+        {
+          id: 'consumer-a-job',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: commercialDispatch.id, instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        options,
+      ),
+      processWhatsAppDispatchJob(
+        {
+          id: 'consumer-b-job',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: commercialDispatch.id, instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        options,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+    expect(markAttemptPending).toHaveBeenCalledTimes(2);
+    expect(markSent).toHaveBeenCalledOnce();
+    expect(currentDispatch).toMatchObject({
+      status: 'SENT',
+      attemptCount: 1,
+      externalMessageId: 'external-single-processing',
+    });
+  });
+
   it('inicia runs deterministicas para dois jobs GROUP no mesmo provider', async () => {
     const groupId = '120363000000000000@g.us';
     const destination = {

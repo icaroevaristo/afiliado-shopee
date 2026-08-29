@@ -4287,6 +4287,7 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
             status: true,
             dispatchId: true,
             jobId: true,
+            executionId: true,
             finalStatus: true,
             investigationRequired: true,
           },
@@ -4297,6 +4298,8 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
             status: true,
             attemptCount: true,
             instanceName: true,
+            externalMessageId: true,
+            sentAt: true,
           },
         },
       },
@@ -6516,6 +6519,8 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
               destinationType: run.dispatch.destination.type,
               destinationAssignedInstanceName:
                 run.dispatch.destination.assignedInstanceName,
+              externalMessageId: run.dispatch.externalMessageId,
+              sentAt: run.dispatch.sentAt,
             }
           : null,
         outbox: run.dispatchOutbox

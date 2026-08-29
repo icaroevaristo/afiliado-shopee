@@ -134,6 +134,24 @@ export const createCommercialOutboxCliRuntime = (
         outboxes: repositories.commercialDispatchOutboxes,
         queue: {
           hasJob: async (jobId) => Boolean(await whatsappQueue.getJob(jobId)),
+          getJob: async (jobId) => {
+            const job = await whatsappQueue.getJob(jobId);
+            if (!job || typeof job.data !== 'object' || job.data === null) {
+              return null;
+            }
+            const data = job.data as {
+              dispatchId?: unknown;
+              instanceName?: unknown;
+            };
+            if (typeof data.dispatchId !== 'string') return null;
+            return {
+              id: String(job.id ?? jobId),
+              dispatchId: data.dispatchId,
+              ...(typeof data.instanceName === 'string'
+                ? { instanceName: data.instanceName }
+                : {}),
+            };
+          },
           enqueue: async (dispatchId, jobId, instanceName) => {
             await enqueueControlledWhatsAppDispatch(
               whatsappQueue,

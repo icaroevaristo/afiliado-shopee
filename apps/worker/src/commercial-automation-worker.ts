@@ -24,12 +24,22 @@ import {
   createCommercialAutomationOrchestratorRuntime,
   type CommercialAutomationRuntimeLogger,
 } from './commercial-automation-runtime';
+import {
+  assertCommercialRecoveryStartupSafe,
+  CommercialRecoveryCoordinator,
+} from '../../api/src/commercial-recovery-coordinator';
+import { createCommercialRecoveryCoordinator } from './commercial-recovery-bootstrap';
 
 type CommercialWorkerInfrastructure = {
   connection: ReturnType<typeof createRedisConnection>;
   scheduler: CommercialAutomationScheduler;
   confirmationQueue?: {
     hasJob(jobId: string): Promise<boolean>;
+    getJob?(jobId: string): Promise<{
+      id: string;
+      dispatchId: string;
+      instanceName?: string | null;
+    } | null>;
     enqueue(
       dispatchId: string,
       jobId: string,
@@ -52,6 +62,7 @@ type CommercialWorkerOptions = {
     mode: 'preview' | 'send',
   ) => CommercialWorkerInfrastructure;
   workerFactory?: typeof createCommercialAutomationWorker;
+  recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
 };
 
 export const COMMERCIAL_AUTOMATION_WORKER_CONCURRENCY = 1;
@@ -257,6 +268,26 @@ export const createCommercialWorkerInfrastructure = (
           async hasJob(jobId) {
             return Boolean(await whatsappQueue.getJob(jobId));
           },
+          async getJob(jobId) {
+            const job = await whatsappQueue.getJob(jobId);
+            if (!job) return null;
+            const data: unknown = job.data;
+            if (
+              typeof data !== 'object' ||
+              data === null ||
+              typeof (data as { dispatchId?: unknown }).dispatchId !==
+                'string'
+            ) {
+              return null;
+            }
+            const instanceName = (data as { instanceName?: unknown })
+              .instanceName;
+            return {
+              id: String(job.id ?? jobId),
+              dispatchId: (data as { dispatchId: string }).dispatchId,
+              ...(typeof instanceName === 'string' ? { instanceName } : {}),
+            };
+          },
           async enqueue(dispatchId, jobId, instanceName) {
             await enqueueControlledWhatsAppDispatch(
               whatsappQueue,
@@ -293,7 +324,42 @@ export const startCommercialAutomationWorker = async (
   const infrastructure = (
     options.infrastructureFactory ?? createCommercialWorkerInfrastructure
   )(config.REDIS_URL, config.COMMERCIAL_AUTOMATION_MODE);
+  const ownsPrisma = !options.prisma;
+  const prisma = options.prisma ?? createPrismaClient();
+  const recoveryCoordinator =
+    options.recoveryCoordinator ??
+    (process.env.NODE_ENV === 'test'
+      ? undefined
+      : createCommercialRecoveryCoordinator({
+          config,
+          queue: infrastructure.confirmationQueue,
+          logger,
+          prisma,
+        }));
   try {
+    if (recoveryCoordinator) {
+      const recovery = await recoveryCoordinator.run();
+      try {
+        assertCommercialRecoveryStartupSafe(recovery);
+      } catch (error) {
+        logger.error(
+          {
+            event: 'commercial-recovery.coordinator.startup-blocked',
+            ...recovery,
+            errorCode: error instanceof AppError ? error.code : 'APP_ERROR',
+          },
+          'Commercial recovery requires human intervention before startup',
+        );
+        throw error;
+      }
+      logger.info(
+        {
+          event: 'commercial-recovery.coordinator.startup-complete',
+          ...recovery,
+        },
+        'Commercial recovery coordinator completed before scheduler startup',
+      );
+    }
     if (config.COMMERCIAL_SCHEDULER_ENABLED) {
       await infrastructure.scheduler.register({
         enabled: true,
@@ -309,6 +375,7 @@ export const startCommercialAutomationWorker = async (
     }
   } catch (error) {
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
 
@@ -318,13 +385,14 @@ export const startCommercialAutomationWorker = async (
   try {
     worker = workerFactory(config, {
       connection: infrastructure.connection,
-      prisma: options.prisma,
+      prisma,
       confirmationQueue: infrastructure.confirmationQueue,
       enqueueTarget: infrastructure.enqueueTarget,
       logger,
     });
   } catch (error) {
     await infrastructure.close().catch(() => undefined);
+    if (ownsPrisma) await prisma.$disconnect().catch(() => undefined);
     throw error;
   }
   logger.info(
@@ -344,6 +412,7 @@ export const startCommercialAutomationWorker = async (
       closePromise ??= closeResources([
         () => worker.close(),
         () => infrastructure.close(),
+        ...(ownsPrisma ? [() => prisma.$disconnect()] : []),
       ]);
       return closePromise;
     },

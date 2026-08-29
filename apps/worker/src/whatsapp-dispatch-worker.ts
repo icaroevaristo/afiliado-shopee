@@ -1,5 +1,5 @@
 import type { Job } from 'bullmq';
-import { Worker } from 'bullmq';
+import { UnrecoverableError, Worker } from 'bullmq';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import type {
   HunterProvider,
@@ -68,6 +68,7 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
 type WhatsAppDispatchProcessorBaseOptions = {
   logger: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode?: 'preview' | 'send';
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -97,11 +98,19 @@ export type WhatsAppDispatchProcessorOptions =
       repositories: WhatsAppDispatchProcessorRepositories;
     });
 
+type WhatsAppDispatchJobInput = Pick<
+  Job<WhatsAppDispatchJob>,
+  'id' | 'name' | 'data'
+> & {
+  opts?: Pick<Job<WhatsAppDispatchJob>['opts'], 'attempts'>;
+};
+
 type CreateWhatsAppDispatchWorkerOptions = {
   connection?: ReturnType<typeof createRedisConnection>;
   prisma?: ReturnType<typeof createPrismaClient>;
   logger?: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
+  commercialAutomationMode?: 'preview' | 'send';
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
@@ -239,6 +248,7 @@ const renewCommercialReservationForDispatch = async (input: {
     renewedAt: now,
     leaseExpiresAt,
   });
+
   if (renewal.kind === 'CONFLICT') {
     throw reservationHandoffError(
       'Reserva comercial pertence a outro owner ou nao esta mais valida',
@@ -364,13 +374,52 @@ const revalidateCommercialDispatchBeforeSend = async (input: {
 };
 
 export const processWhatsAppDispatchJob = async (
-  job: Pick<Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
+  job: WhatsAppDispatchJobInput,
   options: WhatsAppDispatchProcessorOptions,
 ) => {
   if (job.name !== JOB_NAMES.whatsappDispatch) return { skipped: true };
 
+  if (options.commercialAutomationMode === 'preview') {
+    options.logger.error(
+      {
+        event: 'commercial-dispatch.preview-fence-rejected',
+        dispatchId: job.data.dispatchId,
+        providerCallAllowed: false,
+        retryAllowed: false,
+        requeueAllowed: false,
+      },
+      'WhatsApp dispatch rejected before provider because preview mode is active',
+    );
+    throw new UnrecoverableError(
+      'Dispatch WhatsApp comercial indisponivel em modo preview',
+    );
+  }
+
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  const commercialRun = await repositories.commercialRuns.findByDispatchId(
+    job.data.dispatchId,
+  );
+  if (
+    commercialRun?.mode === 'CONFIRMED' &&
+    job.opts?.attempts !== undefined &&
+    job.opts.attempts > 1
+  ) {
+    options.logger.error(
+      {
+        event: 'commercial-dispatch.attempt-policy-rejected',
+        dispatchId: job.data.dispatchId,
+        configuredAttempts: job.opts.attempts,
+        providerCallAllowed: false,
+        retryAllowed: false,
+        requeueAllowed: false,
+      },
+      'Commercial dispatch job rejected before provider because attempts exceed one',
+    );
+    throw new UnrecoverableError(
+      'Dispatch comercial exige exatamente uma tentativa BullMQ',
+    );
+  }
   const clock = options.clock ?? (() => new Date());
   const supportsLifecycleTransactions =
     !options.prisma || typeof options.prisma.$transaction === 'function';
@@ -516,6 +565,12 @@ export const createWhatsAppDispatchWorker = (
   redisUrl: string,
   options: CreateWhatsAppDispatchWorkerOptions,
 ) => {
+  if (options.commercialAutomationMode === 'preview') {
+    throw new AppError(
+      'O worker de dispatch WhatsApp nao pode iniciar em modo preview',
+      'WHATSAPP_DISPATCH_WORKER_PREVIEW_MODE_FORBIDDEN',
+    );
+  }
   const ownsConnection = !options.connection;
   const ownsPrisma = !options.prisma;
   const connection = options.connection ?? createRedisConnection(redisUrl);
@@ -523,6 +578,7 @@ export const createWhatsAppDispatchWorker = (
   const processorOptions: WhatsAppDispatchProcessorOptions = {
     prisma,
     logger: options.logger ?? consoleLogger,
+    commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProvider: options.whatsAppProvider,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
     messageBuilder: options.messageBuilder,

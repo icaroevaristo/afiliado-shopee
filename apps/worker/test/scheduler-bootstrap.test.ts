@@ -3,7 +3,6 @@ import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
 import {
   DEFAULT_PIPELINE_SCHEDULER_JOB_ID,
-  JOB_NAMES,
   type PipelineSchedulerState,
 } from '@shopee-auto-affiliate-ai/queue';
 import { processPipelineProductJob, startWorker } from '../src/index';
@@ -13,6 +12,31 @@ const baseEnv = {
   DATABASE_URL: 'postgresql://localhost:5432/app',
   REDIS_URL: 'redis://localhost:6379',
 };
+
+const recoveryReport = (overrides: {
+  humanRequired?: number;
+  ambiguitiesPreserved?: number;
+} = {}) => ({
+  scanned: 0,
+  safeDbRecovered: 0,
+  safeQueueRecovered: 0,
+  noAction: 0,
+  humanRequired: 0,
+  jobsReused: 0,
+  jobsCreated: 0,
+  reservationsReleased: 0,
+  finalizersReplayed: 0,
+  historicalIgnored: 0,
+  ambiguitiesPreserved: 0,
+  ...overrides,
+});
+
+const legacyWorkerConfig = (
+  env: NodeJS.ProcessEnv = baseEnv,
+): ReturnType<typeof loadConfig> => ({
+  ...loadConfig(env),
+  COMMERCIAL_AUTOMATION_MODE: 'send',
+});
 
 const schedulerState = (
   status: PipelineSchedulerState['status'],
@@ -59,7 +83,7 @@ describe('worker scheduler bootstrap', () => {
 
   it('mantem o scheduler desativado por padrao e remove somente o ID conhecido', async () => {
     const harness = createHarness();
-    const config = loadConfig(baseEnv);
+    const config = legacyWorkerConfig();
 
     await expect(
       startWorker(config, {
@@ -81,7 +105,7 @@ describe('worker scheduler bootstrap', () => {
   it('tolera scheduler inexistente e registra o estado desativado', async () => {
     const harness = createHarness();
 
-    await startWorker(loadConfig(baseEnv), {
+    await startWorker(legacyWorkerConfig(), {
       logger: harness.logger,
       infrastructureFactory: harness.infrastructureFactory,
       workerFactory: harness.workerFactory,
@@ -101,7 +125,7 @@ describe('worker scheduler bootstrap', () => {
 
   it('registra uma vez com cron, timezone e jobId estavel quando habilitado', async () => {
     const harness = createHarness();
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -139,7 +163,7 @@ describe('worker scheduler bootstrap', () => {
   it('nao executa pipeline nem recria scheduler durante o bootstrap ou por job ignorado', async () => {
     const harness = createHarness();
     const hunterProvider = { buscarProdutos: vi.fn() };
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -177,7 +201,7 @@ describe('worker scheduler bootstrap', () => {
     harness.scheduler.register.mockRejectedValueOnce(
       new Error('redis://user:scheduler-secret@localhost:6379 unavailable'),
     );
-    const config = loadConfig({
+    const config = legacyWorkerConfig({
       ...baseEnv,
       SCHEDULER_ENABLED: 'true',
       SCHEDULER_CRON: '0 9 * * *',
@@ -214,7 +238,7 @@ describe('worker scheduler bootstrap', () => {
     );
 
     await expect(
-      startWorker(loadConfig(baseEnv), {
+      startWorker(legacyWorkerConfig(), {
         logger: harness.logger,
         infrastructureFactory: harness.infrastructureFactory,
         workerFactory: harness.workerFactory,
@@ -232,7 +256,7 @@ describe('worker scheduler bootstrap', () => {
   it('fecha workers e infraestrutura sem remover o agendamento no shutdown', async () => {
     const harness = createHarness();
     const runtime = await startWorker(
-      loadConfig({
+      legacyWorkerConfig({
         ...baseEnv,
         SCHEDULER_ENABLED: 'true',
         SCHEDULER_CRON: '0 9 * * *',
@@ -257,7 +281,7 @@ describe('worker scheduler bootstrap', () => {
     const harness = createHarness();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
-    await startWorker(loadConfig(baseEnv), {
+    await startWorker(legacyWorkerConfig(), {
       logger: harness.logger,
       infrastructureFactory: harness.infrastructureFactory,
       workerFactory: harness.workerFactory,
@@ -270,5 +294,109 @@ describe('worker scheduler bootstrap', () => {
         whatsAppProvider: expect.any(MockWhatsAppProvider),
       }),
     );
+  });
+
+  it('executa recovery antes do scheduler e dos consumidores no entrypoint legado', async () => {
+    const harness = createHarness();
+    const order: string[] = [];
+    harness.scheduler.remove.mockImplementation(async () => {
+      order.push('scheduler');
+      return schedulerState('not-registered');
+    });
+    harness.workerFactory.mockImplementation(() => {
+      order.push('workers');
+      return harness.workers;
+    });
+
+    await startWorker(legacyWorkerConfig(), {
+      recoveryCoordinator: {
+        run: vi.fn(async () => {
+          order.push('recovery');
+          return {
+            scanned: 0,
+            safeDbRecovered: 0,
+            safeQueueRecovered: 0,
+            noAction: 0,
+            humanRequired: 0,
+            jobsReused: 0,
+            jobsCreated: 0,
+            reservationsReleased: 0,
+            finalizersReplayed: 0,
+            historicalIgnored: 0,
+            ambiguitiesPreserved: 0,
+          };
+        }),
+      },
+      logger: harness.logger,
+      infrastructureFactory: harness.infrastructureFactory,
+      workerFactory: harness.workerFactory,
+    });
+
+    expect(order).toEqual(['recovery', 'scheduler', 'workers']);
+  });
+
+  it('bloqueia o entrypoint legado antes de scheduler, provider e workers quando recovery exige intervencao humana', async () => {
+    const harness = createHarness();
+    const providerFactory = vi.fn(() => new MockWhatsAppProvider());
+    const recoveryCoordinator = {
+      run: vi.fn(async () =>
+        recoveryReport({ humanRequired: 1, ambiguitiesPreserved: 1 }),
+      ),
+    };
+    const config = legacyWorkerConfig({
+      ...baseEnv,
+      SCHEDULER_ENABLED: 'true',
+      SCHEDULER_CRON: '0 9 * * *',
+      SCHEDULER_TIMEZONE: 'America/Sao_Paulo',
+    });
+
+    await expect(
+      startWorker(config, {
+        recoveryCoordinator,
+        providerFactory,
+        logger: harness.logger,
+        infrastructureFactory: harness.infrastructureFactory,
+        workerFactory: harness.workerFactory,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
+    expect(harness.scheduler.register).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.infrastructure.close).toHaveBeenCalledOnce();
+  });
+
+  it('bloqueia o entrypoint legado com humanRequired mesmo quando nao ha ambiguity reportada', async () => {
+    const harness = createHarness();
+    const providerFactory = vi.fn(() => new MockWhatsAppProvider());
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ humanRequired: 1 })),
+    };
+    const config = legacyWorkerConfig({
+      ...baseEnv,
+      SCHEDULER_ENABLED: 'true',
+      SCHEDULER_CRON: '0 9 * * *',
+      SCHEDULER_TIMEZONE: 'America/Sao_Paulo',
+    });
+
+    await expect(
+      startWorker(config, {
+        recoveryCoordinator,
+        providerFactory,
+        logger: harness.logger,
+        infrastructureFactory: harness.infrastructureFactory,
+        workerFactory: harness.workerFactory,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(harness.scheduler.register).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.infrastructure.close).toHaveBeenCalledOnce();
   });
 });

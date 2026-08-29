@@ -336,6 +336,91 @@ describe('commercial automation scheduler planner', () => {
     expect(firstPlan.slots.every((slot) => slot.target.instanceName !== undefined)).toBe(true);
   });
 
+  it('preserva identidade e cooldown em tres ciclos logicos com restart', () => {
+    const cycleSchedule = {
+      ...schedule,
+      dailyGlobalLimit: 10,
+      dailyGroupLimit: 10,
+      staggerMinutes: 0,
+      scheduleRevision: 7,
+    };
+    const cycleTarget = (lastSentAt: Date | null, sentToday: number) =>
+      target('cycle', {
+        cadenceMinutes: 30,
+        dailyLimit: 10,
+        lastSentAt,
+        groupSentToday: sentToday,
+      });
+    const planCycle = (
+      cycleNow: Date,
+      lastSentAt: Date | null,
+      sentToday: number,
+    ) =>
+      planCommercialTargetSlots({
+        now: cycleNow,
+        schedule: cycleSchedule,
+        targets: [cycleTarget(lastSentAt, sentToday)],
+        globalSentToday: sentToday,
+        horizonMinutes: 180,
+      });
+    const firstCycle = planCycle(now, null, 0);
+    const secondCycle = planCycle(
+      new Date('2026-08-24T12:01:00.000Z'),
+      firstCycle.slots[0].scheduledFor,
+      1,
+    );
+    const thirdCycle = planCycle(
+      new Date('2026-08-24T12:31:00.000Z'),
+      secondCycle.slots[0].scheduledFor,
+      2,
+    );
+    const cycles = [
+      {
+        plan: firstCycle,
+        now,
+        target: cycleTarget(null, 0),
+        sentToday: 0,
+      },
+      {
+        plan: secondCycle,
+        now: new Date('2026-08-24T12:01:00.000Z'),
+        target: cycleTarget(firstCycle.slots[0].scheduledFor, 1),
+        sentToday: 1,
+      },
+      {
+        plan: thirdCycle,
+        now: new Date('2026-08-24T12:31:00.000Z'),
+        target: cycleTarget(secondCycle.slots[0].scheduledFor, 2),
+        sentToday: 2,
+      },
+    ];
+    const firstSlots = cycles.map((cycle) => cycle.plan.slots[0]);
+    const firstJobIds = firstSlots.map((slot) => slot.jobId);
+    const firstTimes = firstSlots.map((slot) => slot.scheduledFor.getTime());
+
+    expect(firstSlots).toHaveLength(3);
+    expect(new Set(firstJobIds).size).toBe(3);
+    expect(firstTimes).toEqual([
+      firstTimes[0],
+      firstTimes[0] + 30 * 60_000,
+      firstTimes[0] + 60 * 60_000,
+    ]);
+    expect(firstSlots.every((slot) => slot.target.scheduleRevision === 7)).toBe(
+      true,
+    );
+
+    for (const cycle of cycles) {
+      const replay = planCommercialTargetSlots({
+        now: cycle.now,
+        schedule: cycleSchedule,
+        targets: [cycle.target],
+        globalSentToday: cycle.sentToday,
+        horizonMinutes: 180,
+      });
+      expect(replay.slots[0].jobId).toBe(cycle.plan.slots[0].jobId);
+    }
+  });
+
   it('consulta a policy antes de planejar um target pausado', async () => {
     const planner = new CommercialAutomationSchedulerPlanner({
       settings: {
