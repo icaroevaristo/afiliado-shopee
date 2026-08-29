@@ -17,7 +17,11 @@ import {
   createCommercialRecoveryQueue,
   createCommercialRecoveryCoordinator,
 } from './commercial-recovery-bootstrap';
-import type { CommercialRecoveryCoordinator } from '../../api/src/commercial-recovery-coordinator';
+import {
+  assertCommercialRecoveryStartupSafe,
+  type CommercialRecoveryCoordinator,
+  type CommercialRecoveryReport,
+} from '../../api/src/commercial-recovery-coordinator';
 import {
   createWhatsAppDispatchWorker,
   type WhatsAppDispatchWorkerLogger,
@@ -31,6 +35,32 @@ export type WhatsAppDispatchWorkerFactory = (
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
   info: (data, message) => console.info(message, data),
   error: (data, message) => console.error(message, data),
+};
+
+const logRecoveryStartupResult = (
+  recovery: CommercialRecoveryReport,
+  logger: WhatsAppDispatchWorkerLogger,
+) => {
+  try {
+    assertCommercialRecoveryStartupSafe(recovery);
+  } catch (error) {
+    logger.error(
+      {
+        event: 'commercial-recovery.coordinator.startup-blocked',
+        ...recovery,
+        errorCode: error instanceof AppError ? error.code : 'APP_ERROR',
+      },
+      'Commercial recovery requires human intervention before startup',
+    );
+    throw error;
+  }
+  logger.info(
+    {
+      event: 'commercial-recovery.coordinator.startup-complete',
+      ...recovery,
+    },
+    'Commercial recovery coordinator completed before WhatsApp worker startup',
+  );
 };
 
 export const startIsolatedWhatsAppDispatchWorker = async (
@@ -50,24 +80,13 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     );
   }
   const logger = options.logger ?? consoleLogger;
-  if (options.recoveryCoordinator) {
-    const recovery = await options.recoveryCoordinator.run();
-    logger.info(
-      {
-        event: 'commercial-recovery.coordinator.startup-complete',
-        ...recovery,
-      },
-      'Commercial recovery coordinator completed before WhatsApp worker startup',
-    );
-  } else if (process.env.NODE_ENV !== 'test') {
-    const recovery = await runDefaultRecoveryCoordinator(config, logger);
-    logger.info(
-      {
-        event: 'commercial-recovery.coordinator.startup-complete',
-        ...recovery,
-      },
-      'Commercial recovery coordinator completed before WhatsApp worker startup',
-    );
+  const recovery = options.recoveryCoordinator
+    ? await options.recoveryCoordinator.run()
+    : process.env.NODE_ENV !== 'test'
+      ? await runDefaultRecoveryCoordinator(config, logger)
+      : undefined;
+  if (recovery) {
+    logRecoveryStartupResult(recovery, logger);
   }
   const provider = (options.providerFactory ?? createWhatsAppProvider)(config, {
     ...options.providerFactoryOptions,
