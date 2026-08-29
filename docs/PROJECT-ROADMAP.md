@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `27aac26a59434cd1dbc0cdeb55c733d814a397ed`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25, Fase 17 certificada como concluída em 2026-08-28 e Fase 18 certificada como concluída em 2026-08-28.
+> Estado auditado contra `main` em `1f500e35e13cc8b2207f1d944da921d807afcff8`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25, Fase 17 certificada como concluída em 2026-08-28, Fase 18 certificada como concluída em 2026-08-28 e Fase 19 certificada como concluída em 2026-08-29.
 
 ## 1. Objetivo final
 
@@ -401,7 +401,7 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13, 14, 15, 16, 17 e 18 estão certificadas como concluídas.** As Fases 19 e 20 permanecem planejadas e não iniciadas, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14, 15, 16, 17, 18 e 19 estão certificadas como concluídas.** A Fase 20 permanece planejada e não iniciada, e `PROJECT_DONE` ainda não foi declarado.
 
 ### Fase 17 — Envio manual seguro pelo mesmo pipeline
 - **Estado:** `DONE`.
@@ -413,9 +413,9 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Validação:** critérios `20/20 PASS`; API `1287 passed / 12 skipped`; Worker `234 passed`; Database `48 passed`; Queue `11 passed`; typecheck `15/15`; lint/build PASS; Prisma validate/generate PASS; `SOL_REVIEW=APPROVED`, P0/P1/P2 = 0.
 - **Critério objetivo preservado:** produto e grupos autorizados atravessam provenance/copy/policy/dedupe/reservation/dispatch/outbox/Sender/finalizer; a idempotency key impede duplicidade; resultados incertos permanecem fail-closed e exigem recovery humano seguro.
 
-## 12. Fases restantes
+## 12. Fases finais do roadmap
 
-As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdivididas em PRs/microtarefas, mas uma fase só muda de estado quando seu critério objetivo for atendido.
+As fases abaixo consolidam o caminho mínimo até o MVP oficial. Fases já concluídas permanecem registradas aqui por histórico; após a conclusão da Fase 19, somente a Fase 20 permanece pendente.
 
 ### Fase 18 — Painel de configuração e observabilidade operacional
 - **Estado:** `DONE`.
@@ -429,12 +429,18 @@ As fases abaixo consolidam o caminho mínimo até o MVP oficial. Podem ser subdi
 - **Estado final certificado:** `paused=true`, `activeExecutions=0`, `activeReservations=0`, `ambiguity=0`, `investigationRequired=0`, `pendingDispatches=0`, `pendingOutboxes=0`, filas quiescentes e providers/SEND `0` durante a certificação.
 - **Dependências:** modelos/config APIs das Fases 14–17.
 - **Critério objetivo:** proprietário cadastra/ativa/pausa instâncias e grupos, atribui rotas, configura horários/intervalos/limites/stagger, vê próximo/último envio/blocker e usa catálogo/manual SEND sem shell/DB.
+
 ### Fase 19 — Recovery/restart e autonomia contínua
-- **Estado:** `NOT_STARTED` como certificação final; mecanismos de recovery já existem.
+- **Estado:** `DONE`.
 - **Objetivo:** provar operação autônoma contínua sob scheduler recorrente, restart e falhas comuns.
-- **Evidência principal:** recovery unit/integration e Fases 9–11 cobrem boundaries isolados; ainda não há soak completo multi-instância/multi-grupo.
-- **Dependências:** Fases 13–18.
-- **Critério objetivo:** restart reconcilia jobs/leases/outboxes sem duplicar; provider ambiguity para sem retry perigoso; instância indisponível fica visível sem reroute indevido; múltiplas janelas/ciclos completam com `duplicateSend=0` e ambiguity pendente `0`; scheduler/worker não duplicam.
+- **Implementação mergeada:** PR #107, `feat(recovery): harden commercial restart and preview safety`; feature HEAD final `570c165ff5449c6d800462e385ef879523d14658`; merge commit `1f500e35e13cc8b2207f1d944da921d807afcff8`.
+- **Recovery/restart certificado:** coordinator de recovery reconcilia executions, outboxes, jobs e finalizers de forma idempotente; crash matrix A–J PASS; scheduler lógico único sob restart; dual worker/attempt guards preservados; post-SENT finalizer reaplicável sem novo provider; uncertainty externa e `EXTERNAL_MAY_HAVE_STARTED` permanecem fail-closed, sem retry/requeue perigoso.
+- **Soak PREVIEW representativo:** 3 ciclos, 2 grupos, 2 instâncias sticky e 2 restarts; 6 target jobs, 6 executions e 6 runs sem duplicatas; PostgreSQL `34/40` writes dentro do orçamento autorizado, `unexpected=0`; providers/SEND `0` durante o soak. A composição com o SEND real já certificado da Fase 17 fecha o requisito sem criar novo SEND nesta fase.
+- **Histórico terminal e P1 final:** histórico terminal não acionável foi separado de recovery real, com `historicalIgnored=19` e `humanRequired=0` no soak. O P1 final foi corrigido pelo commit `570c165ff5449c6d800462e385ef879523d14658`: `humanRequired>0` ou `ambiguitiesPreserved>0` agora bloqueiam o startup com `COMMERCIAL_RECOVERY_HUMAN_REQUIRED` antes de scheduler, provider e workers nos entrypoints comercial e legado; o cleanup existente fecha a infraestrutura. Histórico apenas ignorado continua permitindo startup seguro.
+- **PREVIEW zero-provider:** o caminho PREVIEW impede chamadas a Shopee/OpenAI/Evolution/WhatsApp por código e o entrypoint legado não abre caminho de SEND em PREVIEW.
+- **Validação final pós-P1:** testes focados `27 passed`; API/Worker/Database/Queue/System Supervisor `1.865 passed / 12 skipped`; Dashboard `86 passed`; typecheck `15/15`; lint `10/10`; build `10/10`; Prisma validate/generate PASS; `git diff --check` PASS; `SOL_REVIEW=APPROVED`; Ship Gate `APPROVED`; `P0=0`, `P1=0`, `P2=0`.
+- **Dependências:** Fases 13–18 concluídas.
+- **Critério objetivo atendido:** restart reconcilia jobs/leases/outboxes sem duplicar; ambiguity/provider uncertainty bloqueia startup e retry perigoso; histórico terminal não acionável não cria blocker falso; múltiplos ciclos multi-instância/multi-grupo e restarts completam sem duplicidade; scheduler/worker não duplicam; `duplicateSend=0` no cenário certificado e nenhuma ambiguity pendente foi criada pelo soak.
 
 ### Fase 20 — Certificação PROJECT_DONE
 - **Estado:** `NOT_STARTED`
@@ -496,7 +502,7 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Policy/destinos | DONE | Assignments e instâncias sticky certificados; cadence/stagger persistidos e constraints preservados |
 | Dispatch/outbox/Sender | DONE | Primeiro SEND real concluído |
 | E2E no-SEND | DONE | Regressão preservada |
-| Runtime/recovery base | DONE | Ainda falta autonomia contínua final |
+| Runtime/recovery base | DONE | Recovery/restart e gate fail-closed certificados na Fase 19 |
 | Primeiro SEND real | DONE | Fase 11 certificada |
 | Estabilidade multiciclo | DONE | Dois ciclos reais certificados; stale candidate reconciliado sem bypass |
 | Multi-instância real | DONE | Duas instâncias reais, assignments persistidos e lifecycle sticky certificados |
@@ -507,4 +513,4 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 | Ofertas Relâmpago confiáveis | EXPLICITLY_UNSUPPORTED | Sem sinal oficial do provider; heurísticas bloqueadas fail-closed |
 | Envio manual seguro | DONE | Fase 17 certificada: painel, pipeline único, Preview/idempotência e SEND real controlado |
 | Painel administrativo | DONE | Fase 18 certificada: instâncias, grupos, assignments, settings, status operacional, catálogo e envio manual |
-| Soak/restart/autonomia | NOT_STARTED | Soak e restart/replan da Fase 15 certificados; autonomia contínua final permanece planejada |
+| Soak/restart/autonomia | DONE | Fase 19 certificada: soak multi-instância/multi-grupo, restarts, recovery idempotente e startup fail-closed |
