@@ -4,6 +4,7 @@ import {
   createWhatsAppProvider,
   type WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
+import type { CommercialRecoveryReport } from '../../api/src/commercial-recovery-coordinator';
 
 import {
   startIsolatedWhatsAppDispatchWorker,
@@ -33,6 +34,40 @@ const sendConfig = loadConfig({
   EVOLUTION_INSTANCE_NAME: 'test-instance',
   WHATSAPP_GROUP_SEND_ENABLED: 'true',
 });
+
+const recoveryReport = (
+  overrides: Partial<CommercialRecoveryReport> = {},
+): CommercialRecoveryReport => ({
+  scanned: 0,
+  safeDbRecovered: 0,
+  safeQueueRecovered: 0,
+  noAction: 0,
+  humanRequired: 0,
+  jobsReused: 0,
+  jobsCreated: 0,
+  reservationsReleased: 0,
+  finalizersReplayed: 0,
+  historicalIgnored: 0,
+  ambiguitiesPreserved: 0,
+  ...overrides,
+});
+
+const createWorkerHarness = () => {
+  const provider: WhatsAppProvider = {
+    sendMessage: vi.fn<WhatsAppProvider['sendMessage']>(async () => ({
+      externalMessageId: 'mock-id',
+      status: 'sent' as const,
+      sentAt: new Date('2026-07-25T12:00:00.000Z'),
+    })),
+  };
+  const close = vi.fn(async () => undefined);
+  const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => provider);
+  const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => ({
+    close,
+  }));
+  const logger = { info: vi.fn(), error: vi.fn() };
+  return { provider, close, providerFactory, workerFactory, logger };
+};
 
 describe('isolated WhatsApp dispatch worker', () => {
   it('fails closed in preview before creating provider or worker', async () => {
@@ -92,6 +127,156 @@ describe('isolated WhatsApp dispatch worker', () => {
     );
     await runtime.close();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('bloqueia o startup quando recovery exige intervencao humana', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ humanRequired: 1 })),
+    };
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory: harness.providerFactory,
+        workerFactory: harness.workerFactory,
+        recoveryCoordinator,
+        logger: harness.logger,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
+    expect(harness.providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-recovery.coordinator.startup-blocked',
+        humanRequired: 1,
+        ambiguitiesPreserved: 0,
+        errorCode: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+      }),
+      'Commercial recovery requires human intervention before startup',
+    );
+    expect(harness.logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-recovery.coordinator.startup-complete',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('bloqueia o startup quando recovery preserva ambiguity', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ ambiguitiesPreserved: 1 })),
+    };
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory: harness.providerFactory,
+        workerFactory: harness.workerFactory,
+        recoveryCoordinator,
+        logger: harness.logger,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(harness.providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-recovery.coordinator.startup-blocked',
+        humanRequired: 0,
+        ambiguitiesPreserved: 1,
+        errorCode: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+      }),
+      'Commercial recovery requires human intervention before startup',
+    );
+  });
+
+  it('bloqueia o startup quando recovery exige humano e preserva ambiguity', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () =>
+        recoveryReport({ humanRequired: 1, ambiguitiesPreserved: 1 }),
+      ),
+    };
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory: harness.providerFactory,
+        workerFactory: harness.workerFactory,
+        recoveryCoordinator,
+        logger: harness.logger,
+      }),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+    });
+
+    expect(harness.providerFactory).not.toHaveBeenCalled();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-recovery.coordinator.startup-blocked',
+        humanRequired: 1,
+        ambiguitiesPreserved: 1,
+        errorCode: 'COMMERCIAL_RECOVERY_HUMAN_REQUIRED',
+      }),
+      'Commercial recovery requires human intervention before startup',
+    );
+  });
+
+  it('permite startup quando apenas historico terminal foi ignorado', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ historicalIgnored: 19 })),
+    };
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory: harness.providerFactory,
+      workerFactory: harness.workerFactory,
+      recoveryCoordinator,
+      logger: harness.logger,
+    });
+
+    expect(harness.providerFactory).toHaveBeenCalledOnce();
+    expect(harness.workerFactory).toHaveBeenCalledOnce();
+    expect(harness.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-recovery.coordinator.startup-complete',
+        historicalIgnored: 19,
+      }),
+      'Commercial recovery coordinator completed before WhatsApp worker startup',
+    );
+    expect(harness.logger.error).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
+  it('permite startup quando recovery seguro foi concluido', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () =>
+        recoveryReport({
+          safeDbRecovered: 1,
+          safeQueueRecovered: 1,
+          finalizersReplayed: 1,
+        }),
+      ),
+    };
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory: harness.providerFactory,
+      workerFactory: harness.workerFactory,
+      recoveryCoordinator,
+      logger: harness.logger,
+    });
+
+    expect(harness.providerFactory).toHaveBeenCalledOnce();
+    expect(harness.workerFactory).toHaveBeenCalledOnce();
+    expect(harness.logger.error).not.toHaveBeenCalled();
+    await runtime.close();
   });
 
   it('executa recovery antes de criar provider ou consumer', async () => {
