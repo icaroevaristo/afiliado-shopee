@@ -4,7 +4,7 @@
 >
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
-> Estado auditado contra `main` em `1f500e35e13cc8b2207f1d944da921d807afcff8`; Fase 15 certificada como concluída, Fase 16 certificada como concluída em 2026-08-25, Fase 17 certificada como concluída em 2026-08-28, Fase 18 certificada como concluída em 2026-08-28 e Fase 19 certificada como concluída em 2026-08-29.
+> Estado final auditado contra `main` em `6863261d2da2ae0f845d1ada8f0a2ea227495672`; Fases 1–20 certificadas como concluídas e `PROJECT_DONE=true` certificado em 2026-08-30.
 
 ## 1. Objetivo final
 
@@ -401,7 +401,7 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 - **Dependências:** contratos de snapshot/provenance das Fases 1 e 4; Fase 12 concluída.
 - **Critério objetivo:** regressão reproduz drift; sync/mining atualiza/expira/recria candidate corretamente; ranking não é burlado; preflight volta a provenance válida; Fase 12 fecha com dois novos SENDs reais.
 
-**As Fases 12, 13, 14, 15, 16, 17, 18 e 19 estão certificadas como concluídas.** A Fase 20 permanece planejada e não iniciada, e `PROJECT_DONE` ainda não foi declarado.
+**As Fases 12, 13, 14, 15, 16, 17, 18, 19 e 20 estão certificadas como concluídas. `PROJECT_DONE=true`.**
 
 ### Fase 17 — Envio manual seguro pelo mesmo pipeline
 - **Estado:** `DONE`.
@@ -415,7 +415,7 @@ A operação ordinária não pode depender de consultas manuais a PostgreSQL, Re
 
 ## 12. Fases finais do roadmap
 
-As fases abaixo consolidam o caminho mínimo até o MVP oficial. Fases já concluídas permanecem registradas aqui por histórico; após a conclusão da Fase 19, somente a Fase 20 permanece pendente.
+As fases abaixo consolidam o caminho mínimo até o MVP oficial. Todas as fases finais foram concluídas; a Fase 20 encerra formalmente o MVP com `PROJECT_DONE=true`.
 
 ### Fase 18 — Painel de configuração e observabilidade operacional
 - **Estado:** `DONE`.
@@ -443,11 +443,18 @@ As fases abaixo consolidam o caminho mínimo até o MVP oficial. Fases já concl
 - **Critério objetivo atendido:** restart reconcilia jobs/leases/outboxes sem duplicar; ambiguity/provider uncertainty bloqueia startup e retry perigoso; histórico terminal não acionável não cria blocker falso; múltiplos ciclos multi-instância/multi-grupo e restarts completam sem duplicidade; scheduler/worker não duplicam; `duplicateSend=0` no cenário certificado e nenhuma ambiguity pendente foi criada pelo soak.
 
 ### Fase 20 — Certificação PROJECT_DONE
-- **Estado:** `NOT_STARTED`
+- **Estado:** `DONE`.
 - **Objetivo:** certificar o MVP completo em cenário real representativo.
-- **Evidência principal:** a produzir após Fase 19.
-- **Dependências:** todas as fases anteriores.
-- **Critério objetivo:** satisfazer integralmente a seção 13 e produzir relatório reproduzível com `agenda -> seleção -> SEND -> lifecycle -> próximo ciclo` operável pelo painel.
+- **Baseline certificado:** `main` em `6863261d2da2ae0f845d1ada8f0a2ea227495672`, incluindo o PR #108 que fecha o recovery gate do isolated WhatsApp dispatch runtime.
+- **Evidência operacional final (2026-08-30):** janela autônoma real com scheduler comercial único, `commercialWorker=1`, `whatsappDispatchWorker=1`, `legacyWorker=0`, duas instâncias sticky e dois grupos reais. Foram confirmados 3 novos SENDs: A às `12:51Z` por `afiliado-shopee-local`, A às `13:06Z` por `afiliado-shopee-local` e B às `13:09Z` por `afiliado-shopee-secondary`.
+- **Próximo ciclo/autonomia:** o primeiro SEND A terminalizou às `12:51Z`; sem ação humana operacional, sem config change, restart, retry, requeue ou SEND manual, o scheduler continuou e produziu novo SEND A terminal às `13:06Z`, seguido de SEND B terminal às `13:09Z`. `CRITERION_12=PASS`.
+- **Soak real representativo:** 3 SENDs reais, mais de um slot/período temporal, 2 grupos e 2 instâncias sticky; `duplicateSend=0`, `silentReroute=0`, `retry=0`, `requeue=0`, `ambiguity=0`, `investigationRequired=0`, `attemptCountMax=1`. `CRITERION_14=PASS`.
+- **Fail-closed durante a janela:** uma geração B terminou `COMMERCIAL_AI_COPY_OUTPUT_INVALID`/`AI_FACTUAL_VALUE_FORBIDDEN` antes de run/dispatch/outbox/Evolution e o mesmo generation contract não foi regenerado; um slot A foi bloqueado pré-provider por `GROUP_DAILY_LIMIT_REACHED`/`MINIMUM_INTERVAL_NOT_REACHED`. Ambos foram tratados de forma terminal/segura sem intervenção operacional e sem retry/requeue.
+- **Efeitos externos da certificação final:** `ShopeeHttp=4`, `OpenAIGenerations=4`, `EvolutionSend=3`, `EvolutionOther=0`, `WhatsAppSendAttempts=3`, `WhatsAppConfirmedSent=3`.
+- **Restore final:** scheduler removido, processos F20 `0`, scheduler lógico `0`, filas commercial/dispatch `waiting=0`, `active=0`, `delayed=0`; configuração temporária integralmente restaurada; estado final quiescente; lifecycles históricos preservados; `ambiguity=0` e `investigationRequired=0`.
+- **Revisão independente:** `SOL_REVIEW=APPROVED`; `P0=0`, `P1=0`, `P2=0`; `PROJECT_DONE_CRITERIA=14/14_PASS`; `PROJECT_DONE_CAN_BE_DECLARED=true`.
+- **Dependências:** todas as fases anteriores concluídas.
+- **Critério objetivo atendido:** a sequência `agenda -> seleção -> SEND -> lifecycle terminal -> próximo ciclo`, com multi-grupo/multi-instância, idempotência e recovery fail-closed, foi comprovada em operação real. `PROJECT_DONE=true`.
 
 ## 13. Critério `PROJECT_DONE`
 
@@ -472,7 +479,7 @@ Sequência mínima observável no certificado final:
 
 `agenda -> número correto -> grupos atribuídos -> produto adequado ao nicho -> copy/imagem/link válidos -> envios espaçados -> lifecycle terminal -> próximo ciclo`.
 
-Até isso ser comprovado, o projeto pode estar tecnicamente avançado, mas não está `PROJECT_DONE`.
+**Certificação final de 2026-08-30:** `14/14_PASS`; todos os itens acima foram comprovados e `PROJECT_DONE=true`.
 
 ## 14. Pós-MVP explicitamente separado
 
@@ -495,22 +502,23 @@ Não bloqueiam `PROJECT_DONE`, salvo decisão futura explícita:
 |---|---|---|
 | Identidade/snapshot | DONE | Base certificada |
 | Filtros/scoring/ranking | DONE | Determinístico |
-| Fairness/nicho | DONE no core | Multi-grupo real ainda precisa certificação |
+| Fairness/nicho | DONE | Multi-grupo real certificado até a Fase 20 |
 | Provenance | DONE | Fail-closed; revelou blocker real na Fase 12 |
 | Copy V10 | DONE | Geração/cache/validator provados |
 | Imagem/draft | DONE | Gate antes de dispatch |
 | Policy/destinos | DONE | Assignments e instâncias sticky certificados; cadence/stagger persistidos e constraints preservados |
-| Dispatch/outbox/Sender | DONE | Primeiro SEND real concluído |
+| Dispatch/outbox/Sender | DONE | Boundary real certificado com attempts críticos = 1 |
 | E2E no-SEND | DONE | Regressão preservada |
 | Runtime/recovery base | DONE | Recovery/restart e gate fail-closed certificados na Fase 19 |
 | Primeiro SEND real | DONE | Fase 11 certificada |
-| Estabilidade multiciclo | DONE | Dois ciclos reais certificados; stale candidate reconciliado sem bypass |
+| Estabilidade multiciclo | DONE | Ciclos reais e próximo ciclo autônomo certificados |
 | Multi-instância real | DONE | Duas instâncias reais, assignments persistidos e lifecycle sticky certificados |
-| Multi-grupo real completo | DONE | Dois grupos reais, isolamento e candidates compatíveis certificados |
+| Multi-grupo real completo | DONE | Dois grupos reais, isolamento e SENDs reais certificados |
 | Scheduler/stagger final | DONE | Planner determinístico multi-instância/multi-grupo; cadence/window/quotas/stagger e revision stale certificados |
 | Catálogo operacional completo | DONE | Catálogo read-only, detalhe, filtros, paginação e histórico certificados |
 | Categorias reais no painel | DONE | Registry dinâmico com 101 IDs oficiais; nomes/hierarchy ainda indisponíveis |
 | Ofertas Relâmpago confiáveis | EXPLICITLY_UNSUPPORTED | Sem sinal oficial do provider; heurísticas bloqueadas fail-closed |
 | Envio manual seguro | DONE | Fase 17 certificada: painel, pipeline único, Preview/idempotência e SEND real controlado |
 | Painel administrativo | DONE | Fase 18 certificada: instâncias, grupos, assignments, settings, status operacional, catálogo e envio manual |
-| Soak/restart/autonomia | DONE | Fase 19 certificada: soak multi-instância/multi-grupo, restarts, recovery idempotente e startup fail-closed |
+| Soak/restart/autonomia | DONE | Fases 19–20: recovery/restart e soak real autônomo multi-grupo/multi-instância certificados |
+| PROJECT_DONE | DONE | Fase 20: `14/14_PASS`, `P0=0`, `P1=0`, `P2=0`, `PROJECT_DONE=true` |
