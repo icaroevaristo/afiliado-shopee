@@ -191,9 +191,8 @@ describe('SettingsPage commercial automation', () => {
     expect(text).toContain('0/1 · 1 restante(s)');
     expect(text).toContain('Automação desabilitada pelo ambiente.');
     expect(text).toContain('Automação pausada operacionalmente.');
-    expect(text).toContain('Nenhuma oferta será publicada nesta Sprint.');
-    expect(text).toContain('Pausar ou retomar não envia mensagem.');
-    expect(text).toContain('Scheduler continua desligado');
+    expect(text).toContain('Este controle altera somente a pausa persistida.');
+    expect(text).toContain('Ligar ou desligar não envia mensagem');
     await screen.unmount();
   });
 
@@ -203,7 +202,7 @@ describe('SettingsPage commercial automation', () => {
 
     const resumeButton = Array.from(
       screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.trim() === 'Retomar');
+    ).find((button) => button.textContent?.trim() === 'Ligar automação');
     await click(resumeButton as HTMLButtonElement);
 
     const dialog = screen.container.querySelector('[role="dialog"]');
@@ -240,7 +239,7 @@ describe('SettingsPage commercial automation', () => {
 
     const pauseButton = Array.from(
       screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.trim() === 'Pausar');
+    ).find((button) => button.textContent?.trim() === 'Desligar automação');
     await click(pauseButton as HTMLButtonElement);
     await flush();
 

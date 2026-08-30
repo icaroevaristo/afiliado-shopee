@@ -75,12 +75,12 @@ function ConfirmationModal({
       <div className="ops-modal">
         <p className="ops-eyebrow">Controle protegido</p>
         <h2 id="automation-confirm-title" className="ops-section-title">
-          {isResume ? 'Retomar automacao?' : 'Pausar automacao?'}
+          {isResume ? 'Ligar automação?' : 'Desligar automação?'}
         </h2>
         <p className="ops-section-meta mt-3">
           {isResume
-            ? 'O scheduler podera voltar a avaliar candidatos nos proximos ticks naturais.'
-            : 'Nenhum novo tick comercial devera ser autorizado enquanto a pausa persistir.'}
+            ? 'A pausa persistida será removida. O scheduler poderá avaliar candidatos nos próximos ticks naturais.'
+            : 'A pausa persistida impedirá novos ticks comerciais enquanto permanecer ativa.'}
         </p>
         <div className="ops-modal-actions">
           <button
@@ -101,8 +101,8 @@ function ConfirmationModal({
             {busy
               ? 'Aplicando...'
               : isResume
-                ? 'Confirmar retomada'
-                : 'Confirmar pausa'}
+                ? 'Confirmar ligação'
+                : 'Confirmar desligamento'}
           </button>
         </div>
       </div>
@@ -204,6 +204,7 @@ export default function AutomationPage() {
 
   const operationalState = getCommercialOperationalState(status, scheduler);
   const readinessState = getCommercialReadinessState(status);
+  const automationIsOn = Boolean(status?.enabled && !status?.paused);
   const readinessDetails =
     readinessState.reasonCodes.length > 0
       ? `Reasons: ${readinessState.reasonCodes.join(' · ')}`
@@ -314,6 +315,30 @@ export default function AutomationPage() {
           message={success}
           tone="success"
         />
+      ) : null}
+      {status ? (
+        <section
+          className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:flex-row sm:items-center sm:justify-between"
+          aria-live="polite"
+          aria-label="Estado da automação"
+        >
+          <div>
+            <p className="ops-eyebrow">Controle diário</p>
+            <h2 className="mt-1 text-xl font-semibold tracking-tight text-slate-950">
+              {automationIsOn ? 'AUTOMAÇÃO LIGADA' : 'AUTOMAÇÃO DESLIGADA'}
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-slate-600">
+              {status.paused
+                ? 'A pausa persistida impede novos trabalhos até você ligar a automação.'
+                : status.enabled
+                  ? 'A automação está disponível para operar conforme agenda, limites e readiness.'
+                  : 'O ambiente desabilitou a automação; nenhum trabalho será iniciado.'}
+            </p>
+          </div>
+          <OpsBadge tone={automationIsOn ? 'success' : 'warning'}>
+            {automationIsOn ? 'LIGADA' : 'DESLIGADA'}
+          </OpsBadge>
+        </section>
       ) : null}
       <OperationalStatusSummary />
       {status && scheduler ? (
@@ -542,7 +567,7 @@ export default function AutomationPage() {
                 </label>
                 <label className="ops-control">
                   <span className="ops-control-label">
-                    Minimum interval (min)
+                    Intervalo mínimo (min)
                   </span>
                   <input
                     className="ops-input"
@@ -559,7 +584,7 @@ export default function AutomationPage() {
                   />
                 </label>
                 <label className="ops-control">
-                  <span className="ops-control-label">Stagger (min)</span>
+                  <span className="ops-control-label">Stagger entre grupos (min)</span>
                   <input
                     className="ops-input"
                     type="number"
@@ -631,7 +656,7 @@ export default function AutomationPage() {
           ) : null}
           <OpsSection
             title="Acoes de controle"
-            meta="Pausar, retomar e atualizar a agenda persistida; sem edicao de .env ou cron."
+            meta="Ligar, desligar e atualizar a agenda persistida; sem edição de .env ou cron."
           >
             <div className="flex flex-wrap gap-2">
               <button
@@ -641,7 +666,7 @@ export default function AutomationPage() {
                 onClick={() => setAction('pause')}
                 disabled={status.paused}
               >
-                <Pause size={14} aria-hidden="true" /> Pausar automacao
+                <Pause size={14} aria-hidden="true" /> Desligar automação
               </button>
               <button
                 type="button"
@@ -650,7 +675,7 @@ export default function AutomationPage() {
                 onClick={() => setAction('resume')}
                 disabled={!status.paused}
               >
-                <Play size={14} aria-hidden="true" /> Retomar automacao
+                <Play size={14} aria-hidden="true" /> Ligar automação
               </button>
             </div>
           </OpsSection>

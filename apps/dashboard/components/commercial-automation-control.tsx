@@ -145,11 +145,11 @@ export function CommercialAutomationControl() {
 
         <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">
           <p className="font-medium">
-            Nenhuma oferta será publicada nesta Sprint.
+            Este controle altera somente a pausa persistida.
           </p>
           <p>
-            Pausar ou retomar não envia mensagem. O Scheduler continua desligado
-            e não é alterado por este controle.
+            Ligar ou desligar não envia mensagem nem altera o processo do
+            sistema. A agenda segue os limites, a janela e os blockers exibidos.
           </p>
         </div>
 
@@ -254,7 +254,7 @@ export function CommercialAutomationControl() {
                     className="inline-flex items-center justify-center gap-2 rounded-md bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <PlayCircle className="h-4 w-4" aria-hidden="true" />
-                    Retomar
+                    Ligar automação
                   </button>
                 ) : (
                   <button
@@ -264,7 +264,7 @@ export function CommercialAutomationControl() {
                     className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <PauseCircle className="h-4 w-4" aria-hidden="true" />
-                    Pausar
+                    Desligar automação
                   </button>
                 )}
               </div>
@@ -294,14 +294,14 @@ export function CommercialAutomationControl() {
                   id="resume-automation-title"
                   className="text-lg font-semibold text-slate-950"
                 >
-                  Retomar automação comercial
+                  Ligar automação comercial
                 </h2>
                 <p
                   id="resume-automation-description"
                   className="mt-2 text-sm leading-6 text-slate-600"
                 >
-                  Retomar remove apenas a pausa persistida. Não envia mensagem,
-                  não inicia o Scheduler e não publica oferta nesta Sprint.
+                  Ligar remove apenas a pausa persistida. Não envia mensagem
+                  diretamente nem altera o processo do sistema.
                 </p>
               </div>
               <button

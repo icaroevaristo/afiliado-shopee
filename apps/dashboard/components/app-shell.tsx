@@ -11,6 +11,7 @@ import {
   RadioTower,
   Settings2,
   Tags,
+  UsersRound,
   X,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -19,12 +20,13 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { getHealth } from '../lib/api';
 
 const navigation = [
-  { href: '/', label: 'Visao geral', icon: LayoutDashboard },
+  { href: '/', label: 'Visão geral', icon: LayoutDashboard },
   { href: '/envios', label: 'Envios', icon: RadioTower },
   { href: '/fila', label: 'Fila', icon: Boxes },
   { href: '/produtos', label: 'Produtos', icon: PackageSearch },
   { href: '/campanhas', label: 'Campanhas', icon: Tags },
-  { href: '/automacao', label: 'Automacao', icon: Gauge },
+  { href: '/automacao', label: 'Automação', icon: Gauge },
+  { href: '/whatsapp', label: 'Números e grupos', icon: UsersRound },
 ];
 
 const secondaryNavigation = [
@@ -129,7 +131,7 @@ function Sidebar({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?
           <span className="ops-status-dot" data-tone="success" aria-hidden="true" />
           <span>LIVE · control local</span>
         </div>
-        <span className="ops-mono">read-only / v1</span>
+        <span className="ops-mono">control plane / v1</span>
       </div>
     </aside>
   );
@@ -164,7 +166,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <ApiPulse />
             <span className="ops-header-chip">
               <ClipboardList size={13} aria-hidden="true" />
-              leitura operacional
+              controle operacional
             </span>
           </div>
         </header>
