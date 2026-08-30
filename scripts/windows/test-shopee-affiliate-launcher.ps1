@@ -112,6 +112,15 @@ try {
     Assert-LauncherEqual (@($script:launcherCalls | Where-Object { $_.Arguments -contains 'system:start' }).Count) 0 'already-running does not start another system'
     Assert-LauncherEqual $script:browserCalls.Count 1 'already-running opens the dashboard once'
 
+    $script:fakeStatus = [pscustomobject]@{
+        overall = 'running'
+        operationLock = 'stale'
+        mode = 'send'
+        endpoints = [pscustomobject]@{ api = 'available'; dashboard = 'available' }
+        processes = [pscustomobject]@{ api = 'running'; dashboard = 'running'; 'commercial-worker' = 'running'; 'whatsapp-dispatch-worker' = 'running' }
+    }
+    Assert-LauncherThrowsCode { Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -SkipWindowsCheck } 'SYSTEM_STATUS_UNKNOWN' 'uncertain supervisor lock does not count as healthy'
+
     $script:launcherCalls = @()
     $script:browserCalls = @()
     $script:fakeStatus = $stoppedStatus

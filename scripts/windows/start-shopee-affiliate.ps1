@@ -75,6 +75,7 @@ function Test-SystemHealthyForLauncher {
     )
 
     if ([string]$Status.overall -ne 'running') { return $false }
+    if ([string]$Status.operationLock -ne 'unlocked') { return $false }
     if ([string]$Status.endpoints.api -ne 'available') { return $false }
     if ([string]$Status.endpoints.dashboard -ne 'available') { return $false }
     if ([string]$Status.processes.api -ne 'running') { return $false }
