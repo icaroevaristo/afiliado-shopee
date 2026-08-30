@@ -6,6 +6,11 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
+    "@shopee-auto-affiliate-ai/database#build": {
+      "cache": false,
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
     "lint": {},
     "typecheck": { "dependsOn": ["^build"] },
     "test": { "dependsOn": ["build", "^build"] }
