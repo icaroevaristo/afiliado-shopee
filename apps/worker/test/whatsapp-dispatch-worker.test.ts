@@ -308,6 +308,11 @@ const createHandoffRepositories = (input: {
       findByIdWithDetails: vi.fn().mockResolvedValue(input.dispatch),
       findByIdForSending: vi.fn().mockResolvedValue(input.dispatch),
       markAttemptPending,
+      claimPendingForSending: vi.fn(async () =>
+        (await markAttemptPending())
+          ? { kind: 'CLAIMED' as const }
+          : { kind: 'NOT_PENDING' as const },
+      ),
       markSent: vi.fn().mockResolvedValue({
         ...input.dispatch,
         status: 'SENT',
@@ -361,11 +366,7 @@ const createHandoffRepositories = (input: {
       }),
     },
     commercialPromotions: {
-      findAttemptContextByGeneratedCopyId: vi
-        .fn()
-        .mockResolvedValue(
-          context,
-        ),
+      findAttemptContextByGeneratedCopyId: vi.fn().mockResolvedValue(context),
       markDispatchedByGeneratedCopyId: vi.fn().mockResolvedValue({
         kind: 'DISPATCHED',
         candidateId: 'candidate-123',
@@ -464,14 +465,19 @@ describe('processWhatsAppDispatchJob', () => {
 
     expect(provider.sendMessage).not.toHaveBeenCalled();
     expect(repositories.commercialRuns.findByDispatchId).toHaveBeenCalledOnce();
-    expect(repositories.whatsappDispatches.markAttemptPending).not.toHaveBeenCalled();
+    expect(
+      repositories.whatsappDispatches.markAttemptPending,
+    ).not.toHaveBeenCalled();
   });
 
   it('mantem um unico processamento quando dois consumers disputam o mesmo job comercial', async () => {
     const fixture = createHandoffRepositories({ dispatch: commercialDispatch });
     let currentDispatch: WhatsAppDispatchDetails = commercialDispatch;
     const markAttemptPending = vi.fn(async () => {
-      if (currentDispatch.status !== 'PENDING' || currentDispatch.attemptCount !== 0) {
+      if (
+        currentDispatch.status !== 'PENDING' ||
+        currentDispatch.attemptCount !== 0
+      ) {
         return false;
       }
       currentDispatch = {
@@ -503,6 +509,12 @@ describe('processWhatsAppDispatchJob', () => {
     );
     fixture.repositories.whatsappDispatches.markAttemptPending =
       markAttemptPending;
+    fixture.repositories.whatsappDispatches.claimPendingForSending = vi.fn(
+      async () =>
+        (await markAttemptPending())
+          ? { kind: 'CLAIMED' as const }
+          : { kind: 'NOT_PENDING' as const },
+    );
     fixture.repositories.whatsappDispatches.markSent = markSent;
     const provider: WhatsAppProvider = {
       beginRun: vi.fn(),
@@ -552,8 +564,12 @@ describe('processWhatsAppDispatchJob', () => {
       ),
     ]);
 
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
-    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
     expect(provider.sendMessage).toHaveBeenCalledOnce();
     expect(markAttemptPending).toHaveBeenCalledTimes(2);
     expect(markSent).toHaveBeenCalledOnce();
@@ -571,10 +587,12 @@ describe('processWhatsAppDispatchJob', () => {
       destination: groupId,
       type: 'GROUP' as const,
       fingerprint: fingerprintWhatsAppGroupId(groupId),
+      assignedInstanceName: 'instance',
     };
     const dispatches = ['dispatch-a', 'dispatch-b'].map((id) => ({
       ...fakeDispatch,
       id,
+      instanceName: 'instance',
       destination,
     }));
     const createRepositories = (
@@ -583,6 +601,7 @@ describe('processWhatsAppDispatchJob', () => {
       whatsappDispatches: {
         findByIdWithDetails: vi.fn().mockResolvedValue(dispatch),
         markAttemptPending: vi.fn().mockResolvedValue(true),
+        claimPendingForSending: vi.fn().mockResolvedValue({ kind: 'CLAIMED' }),
         markSent: vi.fn().mockResolvedValue({ ...dispatch, status: 'SENT' }),
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(dispatch),
@@ -666,9 +685,7 @@ describe('processWhatsAppDispatchJob', () => {
     const createLifecycle = (instanceName: string, suffix: string) => {
       const destinationId = `dest-${suffix}`;
       const groupId =
-        suffix === 'a'
-          ? '120363000000000001@g.us'
-          : '120363000000000002@g.us';
+        suffix === 'a' ? '120363000000000001@g.us' : '120363000000000002@g.us';
       const dispatch = {
         ...commercialDispatch,
         id: `dispatch-${suffix}`,
@@ -684,15 +701,16 @@ describe('processWhatsAppDispatchJob', () => {
         },
         generatedCopy: {
           ...commercialDispatch.generatedCopy,
-          promotionCandidates: commercialDispatch.generatedCopy.promotionCandidates?.map(
-            (candidate) => ({
-              ...candidate,
-              campaign: {
-                ...candidate.campaign,
-                logicalGroupFingerprint: fingerprintWhatsAppGroupId(groupId),
-              },
-            }),
-          ),
+          promotionCandidates:
+            commercialDispatch.generatedCopy.promotionCandidates?.map(
+              (candidate) => ({
+                ...candidate,
+                campaign: {
+                  ...candidate.campaign,
+                  logicalGroupFingerprint: fingerprintWhatsAppGroupId(groupId),
+                },
+              }),
+            ),
         },
       } satisfies WhatsAppDispatchDetails;
       const run = {
@@ -776,7 +794,10 @@ describe('processWhatsAppDispatchJob', () => {
       {
         id: 'job-a',
         name: JOB_NAMES.whatsappDispatch,
-        data: { dispatchId: lifecycleA.dispatch.id, instanceName: 'instance-a' },
+        data: {
+          dispatchId: lifecycleA.dispatch.id,
+          instanceName: 'instance-a',
+        },
       },
       options(lifecycleA),
     );
@@ -784,7 +805,10 @@ describe('processWhatsAppDispatchJob', () => {
       {
         id: 'job-b',
         name: JOB_NAMES.whatsappDispatch,
-        data: { dispatchId: lifecycleB.dispatch.id, instanceName: 'instance-b' },
+        data: {
+          dispatchId: lifecycleB.dispatch.id,
+          instanceName: 'instance-b',
+        },
       },
       options(lifecycleB),
     );
@@ -795,19 +819,31 @@ describe('processWhatsAppDispatchJob', () => {
     expect(providerA.sendMessage).toHaveBeenCalledOnce();
     expect(providerB.sendMessage).toHaveBeenCalledOnce();
     expect(providerA.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: lifecycleA.dispatch.destination.destination }),
+      expect.objectContaining({
+        destination: lifecycleA.dispatch.destination.destination,
+      }),
     );
     expect(providerB.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ destination: lifecycleB.dispatch.destination.destination }),
+      expect.objectContaining({
+        destination: lifecycleB.dispatch.destination.destination,
+      }),
     );
     expect(providerA.sendMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ destination: lifecycleB.dispatch.destination.destination }),
+      expect.objectContaining({
+        destination: lifecycleB.dispatch.destination.destination,
+      }),
     );
     expect(providerB.sendMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ destination: lifecycleA.dispatch.destination.destination }),
+      expect.objectContaining({
+        destination: lifecycleA.dispatch.destination.destination,
+      }),
     );
-    expect(lifecycleA.repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
-    expect(lifecycleB.repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
+    expect(
+      lifecycleA.repositories.whatsappDispatches.markSent,
+    ).toHaveBeenCalledOnce();
+    expect(
+      lifecycleB.repositories.whatsappDispatches.markSent,
+    ).toHaveBeenCalledOnce();
   });
 
   it('usa dispatchId como identidade deterministica quando job.id esta ausente', async () => {
@@ -823,6 +859,7 @@ describe('processWhatsAppDispatchJob', () => {
       whatsappDispatches: {
         findByIdWithDetails: vi.fn().mockResolvedValue(fakeDispatch),
         markAttemptPending: vi.fn().mockResolvedValue(true),
+        claimPendingForSending: vi.fn().mockResolvedValue({ kind: 'CLAIMED' }),
         markSent: vi.fn().mockResolvedValue(fakeDispatch),
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
@@ -877,6 +914,11 @@ describe('processWhatsAppDispatchJob', () => {
       whatsappDispatches: {
         findByIdWithDetails,
         markAttemptPending,
+        claimPendingForSending: vi.fn(async () =>
+          (await markAttemptPending())
+            ? { kind: 'CLAIMED' as const }
+            : { kind: 'NOT_PENDING' as const },
+        ),
         markSent,
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
@@ -1706,13 +1748,15 @@ describe('processWhatsAppDispatchJob', () => {
     const { repositories } = createHandoffRepositories({ dispatch });
     const provider: WhatsAppProvider = {
       beginRun: vi.fn(),
-      sendMessage: vi.fn().mockRejectedValue(
-        new WhatsAppSendError(
-          'blocked before request',
-          'WHATSAPP_PROVIDER_BLOCKED',
-          { deliveryMayHaveStarted: false },
+      sendMessage: vi
+        .fn()
+        .mockRejectedValue(
+          new WhatsAppSendError(
+            'blocked before request',
+            'WHATSAPP_PROVIDER_BLOCKED',
+            { deliveryMayHaveStarted: false },
+          ),
         ),
-      ),
     };
     const manualLifecycleFinalizer = {
       finalizeAfterDispatch: vi.fn().mockResolvedValue({

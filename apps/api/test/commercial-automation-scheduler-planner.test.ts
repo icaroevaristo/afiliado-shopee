@@ -15,6 +15,8 @@ const schedule: CommercialAutomationEffectiveSchedule = {
   allowedEndTime: '23:00',
   dailyGlobalLimit: 10,
   dailyGroupLimit: 10,
+  dailyShopeeHttpLimit: 10,
+  dailyOpenAiGenerationLimit: 10,
   minimumIntervalMinutes: 15,
   staggerMinutes: 10,
   scheduleRevision: 3,
@@ -85,17 +87,16 @@ describe('commercial automation scheduler planner', () => {
     });
 
     expect(result.slots[0].target.campaignId).toBe('campaign-b');
-    expect(result.slots.some((slot) => slot.target.campaignId === 'campaign-a')).toBe(true);
+    expect(
+      result.slots.some((slot) => slot.target.campaignId === 'campaign-a'),
+    ).toBe(true);
   });
 
   it('aplica quota global e quota por grupo sem rerotear', () => {
     const result = planCommercialTargetSlots({
       now,
       schedule: { ...schedule, dailyGlobalLimit: 1 },
-      targets: [
-        target('a', { groupSentToday: 10 }),
-        target('b'),
-      ],
+      targets: [target('a', { groupSentToday: 10 }), target('b')],
       globalSentToday: 0,
     });
 
@@ -120,7 +121,9 @@ describe('commercial automation scheduler planner', () => {
       horizonMinutes: 60,
     });
 
-    expect(inactive.slots.every((slot) => slot.target.campaignId !== 'campaign-a')).toBe(true);
+    expect(
+      inactive.slots.every((slot) => slot.target.campaignId !== 'campaign-a'),
+    ).toBe(true);
     expect(revised.slots[0].jobId).not.toBe(inactive.slots[0].jobId);
   });
 
@@ -220,7 +223,10 @@ describe('commercial automation scheduler planner', () => {
       horizonMinutes: 60,
     });
     const firstByScheduledFor = new Map(
-      firstTick.slots.map((slot) => [slot.scheduledFor.toISOString(), slot.jobId]),
+      firstTick.slots.map((slot) => [
+        slot.scheduledFor.toISOString(),
+        slot.jobId,
+      ]),
     );
     const overlaps = secondTick.slots.filter((slot) =>
       firstByScheduledFor.has(slot.scheduledFor.toISOString()),
@@ -230,7 +236,8 @@ describe('commercial automation scheduler planner', () => {
     expect(
       overlaps.every(
         (slot) =>
-          firstByScheduledFor.get(slot.scheduledFor.toISOString()) === slot.jobId,
+          firstByScheduledFor.get(slot.scheduledFor.toISOString()) ===
+          slot.jobId,
       ),
     ).toBe(true);
   });
@@ -269,11 +276,15 @@ describe('commercial automation scheduler planner', () => {
     });
 
     const timestamps = result.slots.map((slot) => slot.scheduledFor.getTime());
-    expect(timestamps).toEqual([...timestamps].sort((left, right) => left - right));
+    expect(timestamps).toEqual(
+      [...timestamps].sort((left, right) => left - right),
+    );
     expect(
-      timestamps.slice(1).every((timestamp, index) =>
-        timestamp - timestamps[index] >= 10 * 60_000,
-      ),
+      timestamps
+        .slice(1)
+        .every(
+          (timestamp, index) => timestamp - timestamps[index] >= 10 * 60_000,
+        ),
     ).toBe(true);
   });
 
@@ -315,7 +326,9 @@ describe('commercial automation scheduler planner', () => {
     const firstJobIds = firstPlan.slots.map((slot) => slot.jobId);
     const restartJobIds = restartPlan.slots.map((slot) => slot.jobId);
     const changedJobIds = changedRevisionPlan.slots.map((slot) => slot.jobId);
-    const firstTimes = firstPlan.slots.map((slot) => slot.scheduledFor.getTime());
+    const firstTimes = firstPlan.slots.map((slot) =>
+      slot.scheduledFor.getTime(),
+    );
 
     expect(firstPlan.slots).toHaveLength(8);
     expect(new Set(firstJobIds).size).toBe(firstJobIds.length);
@@ -323,17 +336,29 @@ describe('commercial automation scheduler planner', () => {
     expect(changedJobIds.every((jobId) => !firstJobIds.includes(jobId))).toBe(
       true,
     );
-    expect(changedRevisionPlan.slots.every((slot) => slot.target.scheduleRevision === 8)).toBe(true);
-    expect(new Set(firstPlan.slots.map((slot) => slot.target.instanceName))).toEqual(
-      new Set(['afiliado-shopee-local', 'afiliado-shopee-secondary']),
-    );
-    expect(new Set(firstPlan.slots.map((slot) => slot.target.groupId)).size).toBe(4);
     expect(
-      firstTimes.slice(1).every((timestamp, index) =>
-        timestamp - firstTimes[index] >= soakSchedule.staggerMinutes * 60_000,
+      changedRevisionPlan.slots.every(
+        (slot) => slot.target.scheduleRevision === 8,
       ),
     ).toBe(true);
-    expect(firstPlan.slots.every((slot) => slot.target.instanceName !== undefined)).toBe(true);
+    expect(
+      new Set(firstPlan.slots.map((slot) => slot.target.instanceName)),
+    ).toEqual(new Set(['afiliado-shopee-local', 'afiliado-shopee-secondary']));
+    expect(
+      new Set(firstPlan.slots.map((slot) => slot.target.groupId)).size,
+    ).toBe(4);
+    expect(
+      firstTimes
+        .slice(1)
+        .every(
+          (timestamp, index) =>
+            timestamp - firstTimes[index] >=
+            soakSchedule.staggerMinutes * 60_000,
+        ),
+    ).toBe(true);
+    expect(
+      firstPlan.slots.every((slot) => slot.target.instanceName !== undefined),
+    ).toBe(true);
   });
 
   it('preserva identidade e cooldown em tres ciclos logicos com restart', () => {

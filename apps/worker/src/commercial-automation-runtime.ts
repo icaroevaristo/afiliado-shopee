@@ -21,6 +21,11 @@ import type { CommercialDispatchOutboxQueue } from '../../api/src/commercial-dis
 import { ScoreService } from '../../api/src/score-service';
 import { ShopeeOfferSyncService } from '../../api/src/shopee-offer-sync-service';
 import { CommercialAutomationSchedulerPlanner } from '../../api/src/commercial-automation-scheduler-planner';
+import {
+  CommercialExternalProviderBudgetService,
+  withOpenAiDailyBudget,
+  withShopeeDailyBudget,
+} from '../../api/src/commercial-external-provider-budget-service';
 
 export type CommercialAutomationRuntimeLogger = {
   info: (obj: unknown, message?: string) => void;
@@ -78,6 +83,12 @@ export const createCommercialAutomationOrchestratorRuntime = (
   const prisma = options.prisma ?? createPrismaClient();
   const logger = options.logger ?? commercialAutomationConsoleLogger;
   const repositories = createPrismaRepositories(prisma);
+  const externalBudget = new CommercialExternalProviderBudgetService({
+    settings: repositories.commercialAutomationSettings,
+    usage: repositories.commercialExternalProviderUsage,
+    timezone: config.COMMERCIAL_TIMEZONE,
+    fallbackDailyGlobalLimit: config.COMMERCIAL_DAILY_GLOBAL_LIMIT,
+  });
   const score = new ScoreService({ products: repositories.products, logger });
   const pipeline = createCommercialPipelineService({
     repositories,
@@ -89,21 +100,26 @@ export const createCommercialAutomationOrchestratorRuntime = (
   });
   const openAiCommercialAiCopyProviderFactory =
     options.openAiCommercialAiCopyProviderFactory ??
-    ((providerOptions: ConstructorParameters<
-      typeof OpenAiCommercialAiCopyProvider
-    >[0]) => new OpenAiCommercialAiCopyProvider(providerOptions));
+    ((
+      providerOptions: ConstructorParameters<
+        typeof OpenAiCommercialAiCopyProvider
+      >[0],
+    ) => new OpenAiCommercialAiCopyProvider(providerOptions));
   const commercialAiCopyProvider =
     config.COMMERCIAL_AUTOMATION_MODE === 'send' &&
     config.COMMERCIAL_AI_COPY_ENABLED &&
     config.OPENAI_API_KEY &&
     config.COMMERCIAL_AI_COPY_MODEL
-      ? openAiCommercialAiCopyProviderFactory({
-          apiKey: config.OPENAI_API_KEY,
-          model: config.COMMERCIAL_AI_COPY_MODEL,
-          timeoutMs: config.COMMERCIAL_AI_COPY_TIMEOUT_MS,
-          maxOutputTokens: config.COMMERCIAL_AI_COPY_MAX_OUTPUT_TOKENS,
-          reasoningEffort: config.COMMERCIAL_AI_COPY_REASONING_EFFORT,
-        })
+      ? withOpenAiDailyBudget(
+          openAiCommercialAiCopyProviderFactory({
+            apiKey: config.OPENAI_API_KEY,
+            model: config.COMMERCIAL_AI_COPY_MODEL,
+            timeoutMs: config.COMMERCIAL_AI_COPY_TIMEOUT_MS,
+            maxOutputTokens: config.COMMERCIAL_AI_COPY_MAX_OUTPUT_TOKENS,
+            reasoningEffort: config.COMMERCIAL_AI_COPY_REASONING_EFFORT,
+          }),
+          externalBudget,
+        )
       : undefined;
   const promotionMining = createCommercialPromotionMiningService({
     repositories,
@@ -166,9 +182,11 @@ export const createCommercialAutomationOrchestratorRuntime = (
 
   const officialShopeeProviderFactory =
     options.officialShopeeProviderFactory ??
-    ((providerOptions: ConstructorParameters<
-      typeof OfficialShopeeAffiliateOfferProvider
-    >[0]) => new OfficialShopeeAffiliateOfferProvider(providerOptions));
+    ((
+      providerOptions: ConstructorParameters<
+        typeof OfficialShopeeAffiliateOfferProvider
+      >[0],
+    ) => new OfficialShopeeAffiliateOfferProvider(providerOptions));
   const syncOffers =
     config.COMMERCIAL_AUTOMATION_MODE === 'preview'
       ? previewCatalogSync
@@ -177,12 +195,15 @@ export const createCommercialAutomationOrchestratorRuntime = (
         : new ShopeeOfferSyncService({
             provider:
               config.SHOPEE_AFFILIATE_PROVIDER === 'official'
-                ? officialShopeeProviderFactory({
-                    apiEnabled: config.SHOPEE_AFFILIATE_API_ENABLED,
-                    apiUrl: config.SHOPEE_AFFILIATE_API_URL,
-                    appId: config.SHOPEE_AFFILIATE_APP_ID,
-                    secret: config.SHOPEE_AFFILIATE_SECRET,
-                  })
+                ? withShopeeDailyBudget(
+                    officialShopeeProviderFactory({
+                      apiEnabled: config.SHOPEE_AFFILIATE_API_ENABLED,
+                      apiUrl: config.SHOPEE_AFFILIATE_API_URL,
+                      appId: config.SHOPEE_AFFILIATE_APP_ID,
+                      secret: config.SHOPEE_AFFILIATE_SECRET,
+                    }),
+                    externalBudget,
+                  )
                 : new MockShopeeAffiliateOfferProvider(),
             offers: repositories.shopeeOffers,
             maxOffersPerSync: config.SHOPEE_AFFILIATE_SYNC_LIMIT,

@@ -3,7 +3,10 @@ import {
   fingerprintWhatsAppGroupId,
   MockWhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
-import { JOB_NAMES, type WhatsAppDispatchJob } from '@shopee-auto-affiliate-ai/queue';
+import {
+  JOB_NAMES,
+  type WhatsAppDispatchJob,
+} from '@shopee-auto-affiliate-ai/queue';
 
 import {
   MANUAL_PUBLICATION_CONFIRMATION,
@@ -399,92 +402,102 @@ describe('manual publication execution ownership integration', () => {
     });
 
     const executions = {
-      start: vi.fn(async (input: {
-        schedulerJobId: string;
-        mode: 'SEND';
-        ownerId: string;
-        startedAt: Date;
-        heartbeatAt: Date;
-        leaseExpiresAt: Date;
-      }) => {
-        execution = {
-          id: 'manual-execution-real',
-          schedulerJobId: input.schedulerJobId,
-          bullMqJobId: null,
-          activeKey: 'commercial-automation',
-          ownerId: input.ownerId,
-          heartbeatAt: input.heartbeatAt,
-          leaseExpiresAt: input.leaseExpiresAt,
-          mode: input.mode,
-          status: 'STARTED',
-          externalStage: 'NOT_REACHED',
-          reasons: [],
-          commercialRunId: null,
-          failureCode: null,
-          startedAt: input.startedAt,
-          completedAt: null,
-        };
-        return {
-          outcome: 'created' as const,
-          execution,
-          ownership: { executionId: execution.id, ownerId: input.ownerId },
-        };
-      }),
+      start: vi.fn(
+        async (input: {
+          schedulerJobId: string;
+          mode: 'SEND';
+          ownerId: string;
+          startedAt: Date;
+          heartbeatAt: Date;
+          leaseExpiresAt: Date;
+        }) => {
+          execution = {
+            id: 'manual-execution-real',
+            schedulerJobId: input.schedulerJobId,
+            bullMqJobId: null,
+            activeKey: 'commercial-automation',
+            ownerId: input.ownerId,
+            heartbeatAt: input.heartbeatAt,
+            leaseExpiresAt: input.leaseExpiresAt,
+            mode: input.mode,
+            status: 'STARTED',
+            externalStage: 'NOT_REACHED',
+            reasons: [],
+            commercialRunId: null,
+            failureCode: null,
+            startedAt: input.startedAt,
+            completedAt: null,
+          };
+          return {
+            outcome: 'created' as const,
+            execution,
+            ownership: { executionId: execution.id, ownerId: input.ownerId },
+          };
+        },
+      ),
       findBySchedulerJobId: vi.fn(async (schedulerJobId: string) =>
         execution?.schedulerJobId === schedulerJobId ? execution : null,
       ),
-      heartbeat: vi.fn(async (
-        ownership: { executionId: string; ownerId: string },
-        input: { heartbeatAt: Date; leaseExpiresAt: Date },
-      ) => {
-        if (
-          !execution ||
-          execution.id !== ownership.executionId ||
-          execution.ownerId !== ownership.ownerId ||
-          execution.status !== 'STARTED'
-        ) {
-          throw new Error('execution ownership lost');
-        }
-        execution.heartbeatAt = input.heartbeatAt;
-        execution.leaseExpiresAt = input.leaseExpiresAt;
-      }),
+      heartbeat: vi.fn(
+        async (
+          ownership: { executionId: string; ownerId: string },
+          input: { heartbeatAt: Date; leaseExpiresAt: Date },
+        ) => {
+          if (
+            !execution ||
+            execution.id !== ownership.executionId ||
+            execution.ownerId !== ownership.ownerId ||
+            execution.status !== 'STARTED'
+          ) {
+            throw new Error('execution ownership lost');
+          }
+          execution.heartbeatAt = input.heartbeatAt;
+          execution.leaseExpiresAt = input.leaseExpiresAt;
+        },
+      ),
       markExternalMayHaveStarted: vi.fn(async () => {
         if (!execution) throw new Error('execution missing');
         execution.externalStage = 'EXTERNAL_MAY_HAVE_STARTED';
         return execution;
       }),
-      finish: vi.fn(async (
-        ownership: { executionId: string; ownerId: string },
-        input: {
-          status: 'QUEUED' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
-          commercialRunId?: string;
-          completedAt: Date;
+      finish: vi.fn(
+        async (
+          ownership: { executionId: string; ownerId: string },
+          input: {
+            status: 'QUEUED' | 'BLOCKED' | 'FAILED' | 'AMBIGUOUS';
+            commercialRunId?: string;
+            completedAt: Date;
+          },
+        ) => {
+          if (
+            !execution ||
+            execution.id !== ownership.executionId ||
+            execution.ownerId !== ownership.ownerId ||
+            execution.status !== 'STARTED'
+          ) {
+            throw new Error('execution ownership lost');
+          }
+          execution.activeKey = null;
+          execution.status = input.status;
+          execution.commercialRunId = input.commercialRunId ?? null;
+          execution.completedAt = input.completedAt;
+          return execution;
         },
-      ) => {
-        if (
-          !execution ||
-          execution.id !== ownership.executionId ||
-          execution.ownerId !== ownership.ownerId ||
-          execution.status !== 'STARTED'
-        ) {
-          throw new Error('execution ownership lost');
-        }
-        execution.activeKey = null;
-        execution.status = input.status;
-        execution.commercialRunId = input.commercialRunId ?? null;
-        execution.completedAt = input.completedAt;
-        return execution;
-      }),
-      findById: vi.fn(async (id: string) => (execution?.id === id ? execution : null)),
+      ),
+      findById: vi.fn(async (id: string) =>
+        execution?.id === id ? execution : null,
+      ),
     };
 
     const runs = {
       create: vi.fn(),
-      update: vi.fn(async (id: string, data: Partial<CommercialPipelineRunRecord>) => {
-        if (id !== run.id) throw new Error('run mismatch');
-        run = { ...run, ...data };
-        return run;
-      }),
+      update: vi.fn(
+        async (id: string, data: Partial<CommercialPipelineRunRecord>) => {
+          if (id !== run.id) throw new Error('run mismatch');
+          run = { ...run, ...data };
+          return run;
+        },
+      ),
       list: vi.fn(),
       findById: vi.fn(async (id: string) => (id === run.id ? run : null)),
       findByExecutionId: vi.fn(async (id: string) =>
@@ -513,52 +526,59 @@ describe('manual publication execution ownership integration', () => {
     };
 
     const outboxes = {
-      createPendingConfirmation: vi.fn(async (input: {
-        outboxId: string;
-        runId: string;
-        confirmedAt: Date;
-        jobId: string;
-        instanceName?: string | null;
-        dispatch: WhatsAppDispatchRecord;
-        existingGeneratedCopyId: string;
-      }) => {
-        dispatch = {
-          ...dispatch,
-          ...input.dispatch,
-          status: 'PENDING',
-          attemptCount: 0,
-          errorMessage: null,
-          sentAt: null,
-          externalMessageId: null,
-          createdAt: input.confirmedAt,
-          updatedAt: input.confirmedAt,
-        };
-        outbox = {
-          id: input.outboxId,
-          commercialRunId: input.runId,
-          dispatchId: input.dispatch.id,
-          jobId: input.jobId,
-          instanceName: input.instanceName ?? null,
-          status: 'PENDING',
-          failureCode: null,
-          createdAt: input.confirmedAt,
-          publishedAt: null,
-        };
-        run = {
-          ...run,
-          mode: 'CONFIRMED',
-          status: 'STARTED',
-          confirmedAt: input.confirmedAt,
-          completedAt: null,
-          dispatchId: dispatch.id,
-          jobId: null,
-          finalStatus: 'PENDING',
-          investigationRequired: false,
-        };
-        return outbox;
-      }),
-      list: vi.fn(async () => ({ items: outbox ? [outbox] : [], total: outbox ? 1 : 0 })),
-      findById: vi.fn(async (id: string) => (outbox?.id === id ? outbox : null)),
+      createPendingConfirmation: vi.fn(
+        async (input: {
+          outboxId: string;
+          runId: string;
+          confirmedAt: Date;
+          jobId: string;
+          instanceName?: string | null;
+          dispatch: WhatsAppDispatchRecord;
+          existingGeneratedCopyId: string;
+        }) => {
+          dispatch = {
+            ...dispatch,
+            ...input.dispatch,
+            status: 'PENDING',
+            attemptCount: 0,
+            errorMessage: null,
+            sentAt: null,
+            externalMessageId: null,
+            createdAt: input.confirmedAt,
+            updatedAt: input.confirmedAt,
+          };
+          outbox = {
+            id: input.outboxId,
+            commercialRunId: input.runId,
+            dispatchId: input.dispatch.id,
+            jobId: input.jobId,
+            instanceName: input.instanceName ?? null,
+            status: 'PENDING',
+            failureCode: null,
+            createdAt: input.confirmedAt,
+            publishedAt: null,
+          };
+          run = {
+            ...run,
+            mode: 'CONFIRMED',
+            status: 'STARTED',
+            confirmedAt: input.confirmedAt,
+            completedAt: null,
+            dispatchId: dispatch.id,
+            jobId: null,
+            finalStatus: 'PENDING',
+            investigationRequired: false,
+          };
+          return outbox;
+        },
+      ),
+      list: vi.fn(async () => ({
+        items: outbox ? [outbox] : [],
+        total: outbox ? 1 : 0,
+      })),
+      findById: vi.fn(async (id: string) =>
+        outbox?.id === id ? outbox : null,
+      ),
       findByDispatchId: vi.fn(async (id: string) =>
         outbox?.dispatchId === id ? outbox : null,
       ),
@@ -626,54 +646,74 @@ describe('manual publication execution ownership integration', () => {
             requestedSnapshotRevision: input.requestedSnapshotRevision,
             requestedSnapshotFingerprint: input.requestedSnapshotFingerprint,
             status: input.status ?? 'ACCEPTED',
-            targets: input.targets.map((item: ManualPublicationRequestCreateData['targets'][number]) => ({
-              ...targetBase(input.id ?? request.id),
-              id: item.id ?? `${input.id}-target-01`,
-              requestId: input.id ?? request.id,
-              status: item.status ?? 'ACCEPTED',
-            })),
+            targets: input.targets.map(
+              (
+                item: ManualPublicationRequestCreateData['targets'][number],
+              ) => ({
+                ...targetBase(input.id ?? request.id),
+                id: item.id ?? `${input.id}-target-01`,
+                requestId: input.id ?? request.id,
+                status: item.status ?? 'ACCEPTED',
+              }),
+            ),
           } satisfies ManualPublicationRequestRecord;
           requests.set(accepted.id, accepted);
           requests.set(accepted.idempotencyKey, accepted);
           return { request: accepted, created: true };
         }),
         findById: vi.fn(async (id: string) => requests.get(id) ?? null),
-        findByIdempotencyKey: vi.fn(async (key: string) => requests.get(key) ?? null),
-        claimProcessing: vi.fn(async (id: string, ownerId: string, _at: Date, lease: Date) => {
-          const current = requests.get(id);
-          if (!current) return null;
-          current.status = 'PROCESSING';
-          current.processingOwnerId = ownerId;
-          current.processingLeaseExpiresAt = lease;
-          return current;
-        }),
-        renewProcessing: vi.fn(async (id: string, ownerId: string, lease: Date) => {
-          const current = requests.get(id);
-          if (!current || current.processingOwnerId !== ownerId) return false;
-          current.processingLeaseExpiresAt = lease;
-          return true;
-        }),
+        findByIdempotencyKey: vi.fn(
+          async (key: string) => requests.get(key) ?? null,
+        ),
+        claimProcessing: vi.fn(
+          async (id: string, ownerId: string, _at: Date, lease: Date) => {
+            const current = requests.get(id);
+            if (!current) return null;
+            current.status = 'PROCESSING';
+            current.processingOwnerId = ownerId;
+            current.processingLeaseExpiresAt = lease;
+            return current;
+          },
+        ),
+        renewProcessing: vi.fn(
+          async (id: string, ownerId: string, lease: Date) => {
+            const current = requests.get(id);
+            if (!current || current.processingOwnerId !== ownerId) return false;
+            current.processingLeaseExpiresAt = lease;
+            return true;
+          },
+        ),
         reserveSendSlot: vi.fn(async () => ({ kind: 'RESERVED' as const })),
         releaseSendSlot: vi.fn(async () => undefined),
-        updateTarget: vi.fn(async (id: string, data: Partial<ManualPublicationTargetRecord>) => {
-          const current = [...requests.values()]
-            .flatMap((item) => item.targets)
-            .find((item) => item.id === id);
-          if (!current) return null;
-          Object.assign(current, data);
-          return current;
-        }),
-        updateRequest: vi.fn(async (id: string, data: Partial<ManualPublicationRequestRecord>) => {
-          const current = requests.get(id);
-          if (!current) return null;
-          Object.assign(current, data);
-          return current;
-        }),
+        updateTarget: vi.fn(
+          async (id: string, data: Partial<ManualPublicationTargetRecord>) => {
+            const current = [...requests.values()]
+              .flatMap((item) => item.targets)
+              .find((item) => item.id === id);
+            if (!current) return null;
+            Object.assign(current, data);
+            return current;
+          },
+        ),
+        updateRequest: vi.fn(
+          async (id: string, data: Partial<ManualPublicationRequestRecord>) => {
+            const current = requests.get(id);
+            if (!current) return null;
+            Object.assign(current, data);
+            return current;
+          },
+        ),
       } as never,
       offers: { findOfferById: vi.fn(async () => offer) },
       catalog: { findOfficialCatalogItem: vi.fn(async () => catalogItem) },
-      groups: { findById: vi.fn(async () => group), listAll: vi.fn(async () => [group]) },
-      campaigns: { findByLogicalGroupFingerprint: vi.fn(async () => campaign), list: vi.fn() },
+      groups: {
+        findById: vi.fn(async () => group),
+        listAll: vi.fn(async () => [group]),
+      },
+      campaigns: {
+        findByLogicalGroupFingerprint: vi.fn(async () => campaign),
+        list: vi.fn(),
+      },
       instances: {
         findByName: vi.fn(async (name: string) => ({
           name,
@@ -698,17 +738,19 @@ describe('manual publication execution ownership integration', () => {
         })),
       },
       candidateFlow: {
-        reserveAttempt: vi.fn(async (_target, input: { executionId: string }) => {
-          attemptExecutionId = input.executionId;
-          return {
-            kind: 'RESERVED' as const,
-            campaignId: campaign.id,
-            executionId: input.executionId,
-            reservedAt: now,
-            leaseExpiresAt: new Date(now.getTime() + 120_000),
-            acquired: true,
-          };
-        }),
+        reserveAttempt: vi.fn(
+          async (_target, input: { executionId: string }) => {
+            attemptExecutionId = input.executionId;
+            return {
+              kind: 'RESERVED' as const,
+              campaignId: campaign.id,
+              executionId: input.executionId,
+              reservedAt: now,
+              leaseExpiresAt: new Date(now.getTime() + 120_000),
+              acquired: true,
+            };
+          },
+        ),
         releaseAttempt: vi.fn(async () => {
           attemptExecutionId = null;
           return {
@@ -725,25 +767,27 @@ describe('manual publication execution ownership integration', () => {
           leaseExpiresAt: new Date(now.getTime() + 120_000),
           renewed: true,
         })),
-        prepareManual: vi.fn(async (
-          _manualProductId: string,
-          _target: { campaignId: string },
-          input: { executionId: string },
-        ) => {
-          run = { ...run, executionId: input.executionId };
-          return {
-            runId: run.id,
-            candidateId: candidate.id,
-            generatedCopyId: 'manual-copy',
-            campaignId: campaign.id,
-            groupId: group.id,
-            logicalGroupFingerprint: groupFingerprint,
-            nicheId: campaign.nicheId,
-            deliveryMode: 'IMAGE' as const,
-            copyPreview: run.copyPreview ?? '',
-            pipeline: {} as never,
-          };
-        }),
+        prepareManual: vi.fn(
+          async (
+            _manualProductId: string,
+            _target: { campaignId: string },
+            input: { executionId: string },
+          ) => {
+            run = { ...run, executionId: input.executionId };
+            return {
+              runId: run.id,
+              candidateId: candidate.id,
+              generatedCopyId: 'manual-copy',
+              campaignId: campaign.id,
+              groupId: group.id,
+              logicalGroupFingerprint: groupFingerprint,
+              nicheId: campaign.nicheId,
+              deliveryMode: 'IMAGE' as const,
+              copyPreview: run.copyPreview ?? '',
+              pipeline: {} as never,
+            };
+          },
+        ),
       } as never,
       confirmation,
       executions: executions as never,
@@ -766,10 +810,15 @@ describe('manual publication execution ownership integration', () => {
       confirm: MANUAL_PUBLICATION_CONFIRMATION,
     });
     const jobId = commercialConfirmationIds(run.id).jobId;
-    const realExecution = execution as CommercialAutomationExecutionRecord | null;
-    if (!realExecution) throw new Error('execution ausente depois do manual create');
+    const realExecution =
+      execution as CommercialAutomationExecutionRecord | null;
+    if (!realExecution)
+      throw new Error('execution ausente depois do manual create');
     const publishedOutbox = outbox as CommercialDispatchOutboxRecord | null;
-    const job: Pick<import('bullmq').Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'> = {
+    const job: Pick<
+      import('bullmq').Job<WhatsAppDispatchJob>,
+      'id' | 'name' | 'data'
+    > = {
       id: jobId,
       name: JOB_NAMES.whatsappDispatch,
       data: { dispatchId: dispatch.id, instanceName },
@@ -815,13 +864,31 @@ describe('manual publication execution ownership integration', () => {
             dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
             return true;
           }),
-          markSent: vi.fn(async (
-            _id: string,
-            data: Parameters<NonNullable<WhatsAppDispatchProcessorRepositories['whatsappDispatches']['markSent']>>[1],
-          ) => {
-            dispatch = { ...dispatch, ...data, status: 'SENT', attemptCount: 1 };
-            return dispatch;
+          claimPendingForSending: vi.fn(async () => {
+            if (dispatch.status !== 'PENDING') {
+              return { kind: 'NOT_PENDING' as const };
+            }
+            dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
+            return { kind: 'CLAIMED' as const };
           }),
+          markSent: vi.fn(
+            async (
+              _id: string,
+              data: Parameters<
+                NonNullable<
+                  WhatsAppDispatchProcessorRepositories['whatsappDispatches']['markSent']
+                >
+              >[1],
+            ) => {
+              dispatch = {
+                ...dispatch,
+                ...data,
+                status: 'SENT',
+                attemptCount: 1,
+              };
+              return dispatch;
+            },
+          ),
           markFailed: vi.fn(),
           createPending: vi.fn(),
           list: vi.fn(),
@@ -884,7 +951,11 @@ describe('manual publication execution ownership integration', () => {
     });
 
     expect(provider.sentMessages).toHaveLength(1);
-    expect(dispatch).toMatchObject({ status: 'SENT', attemptCount: 1, instanceName });
+    expect(dispatch).toMatchObject({
+      status: 'SENT',
+      attemptCount: 1,
+      instanceName,
+    });
     expect(run).toMatchObject({
       status: 'COMPLETED',
       finalStatus: 'SENT',

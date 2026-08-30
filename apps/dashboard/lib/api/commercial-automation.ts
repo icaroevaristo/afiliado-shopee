@@ -20,9 +20,12 @@ export const getCommercialAutomationSchedulerStatus = () =>
   );
 
 export const getCommercialAutomationScheduleSettings = () =>
-  apiRequest<CommercialAutomationScheduleSettings>('/commercial-automation/settings', {
-    method: 'GET',
-  });
+  apiRequest<CommercialAutomationScheduleSettings>(
+    '/commercial-automation/settings',
+    {
+      method: 'GET',
+    },
+  );
 
 export const updateCommercialAutomationScheduleSettings = (input: {
   allowedStartTime?: string | null;
@@ -37,9 +40,12 @@ export const updateCommercialAutomationScheduleSettings = (input: {
   );
 
 export const getCommercialAutomationSchedulePreview = () =>
-  apiRequest<CommercialAutomationSchedulePreview>('/commercial-automation/schedule/preview', {
-    method: 'GET',
-  });
+  apiRequest<CommercialAutomationSchedulePreview>(
+    '/commercial-automation/schedule/preview',
+    {
+      method: 'GET',
+    },
+  );
 
 export const listCommercialAutomationExecutions = (page = 1, limit = 20) =>
   apiRequest<CommercialAutomationExecutionPage>(
@@ -59,8 +65,11 @@ export const pauseCommercialAutomation = () =>
     body: { paused: true },
   });
 
-export const resumeCommercialAutomation = (confirmation: string) =>
+export const resumeCommercialAutomation = (
+  confirmation: string,
+  expectedUpdatedAt: string,
+) =>
   apiRequest<CommercialAutomationStatus>('/commercial-automation/settings', {
     method: 'PATCH',
-    body: { paused: false, confirmation },
+    body: { paused: false, confirmation, expectedUpdatedAt },
   });

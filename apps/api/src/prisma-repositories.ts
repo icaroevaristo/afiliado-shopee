@@ -13,6 +13,8 @@ import type {
   CommercialAutomationSettingsRecord,
   CommercialAutomationScheduleUpdate,
   CommercialAutomationSettingsRepository,
+  CommercialExternalProviderUsageRecord,
+  CommercialExternalProviderUsageRepository,
   OperationalStatusCounts,
   OperationalStatusRepository,
   CommercialDeliveryHistoryRepository,
@@ -3383,6 +3385,32 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
               failureCode,
             );
           }
+          const restartedBudgetAttempt =
+            await transaction.commercialCopyGenerationAttempt.updateMany({
+              where: {
+                inputFingerprint: input.inputFingerprint,
+                status: 'FAILED',
+                failureCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
+                requestMayHaveStarted: false,
+                generatedCopyId: null,
+              },
+              data: {
+                status: 'STARTED',
+                failureCode: null,
+                requestMayHaveStarted: false,
+                providerHttpStatus: null,
+                providerErrorCode: null,
+                providerErrorType: null,
+                providerErrorParam: null,
+                inputTokens: null,
+                outputTokens: null,
+                totalTokens: null,
+                validationFailureCodes: [],
+                startedAt: input.startedAt,
+                completedAt: null,
+              },
+            });
+          if (restartedBudgetAttempt.count === 1) return;
           await transaction.commercialCopyGenerationAttempt.create({
             data: {
               candidateId: input.candidateId,
@@ -5779,14 +5807,43 @@ export class PrismaCommercialAutomationSettingsRepository implements CommercialA
   async setPaused(
     paused: boolean,
     now: Date,
+    expectedUpdatedAt?: Date,
   ): Promise<CommercialAutomationSettingsRecord> {
     const current = await this.getOrCreate(now);
     if (current.paused === paused) return current;
+    if (!paused) {
+      if (!expectedUpdatedAt) {
+        throw new AppError(
+          'A configuracao observada e obrigatoria para retomar a automacao',
+          'COMMERCIAL_AUTOMATION_RESUME_CAS_REQUIRED',
+        );
+      }
+      const result = await this.prisma.commercialAutomationSettings.updateMany({
+        where: {
+          id: COMMERCIAL_AUTOMATION_SETTINGS_ID,
+          paused: true,
+          updatedAt: expectedUpdatedAt,
+        },
+        data: { paused: false, resumedAt: now },
+      });
+      if (result.count !== 1) {
+        throw new AppError(
+          'A configuracao mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
+          'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+        );
+      }
+      const updated = await this.get();
+      if (!updated) {
+        throw new AppError(
+          'A configuracao da automacao ficou indisponivel apos a retomada',
+          'COMMERCIAL_AUTOMATION_SETTINGS_UNAVAILABLE',
+        );
+      }
+      return updated;
+    }
     return this.prisma.commercialAutomationSettings.update({
       where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
-      data: paused
-        ? { paused: true, pausedAt: now }
-        : { paused: false, resumedAt: now },
+      data: { paused: true, pausedAt: now },
     });
   }
 
@@ -5819,6 +5876,46 @@ export class PrismaCommercialAutomationSettingsRepository implements CommercialA
       }
       throw error;
     }
+  }
+}
+
+export class PrismaCommercialExternalProviderUsageRepository implements CommercialExternalProviderUsageRepository {
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  async claim(input: {
+    provider: 'SHOPEE' | 'OPENAI';
+    dayKey: string;
+    limit: number;
+    now: Date;
+  }): Promise<CommercialExternalProviderUsageRecord | null> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        provider: 'SHOPEE' | 'OPENAI';
+        dayKey: string;
+        usedCount: number;
+        updatedAt: Date;
+      }>
+    >(Prisma.sql`
+      INSERT INTO "CommercialExternalProviderUsage"
+        ("provider", "dayKey", "usedCount", "updatedAt")
+      VALUES (${input.provider}, ${input.dayKey}, 1, ${input.now})
+      ON CONFLICT ("provider", "dayKey") DO UPDATE
+      SET "usedCount" = "CommercialExternalProviderUsage"."usedCount" + 1,
+          "updatedAt" = ${input.now}
+      WHERE "CommercialExternalProviderUsage"."usedCount" < ${input.limit}
+      RETURNING "provider", "dayKey", "usedCount", "updatedAt"
+    `);
+    return rows[0] ?? null;
+  }
+
+  async getUsage(
+    provider: 'SHOPEE' | 'OPENAI',
+    dayKey: string,
+  ): Promise<CommercialExternalProviderUsageRecord | null> {
+    const usage = await this.prisma.commercialExternalProviderUsage.findUnique({
+      where: { provider_dayKey: { provider, dayKey } },
+    });
+    return usage ? { ...usage, provider } : null;
   }
 }
 
@@ -7386,10 +7483,7 @@ export class PrismaWhatsAppInstanceRepository implements WhatsAppInstanceReposit
 }
 
 export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDirectoryRepository {
-  constructor(
-    private readonly prisma: Pick<DatabaseClient, 'whatsAppDestination'> &
-      Partial<Pick<DatabaseClient, 'whatsAppInstance'>>,
-  ) {}
+  constructor(private readonly prisma: DatabaseClient) {}
 
   async findById(id: string): Promise<WhatsAppGroupRecord | null> {
     return (await this.prisma.whatsAppDestination.findFirst({
@@ -7491,12 +7585,87 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
     if (result.count !== 1) return null;
     return (await this.findById(id)) as WhatsAppGroupRecord | null;
   }
+
+  async updateAdministrativeWithLifecycleGuard(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName: string | null;
+      expectedUpdatedAt: Date;
+      now: Date;
+    },
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "WhatsAppDestination"
+        WHERE "id" = ${id}
+        FOR UPDATE
+      `;
+      if (locked.length !== 1) return { kind: 'CAS_CONFLICT' as const };
+
+      const current = await transaction.whatsAppDestination.findFirst({
+        where: { id, type: 'GROUP' },
+      });
+      if (
+        !current ||
+        current.updatedAt.getTime() !== data.expectedUpdatedAt.getTime()
+      ) {
+        return { kind: 'CAS_CONFLICT' as const };
+      }
+
+      const dispatches = await transaction.whatsAppDispatch.count({
+        where: { destinationId: id, status: { in: ['PENDING', 'PROCESSING'] } },
+      });
+      const runs = await transaction.commercialPipelineRun.count({
+        where: { groupDestinationId: id, status: 'STARTED' },
+      });
+      const outboxes = await transaction.commercialDispatchOutbox.count({
+        where: {
+          dispatch: {
+            destinationId: id,
+            status: { in: ['PENDING', 'PROCESSING'] },
+          },
+        },
+      });
+      const reservations = await transaction.commercialGroupCampaign.count({
+        where: {
+          anchorDestinationId: id,
+          attemptExecutionId: { not: null },
+          attemptLeaseExpiresAt: { gt: data.now },
+        },
+      });
+      const manualTargets = await transaction.manualPublicationTarget.count({
+        where: {
+          destinationId: id,
+          status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+        },
+      });
+      if (dispatches + runs + outboxes + reservations + manualTargets > 0) {
+        return { kind: 'ACTIVE_LIFECYCLE' as const };
+      }
+
+      const updated = await transaction.whatsAppDestination.updateMany({
+        where: { id, type: 'GROUP', updatedAt: data.expectedUpdatedAt },
+        data: {
+          ...(data.active === undefined ? {} : { active: data.active }),
+          ...(data.paused === undefined ? {} : { paused: data.paused }),
+          assignedInstanceName: data.assignedInstanceName,
+        },
+      });
+      if (updated.count !== 1) return { kind: 'CAS_CONFLICT' as const };
+      const group = await transaction.whatsAppDestination.findUnique({
+        where: { id },
+      });
+      if (!group) return { kind: 'CAS_CONFLICT' as const };
+      return { kind: 'UPDATED' as const, group: group as WhatsAppGroupRecord };
+    });
+  }
 }
 
 export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchRepository {
-  constructor(
-    private readonly prisma: Pick<DatabaseClient, 'whatsAppDispatch'>,
-  ) {}
+  constructor(private readonly prisma: DatabaseClient) {}
 
   async createPending(
     data: WhatsAppDispatchCreateData,
@@ -7704,6 +7873,63 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       } as never,
     });
     return result.count === 1;
+  }
+
+  async claimPendingForSending(
+    id: string,
+    expectedAssignedInstanceName: string,
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT destination."id"
+        FROM "WhatsAppDestination" AS destination
+        INNER JOIN "WhatsAppDispatch" AS dispatch
+          ON dispatch."destinationId" = destination."id"
+        WHERE dispatch."id" = ${id}
+        FOR UPDATE OF destination
+      `;
+      if (locked.length !== 1) return { kind: 'NOT_PENDING' as const };
+
+      const dispatch = await transaction.whatsAppDispatch.findUnique({
+        where: { id },
+        select: {
+          status: true,
+          instanceName: true,
+          destination: {
+            select: { type: true, assignedInstanceName: true },
+          },
+        },
+      });
+      if (!dispatch || dispatch.status !== 'PENDING') {
+        return { kind: 'NOT_PENDING' as const };
+      }
+      if (
+        dispatch.destination.type === 'GROUP' &&
+        (dispatch.instanceName !== expectedAssignedInstanceName ||
+          dispatch.destination.assignedInstanceName !==
+            expectedAssignedInstanceName)
+      ) {
+        await transaction.whatsAppDispatch.updateMany({
+          where: { id, status: 'PENDING' },
+          data: {
+            status: 'FAILED',
+            errorMessage: 'Identidade sticky da instancia comercial divergente',
+          },
+        });
+        return { kind: 'STICKY_INSTANCE_MISMATCH' as const };
+      }
+      const claimed = await transaction.whatsAppDispatch.updateMany({
+        where: { id, status: 'PENDING' },
+        data: {
+          status: 'PROCESSING',
+          attemptCount: { increment: 1 },
+          errorMessage: null,
+        },
+      });
+      return claimed.count === 1
+        ? { kind: 'CLAIMED' as const }
+        : { kind: 'NOT_PENDING' as const };
+    });
   }
 
   async markSent(

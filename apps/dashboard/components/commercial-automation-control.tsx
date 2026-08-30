@@ -83,11 +83,16 @@ export function CommercialAutomationControl() {
   };
 
   const resumeAutomation = async () => {
-    if (resumeConfirmation !== RESUME_CONFIRMATION) return;
+    if (resumeConfirmation !== RESUME_CONFIRMATION || !automation) return;
     setUpdating(true);
     setError(null);
     try {
-      setAutomation(await resumeCommercialAutomation(resumeConfirmation));
+      setAutomation(
+        await resumeCommercialAutomation(
+          resumeConfirmation,
+          automation.updatedAt,
+        ),
+      );
       setResumeModalOpen(false);
       setResumeConfirmation('');
     } catch (err) {

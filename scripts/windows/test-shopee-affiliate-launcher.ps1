@@ -59,7 +59,7 @@ if (Test-Path -LiteralPath $fixtureRoot) {
 [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'apps\api\src') -Force)
 [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'apps\dashboard') -Force)
 [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'apps\worker\src') -Force)
-[IO.File]::WriteAllText((Join-Path $fixtureRoot 'package.json'), '{}')
+[IO.File]::WriteAllText((Join-Path $fixtureRoot 'package.json'), '{"packageManager":"pnpm@9.12.3"}')
 [IO.File]::WriteAllText((Join-Path $fixtureRoot 'pnpm-lock.yaml'), 'lockfileVersion: 9')
 [IO.File]::WriteAllText((Join-Path $fixtureRoot 'apps\system-supervisor\src\cli.ts'), '')
 [IO.File]::WriteAllText((Join-Path $fixtureRoot 'apps\api\src\server.ts'), '')
@@ -82,6 +82,7 @@ try {
         operationLock = 'unlocked'
         mode = 'send'
         endpoints = [pscustomobject]@{ api = 'available'; dashboard = 'available' }
+        controlPlane = [pscustomobject]@{ required = $true; configured = $true; authenticated = $true }
         processes = [pscustomobject]@{ api = 'running'; dashboard = 'running'; 'commercial-worker' = 'running'; 'whatsapp-dispatch-worker' = 'running' }
     }
     $stoppedStatus = [pscustomobject]@{
@@ -89,6 +90,7 @@ try {
         operationLock = 'unlocked'
         mode = 'send'
         endpoints = [pscustomobject]@{ api = 'unavailable'; dashboard = 'unavailable' }
+        controlPlane = [pscustomobject]@{ required = $true; configured = $false; authenticated = $false }
         processes = [pscustomobject]@{ api = 'stopped'; dashboard = 'stopped'; 'commercial-worker' = 'stopped'; 'whatsapp-dispatch-worker' = 'stopped' }
     }
     $script:fakeStatus = $healthyStatus
@@ -99,7 +101,10 @@ try {
         if ($FilePath -eq 'docker') { return [pscustomobject]@{ ExitCode = 0; Output = '27.0.0' } }
         if ($FilePath -eq 'corepack' -and $Arguments[1] -eq '--version') { return [pscustomobject]@{ ExitCode = 0; Output = '9.12.3' } }
         if ($FilePath -eq 'corepack' -and $Arguments[1] -eq 'system:status') { return [pscustomobject]@{ ExitCode = 0; Output = ($script:fakeStatus | ConvertTo-Json -Compress -Depth 5) } }
-        if ($FilePath -eq 'corepack' -and $Arguments[1] -eq 'system:start') { return [pscustomobject]@{ ExitCode = 0; Output = 'started' } }
+        if ($FilePath -eq 'corepack' -and $Arguments[1] -eq 'system:start') {
+            $script:fakeStatus = $healthyStatus
+            return [pscustomobject]@{ ExitCode = 0; Output = 'started' }
+        }
         if ($FilePath -eq 'corepack' -and $Arguments[1] -eq 'system:stop') { return [pscustomobject]@{ ExitCode = 0; Output = 'stopped' } }
         return [pscustomobject]@{ ExitCode = 0; Output = '' }
     }
@@ -117,6 +122,7 @@ try {
         operationLock = 'stale'
         mode = 'send'
         endpoints = [pscustomobject]@{ api = 'available'; dashboard = 'available' }
+        controlPlane = [pscustomobject]@{ required = $true; configured = $true; authenticated = $true }
         processes = [pscustomobject]@{ api = 'running'; dashboard = 'running'; 'commercial-worker' = 'running'; 'whatsapp-dispatch-worker' = 'running' }
     }
     Assert-LauncherThrowsCode { Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -SkipWindowsCheck } 'SYSTEM_STATUS_UNKNOWN' 'uncertain supervisor lock does not count as healthy'
@@ -128,6 +134,23 @@ try {
     Assert-LauncherEqual $startedResult.Action 'started' 'stopped system is started through supervisor'
     Assert-LauncherEqual (@($script:launcherCalls | Where-Object { $_.Arguments -contains 'system:start' }).Count) 1 'start command is issued once'
     Assert-LauncherEqual $script:browserCalls.Count 1 'started system opens the dashboard once'
+
+    $script:launcherCalls = @()
+    $script:fakeStatus = $healthyStatus
+    $directLookup = { param($Name) return $Name -ne 'corepack' }
+    $directRunner = {
+        param($FilePath, $Arguments, $WorkingDirectory)
+        $script:launcherCalls += [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments); WorkingDirectory = $WorkingDirectory }
+        if ($FilePath -eq 'node') { return [pscustomobject]@{ ExitCode = 0; Output = 'v20.11.1' } }
+        if ($FilePath -eq 'docker') { return [pscustomobject]@{ ExitCode = 0; Output = '27.0.0' } }
+        if ($FilePath -eq 'pnpm' -and $Arguments[0] -eq '--version') { return [pscustomobject]@{ ExitCode = 0; Output = '9.99.0' } }
+        if ($FilePath -eq 'pnpm' -and $Arguments[0] -eq 'system:status') { return [pscustomobject]@{ ExitCode = 0; Output = ($script:fakeStatus | ConvertTo-Json -Compress -Depth 5) } }
+        return [pscustomobject]@{ ExitCode = 0; Output = '' }
+    }
+    $directResult = Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $directRunner -CommandLookup $directLookup -HttpProbe $httpReady -BrowserOpener $browser -SkipWindowsCheck
+    Assert-LauncherEqual $directResult.Action 'already-running' 'direct pnpm fallback supports a compatible minor version'
+    Assert-LauncherTrue (@($script:launcherCalls | Where-Object { $_.FilePath -eq 'corepack' }).Count -eq 0) 'direct fallback does not invoke absent Corepack'
+    Assert-LauncherTrue (@($script:launcherCalls | Where-Object { $_.FilePath -eq 'pnpm' -and $_.Arguments -contains 'system:status' }).Count -eq 1) 'direct fallback runs supervisor status'
 
     $statusFailureRunner = {
         param($FilePath, $Arguments, $WorkingDirectory)
@@ -156,6 +179,7 @@ try {
     }
     Assert-LauncherThrowsCode { Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $startFailureRunner -CommandLookup $lookup -SkipWindowsCheck } 'SYSTEM_START_FAILED' 'start failure is surfaced without raw stack trace'
 
+    $script:fakeStatus = $stoppedStatus
     $httpFailure = { param($Url) return $false }
     Assert-LauncherThrowsCode { Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -HttpProbe $httpFailure -NoBrowser -SkipWindowsCheck -TimeoutSeconds 1 -PollSeconds 1 } 'API_NOT_READY' 'API timeout is bounded'
 
@@ -163,13 +187,18 @@ try {
     $stopRunner = {
         param($FilePath, $Arguments, $WorkingDirectory)
         $script:stopCalls += [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments) }
+        if ($FilePath -eq 'corepack' -and $Arguments[1] -eq '--version') { return [pscustomobject]@{ ExitCode = 0; Output = '9.12.3' } }
         return [pscustomobject]@{ ExitCode = 0; Output = 'stopped' }
     }
     $stopResult = Invoke-StopLauncher -Root $fixtureRoot -CommandRunner $stopRunner -CommandLookup $lookup -SkipWindowsCheck
     Assert-LauncherEqual $stopResult.Action 'stopped' 'stop delegates to supervisor'
     Assert-LauncherEqual (@($script:stopCalls | Where-Object { $_.Arguments -contains 'system:stop' }).Count) 1 'stop uses exactly system:stop'
 
-    $incompleteStopRunner = { param($FilePath, $Arguments, $WorkingDirectory) return [pscustomobject]@{ ExitCode = 1; Output = 'SYSTEM_STOP_INCOMPLETE' } }
+    $incompleteStopRunner = {
+        param($FilePath, $Arguments, $WorkingDirectory)
+        if ($FilePath -eq 'corepack' -and $Arguments[1] -eq '--version') { return [pscustomobject]@{ ExitCode = 0; Output = '9.12.3' } }
+        return [pscustomobject]@{ ExitCode = 1; Output = 'SYSTEM_STOP_INCOMPLETE' }
+    }
     Assert-LauncherThrowsCode { Invoke-StopLauncher -Root $fixtureRoot -CommandRunner $incompleteStopRunner -CommandLookup $lookup -SkipWindowsCheck } 'SYSTEM_STOP_INCOMPLETE' 'stop incomplete never force-kills processes'
 
     $profile = Get-DailyRuntimeProfile

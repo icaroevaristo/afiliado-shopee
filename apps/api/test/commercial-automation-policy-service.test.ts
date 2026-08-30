@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
   COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION,
@@ -81,7 +82,17 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
     return this.record;
   }
 
-  async setPaused(paused: boolean, now: Date) {
+  async setPaused(paused: boolean, now: Date, expectedUpdatedAt?: Date) {
+    if (
+      !paused &&
+      (!expectedUpdatedAt ||
+        expectedUpdatedAt.getTime() !== this.record.updatedAt.getTime())
+    ) {
+      throw new AppError(
+        'A configuracao mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
+        'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+      );
+    }
     this.record = {
       ...this.record,
       paused,
@@ -262,9 +273,35 @@ describe('CommercialAutomationPolicyService', () => {
     const resumed = await service.setPaused({
       paused: false,
       confirmation: COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION,
+      expectedUpdatedAt: settings.record.updatedAt.toISOString(),
     });
     expect(resumed.paused).toBe(false);
     expect(resumed.allowed).toBe(true);
+  });
+
+  it('mantem a pausa dominante quando uma aba tenta retomar com estado obsoleto', async () => {
+    const { service, settings } = createSubject({ paused: true });
+    const staleObservedAt = settings.record.updatedAt.toISOString();
+
+    await service.setPaused({
+      paused: false,
+      confirmation: COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION,
+      expectedUpdatedAt: staleObservedAt,
+    });
+    await service.setPaused({ paused: true });
+    settings.record = {
+      ...settings.record,
+      updatedAt: new Date(NOW.getTime() + 1),
+    };
+
+    await expect(
+      service.setPaused({
+        paused: false,
+        confirmation: COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION,
+        expectedUpdatedAt: staleObservedAt,
+      }),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_RESUME_CONFLICT' });
+    expect(settings.record.paused).toBe(true);
   });
 
   it('usa override persistido e incrementa revision sem reiniciar', async () => {
@@ -474,7 +511,11 @@ describe('CommercialAutomationPolicyService', () => {
     ['campanha fracionaria', target('group-1', 1.5), {}],
     ['campanha nao numerica', target('group-1', Number.NaN), {}],
     ['global negativo', target(), { dailyGlobalLimit: -1 }],
-    ['global nao finito', target(), { dailyGlobalLimit: Number.POSITIVE_INFINITY }],
+    [
+      'global nao finito',
+      target(),
+      { dailyGlobalLimit: Number.POSITIVE_INFINITY },
+    ],
     ['grupo negativo', target(), { dailyGroupLimit: -1 }],
     ['grupo fracionario', target(), { dailyGroupLimit: 1.5 }],
   ] as const)(
@@ -513,8 +554,16 @@ describe('CommercialAutomationPolicyService', () => {
     });
     history.groupSentTodayById.set('1', 2);
     history.groupSentTodayById.set('2', 0);
-    const firstTarget = { ...target('1', 2), queueTargetSize: 1, protectedCount: 1 };
-    const secondTarget = { ...target('2', 2), queueTargetSize: 0, protectedCount: 99 };
+    const firstTarget = {
+      ...target('1', 2),
+      queueTargetSize: 1,
+      protectedCount: 1,
+    };
+    const secondTarget = {
+      ...target('2', 2),
+      queueTargetSize: 0,
+      protectedCount: 99,
+    };
 
     await expect(
       service.evaluateAutomationReadiness({ target: firstTarget }),
@@ -593,10 +642,7 @@ describe('CommercialAutomationPolicyService', () => {
     const { service, history } = createSubject({
       groups: [group('1'), group('2')],
     });
-    history.groupLastSentAtById.set(
-      '1',
-      new Date('2026-07-25T14:30:00.000Z'),
-    );
+    history.groupLastSentAtById.set('1', new Date('2026-07-25T14:30:00.000Z'));
 
     await expect(
       service.evaluateAutomationReadiness({ target: target('2') }),
@@ -662,7 +708,10 @@ describe('CommercialAutomationPolicyService', () => {
 
   it('bloqueia destinos fisicos com a mesma fingerprint logica', async () => {
     const { service } = createSubject({
-      groups: [group('1'), { ...group('2'), fingerprint: group('1').fingerprint }],
+      groups: [
+        group('1'),
+        { ...group('2'), fingerprint: group('1').fingerprint },
+      ],
     });
 
     await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
@@ -686,7 +735,9 @@ describe('CommercialAutomationPolicyService', () => {
     history.ambiguousRunIds.add('run-recovery');
 
     await expect(
-      service.evaluateAutomationReadiness({ excludedAmbiguousRunId: 'run-recovery' }),
+      service.evaluateAutomationReadiness({
+        excludedAmbiguousRunId: 'run-recovery',
+      }),
     ).resolves.toMatchObject({ allowed: true, reasons: [] });
   });
 
@@ -696,7 +747,9 @@ describe('CommercialAutomationPolicyService', () => {
     history.ambiguousRunIds.add('run-other');
 
     await expect(
-      service.evaluateAutomationReadiness({ excludedAmbiguousRunId: 'run-recovery' }),
+      service.evaluateAutomationReadiness({
+        excludedAmbiguousRunId: 'run-recovery',
+      }),
     ).resolves.toMatchObject({
       allowed: false,
       reasons: ['AMBIGUOUS_COMMERCIAL_RUN_EXISTS'],

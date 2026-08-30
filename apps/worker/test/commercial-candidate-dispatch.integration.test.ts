@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fingerprintWhatsAppGroupId, MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
+import {
+  fingerprintWhatsAppGroupId,
+  MockWhatsAppProvider,
+} from '@shopee-auto-affiliate-ai/providers';
 import {
   COMMERCIAL_AUTOMATION_JOB_OPTIONS,
   JOB_NAMES,
@@ -272,9 +275,9 @@ describe('commercial candidate dispatch integration', () => {
           commercialRunId: input.runId,
           dispatchId: input.dispatch.id,
           jobId: input.jobId,
-      status: 'PENDING',
-      instanceName: input.instanceName,
-      failureCode: null,
+          status: 'PENDING',
+          instanceName: input.instanceName,
+          failureCode: null,
           createdAt: input.confirmedAt,
           publishedAt: null,
         };
@@ -301,9 +304,7 @@ describe('commercial candidate dispatch integration', () => {
         outbox?.dispatchId === id ? outbox : null,
       ),
       findPublicationContext: vi.fn(async () =>
-        outbox && dispatch
-          ? { outbox, run, dispatch }
-          : null,
+        outbox && dispatch ? { outbox, run, dispatch } : null,
       ),
       markPublished: vi.fn(async (id, publishedAt) => {
         if (!outbox || outbox.id !== id) return null;
@@ -409,6 +410,11 @@ describe('commercial candidate dispatch integration', () => {
       findByIdForSending: vi.fn(async () => dispatchDetails()),
       findByIdWithDetails: vi.fn(async () => dispatchDetails()),
       markAttemptPending,
+      claimPendingForSending: vi.fn(async () =>
+        (await markAttemptPending())
+          ? { kind: 'CLAIMED' as const }
+          : { kind: 'NOT_PENDING' as const },
+      ),
       markSent,
       markFailed: vi.fn(),
       createPending: vi.fn(),

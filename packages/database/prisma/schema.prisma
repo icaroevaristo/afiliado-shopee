@@ -506,8 +506,20 @@ model CommercialAutomationSettings {
   staggerMinutes            Int?
   dailyGlobalLimit         Int?
   dailyGroupLimit          Int?
+  dailyShopeeHttpLimit     Int?
+  dailyOpenAiGenerationLimit Int?
   scheduleRevision         Int       @default(0)
   updatedAt                DateTime  @default(now()) @updatedAt
+}
+
+model CommercialExternalProviderUsage {
+  provider  String   @db.VarChar(16)
+  dayKey    String   @db.VarChar(10)
+  usedCount Int      @default(0)
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@id([provider, dayKey])
+  @@index([dayKey])
 }
 
 model CommercialAutomationExecution {

@@ -21,7 +21,9 @@ const response = (body: unknown) =>
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockImplementation(() => Promise.resolve(response({ allowed: false }))),
+    vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(response({ allowed: false }))),
   );
 });
 
@@ -48,7 +50,10 @@ describe('commercial automation API', () => {
   });
 
   it('envia confirmacao explicita ao retomar', async () => {
-    await resumeCommercialAutomation('RETOMAR_AUTOMACAO_COMERCIAL');
+    await resumeCommercialAutomation(
+      'RETOMAR_AUTOMACAO_COMERCIAL',
+      '2026-07-25T15:00:00.000Z',
+    );
 
     expect(fetch).toHaveBeenCalledWith(
       '/api/commercial-automation/settings',
@@ -57,6 +62,7 @@ describe('commercial automation API', () => {
         body: JSON.stringify({
           paused: false,
           confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+          expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
         }),
       }),
     );

@@ -8,6 +8,10 @@ import {
 } from './commercial-automation-policy-service';
 import type { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type {
+  CommercialExternalProviderBudgetService,
+  CommercialExternalProviderBudgetSnapshot,
+} from './commercial-external-provider-budget-service';
+import type {
   CommercialAutomationHistoryRepository,
   CommercialAutomationSettingsRecord,
   CommercialAutomationSettingsRepository,
@@ -125,6 +129,11 @@ export type OperationalAdminResponse = {
     dailyGroupLimit: number;
     dailyGlobalLimitOverride: number | null;
     dailyGroupLimitOverride: number | null;
+    dailyShopeeHttpLimit: number;
+    dailyOpenAiGenerationLimit: number;
+    dailyShopeeHttpLimitOverride: number | null;
+    dailyOpenAiGenerationLimitOverride: number | null;
+    providerUsage: CommercialExternalProviderBudgetSnapshot;
     hardCaps: {
       dailyGlobalLimit: number;
       dailyGroupLimit: number;
@@ -174,6 +183,7 @@ export type OperationalAdminDependencies = {
   };
   scheduler?: SchedulerStatusReader;
   maxMessagesPerRun: number;
+  externalBudget?: Pick<CommercialExternalProviderBudgetService, 'snapshot'>;
   environment?: {
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -220,6 +230,8 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   staggerMinutes: null,
   dailyGlobalLimit: null,
   dailyGroupLimit: null,
+  dailyShopeeHttpLimit: null,
+  dailyOpenAiGenerationLimit: null,
   scheduleRevision: 0,
   updatedAt: now,
 });
@@ -241,6 +253,10 @@ const messageForReason = (reason: string) => {
     OUTSIDE_ALLOWED_WINDOW: 'Fora da janela operacional configurada.',
     GLOBAL_DAILY_LIMIT_REACHED: 'O limite diario global foi atingido.',
     GROUP_DAILY_LIMIT_REACHED: 'O limite diario do grupo foi atingido.',
+    COMMERCIAL_SHOPEE_DAILY_BUDGET_REACHED:
+      'O limite diario de consultas Shopee foi atingido.',
+    COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED:
+      'O limite diario de geracoes OpenAI foi atingido.',
     MINIMUM_INTERVAL_NOT_REACHED: 'O intervalo minimo ainda nao foi atingido.',
     NO_AUTHORIZED_GROUP: 'Nenhum grupo autorizado e disponivel.',
     MULTIPLE_AUTHORIZED_GROUPS:
@@ -488,13 +504,32 @@ export class OperationalAdminService {
       this.dependencies.config,
       context.settings,
     );
-    const [queueProduct, queueDispatch, queueCommercial, scheduler] =
-      await Promise.all([
-        readQueueCounts(this.dependencies.queues?.productPipeline),
-        readQueueCounts(this.dependencies.queues?.whatsappDispatch),
-        readQueueCounts(this.dependencies.queues?.commercialAutomation),
-        this.dependencies.scheduler?.getStatus() ?? Promise.resolve(null),
-      ]);
+    const [
+      queueProduct,
+      queueDispatch,
+      queueCommercial,
+      scheduler,
+      providerUsage,
+    ] = await Promise.all([
+      readQueueCounts(this.dependencies.queues?.productPipeline),
+      readQueueCounts(this.dependencies.queues?.whatsappDispatch),
+      readQueueCounts(this.dependencies.queues?.commercialAutomation),
+      this.dependencies.scheduler?.getStatus() ?? Promise.resolve(null),
+      this.dependencies.externalBudget?.snapshot() ??
+        Promise.resolve({
+          dayKey: '',
+          shopee: {
+            used: 0,
+            limit: schedule.dailyShopeeHttpLimit,
+            reached: false,
+          },
+          openAi: {
+            used: 0,
+            limit: schedule.dailyOpenAiGenerationLimit,
+            reached: false,
+          },
+        }),
+    ]);
     const campaignByGroup = new Map(
       context.groups.map((group) => [
         group.id,
@@ -605,6 +640,16 @@ export class OperationalAdminService {
         reasonBlocker('GLOBAL', null, 'WHATSAPP_GROUP_SAFE_MODE_REQUIRED'),
       );
     }
+    if (providerUsage.shopee.reached) {
+      globalBlockers.push(
+        reasonBlocker('GLOBAL', null, 'COMMERCIAL_SHOPEE_DAILY_BUDGET_REACHED'),
+      );
+    }
+    if (providerUsage.openAi.reached) {
+      globalBlockers.push(
+        reasonBlocker('GLOBAL', null, 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED'),
+      );
+    }
     const instances = context.instances.map((instance) => {
       const assignedGroups = groupOutputs.filter(
         (group) => group.assignedInstanceName === instance.name,
@@ -690,6 +735,13 @@ export class OperationalAdminService {
         dailyGroupLimit: schedule.dailyGroupLimit,
         dailyGlobalLimitOverride: context.settings.dailyGlobalLimit ?? null,
         dailyGroupLimitOverride: context.settings.dailyGroupLimit ?? null,
+        dailyShopeeHttpLimit: schedule.dailyShopeeHttpLimit,
+        dailyOpenAiGenerationLimit: schedule.dailyOpenAiGenerationLimit,
+        dailyShopeeHttpLimitOverride:
+          context.settings.dailyShopeeHttpLimit ?? null,
+        dailyOpenAiGenerationLimitOverride:
+          context.settings.dailyOpenAiGenerationLimit ?? null,
+        providerUsage,
         hardCaps: {
           dailyGlobalLimit: this.dependencies.config.dailyGlobalLimit,
           dailyGroupLimit: this.dependencies.config.dailyGroupLimit,
@@ -925,18 +977,52 @@ export class OperationalAdminService {
           'OPERATIONAL_ASSIGNMENT_NICHE_BLOCKED',
         );
       }
-      if (
-        input.assignedInstanceName !== group.assignedInstanceName &&
-        this.dependencies.status.hasActiveGroupLifecycle &&
-        (await this.dependencies.status.hasActiveGroupLifecycle(
-          input.id,
-          this.now(),
-        ))
-      ) {
-        throw new AppError(
-          'Assignment bloqueado enquanto o grupo possui lifecycle ativo',
-          'OPERATIONAL_ASSIGNMENT_LIFECYCLE_ACTIVE',
-        );
+      const assignmentChanging =
+        input.assignedInstanceName !== group.assignedInstanceName;
+      if (assignmentChanging) {
+        const now = this.now();
+        if (
+          this.dependencies.status.hasActiveGroupLifecycle &&
+          (await this.dependencies.status.hasActiveGroupLifecycle(
+            input.id,
+            now,
+          ))
+        ) {
+          throw new AppError(
+            'Assignment bloqueado enquanto o grupo possui lifecycle ativo',
+            'OPERATIONAL_ASSIGNMENT_LIFECYCLE_ACTIVE',
+          );
+        }
+        if (!this.dependencies.groups.updateAdministrativeWithLifecycleGuard) {
+          throw new AppError(
+            'Serializacao de routing indisponivel',
+            'OPERATIONAL_ROUTING_SERIALIZATION_UNAVAILABLE',
+          );
+        }
+        const result =
+          await this.dependencies.groups.updateAdministrativeWithLifecycleGuard(
+            input.id,
+            {
+              ...(input.active === undefined ? {} : { active: input.active }),
+              ...(input.paused === undefined ? {} : { paused: input.paused }),
+              assignedInstanceName: input.assignedInstanceName ?? null,
+              expectedUpdatedAt,
+              now,
+            },
+          );
+        if (result.kind === 'ACTIVE_LIFECYCLE') {
+          throw new AppError(
+            'Assignment bloqueado enquanto o grupo possui lifecycle ativo',
+            'OPERATIONAL_ASSIGNMENT_LIFECYCLE_ACTIVE',
+          );
+        }
+        if (result.kind === 'CAS_CONFLICT') {
+          throw new AppError(
+            'O grupo mudou ou nao existe',
+            'OPERATIONAL_CAS_CONFLICT',
+          );
+        }
+        return result.group;
       }
     }
     if (!this.dependencies.groups.updateAdministrative) {
@@ -972,6 +1058,8 @@ export class OperationalAdminService {
     staggerMinutes?: number | null;
     dailyGlobalLimit?: number | null;
     dailyGroupLimit?: number | null;
+    dailyShopeeHttpLimit?: number | null;
+    dailyOpenAiGenerationLimit?: number | null;
     expectedRevision: number;
     confirmation: string;
   }) {

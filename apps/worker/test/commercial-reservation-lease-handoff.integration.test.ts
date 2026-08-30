@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { WhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
-import { JOB_NAMES, type WhatsAppDispatchJob } from '@shopee-auto-affiliate-ai/queue';
 import {
-  PrismaCommercialGroupCampaignAttemptRepository,
-} from '../../api/src/prisma-repositories';
+  JOB_NAMES,
+  type WhatsAppDispatchJob,
+} from '@shopee-auto-affiliate-ai/queue';
+import { PrismaCommercialGroupCampaignAttemptRepository } from '../../api/src/prisma-repositories';
 import {
   COMMERCIAL_AI_COPY_PROMPT_VERSION,
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
@@ -280,9 +281,7 @@ describe('commercial reservation lease handoff integration', () => {
       list: vi.fn(),
       findById: vi.fn(async (id) => (id === runId ? run : null)),
       findByExecutionId: vi.fn(async (id) => (id === runId ? run : null)),
-      findByDispatchId: vi.fn(async (id) =>
-        id === dispatchId ? run : null,
-      ),
+      findByDispatchId: vi.fn(async (id) => (id === dispatchId ? run : null)),
       findExecutionById: vi.fn(async (id) =>
         id === executionId ? { id, commercialRunId: runId } : null,
       ),
@@ -311,6 +310,13 @@ describe('commercial reservation lease handoff integration', () => {
         }
         dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
         return true;
+      }),
+      claimPendingForSending: vi.fn(async () => {
+        if (dispatch.status !== 'PENDING' || dispatch.attemptCount !== 0) {
+          return { kind: 'NOT_PENDING' as const };
+        }
+        dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
+        return { kind: 'CLAIMED' as const };
       }),
       markSent: vi.fn(async (_id, data) => {
         dispatch = {
@@ -347,8 +353,9 @@ describe('commercial reservation lease handoff integration', () => {
         campaignId,
         transitioned: true,
       })),
-      releaseAttempt: vi.fn((input: { campaignId: string; executionId: string }) =>
-        attempt.repository.release(input),
+      releaseAttempt: vi.fn(
+        (input: { campaignId: string; executionId: string }) =>
+          attempt.repository.release(input),
       ),
     };
     const repositories: WhatsAppDispatchProcessorRepositories = {
@@ -405,7 +412,10 @@ describe('commercial reservation lease handoff integration', () => {
         id: jobId,
         name: JOB_NAMES.whatsappDispatch,
         data: { dispatchId, instanceName: 'affiliate-bot' },
-      } satisfies Pick<import('bullmq').Job<WhatsAppDispatchJob>, 'id' | 'name' | 'data'>,
+      } satisfies Pick<
+        import('bullmq').Job<WhatsAppDispatchJob>,
+        'id' | 'name' | 'data'
+      >,
       {
         repositories,
         whatsAppProvider: provider,

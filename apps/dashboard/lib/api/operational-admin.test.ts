@@ -64,6 +64,8 @@ describe('operational admin dashboard API', () => {
     });
     await updateOperationalAutomation({
       dailyGlobalLimit: 8,
+      dailyShopeeHttpLimit: 7,
+      dailyOpenAiGenerationLimit: 6,
       expectedRevision: 3,
       confirmation: 'CONFIRMAR_ALTERACAO_OPERACIONAL',
     });
@@ -87,6 +89,8 @@ describe('operational admin dashboard API', () => {
         method: 'PATCH',
         body: {
           dailyGlobalLimit: 8,
+          dailyShopeeHttpLimit: 7,
+          dailyOpenAiGenerationLimit: 6,
           expectedRevision: 3,
           confirmation: 'CONFIRMAR_ALTERACAO_OPERACIONAL',
         },

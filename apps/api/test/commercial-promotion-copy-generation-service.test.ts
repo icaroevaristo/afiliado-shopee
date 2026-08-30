@@ -6,6 +6,10 @@ import {
 } from '../src/commercial-ai-copy-provider';
 import { commercialAiCopyInputFingerprint } from '../src/commercial-ai-copy-fingerprint';
 import {
+  CommercialExternalProviderBudgetService,
+  withOpenAiDailyBudget,
+} from '../src/commercial-external-provider-budget-service';
+import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   CommercialPromotionCopyGenerationService,
 } from '../src/commercial-promotion-copy-generation-service';
@@ -14,7 +18,9 @@ import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type {
   CommercialAiCopyClaimInput,
   CommercialAiCopyCompletionInput,
+  CommercialAutomationSettingsRepository,
   CommercialCopyGenerationAttemptRecord,
+  CommercialExternalProviderUsageRepository,
   CommercialPromotionCopyContext,
   CommercialPromotionCopyRepository,
   GeneratedCopyRecord,
@@ -195,7 +201,34 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
   }
   async claim(input: CommercialAiCopyClaimInput) {
     this.claimInputs.push(input);
-    if (this.attempts.has(input.inputFingerprint)) return false;
+    const existing = this.attempts.get(input.inputFingerprint);
+    if (existing) {
+      if (
+        existing.status === 'FAILED' &&
+        existing.failureCode === 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED' &&
+        !existing.requestMayHaveStarted &&
+        !existing.generatedCopyId
+      ) {
+        Object.assign(existing, {
+          status: 'STARTED' as const,
+          failureCode: null,
+          requestMayHaveStarted: false,
+          providerHttpStatus: null,
+          providerErrorCode: null,
+          providerErrorType: null,
+          providerErrorParam: null,
+          inputTokens: null,
+          outputTokens: null,
+          totalTokens: null,
+          validationFailureCodes: [],
+          startedAt: input.startedAt,
+          completedAt: null,
+          updatedAt: input.startedAt,
+        });
+        return true;
+      }
+      return false;
+    }
     this.attempts.set(input.inputFingerprint, {
       id: 'attempt-internal',
       candidateId: input.candidateId,
@@ -315,7 +348,8 @@ const legacyAttempt = (
   validationVersion: 'commercial-promotion-copy-validation-v2',
   status,
   generatedCopyId: status === 'SUCCEEDED' ? 'copy-legacy' : null,
-  failureCode: status === 'FAILED' ? 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' : null,
+  failureCode:
+    status === 'FAILED' ? 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' : null,
   requestMayHaveStarted: status !== 'STARTED',
   providerHttpStatus: null,
   providerErrorCode: null,
@@ -375,6 +409,84 @@ const service = (
   });
 
 describe('CommercialPromotionCopyGenerationService', () => {
+  it('preserva budget esgotado como falha pre-provider e permite o mesmo contract no proximo dayKey', async () => {
+    const repository = new MemoryCopyRepository();
+    let budgetNow = new Date('2026-08-01T12:00:00.000Z');
+    const settingsRecord = {
+      paused: false,
+      pausedAt: null,
+      resumedAt: budgetNow,
+      allowedStartTime: null,
+      allowedEndTime: null,
+      minimumIntervalMinutes: null,
+      staggerMinutes: null,
+      dailyGlobalLimit: 1,
+      dailyGroupLimit: 1,
+      dailyShopeeHttpLimit: 1,
+      dailyOpenAiGenerationLimit: 1,
+      scheduleRevision: 1,
+      updatedAt: budgetNow,
+    };
+    const settings: CommercialAutomationSettingsRepository = {
+      get: async () => settingsRecord,
+      getOrCreate: async () => settingsRecord,
+      setPaused: async () => settingsRecord,
+      updateSchedule: async () => settingsRecord,
+    };
+    const usageRows = new Map<string, number>();
+    const usage: CommercialExternalProviderUsageRepository = {
+      async claim(input) {
+        const key = `${input.provider}:${input.dayKey}`;
+        const usedCount = usageRows.get(key) ?? 0;
+        if (usedCount >= input.limit) return null;
+        const claimed = usedCount + 1;
+        usageRows.set(key, claimed);
+        return { ...input, usedCount: claimed, updatedAt: input.now };
+      },
+      async getUsage(provider, dayKey) {
+        const usedCount = usageRows.get(`${provider}:${dayKey}`);
+        return usedCount === undefined
+          ? null
+          : { provider, dayKey, usedCount, updatedAt: budgetNow };
+      },
+    };
+    const budget = new CommercialExternalProviderBudgetService({
+      settings,
+      usage,
+      timezone: 'America/Sao_Paulo',
+      fallbackDailyGlobalLimit: 1,
+      clock: () => budgetNow,
+    });
+    await budget.claim('OPENAI');
+    const actualProvider = validProvider();
+    const copyService = service(
+      repository,
+      withOpenAiDailyBudget(actualProvider, budget),
+    );
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
+    });
+    expect(actualProvider.generate).not.toHaveBeenCalled();
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
+      requestMayHaveStarted: false,
+    });
+
+    budgetNow = new Date('2026-08-02T12:00:00.000Z');
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).resolves.toMatchObject({ status: 'COPY_READY' });
+    expect(actualProvider.generate).toHaveBeenCalledTimes(1);
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'SUCCEEDED',
+      requestMayHaveStarted: false,
+    });
+  });
+
   it('aprova preflight configurado sem construir ou chamar provider', () => {
     const repository = new MemoryCopyRepository();
     const copyService = new CommercialPromotionCopyGenerationService({
@@ -486,22 +598,28 @@ describe('CommercialPromotionCopyGenerationService', () => {
   it('marca output terminal rejeitado como inelegivel somente no fingerprint atual', async () => {
     const repository = new MemoryCopyRepository();
     let rejectedFingerprint: string | null = null;
-    repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => {
-      rejectedFingerprint ??= fingerprint;
-      if (fingerprint !== rejectedFingerprint) return null;
-      return {
-        ...legacyAttempt('FAILED', fingerprint),
-        failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
-        validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
-      };
-    });
+    repository.findAttemptByInputFingerprint = vi.fn(
+      async (fingerprint: string) => {
+        rejectedFingerprint ??= fingerprint;
+        if (fingerprint !== rejectedFingerprint) return null;
+        return {
+          ...legacyAttempt('FAILED', fingerprint),
+          failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+          validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
+        };
+      },
+    );
     const copyService = service(repository);
 
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: false,
       blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
     });
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: false,
       blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
     });
@@ -511,7 +629,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     repository.context!.snapshot.revision = 3;
     repository.context!.product.commercialSnapshotRevision = 3;
 
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: true,
       blockers: [],
     });
@@ -520,16 +640,24 @@ describe('CommercialPromotionCopyGenerationService', () => {
   it.each([
     ['STARTED', null, 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
     ['AMBIGUOUS', null, 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
-    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
+    [
+      'FAILED',
+      'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
+      'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
+    ],
   ] as const)(
     'mantem attempt %s fail-closed no preview',
     async (status, failureCode, expectedBlocker) => {
       const repository = new MemoryCopyRepository();
-      repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => ({
-        ...legacyAttempt(status, fingerprint),
-        failureCode,
-      }));
-      await expect(service(repository).preview('candidate-internal')).resolves.toMatchObject({
+      repository.findAttemptByInputFingerprint = vi.fn(
+        async (fingerprint: string) => ({
+          ...legacyAttempt(status, fingerprint),
+          failureCode,
+        }),
+      );
+      await expect(
+        service(repository).preview('candidate-internal'),
+      ).resolves.toMatchObject({
         eligible: false,
         blockers: [expectedBlocker],
       });
@@ -549,7 +677,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const provider = validProvider();
       const copyService = service(repository, provider);
 
-      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      await expect(
+        copyService.preview('candidate-internal'),
+      ).resolves.toMatchObject({
         eligible: false,
         blockers: ['COMMERCIAL_AI_COPY_AFFILIATE_LINK_INVALID'],
         sanitizedPreview: null,
@@ -588,7 +718,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(first)).not.toContain(affiliateLink);
     expect(first.sanitizedCopy).toEqual({
       titulo: 'OFERTA CONFIÁVEL',
-      mensagem: 'Uma escolha prática para sua rotina.\n\u{1F525} POR R$ 99,90\n\u{1F4B8} 20% OFF',
+      mensagem:
+        'Uma escolha prática para sua rotina.\n\u{1F525} POR R$ 99,90\n\u{1F4B8} 20% OFF',
       cta: '\u{1F6D2} Ver oferta:\n[LINK_AFILIADO]',
       hashtags:
         '\u{1F4F2} Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
@@ -596,7 +727,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
       'Produto verificado',
     );
-    expect(JSON.stringify(first.sanitizedCopy)).not.toContain('Loja verificada');
+    expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
+      'Loja verificada',
+    );
   });
 
   it('mantém candidate MANUAL com link válido fora da Copy V10 por contrato OFFICIAL-only', async () => {
@@ -692,7 +825,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.context?.candidate.generatedCopyId).toBe('copy-internal');
-    expect([...repository.copies.values()][0]?.mensagem).not.toContain('HOKON.br');
+    expect([...repository.copies.values()][0]?.mensagem).not.toContain(
+      'HOKON.br',
+    );
   });
 
   it.each([
@@ -716,7 +851,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
         failureCode,
       });
 
-      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      await expect(
+        copyService.preview('candidate-internal'),
+      ).resolves.toMatchObject({
         eligible: true,
         cacheAvailable: true,
         blockers: [],
@@ -921,7 +1058,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     repository.context!.product.updatedAt = new Date('2026-08-01T12:00:01Z');
     await expect(
       copyService.findCopy('candidate-internal'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH' });
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH',
+    });
   });
 
   it('deduplica falha terminal quando somente product.updatedAt muda', async () => {
@@ -988,20 +1127,24 @@ describe('CommercialPromotionCopyGenerationService', () => {
   it('mantem output invalid terminal no fingerprint atual sem chamar provider', async () => {
     const repository = new MemoryCopyRepository();
     let currentFingerprint: string | null = null;
-    repository.findAttemptByInputFingerprint = vi.fn(async (fingerprint: string) => {
-      currentFingerprint ??= fingerprint;
-      return {
-        ...legacyAttempt('FAILED', fingerprint),
-        promptVersion: 'commercial-promotion-copy-v13',
-        validationVersion: 'commercial-promotion-copy-validation-v4',
-        failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
-      };
-    });
+    repository.findAttemptByInputFingerprint = vi.fn(
+      async (fingerprint: string) => {
+        currentFingerprint ??= fingerprint;
+        return {
+          ...legacyAttempt('FAILED', fingerprint),
+          promptVersion: 'commercial-promotion-copy-v13',
+          validationVersion: 'commercial-promotion-copy-validation-v4',
+          failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+        };
+      },
+    );
     repository.claim = vi.fn().mockResolvedValue(false);
     const provider = validProvider();
     const copyService = service(repository, provider);
 
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: false,
       blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
     });
@@ -1034,7 +1177,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const provider = validProvider();
     const copyService = service(repository, provider);
 
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: true,
       blockers: [],
     });
@@ -1073,7 +1218,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const provider = validProvider();
     const copyService = service(repository, provider);
 
-    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({
       eligible: false,
       blockers: ['COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'],
     });
@@ -1089,8 +1236,16 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
   it.each([
     ['STARTED', null, 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
-    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
-    ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
+    [
+      'AMBIGUOUS',
+      'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
+      'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+    ],
+    [
+      'FAILED',
+      'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
+      'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
+    ],
   ] as const)(
     'mantem preview e generate coerentes para tentativa historica %s',
     async (status, failureCode, expectedCode) => {
@@ -1105,7 +1260,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const provider = validProvider();
       const copyService = service(repository, provider);
 
-      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      await expect(
+        copyService.preview('candidate-internal'),
+      ).resolves.toMatchObject({
         eligible: false,
         blockers: [expectedCode],
       });
@@ -1177,7 +1334,10 @@ describe('CommercialPromotionCopyGenerationService', () => {
   it('não permite que uma tentativa FAILED v3 bloqueie a geração v13', async () => {
     const repository = new MemoryCopyRepository();
     const v3Fingerprint = 'v3-fingerprint-mock-hash';
-    repository.attempts.set(v3Fingerprint, legacyAttempt('FAILED', v3Fingerprint));
+    repository.attempts.set(
+      v3Fingerprint,
+      legacyAttempt('FAILED', v3Fingerprint),
+    );
     const provider = validProvider();
 
     const result = await service(repository, provider).generate(
@@ -1261,15 +1421,18 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const report = await copyService.preview('candidate-internal');
     expect(report.cacheAvailable).toBe(false); // v13 preview não encontra cache de v1
 
-    const result = await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+    const result = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
     expect(result.status).toBe('COPY_READY');
     expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v13
 
     const attempts = [...repository.attempts.values()];
     expect(attempts.length).toBe(2); // v1 and v13 attempts
-    expect(attempts.find(a => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
+    expect(attempts.find((a) => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
 
-    const newAttempt = attempts.find(a => a.id !== 'attempt-v1-failed')!;
+    const newAttempt = attempts.find((a) => a.id !== 'attempt-v1-failed')!;
     expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v13');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
@@ -1367,20 +1530,18 @@ describe('CommercialPromotionCopyGenerationService', () => {
   it('marca timeout/rede incerta como AMBIGUOUS e bloqueia repetição', async () => {
     const repository = new MemoryCopyRepository();
     const provider: CommercialAiCopyProvider = {
-      generate: vi
-        .fn()
-        .mockRejectedValue(
-          new CommercialAiCopyProviderError(
-            'AMBIGUOUS',
-            'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
-            {
-              httpStatus: 503,
-              providerErrorCode: 'server_error',
-              providerErrorType: 'server_error',
-              providerErrorParam: 'request',
-            },
-          ),
+      generate: vi.fn().mockRejectedValue(
+        new CommercialAiCopyProviderError(
+          'AMBIGUOUS',
+          'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
+          {
+            httpStatus: 503,
+            providerErrorCode: 'server_error',
+            providerErrorType: 'server_error',
+            providerErrorParam: 'request',
+          },
         ),
+      ),
     };
     const copyService = service(repository, provider);
     await expect(
@@ -1473,9 +1634,9 @@ describe('CommercialPromotionCopyGenerationService', () => {
       usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
     });
     const s = service(repository, p);
-    await expect(s.generate('candidate-internal', 'GERAR_COPY_COM_IA')).rejects.toThrow(
-      'Output da IA rejeitado',
-    );
+    await expect(
+      s.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toThrow('Output da IA rejeitado');
     const attempt = [...repository.attempts.values()][0];
     expect(attempt?.status).toBe('FAILED');
     expect(attempt?.failureCode).toBe('COMMERCIAL_AI_COPY_OUTPUT_INVALID');

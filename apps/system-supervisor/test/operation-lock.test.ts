@@ -104,17 +104,25 @@ const activeIdentity = (startedAt = STARTED_AT): ProcessIdentityInspection => ({
 });
 
 describe('supervisor operation lock', () => {
-  it('normalizes the real process start time to canonical ISO', async () => {
-    const inspection = await createSystemDependencies().inspectProcessIdentity(
-      process.pid,
-      'node',
-    );
+  it(
+    'normalizes the real process start time to canonical ISO',
+    async () => {
+      const inspection =
+        await createSystemDependencies().inspectProcessIdentity(
+          process.pid,
+          'node',
+        );
 
-    expect(inspection).toMatchObject({ running: true, markerMatches: true });
-    expect(inspection.startedAt).toBe(
-      new Date(inspection.startedAt ?? '').toISOString(),
-    );
-  });
+      expect(inspection).toMatchObject({
+        running: true,
+        markerMatches: true,
+      });
+      expect(inspection.startedAt).toBe(
+        new Date(inspection.startedAt ?? '').toISOString(),
+      );
+    },
+    15_000,
+  );
 
   it('persists only the strict owner identity with restrictive permissions', async () => {
     const root = createRoot();

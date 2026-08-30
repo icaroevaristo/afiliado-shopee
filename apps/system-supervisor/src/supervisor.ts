@@ -134,9 +134,9 @@ const stringArray = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === 'string')
     : [];
 
-
 const arraysEqual = (left: readonly string[], right: readonly string[]) =>
-  left.length === right.length && left.every((value, index) => value === right[index]);
+  left.length === right.length &&
+  left.every((value, index) => value === right[index]);
 
 const parseExpectedMainInfrastructure = (
   stdout: string,
@@ -155,19 +155,19 @@ const parseExpectedMainInfrastructure = (
       const portDefinitions = Array.isArray(definition.ports)
         ? definition.ports
         : [];
-      const matchingPort = portDefinitions
-        .map(objectRecord)
-        .find((item) => {
-          if (!item) return false;
-          return Number(item.published) === expectedPublishedPort;
-        });
+      const matchingPort = portDefinitions.map(objectRecord).find((item) => {
+        if (!item) return false;
+        return Number(item.published) === expectedPublishedPort;
+      });
       const targetPort = Number(matchingPort?.target);
       if (!Number.isInteger(targetPort) || targetPort <= 0) {
         throw new Error('invalid service port');
       }
       const healthcheck = objectRecord(definition.healthcheck);
       const healthTest = stringArray(healthcheck?.test);
-      const volumes = Array.isArray(definition.volumes) ? definition.volumes : [];
+      const volumes = Array.isArray(definition.volumes)
+        ? definition.volumes
+        : [];
       const mounts = volumes.flatMap((value) => {
         const mount = objectRecord(value);
         return mount &&
@@ -256,7 +256,10 @@ const mountsMatchExpected = (
   const seenTargets = new Set<string>();
 
   for (const mount of candidateMounts) {
-    if (typeof mount.Destination !== 'string' || typeof mount.Type !== 'string') {
+    if (
+      typeof mount.Destination !== 'string' ||
+      typeof mount.Type !== 'string'
+    ) {
       return false;
     }
     if (seenTargets.has(mount.Destination)) return false;
@@ -305,7 +308,10 @@ const inspectionMatchesExpected = (
   }
   if (
     expected.healthTest.length > 0 &&
-    !arraysEqual(inspection.Config?.Healthcheck?.Test ?? [], expected.healthTest)
+    !arraysEqual(
+      inspection.Config?.Healthcheck?.Test ?? [],
+      expected.healthTest,
+    )
   ) {
     return false;
   }
@@ -319,7 +325,6 @@ const inspectionMatchesExpected = (
     return false;
   }
   return mountsMatchExpected(inspection, expected, imageVolumeTargets);
-
 };
 
 export type ResolvedMainInfrastructureContainer = {
@@ -348,10 +353,17 @@ const discoverEquivalentMainInfrastructureContainers = async (
 ): Promise<MainInfrastructureContainerDiscovery> => {
   try {
     const configResult = await deps.run(
-      composeSpec(root, [...composeArguments, 'config', '--format', 'json'], env),
+      composeSpec(
+        root,
+        [...composeArguments, 'config', '--format', 'json'],
+        env,
+      ),
     );
     if (configResult.code !== 0) return { status: 'unproven' };
-    const expected = parseExpectedMainInfrastructure(configResult.stdout, ports);
+    const expected = parseExpectedMainInfrastructure(
+      configResult.stdout,
+      ports,
+    );
     if (!expected) return { status: 'unproven' };
     const listResult = await deps.run({
       command: 'docker',
@@ -368,10 +380,7 @@ const discoverEquivalentMainInfrastructureContainers = async (
           .filter(Boolean),
       ),
     ];
-    if (
-      ids.length === 0 ||
-      ids.some((id) => !/^[a-f0-9]{12,64}$/i.test(id))
-    ) {
+    if (ids.length === 0 || ids.some((id) => !/^[a-f0-9]{12,64}$/i.test(id))) {
       return { status: 'unproven' };
     }
     const inspectResult = await deps.run({
@@ -392,7 +401,9 @@ const discoverEquivalentMainInfrastructureContainers = async (
         env,
       });
       if (imageInspectResult.code !== 0) return { status: 'unproven' };
-      const imageInspection = parseDockerImageInspection(imageInspectResult.stdout);
+      const imageInspection = parseDockerImageInspection(
+        imageInspectResult.stdout,
+      );
       if (!imageInspection) return { status: 'unproven' };
       const imageVolumeTargets = declaredImageVolumeTargets(imageInspection);
       const candidates = inspections.filter((inspection) =>
@@ -487,8 +498,7 @@ const mergeMainInfrastructureStatuses = (
 ) => [
   ...primary,
   ...equivalent.filter(
-    (candidate) =>
-      !primary.some((item) => item.service === candidate.service),
+    (candidate) => !primary.some((item) => item.service === candidate.service),
   ),
 ];
 const processMarker = (path: string) => basename(path).toLowerCase();
@@ -548,7 +558,8 @@ const composeSpec = (
 ): CommandSpec => ({ command: 'docker', args, cwd: root, env });
 
 const resolveWindowsPnpmEntrypoint = (env: NodeJS.ProcessEnv) => {
-  const pathValue = env.Path ?? env.PATH ?? process.env.Path ?? process.env.PATH ?? '';
+  const pathValue =
+    env.Path ?? env.PATH ?? process.env.Path ?? process.env.PATH ?? '';
   for (const pathEntry of pathValue.split(delimiter)) {
     if (!pathEntry) continue;
     const pnpmCommand = resolve(pathEntry, 'pnpm.cmd');
@@ -581,6 +592,18 @@ const shouldSkipEvolutionForExplicitSafePreview = (env: NodeJS.ProcessEnv) =>
   env.COMMERCIAL_AUTOMATION_MODE === 'preview' &&
   env.WHATSAPP_PROVIDER === 'mock' &&
   env.WHATSAPP_GROUP_SEND_ENABLED === 'false';
+
+const isDailySendReadyProfile = (
+  mode: AutomationMode,
+  env: NodeJS.ProcessEnv,
+) =>
+  mode === 'send' &&
+  env.COMMERCIAL_AUTOMATION_ENABLED === 'true' &&
+  env.COMMERCIAL_SCHEDULER_ENABLED === 'true' &&
+  env.SCHEDULER_ENABLED === 'false' &&
+  env.SHOPEE_AFFILIATE_PROVIDER === 'official' &&
+  env.WHATSAPP_PROVIDER === 'evolution' &&
+  env.WHATSAPP_GROUP_SEND_ENABLED === 'true';
 const expectedServices = (mode: AutomationMode) =>
   SERVICE_NAMES.filter(
     (name) => name !== 'whatsapp-dispatch-worker' || mode === 'send',
@@ -747,6 +770,11 @@ export type SystemStatusSnapshot = OperationLockSnapshot & {
     api: 'available' | 'unavailable';
     dashboard: 'available' | 'unavailable';
   };
+  controlPlane: {
+    required: boolean;
+    configured: boolean;
+    authenticated: boolean;
+  };
   schedulers: {
     legacy: {
       enabled: boolean | null;
@@ -898,6 +926,15 @@ export class LocalSystemSupervisor {
     const loaded = loadLocalSystemEnvironment(this.root, processEnv);
     const runtimeEnv = loaded.env;
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(runtimeEnv);
+    if (
+      isDailySendReadyProfile(loaded.mode, runtimeEnv) &&
+      !runtimeEnv.LOCAL_API_AUTH_TOKEN?.trim()
+    ) {
+      throw new LocalSystemError(
+        'O token local do painel e obrigatorio no perfil diario SEND-ready',
+        'LOCAL_API_AUTH_TOKEN_REQUIRED',
+      );
+    }
     try {
       loadConfig(runtimeEnv);
     } catch {
@@ -987,7 +1024,8 @@ export class LocalSystemSupervisor {
           ),
         );
     const currentMainServices = parseComposeStatuses(mainBeforeStart.stdout);
-    const currentMainHealthy = hasHealthyMainInfrastructure(currentMainServices);
+    const currentMainHealthy =
+      hasHealthyMainInfrastructure(currentMainServices);
     const equivalentMainServices = currentMainHealthy
       ? []
       : await discoverEquivalentMainInfrastructure(
@@ -996,8 +1034,9 @@ export class LocalSystemSupervisor {
           runtimeEnv,
           loaded.ports,
         );
-    const equivalentMainComplete =
-      hasCompleteMainInfrastructure(equivalentMainServices);
+    const equivalentMainComplete = hasCompleteMainInfrastructure(
+      equivalentMainServices,
+    );
     const reuseEquivalentMain = !currentMainHealthy && equivalentMainComplete;
     const mainServices = mergeMainInfrastructureStatuses(
       currentMainServices,
@@ -1011,7 +1050,13 @@ export class LocalSystemSupervisor {
       [loaded.ports.redis, 'redis', mainServices],
       ...(skipEvolution
         ? []
-        : [[loaded.ports.evolution, 'evolution-api', evolutionServices] as const]),
+        : [
+            [
+              loaded.ports.evolution,
+              'evolution-api',
+              evolutionServices,
+            ] as const,
+          ]),
     ];
     for (const [port, expectedService, statuses] of managedPortChecks) {
       const managed = statuses.some(
@@ -1086,11 +1131,7 @@ export class LocalSystemSupervisor {
         this.deps,
         pnpmSpec(
           this.root,
-          [
-            '--filter',
-            '@shopee-auto-affiliate-ai/database',
-            'db:generate',
-          ],
+          ['--filter', '@shopee-auto-affiliate-ai/database', 'db:generate'],
           runtimeEnv,
         ),
         'PRISMA_GENERATE_FAILED',
@@ -1301,11 +1342,7 @@ export class LocalSystemSupervisor {
     const apiAuthHeaders = localApiAuthHeaders(loaded.env);
     const [legacyBody, commercialBody, automationBody] = apiAvailable
       ? await Promise.all([
-          safeRequestBody(
-            this.deps,
-            `${apiBase}/scheduler`,
-            apiAuthHeaders,
-          ),
+          safeRequestBody(this.deps, `${apiBase}/scheduler`, apiAuthHeaders),
           safeRequestBody(
             this.deps,
             `${apiBase}/commercial-automation/scheduler`,
@@ -1325,6 +1362,18 @@ export class LocalSystemSupervisor {
     const legacy = parseLegacyScheduler(legacyBody);
     const commercial = parseCommercialScheduler(commercialBody);
     const automation = parseAutomationStatus(automationBody);
+    const controlPlaneRequired = isDailySendReadyProfile(
+      state?.mode ?? loaded.mode,
+      loaded.env,
+    );
+    const controlPlaneConfigured = Boolean(
+      loaded.env.LOCAL_API_AUTH_TOKEN?.trim(),
+    );
+    const controlPlaneAuthenticated =
+      apiAvailable &&
+      controlPlaneConfigured &&
+      automation.enabled !== null &&
+      automation.paused !== null;
     const evolutionBase = (
       loaded.env.EVOLUTION_API_URL ?? `http://127.0.0.1:${ports.evolution}`
     ).replace(/\/+$/, '');
@@ -1426,24 +1475,22 @@ export class LocalSystemSupervisor {
     );
     const evolutionHealthy =
       skipEvolution ||
-      [
-        'evolution-api',
-      'evolution-postgres',
-        'evolution-redis',
-      ].every((service) =>
-      evolutionServices.some(
-        (item) =>
-          item.service === service &&
-          item.state === 'running' &&
-          item.health === 'healthy',
-      ),
-    );
+      ['evolution-api', 'evolution-postgres', 'evolution-redis'].every(
+        (service) =>
+          evolutionServices.some(
+            (item) =>
+              item.service === service &&
+              item.state === 'running' &&
+              item.health === 'healthy',
+          ),
+      );
     const overall =
       runningCount === required.length &&
       mainHealthy &&
       evolutionHealthy &&
       apiAvailable &&
-      dashboardHealth.ok
+      dashboardHealth.ok &&
+      (!controlPlaneRequired || controlPlaneAuthenticated)
         ? 'running'
         : runningCount === 0 && !infrastructureRunning
           ? 'stopped'
@@ -1458,13 +1505,12 @@ export class LocalSystemSupervisor {
         services: dockerServices,
       },
       evolution: {
-        api:
-          skipEvolution
-            ? 'unavailable'
-            : evolutionHealth &&
-          typeof evolutionHealth === 'object' &&
-          'status' in evolutionHealth &&
-          evolutionHealth.status === 'unavailable'
+        api: skipEvolution
+          ? 'unavailable'
+          : evolutionHealth &&
+              typeof evolutionHealth === 'object' &&
+              'status' in evolutionHealth &&
+              evolutionHealth.status === 'unavailable'
             ? 'unavailable'
             : 'available',
         services: evolutionServices,
@@ -1477,6 +1523,11 @@ export class LocalSystemSupervisor {
           processStatuses.dashboard === 'running' && dashboardHealth.ok
             ? 'available'
             : 'unavailable',
+      },
+      controlPlane: {
+        required: controlPlaneRequired,
+        configured: controlPlaneConfigured,
+        authenticated: controlPlaneAuthenticated,
       },
       schedulers: { legacy, commercial },
       automation,

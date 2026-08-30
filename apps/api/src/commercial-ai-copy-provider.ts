@@ -64,6 +64,7 @@ const sanitizeHttpStatus = (value: unknown) =>
     : undefined;
 
 const PROVIDER_PUBLIC_CODES = new Set([
+  'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
   'COMMERCIAL_AI_COPY_PROVIDER_NOT_STARTED',
   'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
   'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
@@ -112,9 +113,7 @@ export const sanitizeCommercialAiCopyProviderErrorMetadata = (
   metadata: CommercialAiCopyProviderErrorMetadata = {},
 ): CommercialAiCopyProviderErrorMetadata => ({
   httpStatus: sanitizeHttpStatus(metadata.httpStatus),
-  providerErrorCode: sanitizeProviderMetadataValue(
-    metadata.providerErrorCode,
-  ),
+  providerErrorCode: sanitizeProviderMetadataValue(metadata.providerErrorCode),
   providerErrorType: sanitizeProviderMetadataValue(metadata.providerErrorType),
   providerErrorParam: sanitizeProviderMetadataValue(
     metadata.providerErrorParam,
@@ -142,8 +141,10 @@ export class CommercialAiCopyProviderError extends Error {
     usage?: CommercialAiCopyProviderUsageInput,
     requestMayHaveStarted = kind === 'AMBIGUOUS',
   ) {
-    const safePublicCode = normalizeCommercialAiCopyProviderPublicCode(publicCode);
-    const safeMetadata = sanitizeCommercialAiCopyProviderErrorMetadata(metadata);
+    const safePublicCode =
+      normalizeCommercialAiCopyProviderPublicCode(publicCode);
+    const safeMetadata =
+      sanitizeCommercialAiCopyProviderErrorMetadata(metadata);
     super(safePublicCode);
     this.name = 'CommercialAiCopyProviderError';
     this.publicCode = safePublicCode;
@@ -203,14 +204,14 @@ const isQuotaMarker = (value: string | undefined) => {
   const marker = lowerCaseProviderMarker(value);
   return Boolean(
     marker &&
-      (marker === 'insufficient_quota' ||
-        marker === 'quota_exceeded' ||
-        marker === 'billing_hard_limit_reached' ||
-        marker === 'insufficient_balance' ||
-        marker === 'insufficient_funds' ||
-        marker.includes('quota') ||
-        marker.includes('saldo') ||
-        marker.includes('balance')),
+    (marker === 'insufficient_quota' ||
+      marker === 'quota_exceeded' ||
+      marker === 'billing_hard_limit_reached' ||
+      marker === 'insufficient_balance' ||
+      marker === 'insufficient_funds' ||
+      marker.includes('quota') ||
+      marker.includes('saldo') ||
+      marker.includes('balance')),
   );
 };
 
@@ -218,9 +219,9 @@ const isModelMarker = (value: string | undefined) => {
   const marker = lowerCaseProviderMarker(value);
   return Boolean(
     marker &&
-      (marker === 'model_not_found' ||
-        marker === 'model_not_found_error' ||
-        marker === 'model_unavailable'),
+    (marker === 'model_not_found' ||
+      marker === 'model_not_found_error' ||
+      marker === 'model_unavailable'),
   );
 };
 
@@ -238,10 +239,7 @@ export const classifyOpenAiApiError = (
   error: APIError,
 ): CommercialAiCopyProviderErrorClassification => {
   const metadata = providerErrorMetadata(error);
-  const markers = [
-    metadata.providerErrorCode,
-    metadata.providerErrorType,
-  ];
+  const markers = [metadata.providerErrorCode, metadata.providerErrorType];
   let publicCode = 'COMMERCIAL_AI_COPY_PROVIDER_FAILED';
 
   if (metadata.httpStatus === 400) {

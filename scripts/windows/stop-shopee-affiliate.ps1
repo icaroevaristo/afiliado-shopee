@@ -29,11 +29,9 @@ function Invoke-StopLauncher {
             StopCommand = 'corepack pnpm system:stop'
         }
     }
-    if (-not (Test-LauncherCommandAvailable -Name 'corepack' -CommandLookup $CommandLookup)) {
-        Throw-LauncherError -Code 'COREPACK_UNAVAILABLE' -Message 'Corepack não está disponível.'
-    }
+    $pnpmExecutor = Resolve-LauncherPnpmExecutor -Root $resolvedRoot -CommandRunner $CommandRunner -CommandLookup $CommandLookup
 
-    $stopResult = Invoke-LauncherCommandRunner -FilePath 'corepack' -Arguments @('pnpm', 'system:stop') -WorkingDirectory $resolvedRoot -CommandRunner $CommandRunner
+    $stopResult = Invoke-LauncherPnpmCommand -Executor $pnpmExecutor -Arguments @('system:stop') -Root $resolvedRoot -CommandRunner $CommandRunner
     if ([int]$stopResult.ExitCode -ne 0) {
         if ([string]$stopResult.Output -match 'SYSTEM_STOP_INCOMPLETE') {
             Throw-LauncherError -Code 'SYSTEM_STOP_INCOMPLETE' -Message 'O supervisor não encerrou todos os recursos.'
