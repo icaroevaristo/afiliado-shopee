@@ -34,8 +34,6 @@ export type SenderServiceOptions = {
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
 };
 
-
-
 const providerErrorCode = (error: unknown) =>
   error instanceof AppError ? error.code : undefined;
 
@@ -58,9 +56,8 @@ export class SenderService {
       'WhatsApp dispatch started',
     );
 
-    const dispatch = await this.options.dispatches.findByIdForSending(
-      dispatchId,
-    );
+    const dispatch =
+      await this.options.dispatches.findByIdForSending(dispatchId);
 
     if (!dispatch) {
       throw new AppError(
@@ -94,9 +91,10 @@ export class SenderService {
         );
       }
 
-      const matches = dispatch.generatedCopy.promotionCandidates?.filter(
-        (candidate) => candidate.id === candidateId,
-      ) ?? [];
+      const matches =
+        dispatch.generatedCopy.promotionCandidates?.filter(
+          (candidate) => candidate.id === candidateId,
+        ) ?? [];
 
       if (matches.length !== 1) {
         throw new AppError(
@@ -148,7 +146,8 @@ export class SenderService {
 
       if (
         dispatch.generatedCopy.source !== 'AI' ||
-        dispatch.generatedCopy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
+        dispatch.generatedCopy.promptVersion !==
+          COMMERCIAL_AI_COPY_PROMPT_VERSION ||
         dispatch.generatedCopy.validationVersion !==
           COMMERCIAL_AI_COPY_VALIDATION_VERSION
       ) {
@@ -184,7 +183,8 @@ export class SenderService {
           id: dispatch.generatedCopy.id,
           productId: dispatch.generatedCopy.productId,
           snapshotId: dispatch.generatedCopy.snapshotId ?? null,
-          createdFromCandidateId: dispatch.generatedCopy.createdFromCandidateId ?? null,
+          createdFromCandidateId:
+            dispatch.generatedCopy.createdFromCandidateId ?? null,
           titulo: dispatch.generatedCopy.titulo,
           mensagem: dispatch.generatedCopy.mensagem,
           cta: dispatch.generatedCopy.cta,
@@ -229,7 +229,10 @@ export class SenderService {
         let errorCode = 'COMMERCIAL_MESSAGE_DRAFT_FAILED';
         if (error instanceof AppError) {
           errorCode = error.code;
-        } else if (error instanceof Error && /^COMMERCIAL_MESSAGE_[A-Z0-9_]+$/.test(error.message)) {
+        } else if (
+          error instanceof Error &&
+          /^COMMERCIAL_MESSAGE_[A-Z0-9_]+$/.test(error.message)
+        ) {
           errorCode = error.message;
         }
 
@@ -260,14 +263,43 @@ export class SenderService {
       );
     }
 
-    const claimed = await this.options.dispatches.markAttemptPending(
-      dispatchId,
-    );
-    if (!claimed) {
-      throw new AppError(
-        'Dispatch ja adquirido por outro processamento',
-        'WHATSAPP_DISPATCH_ALREADY_CLAIMED',
+    if (dispatch.destination.type === 'GROUP') {
+      const expectedAssignedInstanceName =
+        dispatch.instanceName ?? this.options.instanceName;
+      if (
+        !expectedAssignedInstanceName ||
+        !this.options.dispatches.claimPendingForSending
+      ) {
+        throw new AppError(
+          'Serializacao do claim de routing indisponivel',
+          'WHATSAPP_DISPATCH_ROUTING_SERIALIZATION_UNAVAILABLE',
+        );
+      }
+      const claim = await this.options.dispatches.claimPendingForSending(
+        dispatchId,
+        expectedAssignedInstanceName,
       );
+      if (claim.kind === 'STICKY_INSTANCE_MISMATCH') {
+        throw new AppError(
+          'Identidade sticky da instancia comercial divergente',
+          'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+        );
+      }
+      if (claim.kind !== 'CLAIMED') {
+        throw new AppError(
+          'Dispatch ja adquirido por outro processamento',
+          'WHATSAPP_DISPATCH_ALREADY_CLAIMED',
+        );
+      }
+    } else {
+      const claimed =
+        await this.options.dispatches.markAttemptPending(dispatchId);
+      if (!claimed) {
+        throw new AppError(
+          'Dispatch ja adquirido por outro processamento',
+          'WHATSAPP_DISPATCH_ALREADY_CLAIMED',
+        );
+      }
     }
 
     try {
@@ -332,10 +364,7 @@ export class SenderService {
       ) {
         throw error;
       }
-      if (
-        error instanceof WhatsAppSendError &&
-        !error.deliveryMayHaveStarted
-      ) {
+      if (error instanceof WhatsAppSendError && !error.deliveryMayHaveStarted) {
         try {
           await this.options.dispatches.markFailed(
             dispatch.id,

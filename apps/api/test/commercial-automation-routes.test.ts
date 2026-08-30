@@ -214,6 +214,7 @@ describe('commercial automation routes', () => {
       payload: {
         paused: false,
         confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+        expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
       },
     });
 
@@ -221,12 +222,14 @@ describe('commercial automation routes', () => {
     expect(subject.setPaused).toHaveBeenCalledWith({
       paused: false,
       confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+      expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
     });
   });
 
   it.each([
     {},
     { paused: false },
+    { paused: false, confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL' },
     { paused: true, confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL' },
     { paused: true, extra: true },
     { paused: 'true' },
@@ -258,13 +261,44 @@ describe('commercial automation routes', () => {
     const response = await subject.app.inject({
       method: 'PATCH',
       url: '/commercial-automation/settings',
-      payload: { paused: false, confirmation: 'INCORRETA' },
+      payload: {
+        paused: false,
+        confirmation: 'INCORRETA',
+        expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
+      },
     });
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({
       error: 'COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION_REQUIRED',
       message: 'Confirmacao explicita obrigatoria',
+    });
+  });
+
+  it('retorna 409 quando uma retomada usa configuracao obsoleta', async () => {
+    const subject = await createApp();
+    subject.setPaused.mockRejectedValueOnce(
+      new AppError(
+        'A configuração mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
+        'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+      ),
+    );
+
+    const response = await subject.app.inject({
+      method: 'PATCH',
+      url: '/commercial-automation/settings',
+      payload: {
+        paused: false,
+        confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+        expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: 'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+      message:
+        'A configuração mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
     });
   });
 });

@@ -61,6 +61,10 @@ const start = async () => {
       reasoningEffort: config.COMMERCIAL_AI_COPY_REASONING_EFFORT,
       maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
     },
+    commercialExternalBudgetConfig: {
+      timezone: config.COMMERCIAL_TIMEZONE,
+      fallbackDailyGlobalLimit: config.COMMERCIAL_DAILY_GLOBAL_LIMIT,
+    },
     commercialConfirmationEnvironment: {
       groupSendEnabled: config.WHATSAPP_GROUP_SEND_ENABLED,
       safeMode: config.EVOLUTION_SAFE_MODE,

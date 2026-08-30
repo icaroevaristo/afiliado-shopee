@@ -21,6 +21,7 @@ const groupDestination = (
   available: true,
   fingerprint: FINGERPRINT,
   sourceInstanceName: INSTANCE,
+  assignedInstanceName: INSTANCE,
   ...overrides,
 });
 
@@ -109,6 +110,7 @@ describe('SenderService com grupo', () => {
     productId: 'product-test',
     generatedCopyId: 'copy-test',
     destinationId: 'group-test',
+    instanceName: INSTANCE,
     generatedCopy: {
       titulo: 'Teste',
       mensagem: 'Mensagem',
@@ -124,6 +126,7 @@ describe('SenderService com grupo', () => {
     const dispatches = {
       findByIdForSending: vi.fn(async () => dispatch),
       markAttemptPending: vi.fn(async () => true),
+      claimPendingForSending: vi.fn(async () => ({ kind: 'CLAIMED' as const })),
       markSent: vi.fn(async () => ({ ...dispatch, status: 'SENT' })),
       markFailed: vi.fn(),
     };

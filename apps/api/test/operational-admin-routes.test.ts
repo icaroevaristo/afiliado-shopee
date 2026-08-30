@@ -23,6 +23,15 @@ const overview = {
     dailyGroupLimit: 5,
     dailyGlobalLimitOverride: null,
     dailyGroupLimitOverride: null,
+    dailyShopeeHttpLimit: 10,
+    dailyOpenAiGenerationLimit: 10,
+    dailyShopeeHttpLimitOverride: null,
+    dailyOpenAiGenerationLimitOverride: null,
+    providerUsage: {
+      dayKey: '2026-08-28',
+      shopee: { used: 0, limit: 10, reached: false },
+      openAi: { used: 0, limit: 10, reached: false },
+    },
     hardCaps: {
       dailyGlobalLimit: 10,
       dailyGroupLimit: 5,
@@ -205,6 +214,8 @@ describe('operational admin routes', () => {
       url: '/commercial-automation/settings/admin',
       payload: {
         dailyGlobalLimit: 8,
+        dailyShopeeHttpLimit: 7,
+        dailyOpenAiGenerationLimit: 6,
         expectedRevision: 3,
         confirmation: OPERATIONAL_CHANGE_CONFIRMATION,
       },
@@ -217,6 +228,8 @@ describe('operational admin routes', () => {
       staggerMinutes: undefined,
       dailyGlobalLimit: 8,
       dailyGroupLimit: undefined,
+      dailyShopeeHttpLimit: 7,
+      dailyOpenAiGenerationLimit: 6,
       expectedRevision: 3,
       confirmation: OPERATIONAL_CHANGE_CONFIRMATION,
     });

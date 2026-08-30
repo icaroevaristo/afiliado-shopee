@@ -56,6 +56,8 @@ export const updateOperationalAutomation = (input: {
   staggerMinutes?: number | null;
   dailyGlobalLimit?: number | null;
   dailyGroupLimit?: number | null;
+  dailyShopeeHttpLimit?: number | null;
+  dailyOpenAiGenerationLimit?: number | null;
   expectedRevision: number;
   confirmation: string;
 }) =>

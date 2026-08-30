@@ -750,6 +750,8 @@ export type CommercialAutomationSettingsRecord = {
   staggerMinutes: number | null;
   dailyGlobalLimit?: number | null;
   dailyGroupLimit?: number | null;
+  dailyShopeeHttpLimit?: number | null;
+  dailyOpenAiGenerationLimit?: number | null;
   scheduleRevision: number;
   updatedAt: Date;
 };
@@ -761,6 +763,8 @@ export type CommercialAutomationScheduleUpdate = {
   staggerMinutes?: number | null;
   dailyGlobalLimit?: number | null;
   dailyGroupLimit?: number | null;
+  dailyShopeeHttpLimit?: number | null;
+  dailyOpenAiGenerationLimit?: number | null;
   expectedRevision?: number;
 };
 
@@ -770,6 +774,7 @@ export interface CommercialAutomationSettingsRepository {
   setPaused(
     paused: boolean,
     now: Date,
+    expectedUpdatedAt?: Date,
   ): Promise<CommercialAutomationSettingsRecord>;
   updateSchedule(
     input: CommercialAutomationScheduleUpdate,
@@ -1961,6 +1966,42 @@ export interface WhatsAppGroupDirectoryRepository {
       expectedUpdatedAt: Date;
     },
   ): Promise<WhatsAppGroupRecord | null>;
+  updateAdministrativeWithLifecycleGuard?(
+    id: string,
+    data: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName: string | null;
+      expectedUpdatedAt: Date;
+      now: Date;
+    },
+  ): Promise<
+    | { kind: 'UPDATED'; group: WhatsAppGroupRecord }
+    | { kind: 'CAS_CONFLICT' }
+    | { kind: 'ACTIVE_LIFECYCLE' }
+  >;
+}
+
+export type CommercialExternalProvider = 'SHOPEE' | 'OPENAI';
+
+export type CommercialExternalProviderUsageRecord = {
+  provider: CommercialExternalProvider;
+  dayKey: string;
+  usedCount: number;
+  updatedAt: Date;
+};
+
+export interface CommercialExternalProviderUsageRepository {
+  claim(input: {
+    provider: CommercialExternalProvider;
+    dayKey: string;
+    limit: number;
+    now: Date;
+  }): Promise<CommercialExternalProviderUsageRecord | null>;
+  getUsage(
+    provider: CommercialExternalProvider,
+    dayKey: string,
+  ): Promise<CommercialExternalProviderUsageRecord | null>;
 }
 
 export const WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION =
@@ -2048,6 +2089,14 @@ export interface WhatsAppDispatchRepository {
   findByIdWithDetails(id: string): Promise<WhatsAppDispatchDetails | null>;
   list(filters: WhatsAppDispatchFilters): Promise<WhatsAppDispatchDetails[]>;
   markAttemptPending(id: string): Promise<boolean>;
+  claimPendingForSending?(
+    id: string,
+    expectedAssignedInstanceName: string,
+  ): Promise<
+    | { kind: 'CLAIMED' }
+    | { kind: 'NOT_PENDING' }
+    | { kind: 'STICKY_INSTANCE_MISMATCH' }
+  >;
   markSent(
     id: string,
     data: { externalMessageId: string; sentAt: Date },

@@ -58,18 +58,23 @@ describe('commercial automation Prisma repositories', () => {
         resumedAt: null,
         updatedAt: new Date('2026-07-25T15:00:00.000Z'),
       });
-    const update = vi.fn().mockResolvedValueOnce({
+    const updateMany = vi.fn().mockResolvedValueOnce({ count: 1 });
+    const findUnique = vi.fn().mockResolvedValueOnce({
       paused: false,
       pausedAt: new Date('2026-07-25T15:00:00.000Z'),
       resumedAt: new Date('2026-07-25T16:00:00.000Z'),
       updatedAt: new Date('2026-07-25T16:00:00.000Z'),
     });
     const repository = new PrismaCommercialAutomationSettingsRepository({
-      commercialAutomationSettings: { upsert, update },
+      commercialAutomationSettings: { upsert, updateMany, findUnique },
     } as never);
 
     await repository.getOrCreate(new Date('2026-07-25T15:00:00.000Z'));
-    await repository.setPaused(false, new Date('2026-07-25T16:00:00.000Z'));
+    await repository.setPaused(
+      false,
+      new Date('2026-07-25T16:00:00.000Z'),
+      new Date('2026-07-25T15:00:00.000Z'),
+    );
 
     expect(upsert).toHaveBeenNthCalledWith(
       1,
@@ -78,11 +83,42 @@ describe('commercial automation Prisma repositories', () => {
         create: expect.objectContaining({ paused: true }),
       }),
     );
-    expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ paused: false }),
-      }),
-    );
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'commercial-automation',
+        paused: true,
+        updatedAt: new Date('2026-07-25T15:00:00.000Z'),
+      },
+      data: {
+        paused: false,
+        resumedAt: new Date('2026-07-25T16:00:00.000Z'),
+      },
+    });
+  });
+
+  it('rejeita retomada obsoleta e preserva pausa persistida', async () => {
+    const current = {
+      paused: true,
+      pausedAt: new Date('2026-07-25T15:00:00.000Z'),
+      resumedAt: null,
+      updatedAt: new Date('2026-07-25T17:00:00.000Z'),
+    };
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const repository = new PrismaCommercialAutomationSettingsRepository({
+      commercialAutomationSettings: {
+        upsert: vi.fn().mockResolvedValue(current),
+        updateMany,
+      },
+    } as never);
+
+    await expect(
+      repository.setPaused(
+        false,
+        new Date('2026-07-25T18:00:00.000Z'),
+        new Date('2026-07-25T15:00:00.000Z'),
+      ),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_RESUME_CONFLICT' });
+    expect(updateMany).toHaveBeenCalledOnce();
   });
 
   it('preserva os timestamps quando a pausa solicitada ja esta vigente', async () => {
@@ -809,7 +845,9 @@ describe('commercial automation Prisma repositories', () => {
       commercialPipelineRun: { findUnique: findRun },
     } as never);
 
-    await expect(repository.findRecoveryContext('execution-1')).resolves.toMatchObject({
+    await expect(
+      repository.findRecoveryContext('execution-1'),
+    ).resolves.toMatchObject({
       execution: { commercialRunId: 'run-1' },
       run: {
         id: 'run-1',
@@ -826,7 +864,6 @@ describe('commercial automation Prisma repositories', () => {
       },
     });
   });
-
 
   it('marca a fronteira externa de forma idempotente e monotona sob concorrencia', async () => {
     const markedAt = new Date('2026-07-26T15:00:30.000Z');
@@ -955,18 +992,20 @@ describe('commercial automation Prisma repositories', () => {
     });
   });
 
-  const createPreMarkerRecoverySubject = (overrides: {
-    externalStage?: 'NOT_REACHED' | 'EXTERNAL_MAY_HAVE_STARTED';
-    commercialRunId?: string | null;
-    leaseExpiresAt?: Date;
-    reservationLeaseExpiresAt?: Date;
-    failureCount?: number;
-    linkedRun?: Record<string, unknown> | null;
-    reservations?: Array<Record<string, unknown>>;
-    copyAttempt?: { id: string } | null;
-    campaignUpdateCount?: number;
-    executionUpdateCount?: number;
-  } = {}) => {
+  const createPreMarkerRecoverySubject = (
+    overrides: {
+      externalStage?: 'NOT_REACHED' | 'EXTERNAL_MAY_HAVE_STARTED';
+      commercialRunId?: string | null;
+      leaseExpiresAt?: Date;
+      reservationLeaseExpiresAt?: Date;
+      failureCount?: number;
+      linkedRun?: Record<string, unknown> | null;
+      reservations?: Array<Record<string, unknown>>;
+      copyAttempt?: { id: string } | null;
+      campaignUpdateCount?: number;
+      executionUpdateCount?: number;
+    } = {},
+  ) => {
     const now = new Date('2026-07-28T15:00:00.000Z');
     const staleExecution = {
       id: 'execution-1',
@@ -1033,8 +1072,9 @@ describe('commercial automation Prisma repositories', () => {
         findFirst: vi.fn().mockResolvedValue(overrides.copyAttempt ?? null),
       },
     };
-    const prismaTransaction = vi.fn(async (callback: (tx: typeof transaction) => unknown) =>
-      callback(transaction),
+    const prismaTransaction = vi.fn(
+      async (callback: (tx: typeof transaction) => unknown) =>
+        callback(transaction),
     );
     const repository = new PrismaCommercialAutomationExecutionRepository({
       $transaction: prismaTransaction,
@@ -1057,12 +1097,14 @@ describe('commercial automation Prisma repositories', () => {
     };
   };
 
-  const createPreConfirmationRecoverySubject = (overrides: {
-    reservation?: Record<string, unknown> | null;
-    campaignUpdateCount?: number;
-    executionUpdateCount?: number;
-    outerExecution?: Record<string, unknown>;
-  } = {}) => {
+  const createPreConfirmationRecoverySubject = (
+    overrides: {
+      reservation?: Record<string, unknown> | null;
+      campaignUpdateCount?: number;
+      executionUpdateCount?: number;
+      outerExecution?: Record<string, unknown>;
+    } = {},
+  ) => {
     const now = new Date('2026-07-28T15:00:00.000Z');
     const staleExecution = {
       id: 'execution-1',
@@ -1159,13 +1201,10 @@ describe('commercial automation Prisma repositories', () => {
     const subject = createPreConfirmationRecoverySubject();
 
     await expect(
-      subject.repository.recoverStalePreConfirmationReservation(
-        'execution-1',
-        {
-          completedAt: subject.now,
-          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
-        },
-      ),
+      subject.repository.recoverStalePreConfirmationReservation('execution-1', {
+        completedAt: subject.now,
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+      }),
     ).resolves.toMatchObject({
       outcome: 'RECOVERED',
       execution: { status: 'FAILED' },
@@ -1209,13 +1248,10 @@ describe('commercial automation Prisma repositories', () => {
     const subject = createPreConfirmationRecoverySubject({ reservation: null });
 
     await expect(
-      subject.repository.recoverStalePreConfirmationReservation(
-        'execution-1',
-        {
-          completedAt: subject.now,
-          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
-        },
-      ),
+      subject.repository.recoverStalePreConfirmationReservation('execution-1', {
+        completedAt: subject.now,
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+      }),
     ).resolves.toMatchObject({ outcome: 'RECOVERED' });
 
     expect(subject.campaignUpdateMany).not.toHaveBeenCalled();
@@ -1232,13 +1268,10 @@ describe('commercial automation Prisma repositories', () => {
     });
 
     await expect(
-      subject.repository.recoverStalePreConfirmationReservation(
-        'execution-1',
-        {
-          completedAt: subject.now,
-          failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
-        },
-      ),
+      subject.repository.recoverStalePreConfirmationReservation('execution-1', {
+        completedAt: subject.now,
+        failureCode: 'COMMERCIAL_EXECUTION_ABANDONED_SAFE',
+      }),
     ).resolves.toEqual({ outcome: 'BLOCKED', reason: 'CAS_CONFLICT' });
 
     expect(subject.executionUpdateMany).not.toHaveBeenCalled();
@@ -1394,7 +1427,13 @@ describe('commercial automation Prisma repositories', () => {
   it.each([
     [
       'run',
-      { id: 'run-1', dispatchId: null, jobId: null, dispatch: null, dispatchOutbox: null },
+      {
+        id: 'run-1',
+        dispatchId: null,
+        jobId: null,
+        dispatch: null,
+        dispatchOutbox: null,
+      },
       'RUN_EVIDENCE',
     ],
     [
@@ -1430,18 +1469,21 @@ describe('commercial automation Prisma repositories', () => {
       },
       'JOB_EVIDENCE',
     ],
-  ])('bloqueia evidencia de %s sem release/backoff', async (_name, linkedRun, reason) => {
-    const subject = createPreMarkerRecoverySubject({ linkedRun });
+  ])(
+    'bloqueia evidencia de %s sem release/backoff',
+    async (_name, linkedRun, reason) => {
+      const subject = createPreMarkerRecoverySubject({ linkedRun });
 
-    await expect(
-      subject.repository.recoverStalePreMarkerReservation('execution-1', {
-        completedAt: subject.now,
-        minimumIntervalMinutes: 60,
-        failureCode: 'COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED',
-      }),
-    ).resolves.toMatchObject({ outcome: 'BLOCKED', reason });
-    expect(subject.campaignUpdateMany).not.toHaveBeenCalled();
-  });
+      await expect(
+        subject.repository.recoverStalePreMarkerReservation('execution-1', {
+          completedAt: subject.now,
+          minimumIntervalMinutes: 60,
+          failureCode: 'COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED',
+        }),
+      ).resolves.toMatchObject({ outcome: 'BLOCKED', reason });
+      expect(subject.campaignUpdateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it('bloqueia configuracao invalida antes de abrir transacao', async () => {
     const subject = createPreMarkerRecoverySubject();
@@ -1524,7 +1566,9 @@ describe('commercial automation Prisma repositories', () => {
 
   it('erro de mutacao nao e reclassificado como LOOKUP_FAILED', async () => {
     const subject = createPreMarkerRecoverySubject();
-    subject.campaignUpdateMany.mockRejectedValueOnce(new Error('campaign mutation failed'));
+    subject.campaignUpdateMany.mockRejectedValueOnce(
+      new Error('campaign mutation failed'),
+    );
 
     await expect(
       subject.repository.recoverStalePreMarkerReservation('execution-1', {
@@ -1581,9 +1625,14 @@ describe('commercial automation Prisma repositories', () => {
       nextEligibleAt: null as Date | null,
       attemptExecutionId: 'execution-1' as string | null,
       attemptReservedAt: new Date('2026-07-28T14:50:00.000Z') as Date | null,
-      attemptLeaseExpiresAt: new Date('2026-07-28T14:58:00.000Z') as Date | null,
+      attemptLeaseExpiresAt: new Date(
+        '2026-07-28T14:58:00.000Z',
+      ) as Date | null,
     };
-    const persistentExecution = { status: 'STARTED', failureCode: null as string | null };
+    const persistentExecution = {
+      status: 'STARTED',
+      failureCode: null as string | null,
+    };
     const staleExecution = {
       id: 'execution-1',
       schedulerJobId: 'scheduler',
@@ -1686,5 +1735,9 @@ describe('commercial automation Prisma repositories', () => {
       attemptReservedAt: new Date('2026-07-28T14:50:00.000Z'),
       attemptLeaseExpiresAt: new Date('2026-07-28T14:58:00.000Z'),
     });
-    expect(persistentExecution).toEqual({ status: 'STARTED', failureCode: null });
-  });});
+    expect(persistentExecution).toEqual({
+      status: 'STARTED',
+      failureCode: null,
+    });
+  });
+});

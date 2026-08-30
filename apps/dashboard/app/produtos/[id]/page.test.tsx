@@ -14,7 +14,8 @@ vi.mock('next/navigation', () => ({
 vi.mock('../../../lib/api', () => ({
   getShopeeOffer: (...args: unknown[]) => detailMock(...args),
   listShopeeCategories: (...args: unknown[]) => categoriesMock(...args),
-  getManualPublicationOptions: (...args: unknown[]) => manualOptionsMock(...args),
+  getManualPublicationOptions: (...args: unknown[]) =>
+    manualOptionsMock(...args),
   createManualPublication: vi.fn(),
   getManualPublication: vi.fn(),
 }));
@@ -186,9 +187,18 @@ describe('ProductDetailPage', () => {
     expect(screen.container.textContent).toContain('Campanha oficial');
     expect(screen.container.textContent).toContain('Grupo oficial');
     expect(screen.container.textContent).toContain('Revisão 2');
-    expect(screen.container.textContent).toContain('Ofertas Relâmpago: não suportado');
+    expect(screen.container.textContent).toContain(
+      'Ofertas Relâmpago: não suportado',
+    );
     expect(screen.container.textContent).toContain('Enviar publicacao manual');
     expect(screen.container.textContent).toContain('Somente OFFICIAL');
+    expect(
+      screen.container.querySelector('input[type="radio"]'),
+    ).not.toBeNull();
+    expect(screen.container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(screen.container.textContent).toContain(
+      'Selecione exatamente 1 grupo',
+    );
     expect(manualOptionsMock).toHaveBeenCalledWith('offer-1');
     expect(detailMock).toHaveBeenCalledWith(
       'offer-1',

@@ -1,9 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
-import {
-  commercialProductRejections,
-} from './commercial-offer-eligibility';
+import { commercialProductRejections } from './commercial-offer-eligibility';
 import type { CommercialMessageDraft } from './commercial-message-draft-service';
 import { CommercialMessageDraftService } from './commercial-message-draft-service';
 import {
@@ -23,9 +21,7 @@ import {
   deriveManualPublicationTargetState,
   isManualPublicationRequestTerminal,
 } from './manual-publication-lifecycle-finalizer';
-import type {
-  CommercialAutomationPolicyService,
-} from './commercial-automation-policy-service';
+import type { CommercialAutomationPolicyService } from './commercial-automation-policy-service';
 import { getLocalDayRange } from './commercial-automation-policy-service';
 import type {
   CommercialGroupCampaignRepository,
@@ -54,7 +50,7 @@ import type {
 } from './repositories';
 
 export const MANUAL_PUBLICATION_CONFIRMATION = 'ENVIAR_PUBLICACAO_MANUAL';
-export const MANUAL_PUBLICATION_MAX_GROUPS = 5;
+export const MANUAL_PUBLICATION_MAX_GROUPS = 1;
 export const MANUAL_PUBLICATION_CONTRACT_VERSION = 'phase17-manual-v1';
 export const MANUAL_PUBLICATION_RECONCILIATION_RESOLUTION =
   'SAFE_PRE_PROVIDER_CONFIRMED';
@@ -155,8 +151,13 @@ export type ManualPublicationRequestView = Omit<
 type ManualPublicationServiceOptions = {
   requests: ManualPublicationRequestRepository;
   offers: Pick<ShopeeOfferRepository, 'findOfferById'>;
-  catalog: Pick<CommercialPromotionCatalogRepository, 'findOfficialCatalogItem'> &
-    Partial<Pick<CommercialPromotionCatalogRepository, 'listOfficialCatalogPage'>>;
+  catalog: Pick<
+    CommercialPromotionCatalogRepository,
+    'findOfficialCatalogItem'
+  > &
+    Partial<
+      Pick<CommercialPromotionCatalogRepository, 'listOfficialCatalogPage'>
+    >;
   groups: Pick<WhatsAppGroupDirectoryRepository, 'findById'> &
     Partial<Pick<WhatsAppGroupDirectoryRepository, 'listAll'>>;
   campaigns: Pick<
@@ -181,10 +182,8 @@ type ManualPublicationServiceOptions = {
     CommercialAutomationCandidateFlowService,
     'prepareManual' | 'reserveAttempt' | 'releaseAttempt' | 'renewAttempt'
   >;
-  confirmation: Pick<
-    CommercialPipelineConfirmationService,
-    'confirm'
-  > & Partial<Pick<CommercialPipelineConfirmationService, 'publishOutbox'>>;
+  confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'> &
+    Partial<Pick<CommercialPipelineConfirmationService, 'publishOutbox'>>;
   executions: Pick<
     CommercialAutomationExecutionRepository,
     | 'start'
@@ -198,19 +197,20 @@ type ManualPublicationServiceOptions = {
     Partial<
       Pick<
         CommercialAutomationExecutionRepository,
-        'recoverStalePreMarkerReservation' | 'recoverStalePreConfirmationReservation'
+        | 'recoverStalePreMarkerReservation'
+        | 'recoverStalePreConfirmationReservation'
       >
     >;
-  runs: Pick<
-    CommercialPipelineRunRepository,
-    'findById' | 'findByExecutionId'
-  >;
+  runs: Pick<CommercialPipelineRunRepository, 'findById' | 'findByExecutionId'>;
   outboxes: Pick<CommercialDispatchOutboxRepository, 'findById'>;
   dispatches: Pick<WhatsAppDispatchRepository, 'findByIdWithDetails'>;
   environment: CommercialConfirmationEnvironment;
   leaseSeconds?: number;
   clock?: () => Date;
-  logger?: { info(data: unknown, message?: string): void; error(data: unknown, message?: string): void };
+  logger?: {
+    info(data: unknown, message?: string): void;
+    error(data: unknown, message?: string): void;
+  };
 };
 
 const fail = (message: string, code: string): never => {
@@ -218,7 +218,8 @@ const fail = (message: string, code: string): never => {
 };
 
 const normalizeId = (value: unknown, field: string) => {
-  if (typeof value !== 'string') return fail(`${field} invalido`, 'MANUAL_PUBLICATION_INVALID');
+  if (typeof value !== 'string')
+    return fail(`${field} invalido`, 'MANUAL_PUBLICATION_INVALID');
   const normalized = value.trim();
   if (!normalized || normalized.length > 200) {
     return fail(`${field} invalido`, 'MANUAL_PUBLICATION_INVALID');
@@ -235,7 +236,9 @@ export const canonicalManualPublicationPayload = (input: {
     version: MANUAL_PUBLICATION_CONTRACT_VERSION,
     mode: input.mode ?? 'SEND',
     productId: input.productId.trim(),
-    destinationIds: [...new Set(input.destinationIds.map((id) => id.trim()))].sort(),
+    destinationIds: [
+      ...new Set(input.destinationIds.map((id) => id.trim())),
+    ].sort(),
   });
 
 const legacyCanonicalManualPublicationPayload = (input: {
@@ -245,7 +248,9 @@ const legacyCanonicalManualPublicationPayload = (input: {
   JSON.stringify({
     version: MANUAL_PUBLICATION_CONTRACT_VERSION,
     productId: input.productId.trim(),
-    destinationIds: [...new Set(input.destinationIds.map((id) => id.trim()))].sort(),
+    destinationIds: [
+      ...new Set(input.destinationIds.map((id) => id.trim())),
+    ].sort(),
   });
 
 export const manualPublicationPayloadHash = (payload: string) =>
@@ -253,7 +258,10 @@ export const manualPublicationPayloadHash = (payload: string) =>
 
 const uniqueDestinationIds = (value: unknown) => {
   if (!Array.isArray(value)) {
-    return fail('destinationIds deve ser uma lista', 'MANUAL_PUBLICATION_INVALID');
+    return fail(
+      'destinationIds deve ser uma lista',
+      'MANUAL_PUBLICATION_INVALID',
+    );
   }
   const ids = value.map((item) => normalizeId(item, 'destinationId'));
   const unique = [...new Set(ids)].sort();
@@ -263,7 +271,7 @@ const uniqueDestinationIds = (value: unknown) => {
     unique.length !== ids.length
   ) {
     return fail(
-      'Selecione entre 1 e 5 grupos unicos',
+      'Selecione exatamente 1 grupo',
       'MANUAL_PUBLICATION_DESTINATION_LIMIT',
     );
   }
@@ -293,14 +301,17 @@ const currentSnapshot = (item: CommercialPromotionCatalogItem | null) =>
       }
     : null;
 
-const productIsAvailable = (item: CommercialPromotionCatalogItem | null, now: Date) =>
+const productIsAvailable = (
+  item: CommercialPromotionCatalogItem | null,
+  now: Date,
+) =>
   Boolean(
     item &&
-      item.product.source === 'OFFICIAL' &&
-      item.currentSnapshot &&
-      item.commercialSnapshotRevision === item.currentSnapshot.revision &&
-      item.commercialSnapshotFingerprint === item.currentSnapshot.fingerprint &&
-      commercialProductRejections(item.product, now).length === 0,
+    item.product.source === 'OFFICIAL' &&
+    item.currentSnapshot &&
+    item.commercialSnapshotRevision === item.currentSnapshot.revision &&
+    item.commercialSnapshotFingerprint === item.currentSnapshot.fingerprint &&
+    commercialProductRejections(item.product, now).length === 0,
   );
 
 const previewProductIsAvailable = (
@@ -309,13 +320,14 @@ const previewProductIsAvailable = (
 ) =>
   Boolean(
     item &&
-      productIsAvailable(item, now) &&
-      item.currentSnapshot &&
-      !item.currentSnapshot.unavailableAt &&
-      (!item.currentSnapshot.offerStartsAt ||
-        item.currentSnapshot.offerStartsAt <= now) &&
-      (!item.currentSnapshot.offerEndsAt || item.currentSnapshot.offerEndsAt > now) &&
-      /^https?:\/\//iu.test(item.product.productLink),
+    productIsAvailable(item, now) &&
+    item.currentSnapshot &&
+    !item.currentSnapshot.unavailableAt &&
+    (!item.currentSnapshot.offerStartsAt ||
+      item.currentSnapshot.offerStartsAt <= now) &&
+    (!item.currentSnapshot.offerEndsAt ||
+      item.currentSnapshot.offerEndsAt > now) &&
+    /^https?:\/\//iu.test(item.product.productLink),
   );
 
 const requestMatchesOperation = (
@@ -431,14 +443,10 @@ const isAmbiguousBlocker = (error: unknown) =>
   ].includes(error.code);
 
 type ManualPublicationFailureStage =
-  | 'SELECTION'
-  | 'PREPARATION'
-  | 'GENERATION'
-  | 'REVALIDATION';
+  'SELECTION' | 'PREPARATION' | 'GENERATION' | 'REVALIDATION';
 
-const unexpectedFailureCodeForStage = (
-  stage: ManualPublicationFailureStage,
-) => `MANUAL_PUBLICATION_${stage}_FAILED`;
+const unexpectedFailureCodeForStage = (stage: ManualPublicationFailureStage) =>
+  `MANUAL_PUBLICATION_${stage}_FAILED`;
 
 const isExplicitPreRequestCopyFailure = (error: unknown) =>
   error instanceof AppError &&
@@ -466,7 +474,9 @@ export class ManualPublicationService {
         ...(afterId ? { afterId } : {}),
         limit: 200,
       });
-      const found = result.items.find(({ product }) => product.id === productId);
+      const found = result.items.find(
+        ({ product }) => product.id === productId,
+      );
       if (found) return found;
       if (!result.hasMore) return null;
       afterId = result.items.at(-1)?.product.id;
@@ -477,7 +487,9 @@ export class ManualPublicationService {
 
   private async campaignForGroup(group: WhatsAppGroupRecord) {
     if (this.options.campaigns.findByLogicalGroupFingerprint) {
-      return this.options.campaigns.findByLogicalGroupFingerprint(group.fingerprint);
+      return this.options.campaigns.findByLogicalGroupFingerprint(
+        group.fingerprint,
+      );
     }
     const matches = (
       await this.options.campaigns.list({ page: 1, limit: 100 })
@@ -568,7 +580,9 @@ export class ManualPublicationService {
         (id) => groups.find((group) => group.id === id) ?? null,
       );
     }
-    return Promise.all(destinationIds.map((id) => this.options.groups.findById(id)));
+    return Promise.all(
+      destinationIds.map((id) => this.options.groups.findById(id)),
+    );
   }
 
   private async optionForGroup(
@@ -591,11 +605,14 @@ export class ManualPublicationService {
       };
     }
     const blockers: string[] = [];
-    if (group.type !== 'GROUP') blockers.push('MANUAL_PUBLICATION_GROUP_REQUIRED');
+    if (group.type !== 'GROUP')
+      blockers.push('MANUAL_PUBLICATION_GROUP_REQUIRED');
     if (!group.active) blockers.push('DESTINATION_INACTIVE');
     if (!group.available) blockers.push('DESTINATION_UNAVAILABLE');
-    if (!group.fingerprint) blockers.push('MANUAL_PUBLICATION_GROUP_FINGERPRINT_INVALID');
-    if (!group.assignedInstanceName) blockers.push('MANUAL_PUBLICATION_INSTANCE_ASSIGNMENT_REQUIRED');
+    if (!group.fingerprint)
+      blockers.push('MANUAL_PUBLICATION_GROUP_FINGERPRINT_INVALID');
+    if (!group.assignedInstanceName)
+      blockers.push('MANUAL_PUBLICATION_INSTANCE_ASSIGNMENT_REQUIRED');
     const campaign = group.fingerprint
       ? await this.campaignForGroup(group)
       : null;
@@ -603,7 +620,9 @@ export class ManualPublicationService {
     if (campaign && !campaign.active) blockers.push('CAMPAIGN_INACTIVE');
     if (campaign && !campaign.niche.active) blockers.push('NICHE_INACTIVE');
     if (group.assignedInstanceName) {
-      const instance = await this.options.instances.findByName(group.assignedInstanceName);
+      const instance = await this.options.instances.findByName(
+        group.assignedInstanceName,
+      );
       if (!instance?.active) blockers.push('COMMERCIAL_INSTANCE_INACTIVE');
     }
     if (!productItem || productItem.product.source !== 'OFFICIAL') {
@@ -613,16 +632,20 @@ export class ManualPublicationService {
     }
     if (campaign) {
       const candidate = this.options.candidates.findByCampaignAndProduct
-        ? await this.options.candidates.findByCampaignAndProduct(campaign.id, productId)
-        : (
+        ? await this.options.candidates.findByCampaignAndProduct(
+            campaign.id,
+            productId,
+          )
+        : ((
             await this.options.candidates.listCampaignCandidates(campaign.id)
-          ).find((item) => item.productId === productId) ?? null;
+          ).find((item) => item.productId === productId) ?? null);
       const copyReady = Boolean(
         candidate?.status === 'COPY_READY' && candidate.generatedCopyId,
       );
-      const draftPreview = candidate && copyReady
-        ? await this.existingDraftPreview(candidate.id)
-        : null;
+      const draftPreview =
+        candidate && copyReady
+          ? await this.existingDraftPreview(candidate.id)
+          : null;
       if (copyReady && !draftPreview) {
         blockers.push('COMMERCIAL_AI_COPY_CACHE_INCONSISTENT');
       }
@@ -634,13 +657,14 @@ export class ManualPublicationService {
         assignedInstanceName: group.assignedInstanceName ?? null,
         eligible: blockers.length === 0,
         blockers,
-        copyStatus: copyReady && draftPreview
-          ? 'READY'
-          : copyReady
-            ? 'BLOCKED'
-          : candidate
-            ? 'AVAILABLE'
-            : 'UNKNOWN',
+        copyStatus:
+          copyReady && draftPreview
+            ? 'READY'
+            : copyReady
+              ? 'BLOCKED'
+              : candidate
+                ? 'AVAILABLE'
+                : 'UNKNOWN',
         draftPreview,
       };
     }
@@ -674,12 +698,13 @@ export class ManualPublicationService {
       ),
     );
     const candidate = groupOptions.find((option) => option.eligible);
-    const candidateRecord = candidate?.campaignId && this.options.candidates.findByCampaignAndProduct
-      ? await this.options.candidates.findByCampaignAndProduct(
-          candidate.campaignId,
-          normalizedProductId,
-        )
-      : null;
+    const candidateRecord =
+      candidate?.campaignId && this.options.candidates.findByCampaignAndProduct
+        ? await this.options.candidates.findByCampaignAndProduct(
+            candidate.campaignId,
+            normalizedProductId,
+          )
+        : null;
     return {
       product: {
         id: product.id,
@@ -729,11 +754,20 @@ export class ManualPublicationService {
       );
     }
     const snapshot = currentSnapshot(item);
-    if (!snapshot) return fail('Snapshot oficial ausente', 'MANUAL_PUBLICATION_SNAPSHOT_STALE');
+    if (!snapshot)
+      return fail(
+        'Snapshot oficial ausente',
+        'MANUAL_PUBLICATION_SNAPSHOT_STALE',
+      );
     const targets: ManualPublicationRequestCreateData['targets'] = [];
     const fingerprints = new Set<string>();
     for (const [index, group] of groups.entries()) {
-      if (!group || group.type !== 'GROUP' || !group.fingerprint || !group.assignedInstanceName) {
+      if (
+        !group ||
+        group.type !== 'GROUP' ||
+        !group.fingerprint ||
+        !group.assignedInstanceName
+      ) {
         return fail(
           'Destino manual nao e um grupo atribuivel',
           'MANUAL_PUBLICATION_TARGET_INVALID',
@@ -761,10 +795,7 @@ export class ManualPublicationService {
           );
         }
         if (!campaign.active) {
-          return fail(
-            'Campanha comercial inativa',
-            'CAMPAIGN_INACTIVE',
-          );
+          return fail('Campanha comercial inativa', 'CAMPAIGN_INACTIVE');
         }
         if (!campaign.niche.active) {
           return fail('Nicho comercial inativo', 'NICHE_INACTIVE');
@@ -822,7 +853,8 @@ export class ManualPublicationService {
       item.product.source !== 'OFFICIAL' ||
       item.currentSnapshot?.id !== request.requestedSnapshotId ||
       item.commercialSnapshotRevision !== request.requestedSnapshotRevision ||
-      item.commercialSnapshotFingerprint !== request.requestedSnapshotFingerprint
+      item.commercialSnapshotFingerprint !==
+        request.requestedSnapshotFingerprint
     ) {
       throw new AppError(
         'Snapshot oficial mudou desde a aceitacao manual',
@@ -836,11 +868,15 @@ export class ManualPublicationService {
     target: ManualPublicationTargetRecord,
   ): Promise<ManualPublicationTargetRecord> {
     if (target.status === 'AMBIGUOUS') return target;
-    const run = target.runId ? await this.options.runs.findById(target.runId) : null;
+    const run = target.runId
+      ? await this.options.runs.findById(target.runId)
+      : null;
     const dispatch = target.dispatchId
       ? await this.options.dispatches.findByIdWithDetails(target.dispatchId)
       : null;
-    const outbox = target.outboxId ? await this.options.outboxes.findById(target.outboxId) : null;
+    const outbox = target.outboxId
+      ? await this.options.outboxes.findById(target.outboxId)
+      : null;
     const { status: nextStatus, investigationRequired } =
       deriveManualPublicationTargetState(target, {
         hasRun: Boolean(run),
@@ -867,7 +903,11 @@ export class ManualPublicationService {
   }
 
   private assertRunMatchesTarget(
-    run: Awaited<ReturnType<NonNullable<ManualPublicationServiceOptions['runs']['findById']>>>,
+    run: Awaited<
+      ReturnType<
+        NonNullable<ManualPublicationServiceOptions['runs']['findById']>
+      >
+    >,
     request: ManualPublicationRequestRecord,
     target: ManualPublicationTargetRecord,
     executionId: string,
@@ -896,18 +936,20 @@ export class ManualPublicationService {
 
   private async reconcileOutboxForRun(
     target: ManualPublicationTargetRecord,
-    run: NonNullable<Awaited<ReturnType<CommercialPipelineRunRepository['findById']>>>,
+    run: NonNullable<
+      Awaited<ReturnType<CommercialPipelineRunRepository['findById']>>
+    >,
     candidateId?: string,
   ) {
     const { dispatchId, outboxId } = commercialConfirmationIds(run.id);
     const outbox = await this.options.outboxes.findById(outboxId);
     const hasConfirmationEvidence = Boolean(
       outbox ||
-        run.mode === 'CONFIRMED' ||
-        run.confirmedAt ||
-        run.dispatchId ||
-        run.jobId ||
-        run.finalStatus,
+      run.mode === 'CONFIRMED' ||
+      run.confirmedAt ||
+      run.dispatchId ||
+      run.jobId ||
+      run.finalStatus,
     );
     if (!hasConfirmationEvidence) return null;
     if (
@@ -927,7 +969,8 @@ export class ManualPublicationService {
         dispatchId,
         outboxId,
         status: outbox.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'QUEUED',
-        blockedReason: outbox.status === 'AMBIGUOUS' ? outbox.failureCode : null,
+        blockedReason:
+          outbox.status === 'AMBIGUOUS' ? outbox.failureCode : null,
         investigationRequired: outbox.status === 'AMBIGUOUS',
       })) ?? target;
     return this.updateTargetState(updated);
@@ -1005,10 +1048,7 @@ export class ManualPublicationService {
             completedAt: this.clock(),
           },
         );
-        if (
-          marked.status !== 'AMBIGUOUS' ||
-          marked.commercialRunId !== runId
-        ) {
+        if (marked.status !== 'AMBIGUOUS' || marked.commercialRunId !== runId) {
           throw new AppError(
             'Ownership manual nao foi marcada como ambigua',
             'COMMERCIAL_EXECUTION_OWNERSHIP_LOST',
@@ -1031,7 +1071,11 @@ export class ManualPublicationService {
   ) {
     const run = await this.options.runs.findById(runId);
     const existingOutbox = run
-      ? await this.reconcileOutboxForRun(target, run, target.candidateId ?? undefined)
+      ? await this.reconcileOutboxForRun(
+          target,
+          run,
+          target.candidateId ?? undefined,
+        )
       : null;
     if (
       run &&
@@ -1086,7 +1130,9 @@ export class ManualPublicationService {
         outboxId,
         status: 'QUEUED',
         blockedReason: null,
-      })) ?? existingOutbox ?? target
+      })) ??
+      existingOutbox ??
+      target
     );
   }
 
@@ -1112,7 +1158,10 @@ export class ManualPublicationService {
             failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
           },
         );
-      if (result.outcome === 'RECOVERED' || result.outcome === 'ALREADY_RECOVERED') {
+      if (
+        result.outcome === 'RECOVERED' ||
+        result.outcome === 'ALREADY_RECOVERED'
+      ) {
         recovered = result.execution;
       }
     }
@@ -1124,10 +1173,7 @@ export class ManualPublicationService {
     ) {
       const run = await this.options.runs.findById(execution.commercialRunId);
       const safePreConfirmationRun = Boolean(
-        run &&
-          run.mode === 'DRY_RUN' &&
-          !run.dispatchId &&
-          !run.jobId,
+        run && run.mode === 'DRY_RUN' && !run.dispatchId && !run.jobId,
       );
       if (
         safePreConfirmationRun &&
@@ -1141,7 +1187,10 @@ export class ManualPublicationService {
               failureCode: COMMERCIAL_EXECUTION_ABANDONED_SAFE,
             },
           );
-        if (result.outcome === 'RECOVERED' || result.outcome === 'ALREADY_RECOVERED') {
+        if (
+          result.outcome === 'RECOVERED' ||
+          result.outcome === 'ALREADY_RECOVERED'
+        ) {
           recovered = result.execution;
         }
       }
@@ -1273,7 +1322,7 @@ export class ManualPublicationService {
       refreshedTargets.map(({ status }) => status),
     );
     const terminal = isManualPublicationRequestTerminal(status);
-    const completedAt = terminal ? request.completedAt ?? this.clock() : null;
+    const completedAt = terminal ? (request.completedAt ?? this.clock()) : null;
     const requestNeedsUpdate =
       request.status !== status ||
       request.completedAt?.getTime() !== completedAt?.getTime() ||
@@ -1308,13 +1357,15 @@ export class ManualPublicationService {
     target: ManualPublicationTargetRecord,
     options: { deferIfActive?: boolean } = {},
   ) {
-    if (['SENT', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(target.status)) return target;
+    if (['SENT', 'BLOCKED', 'FAILED', 'AMBIGUOUS'].includes(target.status))
+      return target;
     let ownership: CommercialAutomationExecutionOwnership | null = null;
     let executionId: string | null = null;
     let quotaReserved = false;
-    let candidateReservation:
-      | { campaignId: string; executionId: string }
-      | null = null;
+    let candidateReservation: {
+      campaignId: string;
+      executionId: string;
+    } | null = null;
     let commercialRunId: string | undefined;
     let externalStageAttempted = false;
     let externalStageReached = false;
@@ -1324,9 +1375,8 @@ export class ManualPublicationService {
     try {
       await this.assertRequestSnapshot(request);
       const automationTarget = targetFromRecord(target);
-      const safety = await this.options.policy.evaluateManualSendSafety(
-        automationTarget,
-      );
+      const safety =
+        await this.options.policy.evaluateManualSendSafety(automationTarget);
       if (
         options.deferIfActive &&
         safety.reasons.length === 1 &&
@@ -1363,7 +1413,8 @@ export class ManualPublicationService {
         return (
           (await this.options.requests.updateTarget(target.id, {
             status: 'BLOCKED',
-            blockedReason: safety.reasons[0] ?? 'MANUAL_PUBLICATION_POLICY_BLOCKED',
+            blockedReason:
+              safety.reasons[0] ?? 'MANUAL_PUBLICATION_POLICY_BLOCKED',
           })) ?? target
         );
       }
@@ -1495,9 +1546,12 @@ export class ManualPublicationService {
           beforeExternalCopyGeneration: async () => {
             failureStage = 'GENERATION';
             externalStageAttempted = true;
-            await this.options.executions.markExternalMayHaveStarted(ownership!, {
-              markedAt: this.clock(),
-            });
+            await this.options.executions.markExternalMayHaveStarted(
+              ownership!,
+              {
+                markedAt: this.clock(),
+              },
+            );
             externalStageReached = true;
           },
         },
@@ -1617,7 +1671,11 @@ export class ManualPublicationService {
       }
       return (
         (await this.options.requests.updateTarget(target.id, {
-          status: ambiguous ? 'AMBIGUOUS' : knownBlocker(error) ? 'BLOCKED' : 'FAILED',
+          status: ambiguous
+            ? 'AMBIGUOUS'
+            : knownBlocker(error)
+              ? 'BLOCKED'
+              : 'FAILED',
           blockedReason: code,
           investigationRequired: ambiguous,
         })) ?? target
@@ -1646,15 +1704,17 @@ export class ManualPublicationService {
     let current = claimed;
     const orderedTargets = [...claimed.targets].sort(
       (left, right) =>
-        left.logicalGroupFingerprint.localeCompare(right.logicalGroupFingerprint) ||
-        left.destinationId.localeCompare(right.destinationId),
+        left.logicalGroupFingerprint.localeCompare(
+          right.logicalGroupFingerprint,
+        ) || left.destinationId.localeCompare(right.destinationId),
     );
     for (const [index, target] of orderedTargets.entries()) {
       const renewed = await this.options.requests.renewProcessing(
         current.id,
         ownerId,
         new Date(
-          this.clock().getTime() + MANUAL_PUBLICATION_PROCESSING_LEASE_SECONDS * 1_000,
+          this.clock().getTime() +
+            MANUAL_PUBLICATION_PROCESSING_LEASE_SECONDS * 1_000,
         ),
       );
       if (!renewed) {
@@ -1728,7 +1788,9 @@ export class ManualPublicationService {
     };
   }
 
-  async create(input: ManualPublicationInput): Promise<ManualPublicationResult> {
+  async create(
+    input: ManualPublicationInput,
+  ): Promise<ManualPublicationResult> {
     if (input.confirm !== MANUAL_PUBLICATION_CONFIRMATION) {
       return fail(
         'Confirmacao de publicacao manual invalida',
@@ -1751,9 +1813,8 @@ export class ManualPublicationService {
         destinationIds: normalizedDestinationIds,
       }),
     );
-    const existing = await this.options.requests.findByIdempotencyKey(
-      normalizedKey,
-    );
+    const existing =
+      await this.options.requests.findByIdempotencyKey(normalizedKey);
     if (existing) {
       if (
         !requestMatchesOperation(existing, {
@@ -1811,9 +1872,8 @@ export class ManualPublicationService {
         destinationIds: normalizedDestinationIds,
       }),
     );
-    const existing = await this.options.requests.findByIdempotencyKey(
-      normalizedKey,
-    );
+    const existing =
+      await this.options.requests.findByIdempotencyKey(normalizedKey);
     if (existing) {
       if (
         !requestMatchesOperation(existing, {
@@ -1884,9 +1944,7 @@ export class ManualPublicationService {
         'MANUAL_PUBLICATION_RECOVERY_RESOLUTION_INVALID',
       );
     }
-    if (
-      input.confirmation !== MANUAL_PUBLICATION_RECONCILIATION_CONFIRMATION
-    ) {
+    if (input.confirmation !== MANUAL_PUBLICATION_RECONCILIATION_CONFIRMATION) {
       return fail(
         'Confirmacao de recovery manual invalida',
         'MANUAL_PUBLICATION_RECOVERY_CONFIRMATION_INVALID',
@@ -1933,7 +1991,11 @@ export class ManualPublicationService {
     const request = await this.options.requests.findById(
       normalizeId(requestId, 'requestId'),
     );
-    if (!request) return fail('Request manual nao encontrada', 'MANUAL_PUBLICATION_NOT_FOUND');
+    if (!request)
+      return fail(
+        'Request manual nao encontrada',
+        'MANUAL_PUBLICATION_NOT_FOUND',
+      );
     if (request.mode === 'PREVIEW') {
       if (request.status !== 'PREVIEW_READY') {
         return fail(

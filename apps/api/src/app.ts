@@ -89,6 +89,11 @@ import type {
   OperationalCatalogSort,
 } from './repositories';
 import type { CommercialAiCopyProvider } from './commercial-ai-copy-provider';
+import {
+  CommercialExternalProviderBudgetService,
+  withOpenAiDailyBudget,
+  withShopeeDailyBudget,
+} from './commercial-external-provider-budget-service';
 import type {
   CommercialAiCopyConfig,
   CommercialPromotionCopyGenerationService,
@@ -206,6 +211,10 @@ export type BuildAppOptions = {
   >;
   commercialAiCopyProvider?: CommercialAiCopyProvider;
   commercialAiCopyConfig?: CommercialAiCopyConfig;
+  commercialExternalBudgetConfig?: {
+    timezone: string;
+    fallbackDailyGlobalLimit: number;
+  };
   commercialAutomationSchedulerStatusServiceFactory?: () => {
     getStatus(): Promise<CommercialAutomationSchedulerStatusSnapshot>;
   };
@@ -789,9 +798,26 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
   const localApiAuthToken = options.localApiAuthToken?.trim();
   const prisma = options.prisma ?? createPrismaClient();
   const hunterProvider = options.hunterProvider ?? new MockShopeeProvider();
-  const shopeeOfferProvider =
+  const rawShopeeOfferProvider =
     options.shopeeOfferProvider ?? new MockShopeeAffiliateOfferProvider();
   const repositories = createPrismaRepositories(prisma);
+  const externalBudget = options.commercialExternalBudgetConfig
+    ? new CommercialExternalProviderBudgetService({
+        settings: repositories.commercialAutomationSettings,
+        usage: repositories.commercialExternalProviderUsage,
+        timezone: options.commercialExternalBudgetConfig.timezone,
+        fallbackDailyGlobalLimit:
+          options.commercialExternalBudgetConfig.fallbackDailyGlobalLimit,
+      })
+    : undefined;
+  const shopeeOfferProvider =
+    externalBudget && rawShopeeOfferProvider.source === 'OFFICIAL'
+      ? withShopeeDailyBudget(rawShopeeOfferProvider, externalBudget)
+      : rawShopeeOfferProvider;
+  const commercialAiCopyProvider =
+    externalBudget && options.commercialAiCopyProvider
+      ? withOpenAiDailyBudget(options.commercialAiCopyProvider, externalBudget)
+      : options.commercialAiCopyProvider;
   const groupDirectoryService =
     options.groupDirectoryService ??
     (options.groupDirectoryProvider && options.groupInstanceName
@@ -922,7 +948,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     commercialPromotionCopyService ??=
       createCommercialPromotionCopyGenerationService({
         repositories,
-        provider: options.commercialAiCopyProvider,
+        provider: commercialAiCopyProvider,
         config: options.commercialAiCopyConfig ?? {
           enabled: false,
           provider: 'openai',
@@ -952,10 +978,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
               return null;
             }
             const rawJob = job as { data?: unknown; id?: unknown };
-            if (
-              typeof rawJob.data !== 'object' ||
-              rawJob.data === null
-            ) {
+            if (typeof rawJob.data !== 'object' || rawJob.data === null) {
               return null;
             }
             const data = rawJob.data as {
@@ -1127,6 +1150,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       scheduler: commercialSchedulerStatusService,
       maxMessagesPerRun:
         options.commercialConfirmationEnvironment?.maximumMessagesPerRun ?? 1,
+      externalBudget,
       environment: {
         groupSendEnabled:
           options.commercialConfirmationEnvironment?.groupSendEnabled ?? false,
@@ -1571,6 +1595,8 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       'staggerMinutes',
       'dailyGlobalLimit',
       'dailyGroupLimit',
+      'dailyShopeeHttpLimit',
+      'dailyOpenAiGenerationLimit',
       'expectedRevision',
       'confirmation',
     ]);
@@ -1601,6 +1627,8 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       'staggerMinutes',
       'dailyGlobalLimit',
       'dailyGroupLimit',
+      'dailyShopeeHttpLimit',
+      'dailyOpenAiGenerationLimit',
     ] as const) {
       if (
         body[key] !== undefined &&
@@ -1622,6 +1650,10 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         staggerMinutes: body.staggerMinutes as number | null | undefined,
         dailyGlobalLimit: body.dailyGlobalLimit as number | null | undefined,
         dailyGroupLimit: body.dailyGroupLimit as number | null | undefined,
+        dailyShopeeHttpLimit: body.dailyShopeeHttpLimit as
+          number | null | undefined,
+        dailyOpenAiGenerationLimit: body.dailyOpenAiGenerationLimit as
+          number | null | undefined,
         expectedRevision: body.expectedRevision,
         confirmation: body.confirmation,
       });
@@ -1930,11 +1962,13 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     const keys = Object.keys(record);
     const isPause = keys.length === 1 && record.paused === true;
     const isResume =
-      keys.length === 2 &&
+      keys.length === 3 &&
       keys.includes('paused') &&
       keys.includes('confirmation') &&
+      keys.includes('expectedUpdatedAt') &&
       record.paused === false &&
-      typeof record.confirmation === 'string';
+      typeof record.confirmation === 'string' &&
+      typeof record.expectedUpdatedAt === 'string';
     if (!isPause && !isResume) {
       return reply.status(400).send({
         error: 'INVALID_COMMERCIAL_AUTOMATION_SETTINGS',
@@ -1948,10 +1982,15 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
           typeof record.confirmation === 'string'
             ? record.confirmation
             : undefined,
+        expectedUpdatedAt:
+          typeof record.expectedUpdatedAt === 'string'
+            ? record.expectedUpdatedAt
+            : undefined,
       });
     } catch (error) {
       if (error instanceof AppError) {
-        return reply.status(400).send({
+        const conflict = error.code === 'COMMERCIAL_AUTOMATION_RESUME_CONFLICT';
+        return reply.status(conflict ? 409 : 400).send({
           error: error.code,
           message: error.message,
         });

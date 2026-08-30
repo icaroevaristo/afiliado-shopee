@@ -33,9 +33,6 @@ function Test-LauncherPrerequisites {
     if (-not (Test-LauncherCommandAvailable -Name 'node' -CommandLookup $CommandLookup)) {
         Throw-LauncherError -Code 'NODE_UNAVAILABLE' -Message 'Node.js não está disponível.'
     }
-    if (-not (Test-LauncherCommandAvailable -Name 'corepack' -CommandLookup $CommandLookup)) {
-        Throw-LauncherError -Code 'COREPACK_UNAVAILABLE' -Message 'Corepack não está disponível.'
-    }
     if (-not (Test-LauncherCommandAvailable -Name 'docker' -CommandLookup $CommandLookup)) {
         Throw-LauncherError -Code 'DOCKER_CLI_UNAVAILABLE' -Message 'Docker CLI não está disponível.'
     }
@@ -57,15 +54,13 @@ function Test-LauncherPrerequisites {
         Throw-LauncherError -Code 'NODE_VERSION_UNSUPPORTED' -Message 'A versão do Node.js é antiga.'
     }
 
-    $pnpmResult = Invoke-LauncherCommandRunner -FilePath 'corepack' -Arguments @('pnpm', '--version') -WorkingDirectory $Root -CommandRunner $CommandRunner
-    if ([int]$pnpmResult.ExitCode -ne 0) {
-        Throw-LauncherError -Code 'PNPM_UNAVAILABLE' -Message 'O pnpm não respondeu pelo Corepack.'
-    }
+    $pnpmExecutor = Resolve-LauncherPnpmExecutor -Root $Root -CommandRunner $CommandRunner -CommandLookup $CommandLookup
 
     $dockerResult = Invoke-LauncherCommandRunner -FilePath 'docker' -Arguments @('info', '--format', '{{.ServerVersion}}') -WorkingDirectory $Root -CommandRunner $CommandRunner
     if ([int]$dockerResult.ExitCode -ne 0) {
         Throw-LauncherError -Code 'DOCKER_DAEMON_UNAVAILABLE' -Message 'O daemon do Docker não respondeu.'
     }
+    return $pnpmExecutor
 }
 
 function Test-SystemHealthyForLauncher {
@@ -85,6 +80,11 @@ function Test-SystemHealthyForLauncher {
     if ([string]$Status.mode -eq 'send' -and [string]$Status.processes.'whatsapp-dispatch-worker' -ne 'running') {
         return $false
     }
+    if ([string]$Status.mode -eq 'send') {
+        if ($null -eq $Status.controlPlane) { return $false }
+        if (-not [bool]$Status.controlPlane.configured) { return $false }
+        if (-not [bool]$Status.controlPlane.authenticated) { return $false }
+    }
 
     return $true
 }
@@ -94,10 +94,13 @@ function Get-SystemStatusForLauncher {
         [Parameter(Mandatory = $true)]
         [string]$Root,
 
-        [scriptblock]$CommandRunner
+        [scriptblock]$CommandRunner,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$PnpmExecutor
     )
 
-    $result = Invoke-LauncherCommandRunner -FilePath 'corepack' -Arguments @('pnpm', 'system:status', '--', '--json') -WorkingDirectory $Root -CommandRunner $CommandRunner
+    $result = Invoke-LauncherPnpmCommand -Executor $PnpmExecutor -Arguments @('system:status', '--', '--json') -Root $Root -CommandRunner $CommandRunner
     return ConvertFrom-LauncherJsonOutput -CommandResult $result
 }
 
@@ -197,8 +200,8 @@ function Invoke-StartLauncher {
         }
     }
 
-    Test-LauncherPrerequisites -Root $resolvedRoot -CommandRunner $CommandRunner -CommandLookup $CommandLookup -SkipWindowsCheck:$SkipWindowsCheck
-    $status = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner
+    $pnpmExecutor = Test-LauncherPrerequisites -Root $resolvedRoot -CommandRunner $CommandRunner -CommandLookup $CommandLookup -SkipWindowsCheck:$SkipWindowsCheck
+    $status = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner -PnpmExecutor $pnpmExecutor
 
     if ([string]$status.operationLock -eq 'active') {
         Throw-LauncherError -Code 'SYSTEM_OPERATION_IN_PROGRESS' -Message 'Outra operação do sistema está em andamento.'
@@ -216,12 +219,16 @@ function Invoke-StartLauncher {
         Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O estado do sistema não é reconhecido.'
     }
 
-    $startResult = Invoke-LauncherCommandRunner -FilePath 'corepack' -Arguments @('pnpm', 'system:start') -WorkingDirectory $resolvedRoot -CommandRunner $CommandRunner
+    $startResult = Invoke-LauncherPnpmCommand -Executor $pnpmExecutor -Arguments @('system:start') -Root $resolvedRoot -CommandRunner $CommandRunner
     if ([int]$startResult.ExitCode -ne 0) {
         Throw-LauncherError -Code 'SYSTEM_START_FAILED' -Message 'O supervisor não conseguiu iniciar o sistema.'
     }
 
     Wait-LauncherReadiness -HttpProbe $HttpProbe -TimeoutSeconds $TimeoutSeconds -PollSeconds $PollSeconds
+    $readyStatus = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner -PnpmExecutor $pnpmExecutor
+    if (-not (Test-SystemHealthyForLauncher -Status $readyStatus)) {
+        Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O control plane autenticado não ficou pronto.'
+    }
     if (-not $NoBrowser) { Open-LauncherDashboard -BrowserOpener $BrowserOpener }
     return [pscustomobject]@{ Action = 'started'; RepositoryRoot = $resolvedRoot }
 }

@@ -202,6 +202,23 @@ class MemoryGroups implements WhatsAppGroupDirectoryRepository {
     };
     return this.record;
   }
+
+  async updateAdministrativeWithLifecycleGuard(
+    id: string,
+    input: {
+      active?: boolean;
+      paused?: boolean;
+      assignedInstanceName: string | null;
+      expectedUpdatedAt: Date;
+      now: Date;
+    },
+  ) {
+    if (this.lifecycleActive) return { kind: 'ACTIVE_LIFECYCLE' as const };
+    const updated = await this.updateAdministrative(id, input);
+    return updated
+      ? { kind: 'UPDATED' as const, group: updated }
+      : { kind: 'CAS_CONFLICT' as const };
+  }
 }
 
 const settings: CommercialAutomationSettingsRecord = {
@@ -410,6 +427,39 @@ describe('OperationalAdminService', () => {
     ).rejects.toMatchObject({
       code: 'OPERATIONAL_ASSIGNMENT_LIFECYCLE_ACTIVE',
     });
+  });
+
+  it('reavalia lifecycle dentro da serialização mesmo após precheck seguro', async () => {
+    const { service, groups, instances } = createService();
+    instances.records.push(instance('instance-b'));
+    status.hasActiveGroupLifecycle = async () => false;
+    groups.lifecycleActive = true;
+
+    await expect(
+      service.updateGroup({
+        id: 'group-a',
+        assignedInstanceName: 'instance-b',
+        expectedUpdatedAt: NOW.toISOString(),
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      }),
+    ).rejects.toMatchObject({
+      code: 'OPERATIONAL_ASSIGNMENT_LIFECYCLE_ACTIVE',
+    });
+    expect(groups.record.assignedInstanceName).toBe('instance-a');
+  });
+
+  it('preserva CAS stale dentro da serialização de routing', async () => {
+    const { service, groups } = createService();
+
+    await expect(
+      service.updateGroup({
+        id: 'group-a',
+        assignedInstanceName: null,
+        expectedUpdatedAt: new Date(NOW.getTime() - 1).toISOString(),
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      }),
+    ).rejects.toMatchObject({ code: 'OPERATIONAL_CAS_CONFLICT' });
+    expect(groups.record.assignedInstanceName).toBe('instance-a');
   });
 
   it('faz update de settings por confirmação e scheduleRevision', async () => {

@@ -156,6 +156,15 @@ export type OperationalAdmin = {
     dailyGroupLimit: number;
     dailyGlobalLimitOverride: number | null;
     dailyGroupLimitOverride: number | null;
+    dailyShopeeHttpLimit: number;
+    dailyOpenAiGenerationLimit: number;
+    dailyShopeeHttpLimitOverride: number | null;
+    dailyOpenAiGenerationLimitOverride: number | null;
+    providerUsage: {
+      dayKey: string;
+      shopee: { used: number; limit: number; reached: boolean };
+      openAi: { used: number; limit: number; reached: boolean };
+    };
     hardCaps: {
       dailyGlobalLimit: number;
       dailyGroupLimit: number;

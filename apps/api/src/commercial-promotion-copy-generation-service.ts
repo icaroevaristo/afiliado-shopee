@@ -102,7 +102,8 @@ const candidateBlockers = (
   ) {
     blockers.push('COMMERCIAL_AI_COPY_OFFER_EXPIRED');
   }
-  const affiliateLinkValidation = validateCommercialAffiliateLinkProvenance(context);
+  const affiliateLinkValidation =
+    validateCommercialAffiliateLinkProvenance(context);
   if (!affiliateLinkValidation.valid) {
     blockers.push(affiliateLinkValidation.code);
   }
@@ -321,6 +322,12 @@ export class CommercialPromotionCopyGenerationService {
     if (attempt.status === 'AMBIGUOUS') {
       return 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS';
     }
+    if (
+      attempt.failureCode === 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED' &&
+      !attempt.requestMayHaveStarted
+    ) {
+      return null;
+    }
     if (attempt.failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID') {
       return scope === 'current'
         ? COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
@@ -414,10 +421,7 @@ export class CommercialPromotionCopyGenerationService {
 
   private sourceProductName(context: CommercialPromotionCopyContext) {
     try {
-      return normalizeUntrustedCommercialText(
-        context.product.productName,
-        250,
-      );
+      return normalizeUntrustedCommercialText(context.product.productName, 250);
     } catch {
       throw new AppError(
         'Fatos comerciais invalidos',
@@ -559,10 +563,10 @@ export class CommercialPromotionCopyGenerationService {
         blocker === 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'
           ? 'Copy historica nao pode ser reutilizada com fingerprint diferente'
           : blocker === 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'
-          ? 'Resultado historico e ambiguo'
-          : blocker === 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'
-            ? 'Geracao historica ainda esta em andamento'
-            : 'Tentativa historica falhou',
+            ? 'Resultado historico e ambiguo'
+            : blocker === 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'
+              ? 'Geracao historica ainda esta em andamento'
+              : 'Tentativa historica falhou',
         blocker,
       );
     }

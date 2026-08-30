@@ -163,7 +163,9 @@ const imageInspection = (volumeTargets: readonly string[] = []) =>
   JSON.stringify([
     {
       Config: {
-        Volumes: Object.fromEntries(volumeTargets.map((target) => [target, {}])),
+        Volumes: Object.fromEntries(
+          volumeTargets.map((target) => [target, {}]),
+        ),
       },
     },
   ]);
@@ -197,6 +199,7 @@ const harness = (
     managedDescendants?: Record<number, number[]>;
     dockerDiscovery?: DockerDiscoveryFixture;
     dockerDiscoveryThrowsAt?: 'config' | 'list' | 'inspect' | 'imageInspect';
+    requiredAuthToken?: string;
   } = {},
 ) => {
   let nextPid = 100;
@@ -214,7 +217,8 @@ const harness = (
   const run = vi.fn(async (spec: CommandSpec) => {
     commands.push(spec);
     if (spec.args.includes('config') && spec.args.includes('--format')) {
-      if (options.dockerDiscoveryThrowsAt === 'config') throw new Error('timeout');
+      if (options.dockerDiscoveryThrowsAt === 'config')
+        throw new Error('timeout');
       const fixture = options.dockerDiscovery?.config;
       return {
         code: fixture?.code ?? 0,
@@ -227,7 +231,8 @@ const harness = (
       spec.args[0] === 'ps' &&
       spec.args.includes('{{.ID}}')
     ) {
-      if (options.dockerDiscoveryThrowsAt === 'list') throw new Error('timeout');
+      if (options.dockerDiscoveryThrowsAt === 'list')
+        throw new Error('timeout');
       const fixture = options.dockerDiscovery?.list;
       return {
         code: fixture?.code ?? 0,
@@ -243,21 +248,25 @@ const harness = (
       if (options.dockerDiscoveryThrowsAt === 'imageInspect') {
         throw new Error('timeout');
       }
-      const fixture = options.dockerDiscovery?.imageInspect?.[spec.args[2] ?? ''];
+      const fixture =
+        options.dockerDiscovery?.imageInspect?.[spec.args[2] ?? ''];
       return {
         code: fixture?.code ?? 1,
         stdout: fixture?.stdout ?? '',
         stderr: '',
       };
-    }    if (spec.command === 'docker' && spec.args[0] === 'inspect') {
-      if (options.dockerDiscoveryThrowsAt === 'inspect') throw new Error('timeout');
+    }
+    if (spec.command === 'docker' && spec.args[0] === 'inspect') {
+      if (options.dockerDiscoveryThrowsAt === 'inspect')
+        throw new Error('timeout');
       const fixture = options.dockerDiscovery?.inspect;
       return {
         code: fixture?.code ?? 0,
         stdout: fixture?.stdout ?? '',
         stderr: '',
       };
-    }    if (spec.args.length === 1 && spec.args[0] === 'info') {
+    }
+    if (spec.args.length === 1 && spec.args[0] === 'info') {
       return {
         code: options.dockerAvailable === false ? 1 : 0,
         stdout: '',
@@ -344,7 +353,7 @@ const harness = (
         rootPid === candidatePid ||
         Boolean(options.managedDescendants?.[rootPid]?.includes(candidatePid)),
     ),
-    request: vi.fn(async (url) => {
+    request: vi.fn(async (url, requestOptions) => {
       if (
         options.healthFails &&
         (url === 'http://api/health' || url === 'http://dashboard')
@@ -359,6 +368,13 @@ const harness = (
         };
       }
       if (url.endsWith('/commercial-automation/status')) {
+        if (
+          options.requiredAuthToken &&
+          requestOptions?.headers?.authorization !==
+            `Bearer ${options.requiredAuthToken}`
+        ) {
+          return { ok: false, status: 401 };
+        }
         return {
           ok: true,
           status: 200,
@@ -417,6 +433,14 @@ const explicitSafePreviewEnvironment = () => ({
   ...environment('preview'),
   WHATSAPP_PROVIDER: 'mock',
   WHATSAPP_GROUP_SEND_ENABLED: 'false',
+});
+
+const dailySendReadyEnvironment = (token?: string) => ({
+  ...environment('send'),
+  COMMERCIAL_AUTOMATION_ENABLED: 'true',
+  COMMERCIAL_SCHEDULER_ENABLED: 'true',
+  SCHEDULER_ENABLED: 'false',
+  ...(token ? { LOCAL_API_AUTH_TOKEN: token } : {}),
 });
 
 describe('LocalSystemSupervisor', () => {
@@ -488,6 +512,52 @@ describe('LocalSystemSupervisor', () => {
     );
   });
 
+  it('fails closed before startup when the daily SEND-ready token is absent', async () => {
+    const root = createRoot();
+    const state = harness();
+
+    await expect(
+      createSupervisor(root, state.deps).start(dailySendReadyEnvironment()),
+    ).rejects.toMatchObject({ code: 'LOCAL_API_AUTH_TOKEN_REQUIRED' });
+    expect(state.spawned).toEqual([]);
+  });
+
+  it('keeps health-only green daily topology NOT_READY when auth is wrong', async () => {
+    const root = createRoot();
+    const state = harness({ requiredAuthToken: 'correct-token' });
+
+    await expect(
+      createSupervisor(root, state.deps).start(
+        dailySendReadyEnvironment('wrong-token'),
+      ),
+    ).rejects.toMatchObject({ code: 'SYSTEM_START_INCOMPLETE' });
+    expect(state.spawned).toEqual([
+      'api',
+      'dashboard',
+      'commercial-worker',
+      'whatsapp-dispatch-worker',
+    ]);
+    expect(state.stopped).toHaveLength(4);
+  });
+
+  it('reports authenticated daily control plane without exposing its token', async () => {
+    const root = createRoot();
+    const token = 'correct-token';
+    const state = harness({ requiredAuthToken: token });
+
+    const status = await createSupervisor(root, state.deps).start(
+      dailySendReadyEnvironment(token),
+    );
+
+    expect(status.overall).toBe('running');
+    expect(status.controlPlane).toEqual({
+      required: true,
+      configured: true,
+      authenticated: true,
+    });
+    expect(JSON.stringify(status)).not.toContain(token);
+  });
+
   it('uses direct pnpm without Corepack and preserves command context', async () => {
     const root = createRoot();
     const state = harness();
@@ -495,12 +565,14 @@ describe('LocalSystemSupervisor', () => {
 
     await createSupervisor(root, state.deps).start(env);
 
-    const versionCommand = state.commands.find((command) =>
-      command.args.includes('--version') &&
-      (command.command === 'pnpm' || command.command === process.execPath),
+    const versionCommand = state.commands.find(
+      (command) =>
+        command.args.includes('--version') &&
+        (command.command === 'pnpm' || command.command === process.execPath),
     );
     expect(versionCommand).toBeDefined();
-    if (!versionCommand) throw new Error('pnpm version command was not captured');
+    if (!versionCommand)
+      throw new Error('pnpm version command was not captured');
 
     const pnpmArgs =
       process.platform === 'win32'
@@ -524,7 +596,8 @@ describe('LocalSystemSupervisor', () => {
       command.args.includes('db:deploy'),
     );
     expect(deployCommand).toBeDefined();
-    if (!deployCommand) throw new Error('pnpm db:deploy command was not captured');
+    if (!deployCommand)
+      throw new Error('pnpm db:deploy command was not captured');
     const deployArgs =
       process.platform === 'win32'
         ? deployCommand.args.slice(1)
@@ -569,13 +642,15 @@ describe('LocalSystemSupervisor', () => {
     const dockerDiscovery = equivalentDockerDiscovery();
     const implicitTarget = '/image-declared-volume';
     const candidate = dockerInspection('redis');
-    candidate.Mounts = [{
-      Type: 'volume',
-      Destination: implicitTarget,
-      RW: true,
-      Mode: '',
-      Propagation: '',
-    }];
+    candidate.Mounts = [
+      {
+        Type: 'volume',
+        Destination: implicitTarget,
+        RW: true,
+        Mode: '',
+        Propagation: '',
+      },
+    ];
     dockerDiscovery.inspect = {
       code: 0,
       stdout: JSON.stringify([dockerInspection('postgres'), candidate]),
@@ -610,12 +685,40 @@ describe('LocalSystemSupervisor', () => {
   });
 
   it.each([
-    ['extra destination', { Type: 'volume', Destination: '/outside-contract', RW: true }],
-    ['bind type', { Type: 'bind', Destination: '/image-declared-volume', RW: true }],
-    ['tmpfs type', { Type: 'tmpfs', Destination: '/image-declared-volume', RW: true }],
-    ['read-only', { Type: 'volume', Destination: '/image-declared-volume', RW: false }],
-    ['incompatible mode', { Type: 'volume', Destination: '/image-declared-volume', RW: true, Mode: 'ro' }],
-    ['incompatible propagation', { Type: 'volume', Destination: '/image-declared-volume', RW: true, Propagation: 'shared' }],
+    [
+      'extra destination',
+      { Type: 'volume', Destination: '/outside-contract', RW: true },
+    ],
+    [
+      'bind type',
+      { Type: 'bind', Destination: '/image-declared-volume', RW: true },
+    ],
+    [
+      'tmpfs type',
+      { Type: 'tmpfs', Destination: '/image-declared-volume', RW: true },
+    ],
+    [
+      'read-only',
+      { Type: 'volume', Destination: '/image-declared-volume', RW: false },
+    ],
+    [
+      'incompatible mode',
+      {
+        Type: 'volume',
+        Destination: '/image-declared-volume',
+        RW: true,
+        Mode: 'ro',
+      },
+    ],
+    [
+      'incompatible propagation',
+      {
+        Type: 'volume',
+        Destination: '/image-declared-volume',
+        RW: true,
+        Propagation: 'shared',
+      },
+    ],
   ] satisfies Array<[string, DockerInspectionFixture['Mounts'][number]]>)(
     'rejects an implicit image volume with %s',
     async (_caseName, mount) => {
@@ -654,51 +757,53 @@ describe('LocalSystemSupervisor', () => {
   it.each([
     ['missing image metadata', { code: 1, stdout: '' }],
     ['invalid image metadata JSON', { code: 0, stdout: '{invalid' }],
-    ['ambiguous image metadata', { code: 0, stdout: JSON.stringify([{ Config: {} }, { Config: {} }]) }],
+    [
+      'ambiguous image metadata',
+      { code: 0, stdout: JSON.stringify([{ Config: {} }, { Config: {} }]) },
+    ],
     ['missing image Config', { code: 0, stdout: JSON.stringify([{}]) }],
     [
       'invalid image Volumes shape',
       { code: 0, stdout: JSON.stringify([{ Config: { Volumes: [] } }]) },
     ],
-  ])(
-    'fails closed for %s',
-    async (_caseName, imageMetadata) => {
-      const root = createRoot();
-      const dockerDiscovery = equivalentDockerDiscovery();
-      const candidate = dockerInspection('redis');
-      candidate.Mounts = [{
+  ])('fails closed for %s', async (_caseName, imageMetadata) => {
+    const root = createRoot();
+    const dockerDiscovery = equivalentDockerDiscovery();
+    const candidate = dockerInspection('redis');
+    candidate.Mounts = [
+      {
         Type: 'volume',
         Destination: '/image-declared-volume',
         RW: true,
-      }];
-      dockerDiscovery.inspect = {
-        code: 0,
-        stdout: JSON.stringify([dockerInspection('postgres'), candidate]),
-      };
-      dockerDiscovery.imageInspect = {
-        ...dockerDiscovery.imageInspect,
-        'redis:7-alpine': imageMetadata,
-      };
-      const state = harness({
-        dockerDiscovery,
-        portOccupants: {
-          5432: { pid: 5001, processName: 'external-postgres' },
-          6379: { pid: 5002, processName: 'external-redis' },
-        },
-      });
+      },
+    ];
+    dockerDiscovery.inspect = {
+      code: 0,
+      stdout: JSON.stringify([dockerInspection('postgres'), candidate]),
+    };
+    dockerDiscovery.imageInspect = {
+      ...dockerDiscovery.imageInspect,
+      'redis:7-alpine': imageMetadata,
+    };
+    const state = harness({
+      dockerDiscovery,
+      portOccupants: {
+        5432: { pid: 5001, processName: 'external-postgres' },
+        6379: { pid: 5002, processName: 'external-redis' },
+      },
+    });
 
-      const status = await createSupervisor(root, state.deps).status(
-        explicitSafePreviewEnvironment(),
-      );
+    const status = await createSupervisor(root, state.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
 
-      expect(status.externalPortOccupants).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ port: 5432 }),
-          expect.objectContaining({ port: 6379 }),
-        ]),
-      );
-    },
-  );
+    expect(status.externalPortOccupants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ port: 5432 }),
+        expect.objectContaining({ port: 6379 }),
+      ]),
+    );
+  });
 
   it('keeps an explicit Compose mount mandatory even when the image declares it', async () => {
     const root = createRoot();
@@ -772,7 +877,9 @@ describe('LocalSystemSupervisor', () => {
     });
     const supervisor = createSupervisor(root, state.deps);
 
-    const beforeStart = await supervisor.status(explicitSafePreviewEnvironment());
+    const beforeStart = await supervisor.status(
+      explicitSafePreviewEnvironment(),
+    );
     expect(beforeStart.externalPortOccupants).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ port: 5432 }),
@@ -800,8 +907,7 @@ describe('LocalSystemSupervisor', () => {
     expect(
       state.commands.some(
         (command) =>
-          command.command === 'docker' &&
-          command.args[0] === 'inspect',
+          command.command === 'docker' && command.args[0] === 'inspect',
       ),
     ).toBe(true);
   });
@@ -863,7 +969,7 @@ describe('LocalSystemSupervisor', () => {
         dockerInspection('redis'),
       ],
     ],
-  ] satisfies Array<[string, DockerInspectionFixture[]]>) (
+  ] satisfies Array<[string, DockerInspectionFixture[]]>)(
     'fails closed for %s',
     async (_caseName, inspections) => {
       const root = createRoot();
@@ -889,10 +995,7 @@ describe('LocalSystemSupervisor', () => {
   );
 
   it.each([
-    [
-      'compose config error',
-      { config: { code: 1, stdout: '' } },
-    ],
+    ['compose config error', { config: { code: 1, stdout: '' } }],
     [
       'invalid compose config JSON',
       { config: { code: 0, stdout: '{invalid' } },
@@ -927,7 +1030,7 @@ describe('LocalSystemSupervisor', () => {
         inspect: { code: 0, stdout: '{invalid' },
       },
     ],
-  ] satisfies Array<[string, DockerDiscoveryFixture]>) (
+  ] satisfies Array<[string, DockerDiscoveryFixture]>)(
     'fails closed when Docker ownership discovery has %s',
     async (_caseName, dockerDiscovery) => {
       const root = createRoot();
@@ -991,7 +1094,9 @@ describe('LocalSystemSupervisor', () => {
     });
 
     await expect(
-      createSupervisor(root, state.deps).start(explicitSafePreviewEnvironment()),
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
     ).resolves.toMatchObject({ overall: 'running' });
 
     expect(state.deps.sleep).toHaveBeenCalled();
@@ -1016,7 +1121,9 @@ describe('LocalSystemSupervisor', () => {
     });
 
     await expect(
-      createSupervisor(root, state.deps).start(explicitSafePreviewEnvironment()),
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
     ).rejects.toMatchObject({ code: 'MAIN_COMPOSE_UNHEALTHY' });
 
     expect(
@@ -1041,9 +1148,9 @@ describe('LocalSystemSupervisor', () => {
       explicitSafePreviewEnvironment(),
     );
 
-    const scannedPorts = vi.mocked(state.deps.getPortOccupant).mock.calls.map(
-      ([port]) => port,
-    );
+    const scannedPorts = vi
+      .mocked(state.deps.getPortOccupant)
+      .mock.calls.map(([port]) => port);
     expect(scannedPorts).not.toContain(8080);
     expect(status.externalPortOccupants).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ port: 8080 })]),
@@ -1109,9 +1216,9 @@ describe('LocalSystemSupervisor', () => {
       ),
     ).toBe(false);
     expect(
-      vi.mocked(state.deps.request).mock.calls.some(([url]) =>
-        String(url).includes('8080'),
-      ),
+      vi
+        .mocked(state.deps.request)
+        .mock.calls.some(([url]) => String(url).includes('8080')),
     ).toBe(false);
 
     await supervisor.status(safeEnvironment);
@@ -1308,7 +1415,9 @@ describe('LocalSystemSupervisor', () => {
     const state = harness({ mainComposeStartFails: true });
 
     await expect(
-      createSupervisor(root, state.deps).start(explicitSafePreviewEnvironment()),
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
     ).rejects.toMatchObject({ code: 'MAIN_COMPOSE_START_FAILED' });
 
     expect(state.spawned).toEqual([]);

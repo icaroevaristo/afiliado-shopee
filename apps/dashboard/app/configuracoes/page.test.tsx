@@ -222,6 +222,7 @@ describe('SettingsPage commercial automation', () => {
 
     expect(resumeCommercialAutomationMock).toHaveBeenCalledWith(
       'RETOMAR_AUTOMACAO_COMERCIAL',
+      automationStatus.updatedAt,
     );
     expect(screen.container.querySelector('[role="dialog"]')).toBeNull();
     expect(screen.container.textContent).toContain('Operação: ativa');

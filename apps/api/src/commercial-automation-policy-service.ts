@@ -61,6 +61,8 @@ export type CommercialAutomationEffectiveSchedule = {
   allowedEndTime: string;
   dailyGlobalLimit: number;
   dailyGroupLimit: number;
+  dailyShopeeHttpLimit: number;
+  dailyOpenAiGenerationLimit: number;
   minimumIntervalMinutes: number;
   staggerMinutes: number;
   scheduleRevision: number;
@@ -102,6 +104,18 @@ export const resolveCommercialAutomationSchedule = (
     config.dailyGroupLimit,
     settings.dailyGroupLimit ?? config.dailyGroupLimit,
   ),
+  dailyShopeeHttpLimit:
+    settings.dailyShopeeHttpLimit ??
+    Math.min(
+      config.dailyGlobalLimit,
+      settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
+    ),
+  dailyOpenAiGenerationLimit:
+    settings.dailyOpenAiGenerationLimit ??
+    Math.min(
+      config.dailyGlobalLimit,
+      settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
+    ),
   minimumIntervalMinutes:
     settings.minimumIntervalMinutes ?? config.minimumIntervalMinutes,
   staggerMinutes: settings.staggerMinutes ?? 0,
@@ -206,6 +220,8 @@ const assertScheduleUpdate = (
     'staggerMinutes',
     'dailyGlobalLimit',
     'dailyGroupLimit',
+    'dailyShopeeHttpLimit',
+    'dailyOpenAiGenerationLimit',
   ].some((field) => field in input);
   if (!hasScheduleField) {
     throw new AppError(
@@ -238,6 +254,8 @@ const assertScheduleUpdate = (
   for (const [field, value] of [
     ['dailyGlobalLimit', input.dailyGlobalLimit],
     ['dailyGroupLimit', input.dailyGroupLimit],
+    ['dailyShopeeHttpLimit', input.dailyShopeeHttpLimit],
+    ['dailyOpenAiGenerationLimit', input.dailyOpenAiGenerationLimit],
   ] as const) {
     if (value === undefined || value === null) continue;
     if (!Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
@@ -334,6 +352,15 @@ export const getLocalDayRange = (now: Date, timezone: string) => {
   };
 };
 
+export const getCommercialDayKey = (now: Date, timezone: string) => {
+  const parts = getZonedParts(now, timezone);
+  return [parts.year, parts.month, parts.day]
+    .map((value, index) =>
+      index === 0 ? String(value) : String(value).padStart(2, '0'),
+    )
+    .join('-');
+};
+
 const isoOrNull = (date: Date | null) => date?.toISOString() ?? null;
 
 const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
@@ -346,6 +373,8 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   staggerMinutes: null,
   dailyGlobalLimit: null,
   dailyGroupLimit: null,
+  dailyShopeeHttpLimit: null,
+  dailyOpenAiGenerationLimit: null,
   scheduleRevision: 0,
   updatedAt: now,
 });
@@ -511,6 +540,7 @@ export class CommercialAutomationPolicyService {
   async setPaused(input: {
     paused: boolean;
     confirmation?: string;
+    expectedUpdatedAt?: string;
   }): Promise<CommercialAutomationStatus> {
     if (
       !input.paused &&
@@ -521,11 +551,22 @@ export class CommercialAutomationPolicyService {
         'COMMERCIAL_AUTOMATION_RESUME_CONFIRMATION_REQUIRED',
       );
     }
+    let expectedUpdatedAt: Date | undefined;
+    if (!input.paused) {
+      expectedUpdatedAt = new Date(input.expectedUpdatedAt ?? '');
+      if (Number.isNaN(expectedUpdatedAt.getTime())) {
+        throw new AppError(
+          'A configuracao observada e obrigatoria para retomar a automacao',
+          'COMMERCIAL_AUTOMATION_RESUME_CAS_REQUIRED',
+        );
+      }
+    }
     const now = (this.dependencies.clock ?? (() => new Date()))();
     const context = await this.loadOperationalContext(now);
     const settings = await this.dependencies.settings.setPaused(
       input.paused,
       now,
+      expectedUpdatedAt,
     );
     return this.buildStatus({ now, settings, ...context });
   }

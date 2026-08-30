@@ -116,6 +116,11 @@ const status = (
     api: overall === 'running' ? 'available' : 'unavailable',
     dashboard: overall === 'running' ? 'available' : 'unavailable',
   },
+  controlPlane: {
+    required: false,
+    configured: false,
+    authenticated: false,
+  },
   schedulers: {
     legacy: {
       enabled: false,
@@ -179,7 +184,9 @@ const safeFinalStoppedStatus = (): SystemStatusSnapshot => {
 
 const finalStateSafetyInput = (
   snapshot: SystemStatusSnapshot,
-  overrides: Partial<Parameters<typeof isSafePreviewStabilityFinalState>[0]> = {},
+  overrides: Partial<
+    Parameters<typeof isSafePreviewStabilityFinalState>[0]
+  > = {},
 ): Parameters<typeof isSafePreviewStabilityFinalState>[0] => ({
   status: snapshot,
   automationPaused: true,
@@ -299,7 +306,10 @@ const createFakeDependencies = (
       }
     },
     status: async () => systemStatus,
-    prepareMainInfrastructure: async (_environment, reuseManagedInfrastructure) => {
+    prepareMainInfrastructure: async (
+      _environment,
+      reuseManagedInfrastructure,
+    ) => {
       prepareReuseDecisions.push(reuseManagedInfrastructure);
       calls.push('prepare-infrastructure');
     },
@@ -310,8 +320,7 @@ const createFakeDependencies = (
       calls.push('start-system');
       startEnvironments.push({
         COMMERCIAL_AUTOMATION_MODE: environment.COMMERCIAL_AUTOMATION_MODE,
-        COMMERCIAL_SCHEDULER_ENABLED:
-          environment.COMMERCIAL_SCHEDULER_ENABLED,
+        COMMERCIAL_SCHEDULER_ENABLED: environment.COMMERCIAL_SCHEDULER_ENABLED,
       });
       startCount += 1;
       if (startCount === options.failStartAt) {
@@ -785,12 +794,14 @@ describe('preview operational stability', () => {
     ] as const)('rejects final state when %s', (_label, overrides) => {
       expect(
         isSafePreviewStabilityFinalState(
-          finalStateSafetyInput(reusableInfrastructurePartialStatus(), overrides),
+          finalStateSafetyInput(
+            reusableInfrastructurePartialStatus(),
+            overrides,
+          ),
         ),
       ).toBe(false);
     });
   });
-
 
   it.each([
     [
@@ -863,9 +874,7 @@ describe('preview operational stability', () => {
         snapshot.mode = 'send';
       },
     ],
-  ] satisfies Array<
-    [string, (snapshot: SystemStatusSnapshot) => void]
-  >)(
+  ] satisfies Array<[string, (snapshot: SystemStatusSnapshot) => void]>)(
     'keeps reusable-infrastructure partial blocked when %s',
     async (_label, mutate) => {
       const initial = reusableInfrastructurePartialStatus();
@@ -902,7 +911,11 @@ describe('preview operational stability', () => {
       (snapshot: SystemStatusSnapshot) => {
         snapshot.processes.dashboard = 'stopped';
       },
-      { component: 'dashboard', observedState: 'stopped', expectedState: 'running' },
+      {
+        component: 'dashboard',
+        observedState: 'stopped',
+        expectedState: 'running',
+      },
     ],
     [
       'commercial-worker',
@@ -970,7 +983,9 @@ describe('preview operational stability', () => {
     const snapshot = partialTopologyStatus();
     snapshot.evolution = {
       api: 'available',
-      services: [{ service: 'evolution-api', state: 'running', health: 'healthy' }],
+      services: [
+        { service: 'evolution-api', state: 'running', health: 'healthy' },
+      ],
       whatsappConnection: 'open',
     };
     expect(snapshot.schedulers.legacy.status).toBe('disabled');
@@ -1010,7 +1025,9 @@ describe('preview operational stability', () => {
         COMMERCIAL_SCHEDULER_ENABLED: 'false',
       },
     ]);
-    expect(fake.calls.filter((call) => call === 'start-system')).toHaveLength(2);
+    expect(fake.calls.filter((call) => call === 'start-system')).toHaveLength(
+      2,
+    );
     expect(
       fake.reports[0]?.scenarios.filter(
         (scenario) => scenario.name === 'scheduled-preview',
@@ -1034,8 +1051,14 @@ describe('preview operational stability', () => {
     );
     expect(fake.reports[0]?.scenarios).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'scheduled-preview', status: 'failed' }),
-        expect.objectContaining({ name: 'mandatory-restoration', status: 'completed' }),
+        expect.objectContaining({
+          name: 'scheduled-preview',
+          status: 'failed',
+        }),
+        expect.objectContaining({
+          name: 'mandatory-restoration',
+          status: 'completed',
+        }),
       ]),
     );
   });
@@ -1276,7 +1299,9 @@ describe('preview operational stability', () => {
         settings: { present: true, paused: false },
       }),
     ).toThrowError(
-      expect.objectContaining({ code: 'PREVIEW_STABILITY_PAUSED_STARTUP_UNSAFE' }),
+      expect.objectContaining({
+        code: 'PREVIEW_STABILITY_PAUSED_STARTUP_UNSAFE',
+      }),
     );
     expect(() =>
       assertPausedStartupEvidence(before, {
@@ -1292,7 +1317,9 @@ describe('preview operational stability', () => {
         ],
       }),
     ).toThrowError(
-      expect.objectContaining({ code: 'PREVIEW_STABILITY_PAUSED_STARTUP_UNSAFE' }),
+      expect.objectContaining({
+        code: 'PREVIEW_STABILITY_PAUSED_STARTUP_UNSAFE',
+      }),
     );
   });
 
@@ -1308,7 +1335,11 @@ describe('preview operational stability', () => {
     expect(report.ticksObserved).toBeGreaterThanOrEqual(5);
     expect(report.deltas.executions).toBe(report.ticksObserved + 1);
     expect(report.deltas.commercialJobs).toBe(report.ticksObserved + 1);
-    expect(report.scenarios.filter((scenario) => scenario.name === 'scheduled-preview')).toHaveLength(1);
+    expect(
+      report.scenarios.filter(
+        (scenario) => scenario.name === 'scheduled-preview',
+      ),
+    ).toHaveLength(1);
   });
 
   it('distinguishes a due scheduled tick from an immediate bootstrap tick', () => {
@@ -1463,7 +1494,11 @@ describe('preview operational stability', () => {
         run: vi.fn(async (spec: { args: string[] }) => {
           commands.push(spec.args);
           if (spec.args.includes('config')) {
-            return { code: 0, stdout: mainInfrastructureComposeConfig(), stderr: '' };
+            return {
+              code: 0,
+              stdout: mainInfrastructureComposeConfig(),
+              stderr: '',
+            };
           }
           if (spec.args[0] === 'ps') {
             return {
@@ -1489,7 +1524,11 @@ describe('preview operational stability', () => {
             };
           }
           if (spec.args[0] === 'image' && spec.args[1] === 'inspect') {
-            return { code: 0, stdout: mainInfrastructureImageInspection(), stderr: '' };
+            return {
+              code: 0,
+              stdout: mainInfrastructureImageInspection(),
+              stderr: '',
+            };
           }
           if (spec.args[0] === 'stop') {
             expect(spec.args).toEqual(['stop', targetId]);
@@ -1512,7 +1551,10 @@ describe('preview operational stability', () => {
       const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
       await expect(
-        runtime.restartMainService(service, safePreviewEvolutionIsolationEnvironment()),
+        runtime.restartMainService(
+          service,
+          safePreviewEvolutionIsolationEnvironment(),
+        ),
       ).resolves.toEqual({ unavailableMs: 5_000 });
 
       expect(commands).toContainEqual(['stop', targetId]);
@@ -1521,7 +1563,9 @@ describe('preview operational stability', () => {
         commands.some(
           (args) =>
             args[0] === 'compose' &&
-            (args.includes('stop') || args.includes('start') || args.includes('up')),
+            (args.includes('stop') ||
+              args.includes('start') ||
+              args.includes('up')),
         ),
       ).toBe(false);
       expect(commands.flat()).not.toContain('down');
@@ -1535,7 +1579,11 @@ describe('preview operational stability', () => {
       run: vi.fn(async (spec: { args: string[] }) => {
         commands.push(spec.args);
         if (spec.args.includes('config')) {
-          return { code: 0, stdout: mainInfrastructureComposeConfig(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureComposeConfig(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'ps') return { code: 0, stdout: '', stderr: '' };
         return { code: 0, stdout: '', stderr: '' };
@@ -1546,7 +1594,10 @@ describe('preview operational stability', () => {
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
     await expect(
-      runtime.restartMainService('postgres', safePreviewEvolutionIsolationEnvironment()),
+      runtime.restartMainService(
+        'postgres',
+        safePreviewEvolutionIsolationEnvironment(),
+      ),
     ).rejects.toMatchObject({
       code: 'PREVIEW_STABILITY_POSTGRES_START_FAILED',
       diagnostic: {
@@ -1556,7 +1607,9 @@ describe('preview operational stability', () => {
         errorCode: 'OWNERSHIP_UNPROVEN',
       },
     });
-    expect(commands.some((args) => args[0] === 'stop' || args[0] === 'start')).toBe(false);
+    expect(
+      commands.some((args) => args[0] === 'stop' || args[0] === 'start'),
+    ).toBe(false);
   });
 
   it('rejects ambiguous PostgreSQL ownership before any stop/start', async () => {
@@ -1565,7 +1618,11 @@ describe('preview operational stability', () => {
       run: vi.fn(async (spec: { args: string[] }) => {
         commands.push(spec.args);
         if (spec.args.includes('config')) {
-          return { code: 0, stdout: mainInfrastructureComposeConfig(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureComposeConfig(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'ps') {
           return {
@@ -1579,14 +1636,22 @@ describe('preview operational stability', () => {
             code: 0,
             stdout: JSON.stringify([
               mainInfrastructureInspection('postgres', 'healthy'),
-              mainInfrastructureInspection('postgres', 'healthy', EXTRA_CONTAINER_ID),
+              mainInfrastructureInspection(
+                'postgres',
+                'healthy',
+                EXTRA_CONTAINER_ID,
+              ),
               mainInfrastructureInspection('redis', 'healthy'),
             ]),
             stderr: '',
           };
         }
         if (spec.args[0] === 'image' && spec.args[1] === 'inspect') {
-          return { code: 0, stdout: mainInfrastructureImageInspection(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureImageInspection(),
+            stderr: '',
+          };
         }
         return { code: 0, stdout: '', stderr: '' };
       }),
@@ -1596,14 +1661,19 @@ describe('preview operational stability', () => {
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
     await expect(
-      runtime.restartMainService('postgres', safePreviewEvolutionIsolationEnvironment()),
+      runtime.restartMainService(
+        'postgres',
+        safePreviewEvolutionIsolationEnvironment(),
+      ),
     ).rejects.toMatchObject({
       diagnostic: {
         mainInfraStage: 'resolve',
         errorCode: 'AMBIGUOUS_OWNERSHIP',
       },
     });
-    expect(commands.some((args) => args[0] === 'stop' || args[0] === 'start')).toBe(false);
+    expect(
+      commands.some((args) => args[0] === 'stop' || args[0] === 'start'),
+    ).toBe(false);
   });
 
   it('preserves MAIN_COMPOSE_START_FAILED when the proven PostgreSQL container cannot start', async () => {
@@ -1612,7 +1682,11 @@ describe('preview operational stability', () => {
       run: vi.fn(async (spec: { args: string[] }) => {
         commands.push(spec.args);
         if (spec.args.includes('config')) {
-          return { code: 0, stdout: mainInfrastructureComposeConfig(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureComposeConfig(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'ps') {
           return {
@@ -1632,7 +1706,11 @@ describe('preview operational stability', () => {
           };
         }
         if (spec.args[0] === 'image' && spec.args[1] === 'inspect') {
-          return { code: 0, stdout: mainInfrastructureImageInspection(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureImageInspection(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'stop') return { code: 0, stdout: '', stderr: '' };
         if (spec.args[0] === 'start') {
@@ -1646,7 +1724,10 @@ describe('preview operational stability', () => {
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
     const error = await runtime
-      .restartMainService('postgres', safePreviewEvolutionIsolationEnvironment())
+      .restartMainService(
+        'postgres',
+        safePreviewEvolutionIsolationEnvironment(),
+      )
       .catch((value: unknown) => value);
     expect(error).toMatchObject({
       code: 'MAIN_COMPOSE_START_FAILED',
@@ -1669,7 +1750,11 @@ describe('preview operational stability', () => {
       run: vi.fn(async (spec: { args: string[] }) => {
         commands.push(spec.args);
         if (spec.args.includes('config')) {
-          return { code: 0, stdout: mainInfrastructureComposeConfig(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureComposeConfig(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'ps') {
           return {
@@ -1689,7 +1774,11 @@ describe('preview operational stability', () => {
           };
         }
         if (spec.args[0] === 'image' && spec.args[1] === 'inspect') {
-          return { code: 0, stdout: mainInfrastructureImageInspection(), stderr: '' };
+          return {
+            code: 0,
+            stdout: mainInfrastructureImageInspection(),
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'stop' || spec.args[0] === 'start') {
           return { code: 0, stdout: '', stderr: '' };
@@ -1702,7 +1791,10 @@ describe('preview operational stability', () => {
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
     await expect(
-      runtime.restartMainService('postgres', safePreviewEvolutionIsolationEnvironment()),
+      runtime.restartMainService(
+        'postgres',
+        safePreviewEvolutionIsolationEnvironment(),
+      ),
     ).rejects.toMatchObject({
       code: 'PREVIEW_STABILITY_POSTGRES_UNHEALTHY',
       diagnostic: {
@@ -1846,7 +1938,9 @@ describe('preview operational stability', () => {
           },
           body: JSON.stringify(expectedPayload),
         });
-        expect(JSON.stringify(options)).not.toMatch(/postgresql:\/\/|redis:\/\//i);
+        expect(JSON.stringify(options)).not.toMatch(
+          /postgresql:\/\/|redis:\/\//i,
+        );
       } finally {
         fetchSpy.mockRestore();
       }
@@ -1861,8 +1955,13 @@ describe('preview operational stability', () => {
     );
     try {
       await expect(
-        runtime.setAutomationPaused(false, safePreviewEvolutionIsolationEnvironment()),
-      ).rejects.toMatchObject({ code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED' });
+        runtime.setAutomationPaused(
+          false,
+          safePreviewEvolutionIsolationEnvironment(),
+        ),
+      ).rejects.toMatchObject({
+        code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+      });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
@@ -1873,9 +1972,11 @@ describe('preview operational stability', () => {
     'keeps pause update fail-closed on HTTP %s without exposing the response',
     async (statusCode) => {
       const token = 'local-preview-auth-test-token';
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response('sensitive response body', { status: statusCode }),
-      );
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          new Response('sensitive response body', { status: statusCode }),
+        );
       const runtime = createPreviewStabilityDependencies(
         ROOT,
         createInfrastructureRuntimeDependencies(vi.fn()),
@@ -1887,8 +1988,12 @@ describe('preview operational stability', () => {
             LOCAL_API_AUTH_TOKEN: token,
           })
           .catch((value: unknown) => value);
-        expect(error).toMatchObject({ code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED' });
-        expect(JSON.stringify(error)).not.toMatch(/sensitive response|local-preview-auth-test-token/i);
+        expect(error).toMatchObject({
+          code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        });
+        expect(JSON.stringify(error)).not.toMatch(
+          /sensitive response|local-preview-auth-test-token/i,
+        );
       } finally {
         fetchSpy.mockRestore();
       }
@@ -1908,7 +2013,9 @@ describe('preview operational stability', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockRejectedValueOnce(
-        new Error('Bearer local-preview-auth-test-token https://sensitive.invalid'),
+        new Error(
+          'Bearer local-preview-auth-test-token https://sensitive.invalid',
+        ),
       )
       .mockResolvedValueOnce(new Response('not-json', { status: 200 }))
       .mockResolvedValueOnce(
@@ -1919,8 +2026,12 @@ describe('preview operational stability', () => {
         const error = await runtime
           .setAutomationPaused(false, environment)
           .catch((value: unknown) => value);
-        expect(error).toMatchObject({ code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED' });
-        expect(JSON.stringify(error)).not.toMatch(/Bearer|local-preview-auth-test-token|sensitive\.invalid|not-json/i);
+        expect(error).toMatchObject({
+          code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+        });
+        expect(JSON.stringify(error)).not.toMatch(
+          /Bearer|local-preview-auth-test-token|sensitive\.invalid|not-json/i,
+        );
       }
       expect(fetchSpy).toHaveBeenCalledTimes(3);
     } finally {
@@ -1946,11 +2057,15 @@ describe('preview operational stability', () => {
     }));
     const dependencies = createInfrastructureRuntimeDependencies(run);
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
-    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const errorLog = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
 
     try {
       await expect(
-        runtime.forceAutomationPaused(safePreviewEvolutionIsolationEnvironment()),
+        runtime.forceAutomationPaused(
+          safePreviewEvolutionIsolationEnvironment(),
+        ),
       ).rejects.toMatchObject({
         code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED',
       });
@@ -1975,7 +2090,9 @@ describe('preview operational stability', () => {
 
   it('reuses preflight-proven healthy main infrastructure without Docker commands', async () => {
     const run = vi.fn(async () => {
-      throw new Error('Docker must not run when preflight already proved reuse');
+      throw new Error(
+        'Docker must not run when preflight already proved reuse',
+      );
     });
     const dependencies = createInfrastructureRuntimeDependencies(run);
     const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
@@ -2005,8 +2122,16 @@ describe('preview operational stability', () => {
           return {
             code: 0,
             stdout: [
-              JSON.stringify({ Service: 'postgres', State: 'running', Health: 'healthy' }),
-              JSON.stringify({ Service: 'redis', State: 'running', Health: 'healthy' }),
+              JSON.stringify({
+                Service: 'postgres',
+                State: 'running',
+                Health: 'healthy',
+              }),
+              JSON.stringify({
+                Service: 'redis',
+                State: 'running',
+                Health: 'healthy',
+              }),
             ].join('\n'),
             stderr: '',
           };
@@ -2022,7 +2147,13 @@ describe('preview operational stability', () => {
     );
 
     expect(commands).toContainEqual(['info']);
-    expect(commands).toContainEqual(['compose', 'up', '-d', 'postgres', 'redis']);
+    expect(commands).toContainEqual([
+      'compose',
+      'up',
+      '-d',
+      'postgres',
+      'redis',
+    ]);
     expect(
       commands.filter((args) => args[0] === 'compose' && args[1] === 'ps'),
     ).toHaveLength(2);
@@ -2104,7 +2235,8 @@ describe('preview operational stability', () => {
         if (spec.args[0] === 'volume') {
           return {
             code: 0,
-            stdout: 'afiliado-shopee-main-volume\nshopee-evolution-private-volume\n',
+            stdout:
+              'afiliado-shopee-main-volume\nshopee-evolution-private-volume\n',
             stderr: '',
           };
         }
@@ -2118,7 +2250,13 @@ describe('preview operational stability', () => {
     );
 
     expect(commands).toHaveLength(2);
-    expect(commands).toContainEqual(['compose', 'ps', '-a', '--format', 'json']);
+    expect(commands).toContainEqual([
+      'compose',
+      'ps',
+      '-a',
+      '--format',
+      'json',
+    ]);
     expect(commands).toContainEqual(['volume', 'ls', '--format', '{{.Name}}']);
     expect(commands.flat()).not.toContain('infra/evolution/docker-compose.yml');
     expect(commands.flat()).not.toContain('inspect');
@@ -2175,17 +2313,27 @@ describe('preview operational stability', () => {
             return { code: 0, stdout: mainInfrastructureCapture, stderr: '' };
           }
           if (spec.args[0] === 'volume') {
-            return { code: 0, stdout: 'afiliado-shopee-main-volume\n', stderr: '' };
+            return {
+              code: 0,
+              stdout: 'afiliado-shopee-main-volume\n',
+              stderr: '',
+            };
           }
           throw new Error(`unexpected command: ${spec.args.join(' ')}`);
         }),
       );
       const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
 
-      await expect(runtime.captureInfrastructure(environment)).rejects.toMatchObject({
+      await expect(
+        runtime.captureInfrastructure(environment),
+      ).rejects.toMatchObject({
         code: 'PREVIEW_STABILITY_EVOLUTION_CONTAINER_CAPTURE_FAILED',
       });
-      expect(commands.some((args) => args.includes('infra/evolution/docker-compose.yml'))).toBe(true);
+      expect(
+        commands.some((args) =>
+          args.includes('infra/evolution/docker-compose.yml'),
+        ),
+      ).toBe(true);
     },
   );
 
@@ -2195,7 +2343,11 @@ describe('preview operational stability', () => {
       vi.fn(async (spec: Parameters<SystemDependencies['run']>[0]) => {
         commands.push(spec.args);
         if (spec.args.includes('infra/evolution/docker-compose.yml')) {
-          return { code: 0, stdout: evolutionInfrastructureCapture, stderr: '' };
+          return {
+            code: 0,
+            stdout: evolutionInfrastructureCapture,
+            stderr: '',
+          };
         }
         if (spec.args[0] === 'compose') {
           return { code: 0, stdout: mainInfrastructureCapture, stderr: '' };
@@ -2218,12 +2370,19 @@ describe('preview operational stability', () => {
       WHATSAPP_GROUP_SEND_ENABLED: 'true',
     });
 
-    expect(commands.some((args) => args.includes('infra/evolution/docker-compose.yml'))).toBe(true);
+    expect(
+      commands.some((args) =>
+        args.includes('infra/evolution/docker-compose.yml'),
+      ),
+    ).toBe(true);
     expect(infrastructure.containers).toMatchObject({
       postgres: 'running',
       'evolution-api': 'running',
     });
-    expect(infrastructure.containers).not.toHaveProperty('evolution', 'not-required');
+    expect(infrastructure.containers).not.toHaveProperty(
+      'evolution',
+      'not-required',
+    );
     expect(infrastructure.volumeCount).toBe(2);
   });
 

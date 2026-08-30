@@ -122,7 +122,7 @@ function Get-LauncherFriendlyMessage {
         NODE_UNAVAILABLE = 'Node.js 20.6 ou mais recente não está disponível. Instale ou atualize o Node.js.'
         NODE_VERSION_UNSUPPORTED = 'O Node.js instalado é antigo. Atualize para a versão 20.6 ou mais recente.'
         COREPACK_UNAVAILABLE = 'O Corepack não está disponível. Ative-o no Node.js e tente novamente.'
-        PNPM_UNAVAILABLE = 'O pnpm não está disponível pelo Corepack. Verifique a instalação local.'
+        PNPM_UNAVAILABLE = 'O pnpm compatível não está disponível. Instale a versão indicada pelo projeto e tente novamente.'
         DOCKER_CLI_UNAVAILABLE = 'O Docker CLI não está disponível. Instale o Docker Desktop e tente novamente.'
         DOCKER_DAEMON_UNAVAILABLE = 'O Docker Desktop não está iniciado. Abra o Docker Desktop e tente novamente.'
         SYSTEM_STATUS_UNAVAILABLE = 'Não foi possível consultar o estado do sistema. Verifique o log técnico e tente novamente.'
@@ -235,6 +235,80 @@ function Test-LauncherCommandAvailable {
     }
 
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Get-LauncherExpectedPnpmMajor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    try {
+        $package = Get-Content -LiteralPath (Join-Path $Root 'package.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+        $match = [regex]::Match([string]$package.packageManager, '^pnpm@(?<major>\d+)\.\d+\.\d+(?:[-+].*)?$')
+        if (-not $match.Success) { throw 'invalid packageManager' }
+        return [int]$match.Groups['major'].Value
+    } catch {
+        Throw-LauncherError -Code 'PNPM_UNAVAILABLE' -Message 'A versão de pnpm exigida pelo projeto não pôde ser determinada.'
+    }
+}
+
+function Test-LauncherPnpmVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Result,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedMajor
+    )
+
+    if ([int]$Result.ExitCode -ne 0) { return $false }
+    $match = [regex]::Match(([string]$Result.Output).Trim(), '^(?<major>\d+)\.\d+\.\d+(?:[-+].*)?$')
+    return $match.Success -and [int]$match.Groups['major'].Value -eq $ExpectedMajor
+}
+
+function Resolve-LauncherPnpmExecutor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [scriptblock]$CommandRunner,
+        [scriptblock]$CommandLookup
+    )
+
+    $expectedMajor = Get-LauncherExpectedPnpmMajor -Root $Root
+    if (Test-LauncherCommandAvailable -Name 'corepack' -CommandLookup $CommandLookup) {
+        $corepack = Invoke-LauncherCommandRunner -FilePath 'corepack' -Arguments @('pnpm', '--version') -WorkingDirectory $Root -CommandRunner $CommandRunner
+        if (Test-LauncherPnpmVersion -Result $corepack -ExpectedMajor $expectedMajor) {
+            return [pscustomobject]@{ FilePath = 'corepack'; PrefixArguments = @('pnpm'); DisplayName = 'corepack pnpm' }
+        }
+    }
+
+    if (Test-LauncherCommandAvailable -Name 'pnpm' -CommandLookup $CommandLookup) {
+        $direct = Invoke-LauncherCommandRunner -FilePath 'pnpm' -Arguments @('--version') -WorkingDirectory $Root -CommandRunner $CommandRunner
+        if (Test-LauncherPnpmVersion -Result $direct -ExpectedMajor $expectedMajor) {
+            return [pscustomobject]@{ FilePath = 'pnpm'; PrefixArguments = @(); DisplayName = 'pnpm' }
+        }
+    }
+
+    Throw-LauncherError -Code 'PNPM_UNAVAILABLE' -Message 'Nenhum executor pnpm compatível foi encontrado.'
+}
+
+function Invoke-LauncherPnpmCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Executor,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [scriptblock]$CommandRunner
+    )
+
+    return Invoke-LauncherCommandRunner -FilePath ([string]$Executor.FilePath) -Arguments @($Executor.PrefixArguments + $Arguments) -WorkingDirectory $Root -CommandRunner $CommandRunner
 }
 
 function ConvertFrom-LauncherJsonOutput {

@@ -99,6 +99,15 @@ beforeEach(() => {
       dailyGroupLimit: 60,
       dailyGlobalLimitOverride: 60,
       dailyGroupLimitOverride: 60,
+      dailyShopeeHttpLimit: 8,
+      dailyOpenAiGenerationLimit: 6,
+      dailyShopeeHttpLimitOverride: 8,
+      dailyOpenAiGenerationLimitOverride: 6,
+      providerUsage: {
+        dayKey: '2026-08-10',
+        shopee: { used: 3, limit: 8, reached: false },
+        openAi: { used: 2, limit: 6, reached: false },
+      },
       hardCaps: {
         dailyGlobalLimit: 60,
         dailyGroupLimit: 60,
@@ -149,6 +158,10 @@ describe('AutomationPage', () => {
       'MINIMUM_INTERVAL_NOT_REACHED',
     );
     expect(screen.container.textContent).not.toContain('BLOQUEADA');
+    expect(screen.container.textContent).toContain('Shopee hoje');
+    expect(screen.container.textContent).toContain('3 / 8');
+    expect(screen.container.textContent).toContain('OpenAI hoje');
+    expect(screen.container.textContent).toContain('2 / 6');
     expect(pauseMock).not.toHaveBeenCalled();
     expect(resumeMock).not.toHaveBeenCalled();
     await screen.unmount();

@@ -121,8 +121,21 @@ const dispatch: WhatsAppDispatchDetails = {
 };
 
 const prismaMock = (dispatchData = dispatch) => {
+  const groupInstanceName =
+    dispatchData.destination.type === 'GROUP'
+      ? (dispatchData.instanceName ??
+        dispatchData.destination.assignedInstanceName ??
+        dispatchData.destination.sourceInstanceName)
+      : dispatchData.instanceName;
   const rawDispatchData = {
     ...dispatchData,
+    instanceName: groupInstanceName,
+    destination: {
+      ...dispatchData.destination,
+      ...(dispatchData.destination.type === 'GROUP'
+        ? { assignedInstanceName: groupInstanceName }
+        : {}),
+    },
     generatedCopy: {
       ...dispatchData.generatedCopy,
       promotionCandidates:
@@ -156,13 +169,20 @@ const prismaMock = (dispatchData = dispatch) => {
         })) ?? [],
     },
   };
-  return {
+  const client = {
     whatsAppDispatch: {
       findUnique: vi.fn(async () => rawDispatchData),
       updateMany: vi.fn(async () => ({ count: 1 })),
       update: vi.fn(async ({ data }) => ({ ...dispatch, ...data })),
     },
+    $queryRaw: vi.fn(async () => [{ id: dispatchData.destinationId }]),
+    $transaction: vi.fn(),
   };
+  client.$transaction.mockImplementation(
+    async (callback: (transaction: typeof client) => Promise<unknown>) =>
+      callback(client),
+  );
+  return client;
 };
 
 const createService = (
@@ -370,6 +390,68 @@ describe('SenderService', () => {
     expect(prisma.whatsAppDispatch.update).not.toHaveBeenCalled();
   });
 
+  it('bloqueia a corrida quando o assignment muda antes do claim serializado', async () => {
+    let persistedAssignment = 'instance-a';
+    const dispatchSnapshot: WhatsAppDispatchDetails = {
+      ...dispatch,
+      instanceName: 'instance-a',
+      destination: {
+        id: 'dest-1',
+        destination: groupDestination,
+        type: 'GROUP',
+        active: true,
+        paused: false,
+        available: true,
+        fingerprint: groupFingerprint,
+        sourceInstanceName: 'instance-a',
+        assignedInstanceName: 'instance-a',
+      },
+    };
+    const provider = {
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'message-1',
+        sentAt: new Date(),
+      })),
+    };
+    const repository: import('../src/repositories').WhatsAppDispatchRepository =
+      {
+        createPending: async () => null,
+        findByIdForSending: async () => structuredClone(dispatchSnapshot),
+        findByIdWithDetails: async () => structuredClone(dispatchSnapshot),
+        list: async () => [],
+        markAttemptPending: async () => {
+          return true;
+        },
+        claimPendingForSending: async () => {
+          persistedAssignment = 'instance-b';
+          return { kind: 'STICKY_INSTANCE_MISMATCH' };
+        },
+        markSent: async () => ({ ...dispatchSnapshot, status: 'SENT' }),
+        markFailed: async () => ({ ...dispatchSnapshot, status: 'FAILED' }),
+      };
+    const service = new SenderService({
+      dispatches: repository,
+      provider,
+      logger,
+      instanceName: 'instance-a',
+      groupSendPolicy: new WhatsAppGroupSendPolicy({
+        enabled: true,
+        safeMode: true,
+        instanceName: 'instance-a',
+      }),
+    });
+
+    await expect(
+      service.sendDispatch(dispatchSnapshot.id),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+    });
+
+    expect(persistedAssignment).toBe('instance-b');
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+  });
+
   describe('Integração com CommercialMessageDraftService', () => {
     const commercialDispatch: WhatsAppDispatchDetails = {
       ...dispatch,
@@ -391,7 +473,7 @@ describe('SenderService', () => {
         createdFromCandidateId: 'candidate-123',
         promotionCandidates: [mockCandidate],
       },
-    }
+    };
 
     const cloneCommercialDispatch = (): WhatsAppDispatchDetails =>
       structuredClone(commercialDispatch);
@@ -417,13 +499,18 @@ describe('SenderService', () => {
     const expectPreClaimFailure = async (
       dispatchData: WhatsAppDispatchDetails,
       expectedCode: string,
-      draftService: Pick<CommercialMessageDraftService, 'createDraft'> = validDraftService(),
+      draftService: Pick<
+        CommercialMessageDraftService,
+        'createDraft'
+      > = validDraftService(),
     ) => {
       const prisma = prismaMock(dispatchData);
       const provider = new MockWhatsAppProvider();
       logger.error.mockClear();
       await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1'),
+        createService(prisma, provider, { draftService }).sendDispatch(
+          'dispatch-1',
+        ),
       ).rejects.toMatchObject({ code: expectedCode });
       expect(prisma.whatsAppDispatch.findUnique).toHaveBeenCalledTimes(1);
       expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
@@ -448,10 +535,12 @@ describe('SenderService', () => {
         })),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
+      await createService(prisma, provider, { draftService }).sendDispatch(
+        'dispatch-1',
+      );
 
       expect(draftService.createDraft).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'candidate-123' })
+        expect.objectContaining({ id: 'candidate-123' }),
       );
       expect(provider.sentMessages[0]).toMatchObject({
         message: 'Draft caption',
@@ -530,7 +619,9 @@ describe('SenderService', () => {
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
       await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
+        createService(prisma, provider, { draftService }).sendDispatch(
+          'dispatch-1',
+        ),
       ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH' });
 
       expect(draftService.createDraft).not.toHaveBeenCalled();
@@ -553,7 +644,9 @@ describe('SenderService', () => {
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
       await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
+        createService(prisma, provider, { draftService }).sendDispatch(
+          'dispatch-1',
+        ),
       ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH' });
 
       expect(draftService.createDraft).not.toHaveBeenCalled();
@@ -570,12 +663,14 @@ describe('SenderService', () => {
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
       await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
+        createService(prisma, provider, { draftService }).sendDispatch(
+          'dispatch-1',
+        ),
       ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_CANDIDATE_EXPIRED' });
 
       expect(logger.error).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'whatsapp.dispatch.draft_failed' }),
-        'Failed to create commercial draft'
+        'Failed to create commercial draft',
       );
       expect(provider.sentMessages).toHaveLength(0);
       expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
@@ -601,7 +696,9 @@ describe('SenderService', () => {
         createDraft: vi.fn(),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
+      await createService(prisma, provider, { draftService }).sendDispatch(
+        'dispatch-1',
+      );
 
       expect(draftService.createDraft).not.toHaveBeenCalled();
       expect(provider.sentMessages[0]).toMatchObject({
@@ -674,10 +771,14 @@ describe('SenderService', () => {
         })),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
+      await createService(prisma, provider, { draftService }).sendDispatch(
+        'dispatch-1',
+      );
 
       expect(provider.sentMessages).toHaveLength(1);
-      expect(provider.sentMessages[0]).toMatchObject({ message: 'Draft caption text' });
+      expect(provider.sentMessages[0]).toMatchObject({
+        message: 'Draft caption text',
+      });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
       expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
     });
@@ -696,10 +797,14 @@ describe('SenderService', () => {
         })),
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
-      await createService(prisma, provider, { draftService }).sendDispatch('dispatch-1');
+      await createService(prisma, provider, { draftService }).sendDispatch(
+        'dispatch-1',
+      );
 
       expect(provider.sentMessages).toHaveLength(1);
-      expect(provider.sentMessages[0]).toMatchObject({ message: 'Draft caption' });
+      expect(provider.sentMessages[0]).toMatchObject({
+        message: 'Draft caption',
+      });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
       expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
     });
@@ -719,7 +824,9 @@ describe('SenderService', () => {
       } satisfies Pick<CommercialMessageDraftService, 'createDraft'>;
 
       await expect(
-        createService(prisma, provider, { draftService }).sendDispatch('dispatch-1'),
+        createService(prisma, provider, { draftService }).sendDispatch(
+          'dispatch-1',
+        ),
       ).rejects.toMatchObject({
         code: 'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED',
       });
@@ -731,51 +838,79 @@ describe('SenderService', () => {
     describe('boundary fail-closed de identidade e provenance', () => {
       it('bloqueia snapshot fingerprint divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
-        candidateFrom(dispatchData).snapshot.fingerprint = 'snapshot-divergente';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH');
+        candidateFrom(dispatchData).snapshot.fingerprint =
+          'snapshot-divergente';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH',
+        );
       });
 
       it('bloqueia product commercialSnapshotFingerprint divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
-        candidateFrom(dispatchData).product.commercialSnapshotFingerprint = 'product-fingerprint-divergente';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH');
+        candidateFrom(dispatchData).product.commercialSnapshotFingerprint =
+          'product-fingerprint-divergente';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_AI_COPY_AFFILIATE_LINK_SNAPSHOT_MISMATCH',
+        );
       });
 
       it('bloqueia provenance invalida', async () => {
         const dispatchData = cloneCommercialDispatch();
-        candidateFrom(dispatchData).product.productLink = 'ftp://produto-invalido';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID');
+        candidateFrom(dispatchData).product.productLink =
+          'ftp://produto-invalido';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID',
+        );
       });
 
       it('bloqueia affiliateLink divergente do contrato afiliado', async () => {
         const dispatchData = cloneCommercialDispatch();
         const candidate = candidateFrom(dispatchData);
         candidate.product.affiliateLink = candidate.product.productLink;
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_NOT_AFFILIATE');
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_AI_COPY_AFFILIATE_LINK_NOT_AFFILIATE',
+        );
       });
 
       it('bloqueia campaign fingerprint divergente do target', async () => {
         const dispatchData = cloneCommercialDispatch();
-        candidateFrom(dispatchData).campaign.logicalGroupFingerprint = 'grp_bbbbbbbbbbbb';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH');
+        candidateFrom(dispatchData).campaign.logicalGroupFingerprint =
+          'grp_bbbbbbbbbbbb';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH',
+        );
       });
 
       it('bloqueia destination id divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
         dispatchData.destination.id = 'dest-outro';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        );
       });
 
       it('bloqueia group fingerprint divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
         dispatchData.destination.fingerprint = 'grp_cccccccccccc';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH');
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_DESTINATION_MISMATCH',
+        );
       });
 
       it('bloqueia instance divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
         dispatchData.destination.sourceInstanceName = 'outra-instancia';
-        await expectPreClaimFailure(dispatchData, 'WHATSAPP_GROUP_INSTANCE_MISMATCH');
+        await expectPreClaimFailure(
+          dispatchData,
+          'WHATSAPP_GROUP_INSTANCE_MISMATCH',
+        );
       });
     });
 
@@ -783,62 +918,103 @@ describe('SenderService', () => {
       it('bloqueia draft candidateId divergente', async () => {
         const draftService = validDraftService();
         draftService.createDraft.mockReturnValue({
-          candidateId: 'candidate-outro', generatedCopyId: 'copy-1', warnings: [],
+          candidateId: 'candidate-outro',
+          generatedCopyId: 'copy-1',
+          warnings: [],
           caption: `Oferta certificada ${affiliateLink}`,
-          imageUrl: 'https://shopee.com/image.jpg', deliveryMode: 'IMAGE',
+          imageUrl: 'https://shopee.com/image.jpg',
+          deliveryMode: 'IMAGE',
         });
-        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_MESSAGE_RELATION_MISMATCH', draftService);
+        await expectPreClaimFailure(
+          cloneCommercialDispatch(),
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+          draftService,
+        );
       });
 
       it('bloqueia draft generatedCopyId divergente', async () => {
         const draftService = validDraftService();
         draftService.createDraft.mockReturnValue({
-          candidateId: 'candidate-123', generatedCopyId: 'copy-outra', warnings: [],
+          candidateId: 'candidate-123',
+          generatedCopyId: 'copy-outra',
+          warnings: [],
           caption: `Oferta certificada ${affiliateLink}`,
-          imageUrl: 'https://shopee.com/image.jpg', deliveryMode: 'IMAGE',
+          imageUrl: 'https://shopee.com/image.jpg',
+          deliveryMode: 'IMAGE',
         });
-        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_MESSAGE_RELATION_MISMATCH', draftService);
+        await expectPreClaimFailure(
+          cloneCommercialDispatch(),
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+          draftService,
+        );
       });
 
       it('bloqueia Copy V10 version divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
-        dispatchData.generatedCopy.promptVersion = 'commercial-promotion-copy-v9';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE');
+        dispatchData.generatedCopy.promptVersion =
+          'commercial-promotion-copy-v9';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE',
+        );
       });
 
       it('bloqueia validation version divergente', async () => {
         const dispatchData = cloneCommercialDispatch();
-        dispatchData.generatedCopy.validationVersion = 'commercial-promotion-copy-validation-v3';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE');
+        dispatchData.generatedCopy.validationVersion =
+          'commercial-promotion-copy-validation-v3';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE',
+        );
       });
 
       it('bloqueia candidate ausente sem fallback legado', async () => {
         const dispatchData = cloneCommercialDispatch();
         dispatchData.generatedCopy.promotionCandidates = [];
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        );
       });
 
       it('bloqueia multiplos candidates sem fallback legado', async () => {
         const dispatchData = cloneCommercialDispatch();
         const candidate = candidateFrom(dispatchData);
-        dispatchData.generatedCopy.promotionCandidates = [candidate, structuredClone(candidate)];
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_RELATION_MISMATCH');
+        dispatchData.generatedCopy.promotionCandidates = [
+          candidate,
+          structuredClone(candidate),
+        ];
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        );
       });
 
       it('bloqueia draft IMAGE sem imagem valida', async () => {
         const draftService = validDraftService();
         draftService.createDraft.mockReturnValue({
-          candidateId: 'candidate-123', generatedCopyId: 'copy-1', warnings: [],
+          candidateId: 'candidate-123',
+          generatedCopyId: 'copy-1',
+          warnings: [],
           caption: `Oferta certificada ${affiliateLink}`,
-          imageUrl: '', deliveryMode: 'IMAGE',
+          imageUrl: '',
+          deliveryMode: 'IMAGE',
         });
-        await expectPreClaimFailure(cloneCommercialDispatch(), 'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED', draftService);
+        await expectPreClaimFailure(
+          cloneCommercialDispatch(),
+          'COMMERCIAL_AUTOMATION_IMAGE_REQUIRED',
+          draftService,
+        );
       });
 
       it('bloqueia relacao product/snapshot inconsistente', async () => {
         const dispatchData = cloneCommercialDispatch();
         candidateFrom(dispatchData).snapshot.productId = 'product-outro';
-        await expectPreClaimFailure(dispatchData, 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID');
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID',
+        );
       });
     });
 
@@ -895,8 +1071,12 @@ describe('SenderService', () => {
         const draftService = new CommercialMessageDraftService();
 
         await expect(
-          createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
-        ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH' });
+          createService(prisma, provider, { draftService }).sendDispatch(
+            'dispatch-1',
+          ),
+        ).rejects.toMatchObject({
+          code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        });
 
         expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
         expect(provider.sentMessages).toHaveLength(0);
@@ -910,8 +1090,12 @@ describe('SenderService', () => {
         const draftService = new CommercialMessageDraftService();
 
         await expect(
-          createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
-        ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH' });
+          createService(prisma, provider, { draftService }).sendDispatch(
+            'dispatch-1',
+          ),
+        ).rejects.toMatchObject({
+          code: 'COMMERCIAL_MESSAGE_RELATION_MISMATCH',
+        });
 
         expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
         expect(provider.sentMessages).toHaveLength(0);
@@ -927,8 +1111,12 @@ describe('SenderService', () => {
         const draftService = new CommercialMessageDraftService();
 
         await expect(
-          createService(prisma, provider, { draftService }).sendDispatch('dispatch-1')
-        ).rejects.toMatchObject({ code: 'COMMERCIAL_MESSAGE_CANDIDATE_EXPIRED' });
+          createService(prisma, provider, { draftService }).sendDispatch(
+            'dispatch-1',
+          ),
+        ).rejects.toMatchObject({
+          code: 'COMMERCIAL_MESSAGE_CANDIDATE_EXPIRED',
+        });
 
         expect(prisma.whatsAppDispatch.updateMany).not.toHaveBeenCalled();
         expect(provider.sentMessages).toHaveLength(0);
@@ -936,7 +1124,11 @@ describe('SenderService', () => {
     });
   });
   it('envia retry manual rearmado como segunda tentativa sem resetar attemptCount', async () => {
-    const retryDispatch = { ...dispatch, status: 'PENDING' as const, attemptCount: 1 };
+    const retryDispatch = {
+      ...dispatch,
+      status: 'PENDING' as const,
+      attemptCount: 1,
+    };
     const prisma = prismaMock(retryDispatch);
     prisma.whatsAppDispatch.update.mockImplementation(async ({ data }) => ({
       ...retryDispatch,
@@ -956,7 +1148,11 @@ describe('SenderService', () => {
   });
 
   it('segunda tentativa ambigua preserva PROCESSING e consome attemptCount 2', async () => {
-    const retryDispatch = { ...dispatch, status: 'PENDING' as const, attemptCount: 1 };
+    const retryDispatch = {
+      ...dispatch,
+      status: 'PENDING' as const,
+      attemptCount: 1,
+    };
     const prisma = prismaMock(retryDispatch);
     const provider = {
       sendMessage: vi.fn(async () => {
@@ -983,5 +1179,4 @@ describe('SenderService', () => {
     );
     expect(provider.sendMessage).toHaveBeenCalledTimes(1);
   });
-
 });

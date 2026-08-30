@@ -125,6 +125,8 @@ export default function AutomationPage() {
     stagger: '',
     globalLimit: '',
     groupLimit: '',
+    shopeeLimit: '',
+    openAiLimit: '',
   });
   const [operational, setOperational] = useState<OperationalAdmin | null>(null);
   const [loading, setLoading] = useState(true);
@@ -180,6 +182,18 @@ export default function AutomationPage() {
                 nextOperational.automation.dailyGroupLimit,
             )
           : '',
+        shopeeLimit: nextOperational
+          ? String(
+              nextOperational.automation.dailyShopeeHttpLimit ??
+                nextOperational.automation.dailyGlobalLimit,
+            )
+          : '',
+        openAiLimit: nextOperational
+          ? String(
+              nextOperational.automation.dailyOpenAiGenerationLimit ??
+                nextOperational.automation.dailyGlobalLimit,
+            )
+          : '',
       });
     } catch (cause) {
       setError(
@@ -219,7 +233,10 @@ export default function AutomationPage() {
       const next =
         action === 'pause'
           ? await pauseCommercialAutomation()
-          : await resumeCommercialAutomation(RESUME_CONFIRMATION);
+          : await resumeCommercialAutomation(
+              RESUME_CONFIRMATION,
+              status?.updatedAt ?? '',
+            );
       setStatus(next);
       setAction(null);
       setSuccess(
@@ -255,6 +272,8 @@ export default function AutomationPage() {
               staggerMinutes: Number(scheduleDraft.stagger),
               dailyGlobalLimit: Number(scheduleDraft.globalLimit),
               dailyGroupLimit: Number(scheduleDraft.groupLimit),
+              dailyShopeeHttpLimit: Number(scheduleDraft.shopeeLimit),
+              dailyOpenAiGenerationLimit: Number(scheduleDraft.openAiLimit),
               expectedRevision: schedule.scheduleRevision,
               confirmation: 'CONFIRMAR_ALTERACAO_OPERACIONAL',
             })
@@ -405,6 +424,22 @@ export default function AutomationPage() {
                 {status.timezone}
               </div>
             </div>
+            <div className="ops-control">
+              <div className="ops-control-label">Shopee hoje</div>
+              <div className="ops-control-value">
+                {operational?.automation.providerUsage?.shopee.used ?? 0} /{' '}
+                {operational?.automation.providerUsage?.shopee.limit ?? '—'}
+              </div>
+              <div className="ops-control-sub">Tentativas HTTP oficiais</div>
+            </div>
+            <div className="ops-control">
+              <div className="ops-control-label">OpenAI hoje</div>
+              <div className="ops-control-value">
+                {operational?.automation.providerUsage?.openAi.used ?? 0} /{' '}
+                {operational?.automation.providerUsage?.openAi.limit ?? '—'}
+              </div>
+              <div className="ops-control-sub">Gerações externas</div>
+            </div>
           </div>
           <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
             <OpsSection
@@ -536,7 +571,7 @@ export default function AutomationPage() {
                   </span>
                 </div>
               </div>
-              <div className="grid gap-4 md:grid-cols-6">
+              <div className="grid gap-4 md:grid-cols-4">
                 <label className="ops-control">
                   <span className="ops-control-label">Inicio da janela</span>
                   <input
@@ -584,7 +619,9 @@ export default function AutomationPage() {
                   />
                 </label>
                 <label className="ops-control">
-                  <span className="ops-control-label">Stagger entre grupos (min)</span>
+                  <span className="ops-control-label">
+                    Stagger entre grupos (min)
+                  </span>
                   <input
                     className="ops-input"
                     type="number"
@@ -637,6 +674,46 @@ export default function AutomationPage() {
                     Teto efetivo:{' '}
                     {operational?.automation.hardCaps.dailyGroupLimit ??
                       status.dailyGroupLimit}
+                  </span>
+                </label>
+                <label className="ops-control">
+                  <span className="ops-control-label">
+                    Limite diário Shopee
+                  </span>
+                  <input
+                    className="ops-input"
+                    type="number"
+                    min="1"
+                    value={scheduleDraft.shopeeLimit}
+                    onChange={(event) =>
+                      setScheduleDraft((current) => ({
+                        ...current,
+                        shopeeLimit: event.target.value,
+                      }))
+                    }
+                  />
+                  <span className="ops-control-sub">
+                    Tentativas HTTP, inclusive falhas.
+                  </span>
+                </label>
+                <label className="ops-control">
+                  <span className="ops-control-label">
+                    Limite diário OpenAI
+                  </span>
+                  <input
+                    className="ops-input"
+                    type="number"
+                    min="1"
+                    value={scheduleDraft.openAiLimit}
+                    onChange={(event) =>
+                      setScheduleDraft((current) => ({
+                        ...current,
+                        openAiLimit: event.target.value,
+                      }))
+                    }
+                  />
+                  <span className="ops-control-sub">
+                    Gerações, inclusive saídas inválidas.
                   </span>
                 </label>
               </div>
