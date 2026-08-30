@@ -105,7 +105,7 @@ export default function WhatsAppPage() {
   return (
     <div className="grid gap-6">
       <PageHeader
-        title="WhatsApp"
+        title="Números e grupos"
         description="Administração segura de instâncias, grupos e assignments, com dispatches e envio manual preservados em seus fluxos próprios."
       />
 

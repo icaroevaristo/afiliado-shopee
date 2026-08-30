@@ -2,6 +2,7 @@
 
 import { CalendarClock, Info, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 
 import { CommercialAutomationControl } from '../../components/commercial-automation-control';
 import { ErrorState } from '../../components/error-state';
@@ -89,8 +90,8 @@ export default function SettingsPage() {
   return (
     <div className="grid gap-6">
       <PageHeader
-        title="Configurações"
-        description="Informações seguras de operação do dashboard. Credenciais nunca devem ser inseridas no navegador."
+        title="Sistema"
+        description="Estado local e controles seguros para a operação diária. Credenciais nunca devem ser inseridas no navegador."
       />
 
       {loading ? <LoadingState label="Verificando API" /> : null}
@@ -110,6 +111,22 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      <section className="rounded-lg border border-sky-200 bg-sky-50 p-5">
+        <h2 className="font-semibold text-slate-950">Como operar</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-700">
+          O launcher liga a topologia local; esta tela não inicia nem encerra
+          processos. A pausa persistida é a autoridade para ligar ou desligar a
+          automação, enquanto agenda, readiness e próximos envios ficam em
+          Automação.
+        </p>
+        <Link
+          href="/automacao"
+          className="mt-3 inline-flex rounded-md border border-sky-300 bg-white px-3 py-2 text-sm font-medium text-sky-900 hover:bg-sky-100"
+        >
+          Abrir Automação
+        </Link>
+      </section>
+
       <CommercialAutomationControl />
 
       <section
@@ -127,7 +144,7 @@ export default function SettingsPage() {
                 id="scheduler-settings-heading"
                 className="font-semibold text-slate-950"
               >
-                Scheduler do pipeline
+                Scheduler legado
               </h2>
               <p className="mt-1 text-sm text-slate-600">
                 Estado retornado pela API para o agendamento conhecido.

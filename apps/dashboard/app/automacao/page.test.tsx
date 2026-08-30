@@ -140,6 +140,8 @@ describe('AutomationPage', () => {
     await act(async () => undefined);
 
     expect(screen.container.textContent).toContain('Status operacional');
+    expect(screen.container.textContent).toContain('AUTOMAÇÃO LIGADA');
+    expect(screen.container.textContent).toContain('Desligar automação');
     expect(screen.container.textContent).toContain('OPERANDO');
     expect(screen.container.textContent).toContain('Readiness para envio');
     expect(screen.container.textContent).toContain('AGUARDANDO CADÊNCIA');
@@ -149,6 +151,17 @@ describe('AutomationPage', () => {
     expect(screen.container.textContent).not.toContain('BLOQUEADA');
     expect(pauseMock).not.toHaveBeenCalled();
     expect(resumeMock).not.toHaveBeenCalled();
+    await screen.unmount();
+  });
+
+  it('mostra automação desligada quando a pausa persistida está ativa', async () => {
+    getStatusMock.mockResolvedValueOnce({ ...status, paused: true });
+
+    const screen = await render(<AutomationPage />);
+    await act(async () => undefined);
+
+    expect(screen.container.textContent).toContain('AUTOMAÇÃO DESLIGADA');
+    expect(screen.container.textContent).toContain('Ligar automação');
     await screen.unmount();
   });
 });

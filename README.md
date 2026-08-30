@@ -81,6 +81,24 @@ NEXT_PUBLIC_API_URL=http://localhost:3333
 Nunca coloque `EVOLUTION_API_KEY` ou outros segredos em variaveis
 `NEXT_PUBLIC_*`.
 
+## Uso diario
+
+Para operar o sistema sem terminal:
+
+1. Dê dois cliques em **Shopee Affiliate**; o atalho verifica o ambiente,
+   delega o ciclo ao supervisor e abre o dashboard quando API e painel estão
+   prontos.
+2. Use **Automação** para conferir o estado e ligar ou desligar a automação.
+   Ligar a automação remove somente a pausa persistida; iniciar o sistema não
+   liga a automação por conta própria.
+3. Ajuste horário, intervalo, stagger e limites no painel.
+4. Use **Números e grupos** para acompanhar instâncias, grupos e assignments.
+5. Feche o navegador quando quiser; o sistema continua ligado. Para encerrar
+   a topologia local, use o atalho **Shopee Affiliate - Encerrar**.
+
+O terminal fica reservado para manutenção e desenvolvimento. O atalho de
+encerramento usa o mesmo supervisor oficial e não força a morte de processos.
+
 ## Hunter Agent
 
 O Hunter Agent pode ser executado manualmente pela API:
