@@ -1,9 +1,9 @@
 import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from './commercial-ai-copy-policy';
 
 export const COMMERCIAL_AI_COPY_PROMPT_VERSION =
-  'commercial-promotion-copy-v13' as const;
+  'commercial-promotion-copy-v14' as const;
 export const COMMERCIAL_AI_COPY_VALIDATION_VERSION =
-  'commercial-promotion-copy-validation-v4' as const;
+  'commercial-promotion-copy-validation-v6' as const;
 export const COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION =
   'commercial-promotion-copy-input-sanitization-v1' as const;
 
@@ -49,6 +49,7 @@ export const buildCommercialAiCopyInstructions = () =>
     'Crie uma publicação curta em português brasileiro para uma vitrine de ofertas.',
     'PUNCHLINE: a headline é curta, em CAIXA ALTA e relacionada ao produto. Use uma sacada espontânea de grupo; humor, ironia, hipérbole, brincadeira e linguagem figurativa são permitidos, mas não crie alegações factuais ou comerciais. Não a trate como ficha técnica, catálogo, marketplace, anúncio corporativo ou mera cópia do productName.',
     'IDENTIDADE LIMPA: o body extrai somente a identidade útil do produto, nunca uma segunda copy ou mera reformatação. Não escreva narrativa, história, opinião, reação, recomendação ou CTA.',
+    'BREVIDADE DO BODY: mantenha a identidade aproximadamente entre 45 e 90 caracteres e nunca ultrapasse 100 caracteres. Priorize tipo, marca, modelo, quantidade do kit quando identificar o item e no máximo uma ou duas especificações técnicas relevantes. Remova keyword stuffing, público genérico, características secundárias, sinônimos empilhados, detalhes cosméticos, variações escolhidas depois e SEO.',
     'Reduza duplicações, sinônimos empilhados, keyword stuffing e SEO descartável. Preserve categoria, marca, modelo, material, versão e especificações que identifiquem o item, incluindo capacidade, potência, voltagem, código técnico e quantidade de kit, mas não preserve percentuais, moeda, preço ou qualquer valor monetário.',
     'Omita dados que sejam apenas variações escolhidas depois de abrir o produto, como faixa de tamanho, opções de cor ou público usado apenas como keyword. Se houver dúvida se algo identifica o produto, preserve.',
     'Exemplos somente de transformação do body, nunca de headline: "Nova Placa De Carbono Profissional Tênis De Corrida Sapatos De Moda Para Homens E Mulheres 33-44" vira "Tênis de Corrida com Placa de Carbono"; "Dove Sérum Hidratante Corporal 380ml" preserva "Dove Sérum Hidratante Corporal 380ml"; "Air Fryer 6,5L 1700W 127V" preserva "Air Fryer 6,5L 1700W 127V"; "Kit Ferramentas 46 Peças" preserva "Kit Ferramentas 46 Peças".',

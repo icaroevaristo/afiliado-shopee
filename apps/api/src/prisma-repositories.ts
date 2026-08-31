@@ -2279,11 +2279,18 @@ const copyContextFailure = (
   expected: CommercialPromotionCopyContext,
   affiliateLinkHash: string,
   validatedAt: Date,
+  expectedCandidateState: 'QUEUED' | 'COPY_READY' = 'QUEUED',
 ) => {
   if (!current) return 'COMMERCIAL_AI_COPY_CANDIDATE_CHANGED';
+  const candidateStateChanged =
+    expectedCandidateState === 'QUEUED'
+      ? current.candidate.status !== 'QUEUED' ||
+        current.candidate.generatedCopyId !== null
+      : current.candidate.status !== 'COPY_READY' ||
+        current.candidate.generatedCopyId !== expected.candidate.generatedCopyId ||
+        expected.candidate.generatedCopyId === null;
   if (
-    current.candidate.status !== 'QUEUED' ||
-    current.candidate.generatedCopyId !== null ||
+    candidateStateChanged ||
     !sameDate(current.candidate.updatedAt, expected.candidate.updatedAt)
   ) {
     return 'COMMERCIAL_AI_COPY_CANDIDATE_CHANGED';
@@ -3443,18 +3450,9 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
     }
   }
 
-  async linkCachedCopy(input: {
-    expected: CommercialPromotionCopyContext;
-    copyId: string;
-    inputFingerprint: string;
-    affiliateLinkHash: string;
-    validatedAt: Date;
-    provider: string;
-    model: string;
-    promptVersion: string;
-    validationVersion: string;
-    maximumLength: number;
-  }) {
+  async linkCachedCopy(
+    input: Parameters<CommercialPromotionCopyRepository['linkCachedCopy']>[0],
+  ) {
     try {
       return await this.prisma.$transaction(
         async (transaction) => {
@@ -3478,14 +3476,14 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
             copy.source !== 'AI' ||
             copy.inputFingerprint !== input.inputFingerprint ||
             copy.productId !== input.expected.product.id ||
-            copy.snapshotId !== input.expected.snapshot.id ||
+            copy.createdFromCandidateId !== input.expected.candidate.id ||
             copy.provider !== input.provider ||
             copy.model !== input.model ||
             copy.promptVersion !== input.promptVersion ||
             copy.validationVersion !== input.validationVersion ||
             !current?.product.affiliateLink ||
             !isSafeAssembledCommercialPromotionCopy(
-              copy,
+              input.assembled,
               current.product.affiliateLink,
               {
                 productName: current.product.productName,
@@ -3510,6 +3508,93 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
               },
               data: { status: 'COPY_READY', generatedCopyId: copy.id },
             });
+          if (updated.count !== 1) return false;
+          await transaction.generatedCopy.update({
+            where: { id: copy.id },
+            data: {
+              ...input.assembled,
+              snapshotId: input.expected.snapshot.id,
+              createdFromCandidateId: input.expected.candidate.id,
+            },
+          });
+          return true;
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (isTransactionConflictError(error)) return false;
+      throw error;
+    }
+  }
+
+  async refreshCachedCopy(
+    input: Parameters<
+      CommercialPromotionCopyRepository['refreshCachedCopy']
+    >[0],
+  ) {
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const lockedCandidate = await transaction.$queryRaw<
+            Array<{ id: string }>
+          >`
+            SELECT "id"
+            FROM "CommercialPromotionCandidate"
+            WHERE "id" = ${input.expected.candidate.id}
+            FOR UPDATE
+          `;
+          if (lockedCandidate.length !== 1) return false;
+          const [current, copy] = await Promise.all([
+            loadCommercialPromotionCopyContext(
+              transaction as CommercialCopyPrismaClient,
+              input.expected.candidate.id,
+            ),
+            transaction.generatedCopy.findUnique({
+              where: { id: input.copyId },
+            }),
+          ]);
+          if (
+            copyContextFailure(
+              current,
+              input.expected,
+              input.affiliateLinkHash,
+              input.validatedAt,
+              'COPY_READY',
+            ) ||
+            !copy ||
+            copy.source !== 'AI' ||
+            copy.inputFingerprint !== input.inputFingerprint ||
+            copy.productId !== input.expected.product.id ||
+            copy.snapshotId !== input.expected.snapshot.id ||
+            copy.createdFromCandidateId !== input.expected.candidate.id ||
+            copy.provider !== input.provider ||
+            copy.model !== input.model ||
+            copy.promptVersion !== input.promptVersion ||
+            copy.validationVersion !== input.validationVersion ||
+            !current?.product.affiliateLink ||
+            !isSafeAssembledCommercialPromotionCopy(
+              input.assembled,
+              current.product.affiliateLink,
+              {
+                productName: current.product.productName,
+                shopName: current.product.shopName,
+                price: current.product.price,
+                discountRate: current.product.discountRate,
+                promotionSignals: current.candidate.promotionSignals,
+                priceDropPercent: current.candidate.priceDropPercent,
+              },
+              input.maximumLength,
+            )
+          ) {
+            return false;
+          }
+          const updated = await transaction.generatedCopy.updateMany({
+            where: {
+              id: copy.id,
+              inputFingerprint: input.inputFingerprint,
+            },
+            data: input.assembled,
+          });
           return updated.count === 1;
         },
         { isolationLevel: 'Serializable' },

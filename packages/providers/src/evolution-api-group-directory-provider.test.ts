@@ -48,6 +48,8 @@ describe('EvolutionApiGroupDirectoryProvider', () => {
             size: 3,
             participants: [{ id: 'sensitive-participant' }],
             desc: 'sensitive-description',
+            inviteCode: 'xyz',
+            inviteUrl: 'https://chat.whatsapp.com/xyz',
           },
         ]);
       },
@@ -70,6 +72,29 @@ describe('EvolutionApiGroupDirectoryProvider', () => {
       headers: { apikey: API_KEY },
     });
     expect(init?.body).toBeUndefined();
+  });
+
+  it('não inventa invite URL porque o contrato read-only atual não o fornece', async () => {
+    const httpClient = vi.fn(async () =>
+      response([
+        {
+          id: GROUP_ID,
+          subject: 'Grupo sem convite confiável',
+          size: 1,
+          inviteCode: 'xyz',
+          inviteUrl: 'https://chat.whatsapp.com/xyz',
+        },
+      ]),
+    );
+
+    const [group] = await createProvider(httpClient).listGroups();
+    expect(group).toEqual({
+      externalGroupId: GROUP_ID,
+      name: 'Grupo sem convite confiável',
+      memberCount: 1,
+    });
+    expect(group).not.toHaveProperty('inviteUrl');
+    expect(group).not.toHaveProperty('inviteCode');
   });
 
   it('mapeia lista vazia', async () => {

@@ -26,6 +26,8 @@ export const COMMERCIAL_AI_COPY_PROHIBITED_PHRASES = [
   'oportunidade única',
 ] as const;
 
+export const COMMERCIAL_AI_COPY_BODY_MAX_LENGTH = 100;
+
 const COMMERCIAL_AI_COPY_SPECIAL_URGENCY_PHRASES = [
   'só hoje',
   'tempo limitado',

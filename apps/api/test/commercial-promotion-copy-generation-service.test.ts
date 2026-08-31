@@ -13,6 +13,7 @@ import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   CommercialPromotionCopyGenerationService,
 } from '../src/commercial-promotion-copy-generation-service';
+import { COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
 import { CommercialAiCopyValidator } from '../src/commercial-ai-copy-validator';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type {
@@ -261,8 +262,31 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
     input: Parameters<CommercialPromotionCopyRepository['linkCachedCopy']>[0],
   ) {
     if (!this.context) return false;
+    const copy = [...this.copies.values()].find(({ id }) => id === input.copyId);
+    if (!copy) return false;
+    Object.assign(copy, input.assembled, {
+      snapshotId: input.expected.snapshot.id,
+      createdFromCandidateId: input.expected.candidate.id,
+    });
     this.context.candidate.status = 'COPY_READY';
     this.context.candidate.generatedCopyId = input.copyId;
+    return true;
+  }
+  async refreshCachedCopy(
+    input: Parameters<
+      CommercialPromotionCopyRepository['refreshCachedCopy']
+    >[0],
+  ) {
+    if (
+      !this.context ||
+      this.context.candidate.status !== 'COPY_READY' ||
+      this.context.candidate.generatedCopyId !== input.copyId
+    ) {
+      return false;
+    }
+    const copy = [...this.copies.values()].find(({ id }) => id === input.copyId);
+    if (!copy) return false;
+    Object.assign(copy, input.assembled);
     return true;
   }
   async complete(input: CommercialAiCopyCompletionInput) {
@@ -321,7 +345,7 @@ const validProvider = (): CommercialAiCopyProvider => ({
   generate: vi.fn().mockResolvedValue({
     output: {
       headline: 'OFERTA CONFIÁVEL',
-      body: 'Uma escolha prática para sua rotina.',
+      body: 'Produto verificado para sua rotina.',
     },
     provider: 'openai',
     model: 'selected-model',
@@ -390,6 +414,7 @@ const service = (
   repository: MemoryCopyRepository,
   provider: CommercialAiCopyProvider = validProvider(),
   validator?: CommercialAiCopyValidator,
+  maximumCopyLength = 1_000,
 ) =>
   new CommercialPromotionCopyGenerationService({
     repository,
@@ -403,7 +428,7 @@ const service = (
       timeoutMs: 30000,
       maxOutputTokens: 300,
       reasoningEffort: 'minimal',
-      maximumCopyLength: 1000,
+       maximumCopyLength,
     },
     clock: () => now,
   });
@@ -529,6 +554,20 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const originalProductName = 'Air Fryer 6,5L 1700W 127V Original';
     repository.context!.product.productName = originalProductName;
     const provider = validProvider();
+    vi.mocked(provider.generate).mockResolvedValue({
+      output: {
+        headline: 'OFERTA CONFIÁVEL',
+        body: 'Air Fryer para sua rotina.',
+      },
+      provider: 'openai',
+      model: 'selected-model',
+      usage: {
+        inputTokens: 10,
+        outputTokens: 20,
+        totalTokens: 30,
+        reasoningTokens: 4,
+      },
+    });
     const validator = new CommercialAiCopyValidator();
     const validate = vi.spyOn(validator, 'validate');
 
@@ -536,9 +575,6 @@ describe('CommercialPromotionCopyGenerationService', () => {
       'candidate-internal',
       'GERAR_COPY_COM_IA',
     );
-    const affiliateLink = repository.context!.product.affiliateLink;
-    if (!affiliateLink) throw new Error('test fixture affiliate link missing');
-
     expect(provider.generate).toHaveBeenCalledWith({
       productName: 'Air Fryer 6,5L 1700W 127V',
     });
@@ -550,8 +586,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.context!.product.productName).toBe(originalProductName);
     expect(repository.claimInputs[0]?.inputFingerprint).toBe(
       commercialAiCopyInputFingerprint({
-        promptVersion: 'commercial-promotion-copy-v13',
-        validationVersion: 'commercial-promotion-copy-validation-v4',
+        promptVersion: 'commercial-promotion-copy-v14',
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
         inputSanitizationVersion:
           'commercial-promotion-copy-input-sanitization-v1',
         modelProductName: 'Air Fryer 6,5L 1700W 127V',
@@ -564,14 +600,6 @@ describe('CommercialPromotionCopyGenerationService', () => {
         snapshotId: repository.context!.snapshot.id,
         snapshotRevision: repository.context!.snapshot.revision,
         snapshotFingerprint: repository.context!.snapshot.fingerprint,
-        promotionSignals: repository.context!.candidate.promotionSignals,
-        priceDropPercent: repository.context!.candidate.priceDropPercent,
-        productName: originalProductName,
-        shopName: repository.context!.product.shopName,
-        price: repository.context!.product.price,
-        discountRate: repository.context!.product.discountRate,
-        affiliateLink,
-        maximumLength: 1000,
       }),
     );
   });
@@ -628,6 +656,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     repository.context!.snapshot.id = 'snapshot-current-2';
     repository.context!.snapshot.revision = 3;
     repository.context!.product.commercialSnapshotRevision = 3;
+    repository.context!.product.productName = 'Produto verificado novo';
 
     await expect(
       copyService.preview('candidate-internal'),
@@ -710,7 +739,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
     expect(first).toMatchObject({ status: 'COPY_READY', cacheHit: false });
     expect(second).toMatchObject({ status: 'COPY_READY', cacheHit: true });
-    expect(first.promptVersion).toBe('commercial-promotion-copy-v13');
+    expect(first.promptVersion).toBe('commercial-promotion-copy-v14');
     expect(repository.claimInputs[0]?.inputFingerprint).toBeTruthy();
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
@@ -719,14 +748,11 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(first.sanitizedCopy).toEqual({
       titulo: 'OFERTA CONFIÁVEL',
       mensagem:
-        'Uma escolha prática para sua rotina.\n\u{1F525} POR R$ 99,90\n\u{1F4B8} 20% OFF',
-      cta: '\u{1F6D2} Ver oferta:\n[LINK_AFILIADO]',
-      hashtags:
-        '\u{1F4F2} Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
+        'Produto verificado para sua rotina.\n\u{1F525} POR: R$ 99,90\n\u{1F4B8} 20% OFF',
+      cta: '\u{1F6D2} Compre aqui: [LINK_AFILIADO]',
+      hashtags: '',
     });
-    expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
-      'Produto verificado',
-    );
+    expect(JSON.stringify(first.sanitizedCopy)).toContain('Produto verificado');
     expect(JSON.stringify(first.sanitizedCopy)).not.toContain(
       'Loja verificada',
     );
@@ -910,16 +936,19 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(provider.generate).toHaveBeenCalledTimes(1);
   });
 
-  it('reutiliza cache quando o preço muda somente na forma canônica do assembler', async () => {
+  it('reutiliza cache quando apenas o contrato de montagem muda', async () => {
     const repository = new MemoryCopyRepository();
     const provider = validProvider();
-    const copyService = service(repository, provider);
+    const copyService = service(repository, provider, undefined, 1_000);
     await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
     repository.context!.candidate.status = 'QUEUED';
     repository.context!.candidate.generatedCopyId = null;
-    repository.context!.product.price = ' 00099.9000 ';
-
-    const cached = await copyService.generate(
+    const cached = await service(
+      repository,
+      provider,
+      undefined,
+      900,
+    ).generate(
       'candidate-internal',
       'GERAR_COPY_COM_IA',
     );
@@ -929,10 +958,64 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.copies.size).toBe(1);
   });
 
+  it('reutiliza a mesma copy AI quando somente o snapshot comercial muda', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const copyService = service(repository, provider);
+    await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+
+    const nextSnapshotFingerprint = fingerprintCommercialOffer({
+      source: 'OFFICIAL',
+      providerProductId,
+      productLink,
+      affiliateLink,
+      price: '89.90',
+      priceMin: null,
+      priceMax: null,
+      discountRate: 30,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt: new Date('2999-12-31T23:59:59.000Z'),
+      unavailableAt: null,
+    });
+    repository.context!.candidate.status = 'QUEUED';
+    repository.context!.candidate.generatedCopyId = null;
+    repository.context!.candidate.snapshotId = 'snapshot-internal-v2';
+    repository.context!.product.price = '89.90';
+    repository.context!.product.discountRate = 30;
+    repository.context!.product.commercialSnapshotRevision = 3;
+    repository.context!.product.commercialSnapshotFingerprint =
+      nextSnapshotFingerprint;
+    repository.context!.snapshot = {
+      ...repository.context!.snapshot,
+      id: 'snapshot-internal-v2',
+      revision: 3,
+      fingerprint: nextSnapshotFingerprint,
+      price: '89.90',
+      discountRate: 30,
+    };
+
+    await expect(
+      copyService.preview('candidate-internal'),
+    ).resolves.toMatchObject({ eligible: true, blockers: [] });
+    const result = await copyService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+    );
+
+    expect(result).toMatchObject({ status: 'COPY_READY', cacheHit: true });
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(result.sanitizedCopy.mensagem).toContain('POR: R$ 89,90');
+    expect(result.sanitizedCopy.mensagem).toContain('30% OFF');
+    expect(repository.copies.values().next().value?.snapshotId).toBe(
+      'snapshot-internal-v2',
+    );
+  });
+
   it('falha fechado quando copy concluída deixa de corresponder ao fingerprint atual', async () => {
     const repository = new MemoryCopyRepository();
-    repository.context!.product.productName = `Produto ${'x'.repeat(250)} A`;
-    repository.context!.product.shopName = `Loja ${'y'.repeat(120)} A`;
+    repository.context!.product.productName = 'Produto Verificado A';
+    repository.context!.product.shopName = 'Loja Verificada A';
     const provider = validProvider();
     const copyService = service(repository, provider);
     const first = await copyService.generate(
@@ -941,8 +1024,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
     repository.context!.candidate.status = 'QUEUED';
     repository.context!.candidate.generatedCopyId = null;
-    repository.context!.product.productName = `Produto ${'x'.repeat(250)} B`;
-    repository.context!.product.shopName = `Loja ${'y'.repeat(120)} B`;
+    repository.context!.product.productName = 'Produto Verificado B';
+    repository.context!.product.shopName = 'Loja Verificada B';
 
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
@@ -952,7 +1035,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect(repository.copies.size).toBe(1);
     expect([...repository.copies.values()][0]?.mensagem).not.toContain(
-      `Produto ${'x'.repeat(250)} A`,
+      'Produto Verificado A',
     );
   });
 
@@ -1012,6 +1095,20 @@ describe('CommercialPromotionCopyGenerationService', () => {
     repository.context!.product.productName = '\u0000 Produto   seguro ';
     repository.context!.product.shopName = ' Loja\tsegura ';
     const provider = validProvider();
+    vi.mocked(provider.generate).mockResolvedValue({
+      output: {
+        headline: 'OFERTA CONFIÁVEL',
+        body: 'Produto seguro para sua rotina.',
+      },
+      provider: 'openai',
+      model: 'selected-model',
+      usage: {
+        inputTokens: 10,
+        outputTokens: 20,
+        totalTokens: 30,
+        reasoningTokens: 4,
+      },
+    });
     await service(repository, provider).generate(
       'candidate-internal',
       'GERAR_COPY_COM_IA',
@@ -1106,8 +1203,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const fingerprint = `legacy-hash-${status.toLowerCase()}`;
       repository.attempts.set(fingerprint, {
         ...legacyAttempt(status, fingerprint),
-        promptVersion: 'commercial-promotion-copy-v13',
-        validationVersion: 'commercial-promotion-copy-validation-v4',
+        promptVersion: 'commercial-promotion-copy-v14',
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       });
       const provider = validProvider();
 
@@ -1132,8 +1229,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
         currentFingerprint ??= fingerprint;
         return {
           ...legacyAttempt('FAILED', fingerprint),
-          promptVersion: 'commercial-promotion-copy-v13',
-          validationVersion: 'commercial-promotion-copy-validation-v4',
+          promptVersion: 'commercial-promotion-copy-v14',
+          validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
           failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
         };
       },
@@ -1199,8 +1296,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       (attempt) => attempt.inputFingerprint !== historicalFingerprint,
     );
     expect(currentAttempt).toMatchObject({
-      promptVersion: 'commercial-promotion-copy-v13',
-      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promptVersion: 'commercial-promotion-copy-v14',
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       status: 'SUCCEEDED',
     });
     expect(currentAttempt?.inputFingerprint).not.toBe(historicalFingerprint);
@@ -1212,8 +1309,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const historicalFingerprint = 'historical-succeeded-fingerprint';
     repository.attempts.set(historicalFingerprint, {
       ...legacyAttempt('SUCCEEDED', historicalFingerprint),
-      promptVersion: 'commercial-promotion-copy-v13',
-      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promptVersion: 'commercial-promotion-copy-v14',
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
     });
     const provider = validProvider();
     const copyService = service(repository, provider);
@@ -1253,8 +1350,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
       const historicalFingerprint = `historical-${status.toLowerCase()}-fingerprint`;
       repository.attempts.set(historicalFingerprint, {
         ...legacyAttempt(status, historicalFingerprint),
-        promptVersion: 'commercial-promotion-copy-v13',
-        validationVersion: 'commercial-promotion-copy-validation-v4',
+        promptVersion: 'commercial-promotion-copy-v14',
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
         failureCode,
       });
       const provider = validProvider();
@@ -1275,7 +1372,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     },
   );
 
-  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v13/v4', async () => {
+  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v14/v6', async () => {
     const repository = new MemoryCopyRepository();
     const v9Fingerprint = 'v9-fingerprint-mock-hash';
     repository.attempts.set(v9Fingerprint, {
@@ -1292,8 +1389,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v13',
-      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promptVersion: 'commercial-promotion-copy-v14',
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.attempts.get(v9Fingerprint)).toMatchObject({
@@ -1321,7 +1418,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(result).toMatchObject({
       status: 'COPY_READY',
       cacheHit: false,
-      promptVersion: 'commercial-promotion-copy-v13',
+      promptVersion: 'commercial-promotion-copy-v14',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.copies.size).toBe(2);
@@ -1331,7 +1428,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v3 bloqueie a geração v13', async () => {
+  it('não permite que uma tentativa FAILED v3 bloqueie a geração v14', async () => {
     const repository = new MemoryCopyRepository();
     const v3Fingerprint = 'v3-fingerprint-mock-hash';
     repository.attempts.set(
@@ -1347,7 +1444,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v13',
+      promptVersion: 'commercial-promotion-copy-v14',
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.attempts.size).toBe(2);
@@ -1356,7 +1453,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v13/v4', async () => {
+  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v14/v6', async () => {
     const repository = new MemoryCopyRepository();
     const v6Fingerprint = 'v6-fingerprint-mock-hash';
     repository.attempts.set(v6Fingerprint, {
@@ -1373,8 +1470,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(result).toMatchObject({
       status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v13',
-      validationVersion: 'commercial-promotion-copy-validation-v4',
+      promptVersion: 'commercial-promotion-copy-v14',
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
     });
     expect(provider.generate).toHaveBeenCalledOnce();
     expect(repository.attempts.get(v6Fingerprint)).toMatchObject({
@@ -1384,7 +1481,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('não permite que um attempt FAILED v1 bloqueie a geração v13, gerando um fingerprint diferente e não o apagando', async () => {
+  it('não permite que um attempt FAILED v1 bloqueie a geração v14, gerando um fingerprint diferente e não o apagando', async () => {
     const repository = new MemoryCopyRepository();
     // Simulate a failed attempt from v1
     const v1Fingerprint = 'v1-fingerprint-mock-hash';
@@ -1419,21 +1516,21 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository, provider);
 
     const report = await copyService.preview('candidate-internal');
-    expect(report.cacheAvailable).toBe(false); // v13 preview não encontra cache de v1
+    expect(report.cacheAvailable).toBe(false); // v14 preview não encontra cache de v1
 
     const result = await copyService.generate(
       'candidate-internal',
       'GERAR_COPY_COM_IA',
     );
     expect(result.status).toBe('COPY_READY');
-    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v13
+    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v14
 
     const attempts = [...repository.attempts.values()];
-    expect(attempts.length).toBe(2); // v1 and v13 attempts
+    expect(attempts.length).toBe(2); // v1 and v14 attempts
     expect(attempts.find((a) => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
 
     const newAttempt = attempts.find((a) => a.id !== 'attempt-v1-failed')!;
-    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v13');
+    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v14');
     expect(newAttempt.status).toBe('SUCCEEDED');
     expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
   });
@@ -1573,7 +1670,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
       return {
         output: {
           headline: 'OFERTA CONFIÁVEL',
-          body: 'Uma escolha prática para sua rotina.',
+          body: 'Produto verificado para sua rotina.',
         },
         provider: 'openai',
         model: 'selected-model',

@@ -1,5 +1,6 @@
 import type { CommercialAiCopyOutput } from './commercial-ai-copy-provider';
 import {
+  COMMERCIAL_AI_COPY_BODY_MAX_LENGTH,
   containsCommercialAiCopyPolicyPhrase,
   hasCommercialAiCopyProhibitedClaim,
   normalizeCommercialAiCopyPolicyText,
@@ -67,6 +68,96 @@ const NUMERIC_SPACED_UNIT =
 
 const normalize = (value: string) =>
   value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+
+const BODY_NON_IDENTITY_WORDS = new Set([
+  'a',
+  'ao',
+  'aos',
+  'as',
+  'com',
+  'da',
+  'das',
+  'de',
+  'do',
+  'dos',
+  'e',
+  'em',
+  'essa',
+  'esse',
+  'esta',
+  'este',
+  'mais',
+  'na',
+  'nas',
+  'no',
+  'nos',
+  'o',
+  'os',
+  'para',
+  'por',
+  'que',
+  'seu',
+  'seus',
+  'sua',
+  'suas',
+  'um',
+  'uma',
+  'dia',
+  'escolha',
+  'opcao',
+  'pratica',
+  'produto',
+  'rotina',
+  'uso',
+]);
+
+const lexicalWords = (value: string) =>
+  normalizeCommercialAiCopyPolicyText(value).match(/[\p{L}]+/gu) ?? [];
+
+const lexicalWordSupportedByProduct = (
+  word: string,
+  productWords: ReadonlySet<string>,
+) => {
+  if (productWords.has(word) || BODY_NON_IDENTITY_WORDS.has(word)) return true;
+  if (word.length > 4 && word.endsWith('s')) {
+    return productWords.has(word.slice(0, -1));
+  }
+  return [...productWords].some(
+    (productWord) =>
+      productWord.length > 4 &&
+      productWord.endsWith('s') &&
+      productWord.slice(0, -1) === word,
+  );
+};
+
+const unsupportedBodyIdentityWords = (body: string, productName: string) => {
+  if (!productName) return [];
+  const productWords = new Set(lexicalWords(productName));
+  return [
+    ...new Set(
+      lexicalWords(body).filter(
+        (word) =>
+          !lexicalWordSupportedByProduct(word, productWords) &&
+          word.length > 2,
+      ),
+    ),
+  ];
+};
+
+const supportedBodyIdentityWords = (body: string, productName: string) => {
+  if (!productName) return [];
+  const productWords = new Set(lexicalWords(productName));
+  return [
+    ...new Set(
+      lexicalWords(body).filter(
+        (word) =>
+          word.length > 2 &&
+          !BODY_NON_IDENTITY_WORDS.has(word) &&
+          lexicalWordSupportedByProduct(word, productWords),
+      ),
+    ),
+  ];
+};
 
 const repeatedWords = (value: string) =>
   /\b([\p{L}]{3,})(?:\s+\1){2,}\b/iu.test(
@@ -163,7 +254,11 @@ export class CommercialAiCopyValidator {
       LETTER.test(headline) && headline !== headline.toLocaleUpperCase('pt-BR'),
       'AI_HEADLINE_UPPERCASE',
     );
-    add(failures, body.length < 10 || body.length > 260, 'AI_BODY_LENGTH');
+    add(
+      failures,
+      body.length < 10 || body.length > COMMERCIAL_AI_COPY_BODY_MAX_LENGTH,
+      'AI_BODY_LENGTH',
+    );
     const headlineTextual = [headline];
     const textual = [headline, body];
     add(
@@ -193,6 +288,21 @@ export class CommercialAiCopyValidator {
     add(
       failures,
       textual.some((value) => MONEY_OR_PERCENT.test(value)),
+      'AI_FACTUAL_VALUE_FORBIDDEN',
+    );
+    add(
+      failures,
+      body.length >= 10 &&
+        body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH &&
+        unsupportedBodyIdentityWords(body, productName).length > 0,
+      'AI_FACTUAL_VALUE_FORBIDDEN',
+    );
+    add(
+      failures,
+      body.length >= 10 &&
+        body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH &&
+        Boolean(productName) &&
+        supportedBodyIdentityWords(body, productName).length === 0,
       'AI_FACTUAL_VALUE_FORBIDDEN',
     );
     add(

@@ -6,7 +6,9 @@ import {
   cleanCommercialPromotionBody,
   isSafeAssembledCommercialPromotionCopy,
   sanitizeCommercialPromotionCopy,
+  validateTrustedGroupInviteUrl,
 } from '../src/commercial-promotion-copy-assembler';
+import type { CommercialPromotionCopyTrustedFacts } from '../src/commercial-promotion-copy-assembler';
 
 const output = {
   headline: 'Oferta confiável',
@@ -32,7 +34,9 @@ const base = {
 describe('CommercialPromotionCopyAssembler', () => {
   const assembler = new CommercialPromotionCopyAssembler();
 
-  const trustedFacts = (overrides = {}) => ({
+  const trustedFacts = (
+    overrides: Partial<CommercialPromotionCopyTrustedFacts> = {},
+  ): CommercialPromotionCopyTrustedFacts => ({
     productName: base.productName,
     shopName: base.shopName,
     price: base.price,
@@ -49,19 +53,17 @@ describe('CommercialPromotionCopyAssembler', () => {
     });
     expect(copy.titulo).toBe(output.headline);
     expect(copy.mensagem).toBe(
-      `${output.body}\n🔥 POR R$ 123,45\n💸 15% OFF`,
+      `${output.body}\n🔥 POR: R$ 123,45\n💸 15% OFF`,
     );
     expect(copy.mensagem).not.toContain('Produto Exato');
     expect(copy.mensagem).not.toContain('Loja Exata');
     expect(copy.mensagem).not.toContain('Queda de');
     expect(copy.mensagem).not.toContain('medição anterior');
     expect(copy.mensagem).not.toContain('DE R$');
-    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
+    expect(copy.cta).toBe(`🛒 Compre aqui: ${base.affiliateLink}`);
     expect(copy.cta).not.toContain('Confira os detalhes');
     expect(copy.cta.split(base.affiliateLink)).toHaveLength(2);
-    expect(copy.hashtags).toBe(
-      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
-    );
+    expect(copy.hashtags).toBe('');
     expect(copy.hashtags).not.toContain(base.affiliateLink);
     expect(
       sanitizeCommercialPromotionCopy(copy, base.affiliateLink).cta,
@@ -75,7 +77,7 @@ describe('CommercialPromotionCopyAssembler', () => {
       affiliateLink,
       promotionSignals: [],
     });
-    expect(copy.cta).toBe(`🛒 Ver oferta:\n${affiliateLink}`);
+    expect(copy.cta).toBe(`🛒 Compre aqui: ${affiliateLink}`);
   });
 
   it.each(['HOKON.br', 'Loja HOKON.br', 'Produto oficial HOKON.br'])(
@@ -158,9 +160,177 @@ describe('CommercialPromotionCopyAssembler', () => {
       priceDropPercent: null,
     });
 
-    expect(copy.mensagem).toBe(`${output.body}\n🔥 POR R$ 49,90`);
+    expect(copy.mensagem).toBe(`${output.body}\n🔥 POR: R$ 49,90`);
     expect(copy.mensagem).not.toContain('DE R$');
     expect(copy.mensagem).not.toContain('OFF');
+  });
+
+  it('monta o exemplo comercial com POR, CTA novo e convite confiável', () => {
+    const input = {
+      ...base,
+      output: {
+        headline: 'CACHEADOR DE BOLSO',
+        body: 'Modelador de Cabelo GOKOCO com Íons Negativos',
+      },
+      price: '189.00',
+      discountRate: 47.5,
+      promotionSignals: [],
+      priceDropPercent: null,
+      affiliateLink: 'https://s.shopee.com.br/abc',
+      groupInviteUrl: 'https://chat.whatsapp.com/xyz',
+    };
+    const copy = assembler.assemble(input);
+
+    expect(copy).toEqual({
+      titulo: 'CACHEADOR DE BOLSO',
+      mensagem:
+        'Modelador de Cabelo GOKOCO com Íons Negativos\n🔥 POR: R$ 189,00\n💸 47,5% OFF',
+      cta: '🛒 Compre aqui: https://s.shopee.com.br/abc',
+      hashtags:
+        '📎 Encaminhe para um amigo participar do grupo: https://chat.whatsapp.com/xyz',
+    });
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        copy,
+        input.affiliateLink,
+        input,
+        input.maximumLength,
+      ),
+    ).toBe(true);
+  });
+
+  it('mantém o núcleo da copy e altera somente o assembly quando o invite muda', () => {
+    const input = {
+      ...base,
+      output: {
+        headline: 'CACHEADOR DE BOLSO',
+        body: 'Modelador de Cabelo GOKOCO com Íons Negativos',
+      },
+      price: '189.00',
+      discountRate: 47.5,
+      promotionSignals: [],
+      priceDropPercent: null,
+      affiliateLink: 'https://s.shopee.com.br/abc',
+    };
+    const first = assembler.assemble({
+      ...input,
+      groupInviteUrl: 'https://chat.whatsapp.com/xyz',
+    });
+    const second = assembler.assemble({
+      ...input,
+      groupInviteUrl: 'https://chat.whatsapp.com/abc',
+    });
+
+    expect(second.titulo).toBe(first.titulo);
+    expect(second.mensagem).toBe(first.mensagem);
+    expect(second.cta).toBe(first.cta);
+    expect(second.hashtags).not.toBe(first.hashtags);
+  });
+
+  it('usa somente o preço atual e nunca trata priceMax como preço original', () => {
+    const copy = assembler.assemble({
+      ...base,
+      price: '189.00',
+      promotionSignals: [],
+      priceDropPercent: null,
+    });
+    expect(copy.mensagem).toContain('🔥 POR: R$ 189,00');
+    expect(copy.mensagem).not.toContain('DE:');
+  });
+
+  it('omite completamente o rodapé quando o invite está ausente ou inválido', () => {
+    for (const groupInviteUrl of [
+      undefined,
+      null,
+      'http://chat.whatsapp.com/xyz',
+      'https://chat.whatsapp.co/xyz',
+      'https://evil.example/xyz',
+      'javascript:alert(1)',
+      'https://chat.whatsapp.com/',
+      'https://chat.whatsapp.com/xyz?redirect=https://evil.example',
+      'https://chat.whatsapp.com:443/xyz',
+      ' https://chat.whatsapp.com/xyz',
+      'https://chat.whatsapp.com/xyz ',
+      'https://chat.whatsapp.com/xyz/',
+    ]) {
+      const copy = assembler.assemble({
+        ...base,
+        groupInviteUrl,
+        promotionSignals: [],
+      });
+      expect(copy.hashtags).toBe('');
+      expect(copy.cta).toBe(`🛒 Compre aqui: ${base.affiliateLink}`);
+      expect(validateTrustedGroupInviteUrl(groupInviteUrl)).toBeNull();
+    }
+  });
+
+  it('conta affiliate e invite confiáveis separadamente e rejeita duplicação', () => {
+    const facts = trustedFacts({
+      price: '189.00',
+      discountRate: 47.5,
+      groupInviteUrl: 'https://chat.whatsapp.com/xyz',
+      promotionSignals: [],
+      priceDropPercent: null,
+    });
+    const copy = assembler.assemble({
+      ...base,
+      ...facts,
+      output: {
+        headline: 'CACHEADOR DE BOLSO',
+        body: 'Modelador de Cabelo GOKOCO com Íons Negativos',
+      },
+      affiliateLink: 'https://s.shopee.com.br/abc',
+    });
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        copy,
+        'https://s.shopee.com.br/abc',
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(true);
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        { ...copy, hashtags: `${copy.hashtags} ${facts.groupInviteUrl}` },
+        'https://s.shopee.com.br/abc',
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(false);
+  });
+
+  it('não aceita cache com CTA diferente ou body acima do limite', () => {
+    const facts = trustedFacts({ promotionSignals: [], priceDropPercent: null });
+    const affiliateLink = 'https://s.shopee.com.br/abc';
+    const copy = assembler.assemble({
+      ...base,
+      ...facts,
+      output: {
+        headline: 'CACHEADOR DE BOLSO',
+        body: 'Modelador de Cabelo GOKOCO com Íons Negativos',
+      },
+      affiliateLink,
+    });
+
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        { ...copy, cta: `Outro CTA ${copy.cta.slice(copy.cta.indexOf(' '))}` },
+        affiliateLink,
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(false);
+    expect(
+      isSafeAssembledCommercialPromotionCopy(
+        {
+          ...copy,
+          mensagem: `${'x'.repeat(101)}\n${copy.mensagem.slice(copy.mensagem.indexOf('\n') + 1)}`,
+        },
+        affiliateLink,
+        facts,
+        base.maximumLength,
+      ),
+    ).toBe(false);
   });
 
   it.each([
@@ -190,19 +360,17 @@ describe('CommercialPromotionCopyAssembler', () => {
     const cached = sanitizeCommercialPromotionCopy(
       {
         ...copy,
-        mensagem: `${body}\n🔥 POR R$ 123,45\n💸 15% OFF`,
+        mensagem: `${body}\n🔥 POR: R$ 123,45\n💸 15% OFF`,
       },
       base.affiliateLink,
     );
 
     expect(cleanCommercialPromotionBody(cleaned)).toBe(cleaned);
     expect(copy.titulo).toBe('SOLA QUE PARECE JET!');
-    expect(copy.mensagem).toBe(`${cleaned}\n🔥 POR R$ 123,45\n💸 15% OFF`);
-    expect(cached.mensagem).toBe(`${cleaned}\n🔥 POR R$ 123,45\n💸 15% OFF`);
-    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
-    expect(copy.hashtags).toBe(
-      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
-    );
+    expect(copy.mensagem).toBe(`${cleaned}\n🔥 POR: R$ 123,45\n💸 15% OFF`);
+    expect(cached.mensagem).toBe(`${cleaned}\n🔥 POR: R$ 123,45\n💸 15% OFF`);
+    expect(copy.cta).toBe(`🛒 Compre aqui: ${base.affiliateLink}`);
+    expect(copy.hashtags).toBe('');
     expect([copy.titulo, copy.mensagem, copy.cta, copy.hashtags].join('\n').split(base.affiliateLink)).toHaveLength(2);
   });
 
@@ -257,7 +425,7 @@ describe('CommercialPromotionCopyAssembler', () => {
       } as unknown as typeof output,
       promotionSignals: [],
     });
-    expect(copy.cta).toBe(`🛒 Ver oferta:\n${base.affiliateLink}`);
+    expect(copy.cta).toBe(`🛒 Compre aqui: ${base.affiliateLink}`);
     expect([copy.titulo, copy.mensagem, copy.cta, copy.hashtags].join('\n').split(base.affiliateLink)).toHaveLength(2);
     expect(() =>
       assembler.assemble({ ...base, promotionSignals: [], maximumLength: 20 }),
@@ -359,7 +527,7 @@ describe('commercialAiCopyInputFingerprint', () => {
     maximumLength: 1000,
   };
 
-  it('é determinístico, canonicaliza sinais e preço equivalente do assembler sem conter o link bruto', () => {
+  it('é determinístico e não contém fatos de montagem nem o link bruto', () => {
     const first = commercialAiCopyInputFingerprint({
       ...input,
       promotionSignals: [...input.promotionSignals],
@@ -431,32 +599,34 @@ describe('commercialAiCopyInputFingerprint', () => {
     );
   });
 
-  it.each([
-    [
-      'productName',
-      'Produto ' + 'x'.repeat(250) + ' A',
-      'Produto ' + 'x'.repeat(250) + ' B',
-    ],
-    [
-      'shopName',
-      'Loja ' + 'x'.repeat(120) + ' A',
-      'Loja ' + 'x'.repeat(120) + ' B',
-    ],
-  ] as const)('muda quando %s muda após o limite antigo', (field, firstValue, secondValue) => {
-    const first = commercialAiCopyInputFingerprint({
+  it('ignora fatos exclusivos da montagem e da publicação', () => {
+    const first = commercialAiCopyInputFingerprint(input);
+    const changedAssemblyFacts = commercialAiCopyInputFingerprint({
       ...input,
-      [field]: firstValue,
-      promotionSignals: [...input.promotionSignals],
+      promotionSignals: ['NEWLY_OBSERVED'],
+      priceDropPercent: '13',
+      productName: 'Produto alterado',
+      shopName: 'Loja alterada',
+      price: '124.45',
+      discountRate: 16,
+      affiliateLink: 'https://example.invalid/affiliate/changed',
+      maximumLength: 999,
     });
-    const second = commercialAiCopyInputFingerprint({
-      ...input,
-      [field]: secondValue,
-      promotionSignals: [...input.promotionSignals],
-    });
-    expect(second).not.toBe(first);
+    expect(changedAssemblyFacts).toBe(first);
   });
 
-  it('muda quando whitespace ou controle altera o artefato cru do assembler', () => {
+  it('mantém o contrato AI quando somente a revisão do snapshot muda', () => {
+    const first = commercialAiCopyInputFingerprint(input);
+    const changedSnapshot = commercialAiCopyInputFingerprint({
+      ...input,
+      snapshotId: 'snapshot-changed',
+      snapshotRevision: 3,
+      snapshotFingerprint: 'snapshot-fingerprint-changed',
+    });
+    expect(changedSnapshot).toBe(first);
+  });
+
+  it('ignora whitespace ou controle exclusivo do artefato de montagem', () => {
     const raw = { productName: 'Produto\u0000  exato', shopName: 'Loja\tExata' };
     const changed = { productName: 'Produto  exato', shopName: 'Loja Exata' };
     const assembler = new CommercialPromotionCopyAssembler();
@@ -477,7 +647,7 @@ describe('commercialAiCopyInputFingerprint', () => {
         ...raw,
         promotionSignals: [...input.promotionSignals],
       }),
-    ).not.toBe(
+    ).toBe(
       commercialAiCopyInputFingerprint({
         ...input,
         ...changed,
@@ -503,17 +673,6 @@ describe('commercialAiCopyInputFingerprint', () => {
     ['nicheId', { nicheId: 'niche-changed' }],
     ['candidateId', { candidateId: 'candidate-changed' }],
     ['productId', { productId: 'product-changed' }],
-    ['snapshotId', { snapshotId: 'snapshot-changed' }],
-    ['snapshotRevision', { snapshotRevision: 3 }],
-    ['snapshotFingerprint', { snapshotFingerprint: 'snapshot-fingerprint-changed' }],
-    ['promotionSignals', { promotionSignals: ['NEWLY_OBSERVED'] }],
-    ['priceDropPercent', { priceDropPercent: '13' }],
-    ['productName', { productName: 'Produto alterado' }],
-    ['shopName', { shopName: 'Loja alterada' }],
-    ['price', { price: '124.45' }],
-    ['discountRate', { discountRate: 16 }],
-    ['affiliateLink', { affiliateLink: 'https://example.invalid/affiliate/changed' }],
-    ['maximumLength', { maximumLength: 999 }],
   ] as const)(
     'muda quando o input semântico %s muda',
     (_field, change) => {
@@ -524,10 +683,7 @@ describe('commercialAiCopyInputFingerprint', () => {
       const changed = commercialAiCopyInputFingerprint({
         ...input,
         ...change,
-        promotionSignals:
-          'promotionSignals' in change
-            ? [...change.promotionSignals]
-            : [...input.promotionSignals],
+        promotionSignals: [...input.promotionSignals],
       });
       expect(changed).not.toBe(first);
     },
@@ -661,7 +817,7 @@ describe('commercialAiCopyInputFingerprint', () => {
     ).toBe(promptV11);
   });
 
-  it('separa V12 de V13 e inclui a versão/texto efetivo enviados ao modelo', () => {
+  it('separa V12 de V14 e inclui a versão/texto efetivo enviados ao modelo', () => {
     const v12 = commercialAiCopyInputFingerprint({
       ...input,
       promptVersion: 'commercial-promotion-copy-v12',
@@ -669,22 +825,22 @@ describe('commercialAiCopyInputFingerprint', () => {
       modelProductName: 'Produto original',
       promotionSignals: [...input.promotionSignals],
     });
-    const v13 = commercialAiCopyInputFingerprint({
+    const v14 = commercialAiCopyInputFingerprint({
       ...input,
-      promptVersion: 'commercial-promotion-copy-v13',
+      promptVersion: 'commercial-promotion-copy-v14',
       inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v1',
       modelProductName: 'Produto',
       promotionSignals: [...input.promotionSignals],
     });
     const changedModelText = commercialAiCopyInputFingerprint({
       ...input,
-      promptVersion: 'commercial-promotion-copy-v13',
+      promptVersion: 'commercial-promotion-copy-v14',
       inputSanitizationVersion: 'commercial-promotion-copy-input-sanitization-v1',
       modelProductName: 'Produto com especificação diferente',
       promotionSignals: [...input.promotionSignals],
     });
 
-    expect(v13).not.toBe(v12);
-    expect(changedModelText).not.toBe(v13);
+    expect(v14).not.toBe(v12);
+    expect(changedModelText).not.toBe(v14);
   });
 });

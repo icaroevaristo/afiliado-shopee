@@ -15,31 +15,30 @@ export type CommercialAiCopyFingerprintInput = {
   nicheId: string;
   candidateId: string;
   productId: string;
-  snapshotId: string;
-  snapshotRevision: number;
-  snapshotFingerprint: string;
-  // These fields affect the trusted assembled message or cache acceptance.
-  promotionSignals: CommercialPromotionSignal[];
-  priceDropPercent: string | null;
-  productName: string;
-  shopName: string;
-  price: string;
-  discountRate: number;
-  affiliateLink: string;
-  maximumLength: number;
+  /**
+   * Snapshot fields are retained only for compatibility with callers that
+   * also carry provenance. They are not part of the AI generation contract:
+   * the prompt sends only the sanitized product identity.
+   */
+  snapshotId?: string;
+  snapshotRevision?: number;
+  snapshotFingerprint?: string;
+  /**
+   * Legacy assembly fields remain accepted for source compatibility only.
+   * They are deliberately excluded from the generation-contract hash below.
+   */
+  promotionSignals?: readonly CommercialPromotionSignal[];
+  priceDropPercent?: string | null;
+  productName?: string;
+  shopName?: string;
+  price?: string;
+  discountRate?: number;
+  affiliateLink?: string;
+  maximumLength?: number;
 };
 
 export const sha256 = (value: string) =>
   createHash('sha256').update(value, 'utf8').digest('hex');
-
-const canonicalDecimal = (value: string) => {
-  const [integer = '0', fraction = ''] = value.trim().split('.');
-  const canonicalInteger = integer.replace(/^(-?)0+(?=\d)/u, '$1');
-  const canonicalFraction = fraction.replace(/0+$/u, '');
-  return canonicalFraction
-    ? `${canonicalInteger}.${canonicalFraction}`
-    : canonicalInteger;
-};
 
 export const commercialAiCopyInputFingerprint = (
   input: CommercialAiCopyFingerprintInput,
@@ -56,19 +55,5 @@ export const commercialAiCopyInputFingerprint = (
       input.nicheId,
       input.candidateId,
       input.productId,
-      input.snapshotId,
-      input.snapshotRevision,
-      input.snapshotFingerprint,
-      // Keep deterministic assembly and cache-acceptance inputs in the key.
-      [...input.promotionSignals].sort(),
-      input.priceDropPercent === null
-        ? null
-        : canonicalDecimal(input.priceDropPercent),
-      input.productName,
-      input.shopName,
-      canonicalDecimal(input.price),
-      input.discountRate,
-      sha256(input.affiliateLink),
-      input.maximumLength,
     ]),
   );
