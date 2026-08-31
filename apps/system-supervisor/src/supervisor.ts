@@ -5,6 +5,7 @@ import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/providers';
 
 import { loadLocalSystemEnvironment } from './environment';
+import { ensureDashboardProductionBuild } from './dashboard-build';
 import {
   absoluteLogPath,
   appendSupervisorLog,
@@ -21,6 +22,7 @@ import type {
   CommandSpec,
   LocalSystemState,
   PortOccupant,
+  ProcessInspection,
   RegisteredProcess,
   ServiceName,
   SystemDependencies,
@@ -32,12 +34,17 @@ import {
   SERVICE_NAMES,
 } from './types';
 
-type ServiceSpec = {
+export type ServiceSpec = {
   name: ServiceName;
   command: string;
-  args: string[];
+  args: string[] | ((ports: LocalSystemState['ports']) => string[]);
   marker: string;
   cwd?: string;
+  env?: (runtimeEnv: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+  identity?: (
+    inspection: ProcessInspection,
+    ports: LocalSystemState['ports'],
+  ) => boolean;
   healthUrl?: (ports: LocalSystemState['ports']) => string;
 };
 
@@ -503,6 +510,68 @@ const mergeMainInfrastructureStatuses = (
 ];
 const processMarker = (path: string) => basename(path).toLowerCase();
 
+const processArguments = (command: string) =>
+  command
+    .match(/"[^"]*"|'[^']*'|\S+/g)
+    ?.map((argument) => argument.replace(/^['"]|['"]$/g, '')) ?? [];
+
+const normalizedPath = (value: string) =>
+  value
+    .replaceAll('\\', '/')
+    .replace(/^\/\/\?\//, '/')
+    .toLowerCase();
+
+const dashboardProcessIdentity = (
+  inspection: ProcessInspection,
+  dashboardPort: number,
+  nodePath: string,
+  nextPath: string,
+  dashboardDirectory: string,
+) => {
+  const command = inspection.command?.replaceAll('\\', '/');
+  if (!command) return false;
+  const args = processArguments(command);
+  const expected = [
+    nodePath,
+    nextPath,
+    'start',
+    dashboardDirectory,
+    '-p',
+    String(dashboardPort),
+    '-H',
+    '127.0.0.1',
+  ];
+  return (
+    args.length === expected.length &&
+    args.every((argument, index) => {
+      const expectedArgument = expected[index];
+      if (index === 0 || index === 1 || index === 3) {
+        return normalizedPath(argument) === normalizedPath(expectedArgument);
+      }
+      return argument.toLowerCase() === expectedArgument.toLowerCase();
+    })
+  );
+};
+
+const serviceIdentityMatches = (
+  spec: ServiceSpec,
+  inspection: ProcessInspection,
+  ports: LocalSystemState['ports'],
+) =>
+  inspection.running &&
+  inspection.identityMatches &&
+  (spec.identity ? spec.identity(inspection, ports) : true);
+
+export const resolveServiceArgs = (
+  spec: ServiceSpec,
+  ports: LocalSystemState['ports'],
+) => (typeof spec.args === 'function' ? spec.args(ports) : spec.args);
+
+export const resolveServiceEnv = (
+  spec: ServiceSpec,
+  runtimeEnv: NodeJS.ProcessEnv,
+) => (spec.env ? spec.env(runtimeEnv) : runtimeEnv);
+
 export const createServiceSpecs = (root: string): ServiceSpec[] => {
   const rootRequire = createRequire(resolve(root, 'package.json'));
   const dashboardRequire = createRequire(
@@ -510,6 +579,7 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
   );
   const tsx = rootRequire.resolve('tsx/cli');
   const next = dashboardRequire.resolve('next/dist/bin/next');
+  const dashboardDirectory = resolve(root, 'apps/dashboard');
   const runtimeTsconfig = resolve(root, 'tsconfig.runtime.json');
   const api = resolve(root, 'apps/api/src/server.ts');
   const commercialWorker = resolve(
@@ -531,9 +601,26 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
     {
       name: 'dashboard',
       command: process.execPath,
-      args: [next, 'dev', '-p', '3000', '-H', '127.0.0.1'],
+      args: (ports) => [
+        next,
+        'start',
+        dashboardDirectory,
+        '-p',
+        String(ports.dashboard),
+        '-H',
+        '127.0.0.1',
+      ],
       marker: processMarker(next),
-      cwd: resolve(root, 'apps/dashboard'),
+      cwd: dashboardDirectory,
+      env: (runtimeEnv) => ({ ...runtimeEnv, NODE_ENV: 'production' }),
+      identity: (inspection, ports) =>
+        dashboardProcessIdentity(
+          inspection,
+          ports.dashboard,
+          process.execPath,
+          next,
+          dashboardDirectory,
+        ),
       healthUrl: (ports) => `http://127.0.0.1:${ports.dashboard}`,
     },
     {
@@ -713,7 +800,7 @@ const inspectRegisteredProcesses = async (
       spec.marker,
       registered.startedAt,
     );
-    if (inspection.running && inspection.identityMatches) {
+    if (serviceIdentityMatches(spec, inspection, state.ports)) {
       valid[spec.name] = registered;
     } else if (inspection.running) {
       reused.push(spec.name);
@@ -742,6 +829,22 @@ const assertPortAvailable = async (
     `A porta ${port} esta ocupada por ${occupant.processName}; nenhum processo sera encerrado`,
     'SYSTEM_PORT_OCCUPIED',
   );
+};
+
+const assertRegisteredServicePortsUnchanged = (
+  previous: LocalSystemState | null,
+  processes: LocalSystemState['processes'],
+  ports: LocalSystemState['ports'],
+) => {
+  if (!previous) return;
+  for (const service of ['api', 'dashboard'] as const) {
+    if (processes[service] && previous.ports[service] !== ports[service]) {
+      throw new LocalSystemError(
+        `A porta do servico ${service} mudou enquanto o processo estava ativo; pare o sistema antes de alterar a configuracao`,
+        'SYSTEM_PORT_CONFIGURATION_CHANGED',
+      );
+    }
+  }
 };
 
 export type SystemStatusSnapshot = OperationLockSnapshot & {
@@ -983,6 +1086,11 @@ export class LocalSystemSupervisor {
         'SYSTEM_UNEXPECTED_REGISTERED_PROCESS',
       );
     }
+    assertRegisteredServicePortsUnchanged(
+      previous,
+      inspected.valid,
+      loaded.ports,
+    );
     if (inspected.reused.length > 0) {
       appendSupervisorLog(
         this.root,
@@ -996,6 +1104,28 @@ export class LocalSystemSupervisor {
       'pnpm nao esta disponivel',
       this.root,
     );
+    await assertPortAvailable(
+      loaded.ports.api,
+      inspected.valid.api?.pid,
+      this.deps,
+    );
+    await assertPortAvailable(
+      loaded.ports.dashboard,
+      inspected.valid.dashboard?.pid,
+      this.deps,
+    );
+    if (!inspected.valid.dashboard) {
+      await ensureDashboardProductionBuild({
+        root: this.root,
+        deps: this.deps,
+        runtimeEnv,
+        buildCommand: pnpmSpec(
+          this.root,
+          ['--filter', '@shopee-auto-affiliate-ai/dashboard', 'build'],
+          { ...runtimeEnv, NODE_ENV: 'production' },
+        ),
+      });
+    }
     await runRequired(
       this.deps,
       composeSpec(this.root, ['--version'], runtimeEnv),
@@ -1012,16 +1142,6 @@ export class LocalSystemSupervisor {
         'DOCKER_DAEMON_UNAVAILABLE',
       );
     }
-    await assertPortAvailable(
-      loaded.ports.api,
-      inspected.valid.api?.pid,
-      this.deps,
-    );
-    await assertPortAvailable(
-      loaded.ports.dashboard,
-      inspected.valid.dashboard?.pid,
-      this.deps,
-    );
     const mainBeforeStart = await this.deps.run(
       composeSpec(
         this.root,
@@ -1186,9 +1306,9 @@ export class LocalSystemSupervisor {
           rotateLogIfNeeded(logPath);
           const started = await this.deps.spawn({
             command: spec.command,
-            args: spec.args,
+            args: resolveServiceArgs(spec, state.ports),
             cwd: spec.cwd ?? this.root,
-            env: runtimeEnv,
+            env: resolveServiceEnv(spec, runtimeEnv),
             logPath,
           });
           state.processes[name] = {
@@ -1211,7 +1331,7 @@ export class LocalSystemSupervisor {
           const inspection = await this.deps
             .inspectProcess(registered.pid, spec.marker, registered.startedAt)
             .catch(() => ({ running: true, identityMatches: false }));
-          if (!inspection.running || !inspection.identityMatches) {
+          if (!serviceIdentityMatches(spec, inspection, state.ports)) {
             throw new LocalSystemError(
               `${name} encerrou durante a inicializacao`,
               'SYSTEM_CHILD_START_FAILED',
@@ -1246,7 +1366,7 @@ export class LocalSystemSupervisor {
           continue;
         }
         if (
-          !inspection.identityMatches ||
+          !serviceIdentityMatches(spec, inspection, state.ports) ||
           !(await this.deps.stopProcessTree(registered.pid))
         ) {
           rollbackFailures.push(name);
@@ -1292,7 +1412,7 @@ export class LocalSystemSupervisor {
             spec.name,
             !inspection.running
               ? 'stopped'
-              : inspection.identityMatches
+              : serviceIdentityMatches(spec, inspection, ports)
                 ? 'running'
                 : 'identity-mismatch',
           ] as const;
@@ -1569,7 +1689,7 @@ export class LocalSystemSupervisor {
           registered.startedAt,
         );
         if (!inspection.running) continue;
-        if (!inspection.identityMatches) {
+        if (!serviceIdentityMatches(spec, inspection, state.ports)) {
           manualIntervention.push(
             `${spec.name}: PID reutilizado ou divergente`,
           );

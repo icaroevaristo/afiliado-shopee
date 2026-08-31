@@ -193,6 +193,7 @@ const harness = (
     mainComposeStartFails?: boolean;
     infrastructureHealthFails?: boolean;
     migrationFails?: boolean;
+    dashboardBuildFails?: boolean;
     healthFails?: boolean;
     dieAfterInitialInspection?: ServiceName;
     portOccupants?: Record<number, PortOccupant>;
@@ -212,10 +213,29 @@ const harness = (
   const commands: CommandSpec[] = [];
   const stopped: number[] = [];
   const spawned: ServiceName[] = [];
+  const spawnCommandIndexes: number[] = [];
   const spawnedCwds = new Map<ServiceName, string>();
   const inspectionCounts = new Map<number, number>();
   const run = vi.fn(async (spec: CommandSpec) => {
     commands.push(spec);
+    if (spec.command === 'git' && spec.args[0] === 'rev-parse') {
+      return { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' };
+    }
+    if (spec.command === 'git' && spec.args[0] === 'status') {
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (
+      spec.args.includes('@shopee-auto-affiliate-ai/dashboard') &&
+      spec.args.includes('build')
+    ) {
+      if (options.dashboardBuildFails) {
+        return { code: 1, stdout: '', stderr: 'dashboard build failed' };
+      }
+      const buildDirectory = join(spec.cwd, 'apps', 'dashboard', '.next');
+      mkdirSync(buildDirectory, { recursive: true });
+      writeFileSync(join(buildDirectory, 'BUILD_ID'), 'test-build-id\n');
+      return { code: 0, stdout: '', stderr: '' };
+    }
     if (spec.args.includes('config') && spec.args.includes('--format')) {
       if (options.dockerDiscoveryThrowsAt === 'config')
         throw new Error('timeout');
@@ -303,6 +323,7 @@ const harness = (
   const deps: SystemDependencies = {
     run,
     spawn: vi.fn(async (spec) => {
+      spawnCommandIndexes.push(commands.length);
       const pid = nextPid++;
       const startedAt = `2026-07-25T12:00:${String(pid - 100).padStart(2, '0')}.000Z`;
       const marker = spec.args[0];
@@ -397,6 +418,7 @@ const harness = (
     commands,
     processes,
     spawned,
+    spawnCommandIndexes,
     spawnedCwds,
     stopped,
     setInfrastructure: (running: boolean) => {
@@ -444,6 +466,40 @@ const dailySendReadyEnvironment = (token?: string) => ({
 });
 
 describe('LocalSystemSupervisor', () => {
+  it('prepares the production dashboard before infrastructure or child spawn', async () => {
+    const root = createRoot();
+    const state = harness();
+
+    await createSupervisor(root, state.deps).start(environment());
+
+    const buildIndex = state.commands.findIndex(
+      (command) =>
+        command.args.includes('@shopee-auto-affiliate-ai/dashboard') &&
+        command.args.includes('build'),
+    );
+    const dockerIndex = state.commands.findIndex(
+      (command) => command.command === 'docker',
+    );
+    expect(buildIndex).toBeGreaterThanOrEqual(0);
+    expect(buildIndex).toBeLessThan(dockerIndex);
+    expect(buildIndex).toBeLessThan(state.spawnCommandIndexes[0]);
+    expect(state.commands[buildIndex].env?.NODE_ENV).toBe('production');
+  });
+
+  it('does not spawn any service when the production dashboard build fails', async () => {
+    const root = createRoot();
+    const state = harness({ dashboardBuildFails: true });
+
+    await expect(
+      createSupervisor(root, state.deps).start(environment()),
+    ).rejects.toMatchObject({ code: 'DASHBOARD_BUILD_FAILED' });
+
+    expect(state.spawned).toEqual([]);
+    expect(state.commands.some((command) => command.command === 'docker')).toBe(
+      false,
+    );
+  });
+
   it('starts the safe preview topology in order without legacy worker, tick or send', async () => {
     const root = createRoot();
     const state = harness();
@@ -1407,6 +1463,48 @@ describe('LocalSystemSupervisor', () => {
     await supervisor.start(environment());
     await supervisor.start(environment());
     expect(state.spawned).toEqual(['api', 'dashboard', 'commercial-worker']);
+  });
+
+  it('does not rebuild the dashboard while its registered process is alive', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSupervisor(root, state.deps);
+    await supervisor.start(environment());
+    rmSync(join(root, 'apps', 'dashboard', '.next', 'BUILD_ID'), {
+      force: true,
+    });
+
+    await supervisor.start(environment());
+
+    expect(
+      state.commands.filter((command) => command.args.includes('build')),
+    ).toHaveLength(1);
+    expect(state.spawned).toEqual(['api', 'dashboard', 'commercial-worker']);
+  });
+
+  it('rejects a persisted dashboard port change before rewriting state', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSupervisor(root, state.deps);
+    await supervisor.start(environment());
+    const persisted = JSON.parse(readFileSync(statePath(root), 'utf8')) as {
+      ports: { dashboard: number };
+    };
+    persisted.ports.dashboard = 3011;
+    writeFileSync(statePath(root), JSON.stringify(persisted));
+
+    await expect(supervisor.start(environment())).rejects.toMatchObject({
+      code: 'SYSTEM_PORT_CONFIGURATION_CHANGED',
+    });
+    expect(
+      JSON.parse(readFileSync(statePath(root), 'utf8')).ports.dashboard,
+    ).toBe(3011);
+    expect(
+      state.commands.filter((command) => command.args.includes('build')),
+    ).toHaveLength(1);
+    await expect(supervisor.stop(environment())).resolves.toMatchObject({
+      stopped: true,
+    });
   });
 
   it('accepts a listening descendant of a validated managed process', async () => {
