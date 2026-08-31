@@ -492,11 +492,20 @@ describe('LocalSystemSupervisor', () => {
         protectedPaths.some((path) => String(url).endsWith(path)),
       );
     expect(protectedCalls).toHaveLength(3);
-    for (const [, options] of protectedCalls) {
-      expect(options).toEqual({
-        headers: { authorization: `Bearer ${localApiAuthToken}` },
-      });
-    }
+    expect(
+      protectedCalls.map(([, options]) => {
+        const headers = new Headers(options?.headers);
+        return {
+          authorizationPresent: headers.has('authorization'),
+          authorizationMatches:
+            headers.get('authorization') === `Bearer ${localApiAuthToken}`,
+        };
+      }),
+    ).toEqual([
+      { authorizationPresent: true, authorizationMatches: true },
+      { authorizationPresent: true, authorizationMatches: true },
+      { authorizationPresent: true, authorizationMatches: true },
+    ]);
     const healthCall = vi
       .mocked(state.deps.request)
       .mock.calls.find(([url]) => String(url).endsWith('/health'));
@@ -510,6 +519,28 @@ describe('LocalSystemSupervisor', () => {
     expect(readFileSync(statePath(root), 'utf8')).not.toContain(
       localApiAuthToken,
     );
+  });
+
+  it('can isolate status environment loading from repository files', async () => {
+    const root = createRoot();
+    const marker = 'TEST_SECRET_MUST_NEVER_APPEAR';
+    writeFileSync(
+      join(root, '.env'),
+      `COMMERCIAL_AUTOMATION_MODE=send\nLOCAL_API_AUTH_TOKEN=${marker}\n`,
+    );
+    const state = harness();
+
+    const status = await new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      loadEnvironmentFiles: false,
+    }).status(explicitSafePreviewEnvironment());
+
+    expect(status.mode).toBe('preview');
+    expect(status.controlPlane.configured).toBe(false);
+    const serializedCommandEnvironments = state.commands
+      .map((command) => JSON.stringify(command.env ?? {}))
+      .join('\n');
+    expect(serializedCommandEnvironments.includes(marker)).toBe(false);
   });
 
   it('fails closed before startup when the daily SEND-ready token is absent', async () => {
