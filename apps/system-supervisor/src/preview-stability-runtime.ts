@@ -391,16 +391,26 @@ export const stopValidatedManagedProcess = async ({
   }
 };
 
+export type PreviewStabilityRuntimeOptions = {
+  loadEnvironmentFiles?: boolean;
+};
+
 export const createPreviewStabilityDependencies = (
   root: string,
   dependencies: SystemDependencies = createSystemDependencies(),
+  options: PreviewStabilityRuntimeOptions = {},
 ): PreviewStabilityDependencies => {
-  const supervisor = new LocalSystemSupervisor(root, dependencies);
+  const loadEnvironmentFiles = options.loadEnvironmentFiles ?? true;
+  const supervisor = new LocalSystemSupervisor(root, dependencies, undefined, {
+    loadEnvironmentFiles,
+  });
   const environmentCache = new WeakMap<NodeJS.ProcessEnv, NodeJS.ProcessEnv>();
   const loadedEnvironment = (environment: NodeJS.ProcessEnv) => {
     const cached = environmentCache.get(environment);
     if (cached) return cached;
-    const loaded = loadLocalSystemEnvironment(root, environment).env;
+    const loaded = loadLocalSystemEnvironment(root, environment, {
+      loadFiles: loadEnvironmentFiles,
+    }).env;
     environmentCache.set(environment, loaded);
     return loaded;
   };
@@ -506,7 +516,9 @@ export const createPreviewStabilityDependencies = (
       );
     },
     async setAutomationPaused(paused, environment) {
-      const loaded = loadLocalSystemEnvironment(root, environment);
+      const loaded = loadLocalSystemEnvironment(root, environment, {
+        loadFiles: loadEnvironmentFiles,
+      });
       const token = loaded.env.LOCAL_API_AUTH_TOKEN?.trim();
       if (!token) {
         throw new LocalSystemError(
@@ -687,7 +699,9 @@ export const createPreviewStabilityDependencies = (
       });
     },
     async restartMainService(service, environment) {
-      const loaded = loadLocalSystemEnvironment(root, environment);
+      const loaded = loadLocalSystemEnvironment(root, environment, {
+        loadFiles: loadEnvironmentFiles,
+      });
       const env = loaded.env;
       const resolution = await resolveEquivalentMainServiceContainer(
         root,

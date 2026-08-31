@@ -1,4 +1,6 @@
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -18,6 +20,7 @@ import {
   type PreviewStabilityEvidence,
   type PreviewStabilityReport,
 } from '../src/preview-stability';
+import { loadLocalSystemEnvironment } from '../src/environment';
 import {
   createPreviewStabilityDependencies,
   parseDatabaseHelperFailureDiagnostic,
@@ -31,6 +34,13 @@ import {
 } from '../src/types';
 
 const ROOT = resolve(import.meta.dirname, '../../..');
+
+const createIsolatedPreviewStabilityDependencies = (
+  dependencies: SystemDependencies,
+) =>
+  createPreviewStabilityDependencies(ROOT, dependencies, {
+    loadEnvironmentFiles: false,
+  });
 
 const POSTGRES_CONTAINER_ID = 'aaaaaaaaaaaa';
 const REDIS_CONTAINER_ID = 'bbbbbbbbbbbb';
@@ -425,11 +435,32 @@ const evolutionInfrastructureCapture = JSON.stringify({
   Health: 'healthy',
 });
 
-const safePreviewEvolutionIsolationEnvironment = (): NodeJS.ProcessEnv => ({
-  COMMERCIAL_AUTOMATION_MODE: 'preview',
-  WHATSAPP_PROVIDER: 'mock',
-  WHATSAPP_GROUP_SEND_ENABLED: 'false',
-});
+const TEST_SENSITIVE_ENV_KEYS = [
+  'LOCAL_API_AUTH_TOKEN',
+  'OPENAI_API_KEY',
+  'SHOPEE_AFFILIATE_SECRET',
+  'EVOLUTION_API_KEY',
+  'DATABASE_URL',
+  'REDIS_URL',
+] as const;
+
+const createSanitizedTestEnvironment = (
+  overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv => {
+  const environment: NodeJS.ProcessEnv = {
+    COMMERCIAL_AUTOMATION_MODE: 'preview',
+    WHATSAPP_PROVIDER: 'mock',
+    WHATSAPP_GROUP_SEND_ENABLED: 'false',
+    ...overrides,
+  };
+  for (const key of TEST_SENSITIVE_ENV_KEYS) {
+    if (!(key in overrides)) delete environment[key];
+  }
+  return environment;
+};
+
+const safePreviewEvolutionIsolationEnvironment = () =>
+  createSanitizedTestEnvironment();
 describe('preview operational stability', () => {
   it('pins the stability harness to the mock WhatsApp provider', () => {
     expect(PREVIEW_STABILITY_ENVIRONMENT).toMatchObject({
@@ -1549,7 +1580,7 @@ describe('preview operational stability', () => {
         }),
         now: () => now,
       } as unknown as SystemDependencies;
-      const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+      const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
       await expect(
         runtime.restartMainService(
@@ -1592,7 +1623,7 @@ describe('preview operational stability', () => {
       sleep: vi.fn(),
       now: () => new Date('2026-07-28T12:00:00.000Z'),
     } as unknown as SystemDependencies;
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await expect(
       runtime.restartMainService(
@@ -1659,7 +1690,7 @@ describe('preview operational stability', () => {
       sleep: vi.fn(),
       now: () => new Date('2026-07-28T12:00:00.000Z'),
     } as unknown as SystemDependencies;
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await expect(
       runtime.restartMainService(
@@ -1722,7 +1753,7 @@ describe('preview operational stability', () => {
       sleep: vi.fn(),
       now: () => new Date('2026-07-28T12:00:00.000Z'),
     } as unknown as SystemDependencies;
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     const error = await runtime
       .restartMainService(
@@ -1789,7 +1820,7 @@ describe('preview operational stability', () => {
       sleep: vi.fn(),
       now: () => new Date('2026-07-28T12:00:00.000Z'),
     } as unknown as SystemDependencies;
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await expect(
       runtime.restartMainService(
@@ -1917,8 +1948,7 @@ describe('preview operational stability', () => {
           headers: { 'content-type': 'application/json' },
         }),
       );
-      const runtime = createPreviewStabilityDependencies(
-        ROOT,
+      const runtime = createIsolatedPreviewStabilityDependencies(
         createInfrastructureRuntimeDependencies(vi.fn()),
       );
       try {
@@ -1931,15 +1961,20 @@ describe('preview operational stability', () => {
         expect(fetchSpy).toHaveBeenCalledOnce();
         const [url, options] = fetchSpy.mock.calls[0]!;
         expect(String(url)).toMatch(/\/commercial-automation\/settings$/);
-        expect(options).toMatchObject({
+        const headers = new Headers(options?.headers);
+        expect({
+          method: options?.method,
+          contentType: headers.get('content-type'),
+          authorizationMatches:
+            headers.get('authorization') === `Bearer ${token}`,
+          body: options?.body,
+        }).toEqual({
           method: 'PATCH',
-          headers: {
-            authorization: `Bearer ${token}`,
-            'content-type': 'application/json',
-          },
+          contentType: 'application/json',
+          authorizationMatches: true,
           body: JSON.stringify(expectedPayload),
         });
-        expect(JSON.stringify(options)).not.toMatch(
+        expect(String(options?.body)).not.toMatch(
           /postgresql:\/\/|redis:\/\//i,
         );
       } finally {
@@ -1948,10 +1983,66 @@ describe('preview operational stability', () => {
     },
   );
 
+  it('isolates test environment files and keeps auth failures out of test output', async () => {
+    const marker = 'TEST_SECRET_MUST_NEVER_APPEAR';
+    const root = mkdtempSync(join(tmpdir(), 'preview-stability-secret-'));
+    writeFileSync(join(root, '.env'), `LOCAL_API_AUTH_TOKEN=${marker}\n`);
+    const isolatedEnvironment = loadLocalSystemEnvironment(
+      root,
+      {},
+      {
+        loadFiles: false,
+      },
+    );
+    expect('LOCAL_API_AUTH_TOKEN' in isolatedEnvironment.env).toBe(false);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error(marker));
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const stderr = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      const runtime = createPreviewStabilityDependencies(
+        ROOT,
+        createInfrastructureRuntimeDependencies(vi.fn()),
+        { loadEnvironmentFiles: false },
+      );
+      const missingTokenError = await runtime
+        .setAutomationPaused(false, safePreviewEvolutionIsolationEnvironment())
+        .catch((error: unknown) => error);
+      expect(missingTokenError).toMatchObject({
+        code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const providerError = await runtime
+        .setAutomationPaused(false, {
+          ...safePreviewEvolutionIsolationEnvironment(),
+          LOCAL_API_AUTH_TOKEN: 'local-preview-auth-test-token',
+        })
+        .catch((error: unknown) => error);
+      const observedOutput = [
+        JSON.stringify(providerError),
+        ...stdout.mock.calls.map(([value]) => String(value)),
+        ...stderr.mock.calls.map(([value]) => String(value)),
+      ].join('\n');
+      expect(observedOutput.includes(marker)).toBe(false);
+      expect(providerError).toMatchObject({
+        code: 'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      fetchSpy.mockRestore();
+      stdout.mockRestore();
+      stderr.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed without a local API token before issuing the pause request', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    const runtime = createPreviewStabilityDependencies(
-      ROOT,
+    const runtime = createIsolatedPreviewStabilityDependencies(
       createInfrastructureRuntimeDependencies(vi.fn()),
     );
     try {
@@ -1978,8 +2069,7 @@ describe('preview operational stability', () => {
         .mockResolvedValue(
           new Response('sensitive response body', { status: statusCode }),
         );
-      const runtime = createPreviewStabilityDependencies(
-        ROOT,
+      const runtime = createIsolatedPreviewStabilityDependencies(
         createInfrastructureRuntimeDependencies(vi.fn()),
       );
       try {
@@ -2007,8 +2097,7 @@ describe('preview operational stability', () => {
       ...safePreviewEvolutionIsolationEnvironment(),
       LOCAL_API_AUTH_TOKEN: token,
     };
-    const runtime = createPreviewStabilityDependencies(
-      ROOT,
+    const runtime = createIsolatedPreviewStabilityDependencies(
       createInfrastructureRuntimeDependencies(vi.fn()),
     );
     const fetchSpy = vi
@@ -2057,7 +2146,7 @@ describe('preview operational stability', () => {
       ].join('\n'),
     }));
     const dependencies = createInfrastructureRuntimeDependencies(run);
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
     const errorLog = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
@@ -2096,7 +2185,7 @@ describe('preview operational stability', () => {
       );
     });
     const dependencies = createInfrastructureRuntimeDependencies(run);
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await expect(
       runtime.prepareMainInfrastructure(
@@ -2140,7 +2229,7 @@ describe('preview operational stability', () => {
         throw new Error(`unexpected command: ${spec.args.join(' ')}`);
       }),
     );
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await runtime.prepareMainInfrastructure(
       safePreviewEvolutionIsolationEnvironment(),
@@ -2244,7 +2333,7 @@ describe('preview operational stability', () => {
         throw new Error(`unexpected command: ${spec.args.join(' ')}`);
       }),
     );
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     const infrastructure = await runtime.captureInfrastructure(
       safePreviewEvolutionIsolationEnvironment(),
@@ -2323,7 +2412,7 @@ describe('preview operational stability', () => {
           throw new Error(`unexpected command: ${spec.args.join(' ')}`);
         }),
       );
-      const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+      const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
       await expect(
         runtime.captureInfrastructure(environment),
@@ -2363,7 +2452,7 @@ describe('preview operational stability', () => {
         throw new Error(`unexpected command: ${spec.args.join(' ')}`);
       }),
     );
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     const infrastructure = await runtime.captureInfrastructure({
       COMMERCIAL_AUTOMATION_MODE: 'send',
@@ -2399,7 +2488,7 @@ describe('preview operational stability', () => {
         throw new Error(`unexpected command: ${spec.args.join(' ')}`);
       }),
     );
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
     await expect(
       runtime.captureInfrastructure(safePreviewEvolutionIsolationEnvironment()),
@@ -2411,7 +2500,7 @@ describe('preview operational stability', () => {
     const dependencies = {
       run: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'sensitive' })),
     } as unknown as SystemDependencies;
-    const runtime = createPreviewStabilityDependencies(ROOT, dependencies);
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
     await expect(runtime.captureInfrastructure({})).rejects.toMatchObject({
       code: 'PREVIEW_STABILITY_MAIN_CONTAINER_CAPTURE_FAILED',
     });

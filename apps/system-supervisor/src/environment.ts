@@ -20,15 +20,19 @@ const integerPort = (value: string | undefined, fallback: number) => {
 export const loadLocalSystemEnvironment = (
   root: string,
   processEnv: NodeJS.ProcessEnv = process.env,
+  options: { loadFiles?: boolean } = {},
 ) => {
   const envPath = resolve(root, '.env');
   const runtimeEnvPath = resolve(root, 'runtime.env');
-  const fileEnv = existsSync(envPath)
-    ? parseDotEnv(readFileSync(envPath, 'utf8'))
-    : {};
-  const runtimeFileEnv = existsSync(runtimeEnvPath)
-    ? parseDotEnv(readFileSync(runtimeEnvPath, 'utf8'))
-    : {};
+  const loadFiles = options.loadFiles ?? true;
+  const fileEnv =
+    loadFiles && existsSync(envPath)
+      ? parseDotEnv(readFileSync(envPath, 'utf8'))
+      : {};
+  const runtimeFileEnv =
+    loadFiles && existsSync(runtimeEnvPath)
+      ? parseDotEnv(readFileSync(runtimeEnvPath, 'utf8'))
+      : {};
   const env = { ...fileEnv, ...runtimeFileEnv, ...processEnv };
   const mode = (env.COMMERCIAL_AUTOMATION_MODE ?? 'preview').toLowerCase();
   if (mode !== 'preview' && mode !== 'send') {

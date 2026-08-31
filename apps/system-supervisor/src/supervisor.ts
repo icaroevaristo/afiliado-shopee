@@ -890,17 +890,28 @@ const parseAutomationStatus = (
 export class LocalSystemSupervisor {
   private readonly specs: ServiceSpec[];
   private readonly validateRoot: () => boolean;
+  private readonly loadEnvironmentFiles: boolean;
 
   constructor(
     private readonly root: string,
     private readonly deps: SystemDependencies,
     specs?: ServiceSpec[],
-    options: { validateRoot?: () => boolean } = {},
+    options: {
+      validateRoot?: () => boolean;
+      loadEnvironmentFiles?: boolean;
+    } = {},
   ) {
     this.specs = specs ?? createServiceSpecs(root);
     this.validateRoot =
       options.validateRoot ??
       (() => realpathSync(process.cwd()) === realpathSync(this.root));
+    this.loadEnvironmentFiles = options.loadEnvironmentFiles ?? true;
+  }
+
+  private loadEnvironment(processEnv: NodeJS.ProcessEnv) {
+    return loadLocalSystemEnvironment(this.root, processEnv, {
+      loadFiles: this.loadEnvironmentFiles,
+    });
   }
 
   async start(processEnv: NodeJS.ProcessEnv = process.env) {
@@ -927,7 +938,7 @@ export class LocalSystemSupervisor {
       );
     }
 
-    const loaded = loadLocalSystemEnvironment(this.root, processEnv);
+    const loaded = this.loadEnvironment(processEnv);
     const runtimeEnv = loaded.env;
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(runtimeEnv);
     if (
@@ -1262,7 +1273,7 @@ export class LocalSystemSupervisor {
   async status(
     processEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<SystemStatusSnapshot> {
-    const loaded = loadLocalSystemEnvironment(this.root, processEnv);
+    const loaded = this.loadEnvironment(processEnv);
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     const state = readState(this.root);
     const operationLockPromise = inspectOperationLock(this.root, this.deps);
@@ -1544,7 +1555,7 @@ export class LocalSystemSupervisor {
   }
 
   async stop(processEnv: NodeJS.ProcessEnv = process.env) {
-    const loaded = loadLocalSystemEnvironment(this.root, processEnv);
+    const loaded = this.loadEnvironment(processEnv);
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     const state = readState(this.root);
     const manualIntervention: string[] = [];
