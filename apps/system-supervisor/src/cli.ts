@@ -173,6 +173,7 @@ export const formatStatus = (status: SystemStatusSnapshot) =>
     `WhatsApp: ${status.evolution.whatsappConnection}`,
     `API: ${status.processes.api} / ${status.endpoints.api}`,
     `Dashboard: ${status.processes.dashboard} / ${status.endpoints.dashboard}`,
+    `Portas locais: API ${status.ports.api} / Dashboard ${status.ports.dashboard}`,
     `Worker comercial: ${status.processes['commercial-worker']}`,
     `Worker de dispatch: ${status.processes['whatsapp-dispatch-worker']}`,
     `Scheduler legado: ${status.schedulers.legacy.status}`,

@@ -74,6 +74,9 @@ try {
     Assert-LauncherTrue ($dryRun.StatusCommand -eq 'corepack pnpm system:status -- --json') 'start delegates status to supervisor'
     Assert-LauncherTrue ($dryRun.StartCommand -eq 'corepack pnpm system:start') 'start delegates lifecycle to supervisor'
     Assert-LauncherTrue ($dryRun.RepositoryRoot -like '*Shopee Affiliate Launcher Test Root') 'repository paths with spaces resolve'
+    Assert-LauncherEqual $dryRun.ReadinessApi 'http://127.0.0.1:3433/health' 'dry-run uses the daily API port'
+    Assert-LauncherEqual $dryRun.ReadinessDashboard 'http://127.0.0.1:3000' 'dry-run uses the daily dashboard port'
+    Assert-LauncherEqual $dryRun.BrowserUrl 'http://localhost:3000' 'dry-run uses the daily browser URL'
 
     $script:launcherCalls = @()
     $script:browserCalls = @()
@@ -81,6 +84,7 @@ try {
         overall = 'running'
         operationLock = 'unlocked'
         mode = 'send'
+        ports = [pscustomobject]@{ api = 3433; dashboard = 3000 }
         endpoints = [pscustomobject]@{ api = 'available'; dashboard = 'available' }
         controlPlane = [pscustomobject]@{ required = $true; configured = $true; authenticated = $true }
         processes = [pscustomobject]@{ api = 'running'; dashboard = 'running'; 'commercial-worker' = 'running'; 'whatsapp-dispatch-worker' = 'running' }
@@ -89,11 +93,13 @@ try {
         overall = 'stopped'
         operationLock = 'unlocked'
         mode = 'send'
+        ports = [pscustomobject]@{ api = 3433; dashboard = 3000 }
         endpoints = [pscustomobject]@{ api = 'unavailable'; dashboard = 'unavailable' }
         controlPlane = [pscustomobject]@{ required = $true; configured = $false; authenticated = $false }
         processes = [pscustomobject]@{ api = 'stopped'; dashboard = 'stopped'; 'commercial-worker' = 'stopped'; 'whatsapp-dispatch-worker' = 'stopped' }
     }
     $script:fakeStatus = $healthyStatus
+    $script:httpCalls = @()
     $runner = {
         param($FilePath, $Arguments, $WorkingDirectory)
         $script:launcherCalls += [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments); WorkingDirectory = $WorkingDirectory }
@@ -110,17 +116,46 @@ try {
     }
     $lookup = { param($Name) return $true }
     $browser = { param($Url) $script:browserCalls += $Url }
-    $httpReady = { param($Url) return $true }
+    $httpReady = { param($Url) $script:httpCalls += $Url; return $true }
 
     $runningResult = Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -HttpProbe $httpReady -BrowserOpener $browser -SkipWindowsCheck
     Assert-LauncherEqual $runningResult.Action 'already-running' 'healthy system is reused'
     Assert-LauncherEqual (@($script:launcherCalls | Where-Object { $_.Arguments -contains 'system:start' }).Count) 0 'already-running does not start another system'
     Assert-LauncherEqual $script:browserCalls.Count 1 'already-running opens the dashboard once'
+    Assert-LauncherEqual $script:browserCalls[0] 'http://localhost:3000' 'already-running opens the status dashboard port'
+
+    $healthyStatus.ports.api = 3444
+    $healthyStatus.ports.dashboard = 3011
+    $stoppedStatus.ports.api = 3444
+    $stoppedStatus.ports.dashboard = 3011
+    $script:fakeStatus = $stoppedStatus
+    $script:browserCalls = @()
+    $script:httpCalls = @()
+    $dynamicResult = Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -HttpProbe $httpReady -BrowserOpener $browser -SkipWindowsCheck -TimeoutSeconds 1 -PollSeconds 1
+    Assert-LauncherEqual $dynamicResult.Action 'started' 'launcher follows status-provided ports after start'
+    Assert-LauncherTrue ($script:httpCalls -contains 'http://127.0.0.1:3444/health') 'readiness uses API port from status'
+    Assert-LauncherTrue ($script:httpCalls -contains 'http://127.0.0.1:3011') 'readiness uses dashboard port from status'
+    Assert-LauncherTrue ($script:httpCalls -notcontains 'http://127.0.0.1:3333/health') 'readiness never probes the old API port'
+    Assert-LauncherEqual $script:browserCalls[0] 'http://localhost:3011' 'browser uses dashboard port from status'
+
+    $stoppedStatus.ports.api = 3333
+    $stoppedStatus.ports.dashboard = 3000
+    $healthyStatus.ports.api = 3433
+    $healthyStatus.ports.dashboard = 3000
+    $script:fakeStatus = $stoppedStatus
+    $script:browserCalls = @()
+    $script:httpCalls = @()
+    $staleStateResult = Invoke-StartLauncher -Root $fixtureRoot -CommandRunner $runner -CommandLookup $lookup -HttpProbe $httpReady -BrowserOpener $browser -SkipWindowsCheck -TimeoutSeconds 1 -PollSeconds 1
+    Assert-LauncherEqual $staleStateResult.Action 'started' 'launcher refreshes stale pre-start port metadata'
+    Assert-LauncherTrue ($script:httpCalls -contains 'http://127.0.0.1:3433/health') 'readiness uses refreshed post-start API port'
+    Assert-LauncherTrue ($script:httpCalls -notcontains 'http://127.0.0.1:3333/health') 'stale pre-start API port is never probed'
+    Assert-LauncherEqual $script:browserCalls[0] 'http://localhost:3000' 'stale pre-start metadata does not change the final browser URL'
 
     $script:fakeStatus = [pscustomobject]@{
         overall = 'running'
         operationLock = 'stale'
         mode = 'send'
+        ports = [pscustomobject]@{ api = 3433; dashboard = 3000 }
         endpoints = [pscustomobject]@{ api = 'available'; dashboard = 'available' }
         controlPlane = [pscustomobject]@{ required = $true; configured = $true; authenticated = $true }
         processes = [pscustomobject]@{ api = 'running'; dashboard = 'running'; 'commercial-worker' = 'running'; 'whatsapp-dispatch-worker' = 'running' }
@@ -202,6 +237,8 @@ try {
     Assert-LauncherThrowsCode { Invoke-StopLauncher -Root $fixtureRoot -CommandRunner $incompleteStopRunner -CommandLookup $lookup -SkipWindowsCheck } 'SYSTEM_STOP_INCOMPLETE' 'stop incomplete never force-kills processes'
 
     $profile = Get-DailyRuntimeProfile
+    Assert-LauncherEqual $profile.PORT '3433' 'daily profile isolates the API port'
+    Assert-LauncherEqual $profile.DASHBOARD_API_URL 'http://127.0.0.1:3433' 'dashboard proxy follows the isolated API port'
     $forbiddenProfileKeys = @('DATABASE_URL', 'REDIS_URL', 'OPENAI_API_KEY', 'SHOPEE_AFFILIATE_SECRET', 'EVOLUTION_API_KEY', 'LOCAL_API_AUTH_TOKEN')
     foreach ($key in $forbiddenProfileKeys) {
         Assert-LauncherTrue (-not $profile.Contains($key)) "daily profile does not include $key"

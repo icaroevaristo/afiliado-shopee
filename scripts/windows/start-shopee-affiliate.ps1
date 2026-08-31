@@ -104,6 +104,45 @@ function Get-SystemStatusForLauncher {
     return ConvertFrom-LauncherJsonOutput -CommandResult $result
 }
 
+function Get-LauncherStatusPort {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Status,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('api', 'dashboard')]
+        [string]$Name
+    )
+
+    $portsProperty = $Status.PSObject.Properties['ports']
+    if ($null -eq $portsProperty -or $null -eq $portsProperty.Value) {
+        Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O supervisor não informou as portas efetivas.'
+    }
+
+    $portProperty = $portsProperty.Value.PSObject.Properties[$Name]
+    if ($null -eq $portProperty) {
+        Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O supervisor não informou uma porta local válida.'
+    }
+
+    $port = 0
+    if (-not [int]::TryParse([string]$portProperty.Value, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O supervisor informou uma porta local inválida.'
+    }
+    return $port
+}
+
+function Get-LauncherStatusPorts {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Status
+    )
+
+    return [pscustomobject]@{
+        Api = Get-LauncherStatusPort -Status $Status -Name 'api'
+        Dashboard = Get-LauncherStatusPort -Status $Status -Name 'dashboard'
+    }
+}
+
 function Test-LauncherEndpoint {
     param(
         [Parameter(Mandatory = $true)]
@@ -128,6 +167,12 @@ function Wait-LauncherReadiness {
     param(
         [scriptblock]$HttpProbe,
 
+        [Parameter(Mandatory = $true)]
+        [int]$ApiPort,
+
+        [Parameter(Mandatory = $true)]
+        [int]$DashboardPort,
+
         [int]$TimeoutSeconds,
 
         [int]$PollSeconds
@@ -140,12 +185,14 @@ function Wait-LauncherReadiness {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $apiReady = $false
     $dashboardReady = $false
+    $apiUrl = 'http://127.0.0.1:{0}/health' -f $ApiPort
+    $dashboardUrl = 'http://127.0.0.1:{0}' -f $DashboardPort
     while ([DateTime]::UtcNow -lt $deadline) {
         if (-not $apiReady) {
-            $apiReady = Test-LauncherEndpoint -Url 'http://127.0.0.1:3333/health' -HttpProbe $HttpProbe
+            $apiReady = Test-LauncherEndpoint -Url $apiUrl -HttpProbe $HttpProbe
         }
         if (-not $dashboardReady) {
-            $dashboardReady = Test-LauncherEndpoint -Url 'http://127.0.0.1:3000' -HttpProbe $HttpProbe
+            $dashboardReady = Test-LauncherEndpoint -Url $dashboardUrl -HttpProbe $HttpProbe
         }
         if ($apiReady -and $dashboardReady) { return }
         Start-Sleep -Seconds $PollSeconds
@@ -159,14 +206,18 @@ function Wait-LauncherReadiness {
 
 function Open-LauncherDashboard {
     param(
-        [scriptblock]$BrowserOpener
+        [scriptblock]$BrowserOpener,
+
+        [Parameter(Mandatory = $true)]
+        [int]$DashboardPort
     )
 
     try {
+        $url = 'http://localhost:{0}' -f $DashboardPort
         if ($null -ne $BrowserOpener) {
-            & $BrowserOpener 'http://localhost:3000'
+            & $BrowserOpener $url
         } else {
-            Start-Process -FilePath 'http://localhost:3000' | Out-Null
+            Start-Process -FilePath $url | Out-Null
         }
     } catch {
         Throw-LauncherError -Code 'BROWSER_OPEN_FAILED' -Message 'O navegador não pôde ser aberto.'
@@ -194,14 +245,17 @@ function Invoke-StartLauncher {
             RepositoryRoot = $resolvedRoot
             StatusCommand = 'corepack pnpm system:status -- --json'
             StartCommand = 'corepack pnpm system:start'
-            ReadinessApi = 'http://127.0.0.1:3333/health'
+            ReadinessApi = 'http://127.0.0.1:3433/health'
             ReadinessDashboard = 'http://127.0.0.1:3000'
             BrowserUrl = 'http://localhost:3000'
+            ApiPort = 3433
+            DashboardPort = 3000
         }
     }
 
     $pnpmExecutor = Test-LauncherPrerequisites -Root $resolvedRoot -CommandRunner $CommandRunner -CommandLookup $CommandLookup -SkipWindowsCheck:$SkipWindowsCheck
     $status = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner -PnpmExecutor $pnpmExecutor
+    $statusPorts = Get-LauncherStatusPorts -Status $status
 
     if ([string]$status.operationLock -eq 'active') {
         Throw-LauncherError -Code 'SYSTEM_OPERATION_IN_PROGRESS' -Message 'Outra operação do sistema está em andamento.'
@@ -211,7 +265,7 @@ function Invoke-StartLauncher {
         if (-not (Test-SystemHealthyForLauncher -Status $status)) {
             Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O supervisor reportou um estado incompleto.'
         }
-        if (-not $NoBrowser) { Open-LauncherDashboard -BrowserOpener $BrowserOpener }
+        if (-not $NoBrowser) { Open-LauncherDashboard -BrowserOpener $BrowserOpener -DashboardPort $statusPorts.Dashboard }
         return [pscustomobject]@{ Action = 'already-running'; RepositoryRoot = $resolvedRoot }
     }
 
@@ -224,12 +278,18 @@ function Invoke-StartLauncher {
         Throw-LauncherError -Code 'SYSTEM_START_FAILED' -Message 'O supervisor não conseguiu iniciar o sistema.'
     }
 
-    Wait-LauncherReadiness -HttpProbe $HttpProbe -TimeoutSeconds $TimeoutSeconds -PollSeconds $PollSeconds
+    $startedStatus = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner -PnpmExecutor $pnpmExecutor
+    $startedStatusPorts = Get-LauncherStatusPorts -Status $startedStatus
+    Wait-LauncherReadiness -HttpProbe $HttpProbe -ApiPort $startedStatusPorts.Api -DashboardPort $startedStatusPorts.Dashboard -TimeoutSeconds $TimeoutSeconds -PollSeconds $PollSeconds
     $readyStatus = Get-SystemStatusForLauncher -Root $resolvedRoot -CommandRunner $CommandRunner -PnpmExecutor $pnpmExecutor
+    $readyStatusPorts = Get-LauncherStatusPorts -Status $readyStatus
+    if ($readyStatusPorts.Api -ne $startedStatusPorts.Api -or $readyStatusPorts.Dashboard -ne $startedStatusPorts.Dashboard) {
+        Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'As portas do supervisor mudaram durante a inicialização.'
+    }
     if (-not (Test-SystemHealthyForLauncher -Status $readyStatus)) {
         Throw-LauncherError -Code 'SYSTEM_STATUS_UNKNOWN' -Message 'O control plane autenticado não ficou pronto.'
     }
-    if (-not $NoBrowser) { Open-LauncherDashboard -BrowserOpener $BrowserOpener }
+    if (-not $NoBrowser) { Open-LauncherDashboard -BrowserOpener $BrowserOpener -DashboardPort $readyStatusPorts.Dashboard }
     return [pscustomobject]@{ Action = 'started'; RepositoryRoot = $resolvedRoot }
 }
 

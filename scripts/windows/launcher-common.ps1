@@ -347,7 +347,8 @@ function ConvertTo-LauncherShortcutArgument {
 function Get-DailyRuntimeProfile {
     $profile = [ordered]@{
         NODE_ENV = 'production'
-        DASHBOARD_API_URL = 'http://127.0.0.1:3333'
+        PORT = '3433'
+        DASHBOARD_API_URL = 'http://127.0.0.1:3433'
         COMMERCIAL_AUTOMATION_ENABLED = 'true'
         COMMERCIAL_SCHEDULER_ENABLED = 'true'
         SCHEDULER_ENABLED = 'false'
