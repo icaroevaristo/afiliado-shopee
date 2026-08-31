@@ -67,7 +67,7 @@ const sampleFakeOutputs = [
 describe('commercial AI copy prompt', () => {
   it('mantem schema remoto estrito e prompt versionado', () => {
     expect(COMMERCIAL_AI_COPY_PROMPT_VERSION).toBe(
-      'commercial-promotion-copy-v13',
+      'commercial-promotion-copy-v14',
     );
     expect(COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION).toBe(
       'commercial-promotion-copy-input-sanitization-v1',
@@ -95,6 +95,8 @@ describe('commercial AI copy prompt', () => {
     expect(instructions).toContain('humor, ironia, hipérbole, brincadeira e linguagem figurativa são permitidos');
     expect(instructions).toContain('Não a trate como ficha técnica');
     expect(instructions).toContain('IDENTIDADE LIMPA');
+    expect(instructions).toContain('aproximadamente entre 45 e 90 caracteres');
+    expect(instructions).toContain('nunca ultrapasse 100 caracteres');
     expect(instructions).toContain('extrai somente a identidade útil do produto');
     expect(instructions).toContain('nunca uma segunda copy ou mera reformatação');
     expect(instructions).toContain('Não escreva narrativa, história, opinião, reação, recomendação ou CTA');
@@ -208,7 +210,7 @@ describe('commercial AI copy prompt', () => {
 
   it('versiona o validador local e mantém limites fora do schema remoto', () => {
     expect(COMMERCIAL_AI_COPY_VALIDATION_VERSION).toBe(
-      'commercial-promotion-copy-validation-v4',
+      'commercial-promotion-copy-validation-v6',
     );
     expect(COMMERCIAL_AI_COPY_SCHEMA.properties.headline).not.toHaveProperty(
       'minLength',
@@ -234,7 +236,7 @@ describe('commercial AI copy prompt', () => {
     const validator = new CommercialAiCopyValidator();
     expect(
       validator.validate(
-        { headline: 'GANCHO ESPECÍFICO', body: 'Nome limpo do produto.' },
+        { headline: 'GANCHO ESPECÍFICO', body: 'Nome completo do produto.' },
         'Nome completo do produto',
         ['HOKON.br'],
       ).valid,

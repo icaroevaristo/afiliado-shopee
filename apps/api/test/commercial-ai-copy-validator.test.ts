@@ -12,7 +12,7 @@ const valid = {
   body: 'Produto seguro para o seu dia.',
 };
 
-describe('CommercialAiCopyValidator V4', () => {
+describe('CommercialAiCopyValidator V6', () => {
   const validator = new CommercialAiCopyValidator();
 
   it('normaliza e aceita output válido somente com headline e body', () => {
@@ -49,6 +49,7 @@ describe('CommercialAiCopyValidator V4', () => {
     [{ ...valid, headline: 'Achado para o dia' }, 'AI_HEADLINE_UPPERCASE'],
     [{ ...valid, headline: 'ACHADO 2 O DIA' }, 'AI_DIGIT_FORBIDDEN'],
     [{ ...valid, body: '' }, 'AI_BODY_LENGTH'],
+    [{ ...valid, body: 'x'.repeat(101) }, 'AI_BODY_LENGTH'],
     [{ ...valid, body: 'x'.repeat(261) }, 'AI_BODY_LENGTH'],
     [
       { ...valid, body: 'Veja https://example.invalid agora' },
@@ -123,6 +124,81 @@ describe('CommercialAiCopyValidator V4', () => {
     );
     expect(result.valid).toBe(false);
     expect(result.publicFailureCodes).toContain('AI_DIGIT_FORBIDDEN');
+  });
+
+  it('aceita identidades curtas dos produtos de referência sem relaxar a headline', () => {
+    const fixtures = [
+      [
+        'Kit 3 Regata Feminina Suplex com Alcinha, Modelo Virgínia',
+        'Kit 3 Regatas Suplex Modelo Virgínia',
+      ],
+      [
+        'Kit 5 pacotes de Toalhas Umedecidas Baby Free com 100 unidades',
+        'Kit 5 Pacotes de Toalhas Umedecidas Baby Free',
+      ],
+      [
+        'Seringa de insulina 0,5ml com agulha ultrafina 0,30mm x 8mm',
+        'Seringa de Insulina 0,5ml com Agulha 8mm',
+      ],
+      [
+        'Modelador de cabelo portátil GOKOCO com íons negativos, 9 níveis',
+        'Modelador de Cabelo GOKOCO com Íons Negativos',
+      ],
+      ['Tênis de Corrida com Placa de Carbono', 'Tênis de Corrida com Placa de Carbono'],
+      ['Air Fryer 6,5L 1700W 127V', 'Air Fryer 6,5L 1700W 127V'],
+    ] as const;
+    const validator = new CommercialAiCopyValidator();
+
+    for (const [productName, body] of fixtures) {
+      expect(body.length).toBeLessThanOrEqual(100);
+      expect(
+        validator.validate({ headline: 'ACHADO DO DIA', body }, productName),
+      ).toMatchObject({ valid: true, publicFailureCodes: [] });
+    }
+    expect(
+      validator.validate(
+        { headline: 'ACHADO 2 DIA', body: 'Tênis de Corrida com Placa de Carbono' },
+        fixtures[4][0],
+      ).publicFailureCodes,
+    ).toContain('AI_DIGIT_FORBIDDEN');
+  });
+
+  it('rejeita identidade textual que não existe no nome do produto', () => {
+    const result = validator.validate(
+      {
+        headline: 'AIR FRYER EM DESTAQUE',
+        body: 'Air Fryer Marca Fantasma com Bluetooth',
+      },
+      'Air Fryer 6,5L 1700W 127V',
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.publicFailureCodes).toContain('AI_FACTUAL_VALUE_FORBIDDEN');
+  });
+
+  it('rejeita corpo genérico sem identidade sustentada pelo produto', () => {
+    const result = validator.validate(
+      {
+        headline: 'OFERTA SEGURA',
+        body: 'Uma escolha prática para sua rotina.',
+      },
+      'Produto verificado',
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.publicFailureCodes).toContain('AI_FACTUAL_VALUE_FORBIDDEN');
+  });
+
+  it('aceita body no limite exato e rejeita o primeiro caractere excedente', () => {
+    const validator = new CommercialAiCopyValidator();
+    const atLimit = 'a'.repeat(100);
+    expect(
+      validator.validate({ headline: 'NOME LIMPO', body: atLimit }).valid,
+    ).toBe(true);
+    expect(
+      validator.validate({ headline: 'NOME LIMPO', body: `${atLimit}a` })
+        .publicFailureCodes,
+    ).toContain('AI_BODY_LENGTH');
   });
 
   it('rejeita repetição contextual de fato confiável da loja', () => {

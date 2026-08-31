@@ -509,6 +509,24 @@ class MemoryE2ECopyRepository implements CommercialPromotionCopyRepository {
     this.context.candidate.generatedCopyId = input.copyId;
     return true;
   }
+  async refreshCachedCopy(
+    input: Parameters<
+      CommercialPromotionCopyRepository['refreshCachedCopy']
+    >[0],
+  ) {
+    if (
+      this.context.candidate.status !== 'COPY_READY' ||
+      this.context.candidate.generatedCopyId !== input.copyId
+    ) {
+      return false;
+    }
+    const copy = [...this.copies.values()].find(
+      ({ id }) => id === input.copyId,
+    );
+    if (!copy || copy.inputFingerprint !== input.inputFingerprint) return false;
+    Object.assign(copy, input.assembled);
+    return true;
+  }
   async complete(input: CommercialAiCopyCompletionInput) {
     const attempt = this.attempts.get(input.inputFingerprint);
     if (!attempt)
@@ -565,7 +583,7 @@ const phase9CopyProvider = (): CommercialAiCopyProvider => ({
   generate: vi.fn().mockResolvedValue({
     output: {
       headline: 'OFERTA CONFIÁVEL',
-      body: 'Uma escolha prática para sua rotina.',
+      body: 'Produto comercial para sua rotina.',
     },
     provider: 'openai',
     model: 'phase9-model',

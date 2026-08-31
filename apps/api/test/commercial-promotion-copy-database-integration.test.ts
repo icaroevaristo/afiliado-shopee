@@ -14,12 +14,12 @@ const NOW = new Date('2026-08-01T12:00:00.000Z');
 const PREFIX = 'validated-ai-copy-fixture';
 const CASES = ['success', 'failed', 'ambiguous', 'changed', 'expired'] as const;
 
-const validOutput = {
+const validOutput = (productSuffix: string) => ({
   headline: 'Oferta confiável',
-  body: 'Uma escolha prática para sua rotina.',
+  body: `Produto ${productSuffix} em destaque.`,
   cta: 'Confira os detalhes',
   hashtags: ['#Oferta'],
-};
+});
 
 describeDatabase('validated AI promotion copy database fixture', () => {
   const prisma = createPrismaClient();
@@ -172,7 +172,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
       generate: vi.fn(async () => {
         await gate;
         return {
-          output: validOutput,
+          output: validOutput('success'),
           provider: 'openai' as const,
           model: 'fixture-model',
           usage: {
@@ -278,7 +278,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
           },
         });
         return {
-          output: validOutput,
+          output: validOutput('changed'),
           provider: 'openai' as const,
           model: 'fixture-model',
           usage: {
@@ -315,7 +315,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
           WHERE "id" = ${candidateId('expired')}
         `;
         return {
-          output: validOutput,
+          output: validOutput('expired'),
           provider: 'openai' as const,
           model: 'fixture-model',
           usage: {

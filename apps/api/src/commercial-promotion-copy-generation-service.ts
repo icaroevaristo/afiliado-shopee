@@ -27,6 +27,7 @@ import {
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 import {
   CommercialPromotionCopyAssembler,
+  extractCachedCommercialAiCopyOutput,
   hasAsciiControlOrDel,
   isSafeAssembledCommercialPromotionCopy,
   sanitizeCommercialPromotionCopy,
@@ -199,75 +200,37 @@ export class CommercialPromotionCopyGenerationService {
       snapshotId: context.snapshot.id,
       snapshotRevision: context.snapshot.revision,
       snapshotFingerprint: context.snapshot.fingerprint,
-      promotionSignals: context.candidate.promotionSignals,
-      priceDropPercent: context.candidate.priceDropPercent,
-      productName: context.product.productName,
-      shopName: context.product.shopName,
-      price: context.product.price,
-      discountRate: context.product.discountRate,
-      affiliateLink: context.product.affiliateLink,
-      maximumLength: this.options.config.maximumCopyLength,
     });
   }
 
-  private validCache(
-    copy: GeneratedCopyRecord | null,
-    context: CommercialPromotionCopyContext,
-    fingerprint: string,
-  ) {
-    return Boolean(
-      copy &&
-      copy.source === 'AI' &&
-      copy.provider === this.options.config.provider &&
-      copy.model === this.options.config.model &&
-      copy.promptVersion === COMMERCIAL_AI_COPY_PROMPT_VERSION &&
-      copy.validationVersion === COMMERCIAL_AI_COPY_VALIDATION_VERSION &&
-      copy.inputFingerprint === fingerprint &&
-      copy.snapshotId === context.snapshot.id &&
-      copy.productId === context.product.id &&
-      context.product.affiliateLink &&
-      isSafeAssembledCommercialPromotionCopy(
-        copy,
-        context.product.affiliateLink as string,
-        {
-          productName: context.product.productName,
-          shopName: context.product.shopName,
-          price: context.product.price,
-          discountRate: context.product.discountRate,
-          promotionSignals: context.candidate.promotionSignals,
-          priceDropPercent: context.candidate.priceDropPercent,
-        },
-        this.options.config.maximumCopyLength,
-      ),
-    );
-  }
-
-  private validLinkedCopy(
+  private assembleCachedCopy(
     copy: GeneratedCopyRecord,
     context: CommercialPromotionCopyContext,
-  ) {
-    const model = this.options.config.model ?? copy.model ?? null;
-    const provider = this.options.config.provider ?? copy.provider ?? '';
-    const fingerprint = model
-      ? this.fingerprint(context, { provider, model })
-      : null;
-    return Boolean(
-      model &&
-      copy.id === context.candidate.generatedCopyId &&
-      copy.source === 'AI' &&
-      copy.provider === provider &&
-      copy.model === model &&
-      copy.promptVersion === COMMERCIAL_AI_COPY_PROMPT_VERSION &&
-      copy.validationVersion === COMMERCIAL_AI_COPY_VALIDATION_VERSION &&
-      (fingerprint
-        ? copy.inputFingerprint === fingerprint
-        : Boolean(copy.inputFingerprint)) &&
-      copy.snapshotId === context.snapshot.id &&
-      copy.productId === context.product.id &&
-      copy.createdFromCandidateId === context.candidate.id &&
-      context.product.affiliateLink &&
-      isSafeAssembledCommercialPromotionCopy(
-        copy,
+  ): AssembledCommercialPromotionCopy | null {
+    if (!context.product.affiliateLink) return null;
+    const output = extractCachedCommercialAiCopyOutput(copy);
+    if (!output) return null;
+    const facts = this.validationFacts(context);
+    const validation = this.validator.validate(
+      output,
+      facts.productName,
+      [facts.shopName],
+    );
+    if (!validation.valid || !validation.sanitizedOutput) return null;
+    try {
+      const assembled = this.assembler.assemble({
+        output: validation.sanitizedOutput,
+        productName: context.product.productName,
+        shopName: context.product.shopName,
+        price: context.product.price,
+        discountRate: context.product.discountRate,
+        promotionSignals: context.candidate.promotionSignals,
+        priceDropPercent: context.candidate.priceDropPercent,
+        affiliateLink: context.product.affiliateLink,
+        maximumLength: this.options.config.maximumCopyLength,
+      });
+      return isSafeAssembledCommercialPromotionCopy(
+        assembled,
         context.product.affiliateLink,
         {
           productName: context.product.productName,
@@ -278,8 +241,62 @@ export class CommercialPromotionCopyGenerationService {
           priceDropPercent: context.candidate.priceDropPercent,
         },
         this.options.config.maximumCopyLength,
-      ),
-    );
+      )
+        ? assembled
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private validCache(
+    copy: GeneratedCopyRecord | null,
+    context: CommercialPromotionCopyContext,
+    fingerprint: string,
+  ): AssembledCommercialPromotionCopy | null {
+    if (
+      !copy ||
+      copy.source !== 'AI' ||
+      copy.provider !== this.options.config.provider ||
+      copy.model !== this.options.config.model ||
+      copy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
+      copy.validationVersion !== COMMERCIAL_AI_COPY_VALIDATION_VERSION ||
+      copy.inputFingerprint !== fingerprint ||
+      copy.productId !== context.product.id ||
+      copy.createdFromCandidateId !== context.candidate.id
+    ) {
+      return null;
+    }
+    return this.assembleCachedCopy(copy, context);
+  }
+
+  private validLinkedCopy(
+    copy: GeneratedCopyRecord,
+    context: CommercialPromotionCopyContext,
+  ): AssembledCommercialPromotionCopy | null {
+    const model = this.options.config.model ?? copy.model ?? null;
+    const provider = this.options.config.provider ?? copy.provider ?? '';
+    const fingerprint = model
+      ? this.fingerprint(context, { provider, model })
+      : null;
+    if (
+      !model ||
+      copy.id !== context.candidate.generatedCopyId ||
+      copy.source !== 'AI' ||
+      copy.provider !== provider ||
+      copy.model !== model ||
+      copy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
+      copy.validationVersion !== COMMERCIAL_AI_COPY_VALIDATION_VERSION ||
+      (fingerprint
+        ? copy.inputFingerprint !== fingerprint
+        : !copy.inputFingerprint) ||
+      copy.snapshotId !== context.snapshot.id ||
+      copy.productId !== context.product.id ||
+      copy.createdFromCandidateId !== context.candidate.id
+    ) {
+      return null;
+    }
+    return this.assembleCachedCopy(copy, context);
   }
 
   private assemblePreview(
@@ -489,6 +506,7 @@ export class CommercialPromotionCopyGenerationService {
     context: CommercialPromotionCopyContext,
     fingerprint: string,
     copy: GeneratedCopyRecord,
+    assembled: AssembledCommercialPromotionCopy,
   ) {
     const linked = await this.options.repository.linkCachedCopy({
       expected: context,
@@ -501,6 +519,7 @@ export class CommercialPromotionCopyGenerationService {
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       maximumLength: this.options.config.maximumCopyLength,
+      assembled,
     });
     if (!linked) {
       fail(
@@ -508,7 +527,7 @@ export class CommercialPromotionCopyGenerationService {
         'COMMERCIAL_AI_COPY_CANDIDATE_CHANGED',
       );
     }
-    return this.result(context, copy, true);
+    return this.result(context, { ...copy, ...assembled }, true);
   }
 
   private async classifyExistingClaim(
@@ -545,13 +564,19 @@ export class CommercialPromotionCopyGenerationService {
     const copy = attempt.generatedCopyId
       ? await this.options.repository.findCopyByInputFingerprint(fingerprint)
       : null;
-    if (!this.validCache(copy, context, fingerprint)) {
+    const assembled = this.validCache(copy, context, fingerprint);
+    if (!assembled) {
       fail(
         'Cache de copy inconsistente',
         'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
       );
     }
-    return this.useCache(context, fingerprint, copy as GeneratedCopyRecord);
+    return this.useCache(
+      context,
+      fingerprint,
+      copy as GeneratedCopyRecord,
+      assembled as AssembledCommercialPromotionCopy,
+    );
   }
 
   private classifyHistoricalAttempt(
@@ -620,8 +645,30 @@ export class CommercialPromotionCopyGenerationService {
         (code) => code !== 'COMMERCIAL_AI_COPY_ALREADY_READY',
       );
       assertNoBlockers(blockers);
-      if (linked && this.validLinkedCopy(linked.copy, context)) {
-        return this.result(context, linked.copy, true);
+      const linkedAssembly = linked
+        ? this.validLinkedCopy(linked.copy, context)
+        : null;
+      if (linked && linkedAssembly) {
+        const refreshed = await this.options.repository.refreshCachedCopy({
+          expected: context,
+          copyId: linked.copy.id,
+          inputFingerprint: linked.copy.inputFingerprint as string,
+          affiliateLinkHash: sha256(context.product.affiliateLink as string),
+          validatedAt: this.clock(),
+          provider: linked.copy.provider as string,
+          model: linked.copy.model as string,
+          promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+          validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+          maximumLength: this.options.config.maximumCopyLength,
+          assembled: linkedAssembly,
+        });
+        if (!refreshed) {
+          fail(
+            'Candidato mudou antes da atualizacao do cache',
+            'COMMERCIAL_AI_COPY_CANDIDATE_CHANGED',
+          );
+        }
+        return this.result(context, { ...linked.copy, ...linkedAssembly }, true);
       }
       throw new AppError(
         'Copy pronta esta inconsistente',
@@ -641,8 +688,14 @@ export class CommercialPromotionCopyGenerationService {
     }
     const cached =
       await this.options.repository.findCopyByInputFingerprint(fingerprint);
-    if (this.validCache(cached, context, fingerprint)) {
-      return this.useCache(context, fingerprint, cached as GeneratedCopyRecord);
+    const cachedAssembly = this.validCache(cached, context, fingerprint);
+    if (cachedAssembly) {
+      return this.useCache(
+        context,
+        fingerprint,
+        cached as GeneratedCopyRecord,
+        cachedAssembly,
+      );
     }
     if (!cached) {
       const historicalAttempt = await this.findHistoricalAttempt(
@@ -892,11 +945,40 @@ export class CommercialPromotionCopyGenerationService {
       (code) => code !== 'COMMERCIAL_AI_COPY_ALREADY_READY',
     );
     assertNoBlockers(blockers);
-    if (!this.validLinkedCopy(found.copy, context))
+    const linkedAssembly = this.validLinkedCopy(found.copy, context);
+    if (!linkedAssembly)
       fail(
         'Copy pronta esta inconsistente',
         'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
       );
+    const currentAssembly = linkedAssembly as AssembledCommercialPromotionCopy;
+    const needsRefresh =
+      found.copy.titulo !== currentAssembly.titulo ||
+      found.copy.mensagem !== currentAssembly.mensagem ||
+      found.copy.cta !== currentAssembly.cta ||
+      found.copy.hashtags !== currentAssembly.hashtags;
+    if (needsRefresh) {
+      const refreshed = await this.options.repository.refreshCachedCopy({
+        expected: context,
+        copyId: found.copy.id,
+        inputFingerprint: found.copy.inputFingerprint as string,
+        affiliateLinkHash: sha256(context.product.affiliateLink as string),
+        validatedAt: this.clock(),
+        provider: found.copy.provider as string,
+        model: found.copy.model as string,
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        maximumLength: this.options.config.maximumCopyLength,
+        assembled: currentAssembly,
+      });
+      if (!refreshed) {
+        fail(
+          'Candidato mudou antes da atualizacao do cache',
+          'COMMERCIAL_AI_COPY_CANDIDATE_CHANGED',
+        );
+      }
+    }
+    const currentCopy = { ...found.copy, ...currentAssembly };
     return {
       candidateId,
       status: found.candidate.status,
@@ -908,10 +990,10 @@ export class CommercialPromotionCopyGenerationService {
       validationVersion: found.copy.validationVersion,
       snapshotRevision: found.snapshotRevision,
       sanitizedCopy: sanitizeCommercialPromotionCopy(
-        found.copy as AssembledCommercialPromotionCopy,
+        currentCopy,
         context.product.affiliateLink as string,
       ),
-      createdAt: found.copy.createdAt,
+      createdAt: currentCopy.createdAt,
     };
   }
 }

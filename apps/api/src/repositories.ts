@@ -1632,6 +1632,26 @@ export interface CommercialPromotionCopyRepository {
     promptVersion: string;
     validationVersion: string;
     maximumLength: number;
+    assembled: Pick<
+      GeneratedCopyData,
+      'titulo' | 'mensagem' | 'cta' | 'hashtags'
+    >;
+  }): Promise<boolean>;
+  refreshCachedCopy(input: {
+    expected: CommercialPromotionCopyContext;
+    copyId: string;
+    inputFingerprint: string;
+    affiliateLinkHash: string;
+    validatedAt: Date;
+    provider: string;
+    model: string;
+    promptVersion: string;
+    validationVersion: string;
+    maximumLength: number;
+    assembled: Pick<
+      GeneratedCopyData,
+      'titulo' | 'mensagem' | 'cta' | 'hashtags'
+    >;
   }): Promise<boolean>;
   complete(
     input: CommercialAiCopyCompletionInput,

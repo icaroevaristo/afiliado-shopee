@@ -207,22 +207,19 @@ describe('CommercialMessageDraftService', () => {
     const candidate = createValidCandidate();
     candidate.generatedCopy!.titulo = 'SOLA QUE PARECE JET!';
     candidate.generatedCopy!.mensagem =
-      'Tênis de Corrida com Placa de Carbono Profissional 33-44\n🔥 POR R$ 71,62\n💸 53% OFF';
-    candidate.generatedCopy!.cta = '🛒 Ver oferta:\nhttps://shope.ee/link';
-    candidate.generatedCopy!.hashtags =
-      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.';
+      'Tênis de Corrida com Placa de Carbono Profissional 33-44\n🔥 POR: R$ 71,62\n💸 53% OFF';
+    candidate.generatedCopy!.cta = '🛒 Compre aqui: https://shope.ee/link';
+    candidate.generatedCopy!.hashtags = '';
 
     const draft = service.createDraft(candidate, { now: () => fixedNow });
 
     expect(draft.caption).toContain(
-      'Tênis de Corrida com Placa de Carbono Profissional\n🔥 POR R$ 71,62\n💸 53% OFF',
+      'Tênis de Corrida com Placa de Carbono Profissional\n🔥 POR: R$ 71,62\n💸 53% OFF',
     );
     expect(draft.caption).not.toContain('33-44');
     expect(draft.caption.split('https://shope.ee/link')).toHaveLength(2);
-    expect(draft.caption).toContain('🛒 Ver oferta:');
-    expect(draft.caption).toContain(
-      '📲 Curtiu o achado? Compartilhe o grupo com alguém que também gosta de economizar.',
-    );
+    expect(draft.caption).toContain('🛒 Compre aqui: https://shope.ee/link');
+    expect(draft.caption).not.toContain('Curtiu o achado');
   });
 
   it('should omit empty blocks from caption without leaving empty lines', () => {
