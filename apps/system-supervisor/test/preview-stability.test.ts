@@ -100,6 +100,7 @@ const status = (
   overall,
   operationLock,
   mode: 'preview',
+  ports: { api: 3333, dashboard: 3000 },
   docker: { daemon: 'available', services: [] },
   evolution: {
     api: 'unavailable',

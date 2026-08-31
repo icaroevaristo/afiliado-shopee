@@ -1177,6 +1177,62 @@ describe('LocalSystemSupervisor', () => {
     }
   });
 
+  it('publishes the configured API port and ignores an unrelated occupant on the legacy port', async () => {
+    const root = createRoot();
+    const state = harness({
+      portOccupants: {
+        3333: { pid: 3333, processName: 'chatgpt-devbridge' },
+      },
+    });
+
+    const status = await createSupervisor(root, state.deps).status({
+      ...explicitSafePreviewEnvironment(),
+      PORT: '3433',
+    });
+
+    expect(status.ports).toEqual({ api: 3433, dashboard: 3000 });
+    expect(state.deps.getPortOccupant).toHaveBeenCalledWith(3433);
+    expect(state.deps.getPortOccupant).not.toHaveBeenCalledWith(3333);
+    expect(status.externalPortOccupants).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ port: 3333 })]),
+    );
+  });
+
+  it('starts on the isolated API port while the legacy port is occupied', async () => {
+    const root = createRoot();
+    const state = harness({
+      portOccupants: {
+        3333: { pid: 3333, processName: 'chatgpt-devbridge' },
+      },
+    });
+
+    const status = await createSupervisor(root, state.deps).start({
+      ...explicitSafePreviewEnvironment(),
+      PORT: '3433',
+    });
+
+    expect(status.overall).toBe('running');
+    expect(status.ports.api).toBe(3433);
+    expect(state.deps.getPortOccupant).not.toHaveBeenCalledWith(3333);
+  });
+
+  it('fails closed when the configured API port is occupied', async () => {
+    const root = createRoot();
+    const state = harness({
+      portOccupants: {
+        3433: { pid: 3433, processName: 'external-api' },
+      },
+    });
+
+    await expect(
+      createSupervisor(root, state.deps).start({
+        ...explicitSafePreviewEnvironment(),
+        PORT: '3433',
+      }),
+    ).rejects.toMatchObject({ code: 'SYSTEM_PORT_OCCUPIED' });
+    expect(state.spawned).toEqual([]);
+  });
+
   it('keeps the Evolution port in external-port scanning outside safe preview', async () => {
     const root = createRoot();
     const state = harness({

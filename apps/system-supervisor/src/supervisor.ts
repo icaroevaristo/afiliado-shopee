@@ -747,6 +747,10 @@ const assertPortAvailable = async (
 export type SystemStatusSnapshot = OperationLockSnapshot & {
   overall: 'running' | 'partial' | 'stopped';
   mode: AutomationMode;
+  ports: {
+    api: number;
+    dashboard: number;
+  };
   docker: {
     daemon: 'available' | 'unavailable';
     services: ComposeServiceStatus[];
@@ -1500,6 +1504,10 @@ export class LocalSystemSupervisor {
       ...operationLock,
       overall,
       mode: state?.mode ?? loaded.mode,
+      ports: {
+        api: ports.api,
+        dashboard: ports.dashboard,
+      },
       docker: {
         daemon: dockerResult.code === 0 ? 'available' : 'unavailable',
         services: dockerServices,
