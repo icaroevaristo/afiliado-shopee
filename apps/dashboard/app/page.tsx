@@ -1,319 +1,477 @@
 'use client';
 
-import Link from 'next/link';
-import { ArrowUpRight, Circle, FileText, Package, RefreshCw, Send, UsersRound } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
 import {
-  getAnalytics,
+  ArrowUpRight,
+  BadgeCheck,
+  CheckCircle2,
+  Circle,
+  Clock3,
+  FileText,
+  HeartPulse,
+  Package,
+  RefreshCw,
+  Send,
+  Tag,
+  UsersRound,
+} from 'lucide-react';
+import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
   getCommercialAutomationSchedulerStatus,
   getCommercialAutomationStatus,
   getHealth,
+  getOperationalAdmin,
   listCommercialAutomationExecutions,
-  listCommercialCampaignQueue,
-  listCommercialCampaigns,
   listDispatches,
-  type AnalyticsSnapshot,
   type CommercialAutomationExecution,
   type CommercialAutomationSchedulerStatus,
   type CommercialAutomationStatus,
-  type CommercialQueueItem,
   type HealthResponse,
+  type OperationalAdmin,
   type WhatsAppDispatch,
 } from '../lib/api';
-import { formatCurrency, formatDateTimeInTimezone } from '../lib/format';
-import { OperationsStrip } from '../components/operations-strip';
-import { CopyIdButton, OpsBadge, OpsEmpty, OpsLoading, OpsPageHeading, OpsSection, OpsState, toneForStatus } from '../components/ops-components';
+import {
+  homeAutomationPresentation,
+  translateHomeDispatchStatus,
+  translateHomeExecutionStatus,
+  translateHomeReason,
+} from '../lib/home-display';
+import { formatDateTimeInTimezone, formatNumber } from '../lib/format';
+import {
+  OpsBadge,
+  OpsEmpty,
+  OpsLoading,
+  OpsPageHeading,
+  OpsSection,
+  OpsState,
+  toneForStatus,
+} from '../components/ops-components';
 import { SafeProductImage } from '../components/safe-product-image';
 
 type OverviewData = {
   health: HealthResponse | null;
-  analytics: AnalyticsSnapshot | null;
   status: CommercialAutomationStatus | null;
   scheduler: CommercialAutomationSchedulerStatus | null;
+  admin: OperationalAdmin | null;
   executions: CommercialAutomationExecution[];
   dispatches: WhatsAppDispatch[];
-  queue: CommercialQueueItem[];
+  sourceAvailability: {
+    executions: boolean;
+    dispatches: boolean;
+  };
   partialFailures: string[];
+  lastUpdatedAt: string | null;
 };
+
+const DEFAULT_TIMEZONE = 'America/Sao_Paulo';
 
 const dispatchSortValue = (dispatch: WhatsAppDispatch) =>
   new Date(dispatch.sentAt ?? dispatch.createdAt ?? 0).getTime();
 
-function Timeline({ executions, dispatches }: Pick<OverviewData, 'executions' | 'dispatches'>) {
-  const activity = useMemo(() => {
-    const executionRows = executions.map((execution) => ({
-      id: `execution-${execution.id}`,
-      time: execution.startedAt,
-      status: execution.status,
-      title: execution.status === 'PREVIEW_READY' ? 'Preparacao comercial concluida' : execution.reasons[0] ?? execution.status,
-      meta: `${execution.mode} / ${execution.commercialRunId ?? 'sem run associado'}`,
-      kind: 'RUN' as const,
-      deliveryMode: null,
-      destination: null,
-      score: null,
-    }));
-    const dispatchRows = dispatches.map((dispatch) => ({
-      id: `dispatch-${dispatch.id}`,
-      time: dispatch.sentAt ?? dispatch.createdAt ?? null,
-      status: dispatch.status,
-      title: dispatch.product?.nome ?? 'Produto sem nome',
-      meta: `${dispatch.deliveryMode ?? 'IMAGE'} / ${dispatch.destination?.name ?? 'grupo nao informado'}`,
-      kind: 'DISPATCH' as const,
-      deliveryMode: dispatch.deliveryMode,
-      destination: dispatch.destination?.name ?? null,
-      score: dispatch.product?.score ?? null,
-    }));
-    return [...executionRows, ...dispatchRows]
-      .sort((a, b) => new Date(b.time ?? 0).getTime() - new Date(a.time ?? 0).getTime())
-      .slice(0, 8);
-  }, [dispatches, executions]);
+const formatHomeTime = (
+  value: string | null | undefined,
+  timezone: string,
+  timeStyle: 'short' | 'medium' = 'short',
+) => formatDateTimeInTimezone(value, timezone, 'Não disponível', timeStyle);
 
-  if (activity.length === 0) {
-    return <OpsEmpty title="Nenhuma atividade recente" message="Execucoes e dispatches persistidos aparecerao nesta linha do tempo." />;
-  }
+function HomeSystemLine({
+  health,
+  scheduler,
+}: Pick<OverviewData, 'health' | 'scheduler'>) {
+  const apiState = health
+    ? health.status === 'ok'
+      ? { label: 'API online', tone: 'success' as const }
+      : { label: 'API requer atenção', tone: 'warning' as const }
+    : { label: 'API não disponível', tone: 'neutral' as const };
+  const agendaState = scheduler
+    ? scheduler.status === 'registered'
+      ? { label: 'Agenda pronta', tone: 'success' as const }
+      : { label: 'Agenda aguardando', tone: 'warning' as const }
+    : { label: 'Agenda não disponível', tone: 'neutral' as const };
 
   return (
-    <div className="ops-timeline">
-      {activity.map((item) => (
-        <div className="ops-timeline-row" key={item.id}>
-          <span className="ops-timeline-time">{formatDateTimeInTimezone(item.time, 'America/Sao_Paulo', '—', 'short')}</span>
-          <span className="ops-timeline-rail" aria-hidden="true"><span className="ops-timeline-marker" data-tone={toneForStatus(item.status)} /></span>
-          <div className="min-w-0">
-            <div className="ops-timeline-title"><span className="ops-timeline-kind">{item.kind}</span>{item.title}</div>
-            <div className="ops-timeline-meta">{item.meta}</div>
-            {item.kind === 'DISPATCH' ? (
-              <div className="ops-timeline-route">
-                <span className="ops-mono">{item.deliveryMode ?? 'IMAGE'}</span>
-                <span aria-hidden="true">→</span>
-                <span>{item.destination ?? 'grupo nao informado'}</span>
-                {item.score !== null ? <span className="ops-mono">{item.score} pts</span> : null}
-              </div>
-            ) : null}
-          </div>
-          <span className="ops-timeline-status" data-tone={toneForStatus(item.status)}>{item.status}</span>
-        </div>
-      ))}
+    <div className="ops-home-system-line" aria-label="Estado do sistema">
+      <span><HeartPulse size={15} aria-hidden="true" /> Sistema</span>
+      <OpsBadge tone={apiState.tone}>{apiState.label}</OpsBadge>
+      <OpsBadge tone={agendaState.tone}>{agendaState.label}</OpsBadge>
     </div>
   );
 }
 
-function DispatchRail({ dispatch }: { dispatch: WhatsAppDispatch | null }) {
-  if (!dispatch) return null;
-
-  const candidateId = dispatch.generatedCopy?.createdFromCandidateId ?? null;
-  const failed = dispatch.status === 'FAILED';
-  const stateFor = (available: boolean, complete: boolean) => {
-    if (!available) return 'missing';
-    if (complete) return 'complete';
-    return failed ? 'blocked' : 'current';
-  };
-  const stages = [
-    { label: 'PRODUTO', value: dispatch.product?.nome ?? 'Nao informado', available: Boolean(dispatch.product), complete: Boolean(dispatch.product), Icon: Package },
-    { label: 'CANDIDATO', value: candidateId ? `${candidateId.slice(0, 10)}…` : 'Sem vinculo persistido', available: Boolean(candidateId), complete: Boolean(candidateId), Icon: Circle },
-    { label: 'COPY', value: dispatch.generatedCopyId ? `${dispatch.generatedCopyId.slice(0, 10)}…` : 'Nao disponivel', available: Boolean(dispatch.generatedCopyId), complete: Boolean(dispatch.generatedCopyId), Icon: FileText },
-    { label: 'DISPATCH', value: `${dispatch.status} · tentativa ${dispatch.attemptCount}`, available: true, complete: true, Icon: Send },
-    { label: 'GRUPO', value: dispatch.destination?.name ?? 'Nao informado', available: Boolean(dispatch.destination), complete: Boolean(dispatch.destination), Icon: UsersRound },
-    { label: 'SENT', value: dispatch.status === 'SENT' ? 'Confirmado' : dispatch.status, available: true, complete: dispatch.status === 'SENT', Icon: Send },
-  ] as const;
+function AutomationCard({
+  health,
+  status,
+  scheduler,
+  admin,
+}: Pick<OverviewData, 'health' | 'status' | 'scheduler' | 'admin'>) {
+  const presentation = homeAutomationPresentation(status, scheduler);
+  const timezone = admin?.automation.timezone ?? status?.timezone ?? scheduler?.timezone ?? DEFAULT_TIMEZONE;
+  const windowStart = admin?.automation.allowedStartTime ?? status?.allowedStartTime;
+  const windowEnd = admin?.automation.allowedEndTime ?? status?.allowedEndTime;
+  const windowLabel = windowStart && windowEnd ? `${windowStart}–${windowEnd}` : 'Não disponível';
 
   return (
-    <section className="ops-dispatch-rail" aria-label="Rastro do ultimo dispatch">
-      <div className="ops-dispatch-rail-header">
-        <div>
-          <span className="ops-eyebrow">Dispatch rail</span>
-          <strong>Produto → Candidato → Copy → Dispatch → Grupo → Sent</strong>
+    <section className="ops-home-automation" aria-labelledby="home-automation-title">
+      <div className="ops-home-automation-top">
+        <div className="ops-home-automation-icon" aria-hidden="true"><BadgeCheck size={22} /></div>
+        <div className="min-w-0">
+          <p className="ops-eyebrow">Controle diário</p>
+          <h2 id="home-automation-title" className="ops-home-card-title">Automação</h2>
         </div>
-        <span className="ops-mono">{dispatch.id.slice(0, 14)}…</span>
+        <OpsBadge tone={presentation.tone}>{presentation.label}</OpsBadge>
       </div>
-      <div className="ops-dispatch-stages">
-        {stages.map(({ label, value, available, complete, Icon }) => {
-          const state = stateFor(available, complete);
-          return (
-            <div className="ops-dispatch-stage" data-state={state} key={label}>
-              <span className="ops-dispatch-stage-icon"><Icon size={14} aria-hidden="true" /></span>
-              <span className="ops-dispatch-stage-label">{label}</span>
-              <span className="ops-dispatch-stage-value" title={value}>{value}</span>
-            </div>
-          );
-        })}
+      <p className="ops-home-automation-detail">{presentation.detail}</p>
+      <div className="ops-home-automation-meta">
+        <div>
+          <span>Próximo envio</span>
+          <strong>{formatHomeTime(admin?.nextSendAt, timezone)}</strong>
+        </div>
+        <div>
+          <span>Janela de envio</span>
+          <strong>{windowLabel}</strong>
+        </div>
+        <div>
+          <span>Fuso horário</span>
+          <strong>{timezone}</strong>
+        </div>
       </div>
+      <HomeSystemLine health={health} scheduler={scheduler} />
+      <Link className="ops-button ops-button--secondary" href="/automacao">
+        Ver automação <ArrowUpRight size={14} aria-hidden="true" />
+      </Link>
     </section>
   );
 }
 
-function LatestDispatch({ dispatch }: { dispatch: WhatsAppDispatch | null }) {
-  if (!dispatch) {
-    return <OpsEmpty title="Nenhum envio localizado" message="O ultimo envio aparecera aqui quando houver um dispatch persistido." />;
-  }
-  const product = dispatch.product;
-  const copyPreview = dispatch.generatedCopy?.mensagem?.trim() ?? '';
-  const candidateId = dispatch.generatedCopy?.createdFromCandidateId ?? null;
+function SummaryMetric({
+  label,
+  value,
+  detail,
+  icon: Icon,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: typeof Clock3;
+}) {
   return (
-    <div className="ops-dispatch-receipt">
-      <div className="ops-receipt-header">
-        <div>
-          <span className="ops-eyebrow">Dispatch receipt</span>
-          <div className="ops-receipt-status"><OpsBadge tone={toneForStatus(dispatch.status)}>{dispatch.status}</OpsBadge><span className="ops-mono">{formatDateTimeInTimezone(dispatch.sentAt ?? dispatch.createdAt, 'America/Sao_Paulo', '—', 'short')}</span></div>
-        </div>
-        <CopyIdButton value={dispatch.id} />
-      </div>
-      <div className="ops-receipt-product">
-        <SafeProductImage className="ops-product-image" src={product?.urlImagem} />
-        <div className="min-w-0">
-          <div className="ops-product-name">{product?.nome ?? 'Produto nao informado'}</div>
-          <div className="ops-product-price">{formatCurrency(typeof product?.preco === 'number' ? product.preco : null)}</div>
-          <div className="ops-receipt-route"><span className="ops-mono">{dispatch.deliveryMode ?? 'IMAGE'}</span><span aria-hidden="true">→</span><span>{dispatch.destination?.name ?? 'Grupo nao disponivel'}</span></div>
-        </div>
-      </div>
-      <div className="ops-receipt-copy">
-        <span className="ops-detail-label">COPY</span>
-        <p>{copyPreview ? `“${copyPreview.slice(0, 190)}${copyPreview.length > 190 ? '…' : ''}”` : 'Copy nao disponivel na resposta da API.'}</p>
-      </div>
-      <div className="ops-receipt-ledger">
-        <div><span className="ops-detail-label">Provider</span><strong>{dispatch.provider ?? 'Nao disponivel'}</strong></div>
-        <div><span className="ops-detail-label">Tentativa</span><strong className="ops-mono">{dispatch.attemptCount}</strong></div>
-        <div><span className="ops-detail-label">Enviado em</span><strong className="ops-mono">{formatDateTimeInTimezone(dispatch.sentAt, 'America/Sao_Paulo', '—', 'medium')}</strong></div>
-        <div><span className="ops-detail-label">Mensagem externa</span><strong>{dispatch.externalMessageId ? 'presente' : '—'}</strong></div>
-      </div>
-      <div className="ops-receipt-trace">
-        <div><span className="ops-detail-label">Candidate ID</span><CopyIdButton value={candidateId} /></div>
-        <div><span className="ops-detail-label">Generated copy</span><CopyIdButton value={dispatch.generatedCopyId} /></div>
-        {dispatch.externalMessageId ? <div><span className="ops-detail-label">External ID</span><CopyIdButton value={dispatch.externalMessageId} /></div> : null}
-      </div>
-      <div className="ops-receipt-footer"><span>Dispatch confirmado · attempt {dispatch.attemptCount}</span><Link className="ops-button" href="/envios">Ver dispatch <ArrowUpRight size={14} aria-hidden="true" /></Link></div>
+    <div className="ops-home-summary-item">
+      <div className="ops-home-summary-label"><Icon size={15} aria-hidden="true" />{label}</div>
+      <strong className="ops-home-summary-value">{value}</strong>
+      <span className="ops-home-summary-detail">{detail}</span>
     </div>
   );
 }
 
-function QueuePreview({ items }: { items: CommercialQueueItem[] }) {
-  if (items.length === 0) return <OpsEmpty title="Fila sem candidatos" message="A fila pronta depende de uma campanha ativa com candidatos elegiveis." />;
+function TodaySummary({ admin, status }: Pick<OverviewData, 'admin' | 'status'>) {
+  const activeGroups = admin ? admin.groups.filter((group) => group.active).length : null;
+  const activeInstances = admin ? admin.instances.filter((instance) => instance.active).length : null;
+  const timezone = admin?.automation.timezone ?? status?.timezone ?? DEFAULT_TIMEZONE;
+
   return (
-    <div className="ops-queue-preview">
-      {items.slice(0, 6).map((item, index) => {
-        const commercialMeta = [
-          formatCurrency(Number(item.price)),
-          item.discountRate > 0 ? `${item.discountRate}% desconto` : null,
-          item.priceDropPercent ? `queda ${item.priceDropPercent}%` : null,
-        ].filter(Boolean).join(' · ');
-        return (
-        <div className="ops-queue-row" key={item.id}>
-          <span className="ops-queue-rank">#{String(item.rankPosition ?? index + 1).padStart(2, '0')}</span>
-          <div className="ops-queue-product">
-            <strong>{item.productName}</strong>
-            <span>{commercialMeta} · rev. {item.snapshotRevision}</span>
-            <small>{item.promotionSignals.length ? item.promotionSignals.join(' · ') : 'sem sinal comercial adicional'}</small>
-          </div>
-          <div className="ops-queue-score"><strong>{item.commercialScore}</strong><span>score</span></div>
-          <span className="ops-queue-status" data-tone={toneForStatus(item.status)}>{item.status.replace('_', ' ')}</span>
+    <OpsSection title="Hoje" meta="Um resumo simples do que está acontecendo agora." className="ops-home-summary">
+      <div className="ops-home-summary-grid">
+        <SummaryMetric
+          icon={Send}
+          label="Envios hoje"
+          value={status ? `${formatNumber(status.globalSentToday)} de ${formatNumber(status.dailyGlobalLimit)}` : 'Não disponível'}
+          detail={status ? 'mensagens realizadas' : 'A API não informou'}
+        />
+        <SummaryMetric
+          icon={Clock3}
+          label="Próximo envio"
+          value={formatHomeTime(admin?.nextSendAt, timezone)}
+          detail={admin?.nextSendAt ? timezone : 'Sem agenda informada'}
+        />
+        <SummaryMetric
+          icon={UsersRound}
+          label="Grupos ativos"
+          value={activeGroups === null ? 'Não disponível' : formatNumber(activeGroups)}
+          detail={activeGroups === null ? 'A API não informou' : 'grupos com estado ativo'}
+        />
+        <SummaryMetric
+          icon={HeartPulse}
+          label="Instâncias ativas"
+          value={activeInstances === null ? 'Não disponível' : formatNumber(activeInstances)}
+          detail={activeInstances === null ? 'A API não informou' : 'estado ativo informado'}
+        />
+      </div>
+    </OpsSection>
+  );
+}
+
+function AttentionPanel({ data }: { data: OverviewData }) {
+  const attention = useMemo(() => {
+    const messages: string[] = [];
+    const add = (message: string) => {
+      if (!messages.includes(message)) messages.push(message);
+    };
+
+    if (data.partialFailures.length > 0) {
+      add('Algumas informações estão desatualizadas. Tente atualizar novamente.');
+    }
+    if (data.status?.paused) add('A automação está desligada.');
+    for (const reason of data.status?.reasons ?? []) add(translateHomeReason(reason));
+    if (data.status && !data.status.allowed && data.status.reasons.length === 0) {
+      add('A automação ainda não está pronta para o próximo envio.');
+    }
+    for (const blocker of data.admin?.blockers ?? []) add(translateHomeReason(blocker.code));
+    if ((data.admin?.ambiguity ?? 0) > 0) add('Existe um envio que precisa de verificação manual.');
+    if ((data.admin?.investigationRequired ?? 0) > 0) add('Existe uma pendência que precisa de verificação manual.');
+    if (data.dispatches.some((dispatch) => dispatch.status === 'PROCESSING')) add('Há um envio aguardando confirmação.');
+    if (data.dispatches.some((dispatch) => dispatch.status === 'FAILED')) add('Há um envio que não foi realizado.');
+    if (data.health && data.health.status !== 'ok') add('A API informou que precisa de atenção.');
+    if (!data.scheduler || data.scheduler.status !== 'registered') add('A agenda automática não está disponível neste momento.');
+
+    return messages;
+  }, [data]);
+
+  return (
+    <OpsSection
+      title="Precisa da sua atenção"
+      meta={attention.length > 0 ? 'Veja o próximo passo antes de continuar.' : 'Nenhuma pendência identificada na última leitura.'}
+      className="ops-home-attention"
+    >
+      {attention.length === 0 ? (
+        <div className="ops-home-attention-clear"><CheckCircle2 size={18} aria-hidden="true" /><span>Tudo certo por aqui.</span></div>
+      ) : (
+        <ul className="ops-home-attention-list">
+          {attention.map((message) => (
+            <li key={message}>
+              <Circle className="ops-home-attention-marker" size={10} aria-hidden="true" />
+              <span>{message}</span>
+              {message.includes('automação') ? <Link className="ops-home-attention-link" href="/automacao">Abrir automação <ArrowUpRight size={13} aria-hidden="true" /></Link> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </OpsSection>
+  );
+}
+
+function LatestSend({ dispatch, timezone, available }: { dispatch: WhatsAppDispatch | null; timezone: string; available: boolean }) {
+  if (!available) {
+    return <OpsEmpty title="Envios indisponíveis" message="Não foi possível consultar o histórico de envios agora." />;
+  }
+  if (!dispatch) {
+    return <OpsEmpty title="Nenhum envio registrado" message="O histórico aparecerá aqui quando houver um envio." />;
+  }
+
+  return (
+    <div className="ops-home-latest-card">
+      <div className="ops-home-latest-product">
+        <SafeProductImage className="ops-product-image" src={dispatch.product?.urlImagem} />
+        <div className="min-w-0">
+          <strong>{dispatch.product?.nome ?? 'Produto não informado'}</strong>
+          <span>{dispatch.destination?.name ?? 'Grupo não informado'}</span>
         </div>
+      </div>
+      <div className="ops-home-latest-meta">
+        <OpsBadge tone={toneForStatus(dispatch.status)}>{translateHomeDispatchStatus(dispatch.status)}</OpsBadge>
+        <span>{formatHomeTime(dispatch.sentAt ?? dispatch.createdAt, timezone, 'medium')}</span>
+      </div>
+      <Link className="ops-button ops-button--secondary" href="/envios">
+        Ver histórico <ArrowUpRight size={14} aria-hidden="true" />
+      </Link>
+    </div>
+  );
+}
+
+function DeliveryJourney({ dispatch, available }: { dispatch: WhatsAppDispatch | null; available: boolean }) {
+  if (!available) {
+    return <OpsEmpty title="Jornada indisponível" message="Não foi possível consultar as etapas do último envio agora." />;
+  }
+  if (!dispatch) {
+    return <OpsEmpty title="Sem dados para mostrar" message="A jornada ficará disponível junto com o próximo envio registrado." />;
+  }
+
+  const candidateReady = Boolean(dispatch.generatedCopy?.createdFromCandidateId);
+  const copyReady = Boolean(dispatch.generatedCopy);
+  const isFailed = dispatch.status === 'FAILED';
+  const stateFor = (available: boolean, complete: boolean) => {
+    if (!available) return 'missing';
+    if (complete) return 'complete';
+    return isFailed ? 'blocked' : 'current';
+  };
+  const stages = [
+    { label: 'Produto', value: dispatch.product?.nome ?? 'Não disponível', available: Boolean(dispatch.product), complete: Boolean(dispatch.product), Icon: Package },
+    { label: 'Oferta selecionada', value: candidateReady ? 'Selecionada' : 'Não disponível', available: candidateReady, complete: candidateReady, Icon: Tag },
+    { label: 'Texto preparado', value: copyReady ? 'Pronto para o envio' : 'Não disponível', available: copyReady, complete: copyReady, Icon: FileText },
+    { label: 'Envio', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: dispatch.status === 'SENT', Icon: Send },
+    { label: 'Grupo', value: dispatch.destination?.name ?? 'Não disponível', available: Boolean(dispatch.destination), complete: Boolean(dispatch.destination), Icon: UsersRound },
+    { label: 'Enviado', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: dispatch.status === 'SENT', Icon: CheckCircle2 },
+  ] as const;
+
+  return (
+    <ol className="ops-home-journey-list" aria-label="Jornada do envio: produto, oferta, texto, envio, grupo e enviado">
+      {stages.map(({ label, value, available, complete, Icon }) => {
+        const state = stateFor(available, complete);
+        return (
+          <li className="ops-home-journey-stage" data-state={state} key={label}>
+            <span className="ops-home-journey-icon"><Icon size={15} aria-hidden="true" /></span>
+            <span className="ops-home-journey-label">{label}</span>
+            <span className="ops-home-journey-value">{value}</span>
+          </li>
         );
       })}
-    </div>
+    </ol>
+  );
+}
+
+function RecentActivity({
+  executions,
+  dispatches,
+  timezone,
+  available,
+}: Pick<OverviewData, 'executions' | 'dispatches'> & { timezone: string; available: boolean }) {
+  const activity = useMemo(() => {
+    const executionRows = executions.map((execution) => ({
+      id: `execution-${execution.id}`,
+      time: execution.completedAt ?? execution.startedAt,
+      title: translateHomeExecutionStatus(execution.status),
+      detail: execution.status === 'BLOCKED' ? translateHomeReason(execution.reasons[0] ?? '') : 'A automação registrou uma nova atividade.',
+      status: execution.status,
+    }));
+    const dispatchRows = dispatches.map((dispatch) => ({
+      id: `dispatch-${dispatch.id}`,
+      time: dispatch.sentAt ?? dispatch.createdAt ?? null,
+      title: translateHomeDispatchStatus(dispatch.status),
+      detail: `${dispatch.product?.nome ?? 'Produto não informado'} · ${dispatch.destination?.name ?? 'Grupo não informado'}`,
+      status: dispatch.status,
+    }));
+    return [...executionRows, ...dispatchRows]
+      .sort((a, b) => new Date(b.time ?? 0).getTime() - new Date(a.time ?? 0).getTime())
+      .slice(0, 5);
+  }, [dispatches, executions]);
+
+  if (!available) {
+    return <OpsEmpty title="Atividade indisponível" message="Não foi possível consultar a atividade recente agora." />;
+  }
+  if (activity.length === 0) {
+    return <OpsEmpty title="Nenhuma atividade recente" message="A atividade da automação aparecerá aqui." />;
+  }
+
+  return (
+    <ol className="ops-home-activity-list" aria-label="Atividade recente">
+      {activity.map((item) => (
+        <li className="ops-home-activity-row" key={item.id}>
+          <span className="ops-home-activity-icon" data-tone={toneForStatus(item.status)} aria-hidden="true"><Clock3 size={15} /></span>
+          <div className="min-w-0">
+            <strong>{item.title}</strong>
+            <span>{item.detail}</span>
+          </div>
+          <div className="ops-home-activity-time">
+            <OpsBadge tone={toneForStatus(item.status)}>{item.title}</OpsBadge>
+            <time dateTime={item.time ?? undefined}>{formatHomeTime(item.time, timezone)}</time>
+          </div>
+        </li>
+      ))}
+    </ol>
   );
 }
 
 export default function OverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
+  const dataRef = useRef<OverviewData | null>(null);
+  const inFlightRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'partial' | 'unavailable' | null>(null);
 
-  const load = async (initial = false) => {
+  const load = useCallback(async (initial = false) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     if (initial) setLoading(true); else setRefreshing(true);
-    setError(null);
-    try {
-      const results = await Promise.allSettled([
-        getHealth(),
-        getAnalytics(),
-        getCommercialAutomationStatus(),
-        getCommercialAutomationSchedulerStatus(),
-        listCommercialAutomationExecutions(1, 20),
-        listDispatches(),
-        listCommercialCampaigns(1, 20),
-      ]);
-      const labels = ['health', 'analytics', 'status', 'scheduler', 'executions', 'dispatches', 'campaigns'];
-      const partialFailures = results.flatMap((result, index) => result.status === 'rejected' ? [labels[index]] : []);
-      const health = results[0].status === 'fulfilled' ? results[0].value : null;
-      const analytics = results[1].status === 'fulfilled' ? results[1].value : null;
-      const status = results[2].status === 'fulfilled' ? results[2].value : null;
-      const scheduler = results[3].status === 'fulfilled' ? results[3].value : null;
-      const executions = results[4].status === 'fulfilled' ? results[4].value.items : [];
-      const dispatches = results[5].status === 'fulfilled' ? results[5].value : [];
-      const campaigns = results[6].status === 'fulfilled' ? results[6].value.items : [];
-      let queue: CommercialQueueItem[] = [];
-      if (campaigns.length > 0) {
-        const campaign = campaigns.find((item) => item.active) ?? campaigns[0];
-        try {
-          queue = (await listCommercialCampaignQueue(campaign.id, { limit: 8 })).items;
-        } catch {
-          partialFailures.push('queue');
-        }
-      }
-      setData({ health, analytics, status, scheduler, executions, dispatches, queue, partialFailures });
-      if (partialFailures.length > 0) {
-        setError(`Atualizacao parcial: ${partialFailures.join(', ')} indisponivel(is).`);
-      }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
+
+    const results = await Promise.allSettled([
+      getHealth(),
+      getCommercialAutomationStatus(),
+      getCommercialAutomationSchedulerStatus(),
+      getOperationalAdmin(),
+      listCommercialAutomationExecutions(1, 10),
+      listDispatches(),
+    ]);
+    const labels = ['health', 'status', 'scheduler', 'admin', 'executions', 'dispatches'];
+    const partialFailures = results.flatMap((result, index) => result.status === 'rejected' ? [labels[index]] : []);
+    const successfulReads = results.some((result) => result.status === 'fulfilled');
+    const previous = dataRef.current;
+    const next: OverviewData = {
+      health: results[0].status === 'fulfilled' ? results[0].value : previous?.health ?? null,
+      status: results[1].status === 'fulfilled' ? results[1].value : previous?.status ?? null,
+      scheduler: results[2].status === 'fulfilled' ? results[2].value : previous?.scheduler ?? null,
+      admin: results[3].status === 'fulfilled' ? results[3].value : previous?.admin ?? null,
+      executions: results[4].status === 'fulfilled' ? results[4].value.items : previous?.executions ?? [],
+      dispatches: results[5].status === 'fulfilled' ? results[5].value : previous?.dispatches ?? [],
+      sourceAvailability: {
+        executions: results[4].status === 'fulfilled' || Boolean(previous?.sourceAvailability.executions),
+        dispatches: results[5].status === 'fulfilled' || Boolean(previous?.sourceAvailability.dispatches),
+      },
+      partialFailures,
+      lastUpdatedAt: successfulReads ? new Date().toISOString() : previous?.lastUpdatedAt ?? null,
+    };
+    dataRef.current = next;
+    setData(next);
+    setError(partialFailures.length === results.length ? 'unavailable' : partialFailures.length > 0 ? 'partial' : null);
+    setLoading(false);
+    setRefreshing(false);
+    inFlightRef.current = false;
+  }, []);
 
   useEffect(() => {
     void load(true);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void load();
-    }, 15_000);
+      if (document.visibilityState !== 'hidden') void load();
+    }, 30_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [load]);
 
-  const latestDispatch = useMemo(() => [...(data?.dispatches ?? [])].sort((a, b) => dispatchSortValue(b) - dispatchSortValue(a))[0] ?? null, [data?.dispatches]);
+  const latestDispatch = useMemo(
+    () => [...(data?.dispatches ?? [])].sort((a, b) => dispatchSortValue(b) - dispatchSortValue(a))[0] ?? null,
+    [data?.dispatches],
+  );
+  const timezone = data?.admin?.automation.timezone ?? data?.status?.timezone ?? data?.scheduler?.timezone ?? DEFAULT_TIMEZONE;
 
   return (
     <>
       <OpsPageHeading
-        eyebrow="Shopee operations console"
-        title="Visao geral"
-        description="Produto, fila, copy e dispatch em uma mesma leitura operacional."
-        actions={<button type="button" className="ops-button" onClick={() => void load()} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" /> Atualizar agora</button>}
+        eyebrow="Operação diária"
+        title="Início"
+        description="Acompanhe a automação, os envios e o que precisa da sua atenção."
+        actions={
+          <div className="ops-home-heading-actions">
+            <button type="button" className="ops-button" onClick={() => void load()} disabled={refreshing}>
+              <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" /> Atualizar
+            </button>
+            {data?.lastUpdatedAt ? <span>Última atualização: {formatHomeTime(data.lastUpdatedAt, timezone)}</span> : null}
+          </div>
+        }
       />
-      <OperationsStrip health={data?.health ?? null} status={data?.status ?? null} scheduler={data?.scheduler ?? null} lastDispatch={latestDispatch} />
-      <DispatchRail dispatch={latestDispatch} />
-      {loading ? <OpsLoading label="Consultando o control plane" /> : null}
-      {error ? <OpsState title="Estado parcial" message={error} tone="warning" action={<button className="ops-button" type="button" onClick={() => void load()}>Tentar novamente</button>} /> : null}
+      {loading ? <OpsLoading label="Carregando sua visão diária" /> : null}
+      {error ? (
+        <OpsState
+          title={error === 'unavailable' ? 'Não foi possível atualizar a visão diária' : 'Algumas informações estão desatualizadas'}
+          message="Os dados disponíveis continuam visíveis. Tente atualizar novamente quando a API estiver disponível."
+          tone="warning"
+          action={<button className="ops-button" type="button" onClick={() => void load()} disabled={refreshing}>Tentar novamente</button>}
+        />
+      ) : null}
       {data ? (
-        <>
-          <div className="ops-overview-grid">
-            <OpsSection title="Atividade da automacao" meta="Execucoes comerciais e dispatches mais recentes.">
-              <Timeline executions={data.executions} dispatches={data.dispatches} />
+        <div className="ops-home-layout">
+          <AutomationCard health={data.health} status={data.status} scheduler={data.scheduler} admin={data.admin} />
+          <TodaySummary admin={data.admin} status={data.status} />
+          <AttentionPanel data={data} />
+          <div className="ops-home-lower">
+            <OpsSection title="Último envio" meta={latestDispatch ? 'A atividade mais recente registrada.' : data.sourceAvailability.dispatches ? 'Ainda não há envios registrados.' : 'Histórico indisponível no momento.'}>
+              <LatestSend dispatch={latestDispatch} timezone={timezone} available={data.sourceAvailability.dispatches} />
             </OpsSection>
-            <OpsSection title="Ultimo envio" meta={latestDispatch?.id ?? 'Nenhum dispatch carregado'}>
-              <LatestDispatch dispatch={latestDispatch} />
-            </OpsSection>
-          </div>
-          <div className="ops-overview-lower">
-            <OpsSection className="ops-section--quiet" title="Fila pronta" meta={data.queue.length ? `${data.queue.length} candidatos retornados pela campanha ativa.` : 'Sem endpoint global de candidatos.'} actions={<Link href="/fila" className="ops-button">Abrir fila <ArrowUpRight size={14} aria-hidden="true" /></Link>}>
-              <QueuePreview items={data.queue} />
-            </OpsSection>
-            <OpsSection className="ops-section--quiet" title="Saude operacional" meta="Somente sinais expostos pela API atual.">
-              <div className="ops-health-list">
-                <div className="ops-health-row"><span className="ops-health-name">API Fastify</span><OpsBadge tone={data.health?.status === 'ok' ? 'success' : 'danger'}>{data.health?.status === 'ok' ? 'OK' : 'N/D'}</OpsBadge></div>
-                <div className="ops-health-row"><span className="ops-health-name">Scheduler comercial</span><OpsBadge tone={data.scheduler?.status === 'registered' ? 'success' : 'warning'}>{data.scheduler?.status ?? 'N/D'}</OpsBadge></div>
-                <div className="ops-health-row"><span className="ops-health-name">Grupo autorizado</span><span className="ops-mono">{data.status?.authorizedGroupCount ?? 'N/D'}</span></div>
-                <div className="ops-health-row"><span className="ops-health-name">Postgres</span><span className="ops-mono">N/D · sem endpoint</span></div>
-                <div className="ops-health-row"><span className="ops-health-name">Redis / workers</span><span className="ops-mono">N/D · sem endpoint</span></div>
-              </div>
+            <OpsSection title="Como o envio acontece" meta="Acompanhe cada etapa em linguagem simples.">
+              <DeliveryJourney dispatch={latestDispatch} available={data.sourceAvailability.dispatches} />
             </OpsSection>
           </div>
-          <div className="ops-metric-line" aria-label="Resumo comercial persistido">
-            {[
-              ['Produtos', data.analytics?.totalProducts],
-              ['Aprovados', data.analytics?.totalApprovedProducts],
-              ['Copies', data.analytics?.totalGeneratedCopies],
-              ['Falhas', data.analytics?.totalFailedDispatches],
-            ].map(([label, value]) => <div className="ops-metric-cell" key={label}><span>{label}</span><strong className="ops-mono">{value ?? '—'}</strong></div>)}
-          </div>
-        </>
+          <OpsSection title="Atividade recente" meta="Os cinco registros mais recentes." actions={<Link className="ops-button ops-button--secondary" href="/envios">Ver histórico <ArrowUpRight size={14} aria-hidden="true" /></Link>}>
+            <RecentActivity executions={data.executions} dispatches={data.dispatches} timezone={timezone} available={data.sourceAvailability.executions && data.sourceAvailability.dispatches} />
+          </OpsSection>
+        </div>
       ) : null}
     </>
   );
