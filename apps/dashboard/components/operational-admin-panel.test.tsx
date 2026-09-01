@@ -158,4 +158,14 @@ describe('OperationalAdminPanel', () => {
     expect(screen.container.textContent).toContain('Grupo Grupo A atualizado.');
     await screen.unmount();
   });
+
+  it('pode apresentar somente os números na view contextual de WhatsApps', async () => {
+    const screen = await render(<OperationalAdminPanel showGroups={false} />);
+
+    expect(screen.container.textContent).toContain('Instâncias operacionais');
+    expect(screen.container.textContent).toContain('instance-a');
+    expect(screen.container.textContent).not.toContain('Grupos e assignments');
+    expect(screen.container.textContent).not.toContain('Grupo A');
+    await screen.unmount();
+  });
 });
