@@ -2,13 +2,26 @@
 
 import Link from 'next/link';
 import { ExternalLink, Link2, Search } from 'lucide-react';
-import { FormEvent, useEffect, useState } from 'react';
-import { EmptyState } from '../../components/empty-state';
-import { ErrorState } from '../../components/error-state';
-import { LoadingState } from '../../components/loading-state';
-import { PageHeader } from '../../components/page-header';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
+import { OffersContextNav } from '../../components/offers-context-nav';
+import {
+  OpsBadge,
+  OpsEmpty,
+  OpsLoading,
+  OpsPageHeading,
+  OpsSection,
+  OpsState,
+  RefreshButton,
+  type OpsTone,
+} from '../../components/ops-components';
 import { SafeProductImage } from '../../components/safe-product-image';
-import { StatusBadge } from '../../components/status-badge';
 import {
   listShopeeCategories,
   listShopeeOffers,
@@ -27,7 +40,9 @@ import {
   formatPercent,
 } from '../../lib/format';
 
-const initialFilters: ShopeeOfferFilters = {
+type QuickFilter = 'all' | 'sales' | 'discount' | 'commission';
+
+const createInitialFilters = (): ShopeeOfferFilters => ({
   keyword: '',
   source: '',
   availability: '',
@@ -36,15 +51,24 @@ const initialFilters: ShopeeOfferFilters = {
   sort: 'recent',
   page: 1,
   limit: 12,
-};
+});
 
-const sourceLabel = { MOCK: 'Mock', MANUAL: 'Manual', OFFICIAL: 'Oficial' };
-const providerLabel = { mock: 'Mock', manual: 'Manual', official: 'Oficial' };
-const statusLabel = {
+const statusLabel: Record<ShopeeOfferStatus, string> = {
   ACTIVE: 'Ativa',
   EXPIRED: 'Expirada',
   UNAVAILABLE: 'Indisponível',
 };
+
+const quickFilters: Array<{
+  key: QuickFilter;
+  label: string;
+  sort: ShopeeOfferSort;
+}> = [
+  { key: 'all', label: 'Todas', sort: 'recent' },
+  { key: 'sales', label: 'Mais vendidas', sort: 'sales_desc' },
+  { key: 'discount', label: 'Maior desconto', sort: 'discount_desc' },
+  { key: 'commission', label: 'Maior comissão', sort: 'commission_desc' },
+];
 
 const sourceFromValue = (value: string): ShopeeOfferFilters['source'] =>
   value === 'MOCK' || value === 'MANUAL' || value === 'OFFICIAL' ? value : '';
@@ -72,42 +96,116 @@ const sortFromValue = (value: string): ShopeeOfferSort => {
   }
 };
 
-const optionalNumber = (value: string) =>
-  value.trim() === '' ? undefined : Number(value);
+const optionalNumber = (value: string) => {
+  if (value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const toFiniteNumber = (value: string | number | null | undefined) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const safeCurrency = (value: string | number | null | undefined) =>
+  formatCurrency(toFiniteNumber(value));
+
+const safeNumber = (value: string | number | null | undefined) =>
+  formatNumber(toFiniteNumber(value));
+
+const safePercent = (value: string | number | null | undefined) =>
+  formatPercent(toFiniteNumber(value));
+
+const priceRangeLabel = (
+  min: string | number | null | undefined,
+  max: string | number | null | undefined,
+) => {
+  const minValue = toFiniteNumber(min);
+  const maxValue = toFiniteNumber(max);
+  if (minValue === null && maxValue === null) return null;
+  if (minValue !== null && maxValue !== null && minValue === maxValue) {
+    return null;
+  }
+  if (minValue !== null && maxValue !== null) {
+    return `${formatCurrency(minValue)} – ${formatCurrency(maxValue)}`;
+  }
+  return minValue !== null
+    ? `A partir de ${formatCurrency(minValue)}`
+    : `Até ${formatCurrency(maxValue)}`;
+};
+
+const safeCategoryLabel = (category: ShopeeCategory) => {
+  const name = category.name?.trim();
+  if (name) return name;
+  const displayLabel = category.displayLabel?.trim();
+  if (!displayLabel || displayLabel.includes(category.id)) {
+    return 'Categoria não disponível';
+  }
+  return displayLabel;
+};
+
+const isSafeHttpUrl = (value: string | undefined) => {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 export default function ProductsPage() {
   const [result, setResult] = useState<ShopeeOfferPage | null>(null);
   const [categories, setCategories] = useState<ShopeeCategory[]>([]);
-  const [categoryError, setCategoryError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<ShopeeOfferFilters>(initialFilters);
+  const [categoryError, setCategoryError] = useState(false);
+  const [filters, setFilters] = useState<ShopeeOfferFilters>(
+    createInitialFilters(),
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestSequence = useRef(0);
 
-  const load = async (nextFilters = filters) => {
+  const load = useCallback(async (nextFilters: ShopeeOfferFilters) => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     setError(null);
     try {
-      setResult(await listShopeeOffers(nextFilters));
+      const nextResult = await listShopeeOffers(nextFilters);
+      if (sequence === requestSequence.current) setResult(nextResult);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
+      if (sequence === requestSequence.current) {
+        setError(err instanceof Error ? err.message : 'Erro inesperado.');
+      }
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    const initialFilters = createInitialFilters();
     void load(initialFilters);
     void listShopeeCategories()
       .then((response) => {
         setCategories(response.items);
-        setCategoryError(null);
+        setCategoryError(false);
       })
-      .catch((err: unknown) => {
-        setCategoryError(
-          err instanceof Error ? err.message : 'Categorias indisponíveis.',
-        );
+      .catch(() => {
+        setCategoryError(true);
       });
-  }, []);
+  }, [load]);
+
+  const categoryMap = useMemo(
+    () =>
+      new Map(
+        categories.map((category) => [
+          category.id,
+          safeCategoryLabel(category),
+        ]),
+      ),
+    [categories],
+  );
 
   const submitFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -117,8 +215,9 @@ export default function ProductsPage() {
   };
 
   const clearFilters = () => {
-    setFilters(initialFilters);
-    void load(initialFilters);
+    const next = createInitialFilters();
+    setFilters(next);
+    void load(next);
   };
 
   const changePage = (page: number) => {
@@ -127,216 +226,421 @@ export default function ProductsPage() {
     void load(next);
   };
 
+  const applyQuickFilter = (quickFilter: (typeof quickFilters)[number]) => {
+    const next = { ...filters, sort: quickFilter.sort, page: 1 };
+    setFilters(next);
+    void load(next);
+  };
+
   const setNumberFilter = (
     field:
       | 'minDiscount'
+      | 'maxDiscount'
       | 'minScore'
+      | 'maxScore'
       | 'minPrice'
       | 'maxPrice'
-      | 'minCommission',
+      | 'minCommission'
+      | 'maxCommission',
     value: string,
   ) => {
     setFilters((current) => ({ ...current, [field]: optionalNumber(value) }));
   };
 
+  const selectedQuickFilter = quickFilters.find(
+    (quickFilter) => quickFilter.sort === filters.sort,
+  )?.key;
+
   return (
-    <div className="grid gap-6">
-      <PageHeader
-        title="Produtos e ofertas"
-        description="Catálogo operacional local da Shopee Affiliate em modo somente leitura."
+    <div className="offers-page">
+      <OpsPageHeading
+        eyebrow="Catálogo"
+        title="Ofertas"
+        description="Encontre e acompanhe as melhores oportunidades da Shopee."
+        actions={
+          <Link href="/cupons" className="ops-button">
+            Ver cupons
+          </Link>
+        }
       />
 
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-4">
-        <span className="text-sm text-slate-600">Provider atual</span>
-        <StatusBadge tone={result?.provider === 'official' ? 'warning' : 'ok'}>
-          {result?.provider ? providerLabel[result.provider] : 'carregando'}
-        </StatusBadge>
-        <p className="text-sm text-slate-600">
-          A atualização acontece pelo fluxo operacional oficial; este console não
-          sincroniza, gera copy nem envia mensagens.
-        </p>
-      </div>
+      <OffersContextNav active="offers" />
 
-      <p className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-        Ofertas Relâmpago: não suportado pelo contrato atual do provider.
-      </p>
-
-      {error ? <ErrorState message={error} onRetry={() => load()} /> : null}
-      <section className="rounded-lg border border-slate-200 bg-white p-4">
-        <form
-          onSubmit={submitFilters}
-          className="grid gap-3 md:grid-cols-3 xl:grid-cols-5"
-        >
-          <label className="md:col-span-2">
-            <span className="text-sm font-medium text-slate-700">Busca</span>
-            <div className="mt-1 flex items-center gap-2 rounded-md border border-slate-300 px-3 focus-within:ring-2 focus-within:ring-orange-500">
-              <Search className="h-4 w-4 text-slate-400" aria-hidden="true" />
+      <OpsSection
+        title="Encontre uma oportunidade"
+        meta="Use a busca e os atalhos para começar. Os filtros avançados ficam disponíveis quando você precisar refinar a seleção."
+        className="offers-toolbar-section"
+      >
+        <form onSubmit={submitFilters} className="offers-toolbar-form">
+          <label className="offers-search-field">
+            <span>Buscar oferta</span>
+            <div className="offers-search-control">
+              <Search size={17} aria-hidden="true" />
               <input
-                value={filters.keyword}
+                value={filters.keyword ?? ''}
                 onChange={(event) =>
                   setFilters((current) => ({
                     ...current,
                     keyword: event.target.value,
                   }))
                 }
-                className="w-full border-0 bg-transparent py-2 text-sm outline-none"
-                placeholder="Nome ou loja"
+                placeholder="Nome do produto ou loja"
+                aria-label="Buscar por produto ou loja"
               />
             </div>
           </label>
-          <FilterSelect
-            label="Categoria"
-            value={filters.categoryId ?? ''}
-            onChange={(value) =>
-              setFilters((current) => ({
-                ...current,
-                categoryId: value || undefined,
-              }))
-            }
-            options={categories.map(({ id, displayLabel }) => [id, displayLabel])}
-          />
-          <FilterSelect
-            label="Disponibilidade"
-            value={filters.availability ?? ''}
-            onChange={(value) =>
-              setFilters((current) => ({
-                ...current,
-                availability: statusFromValue(value),
-              }))
-            }
-            options={[
-              ['ACTIVE', 'Ativa'],
-              ['EXPIRED', 'Expirada'],
-              ['UNAVAILABLE', 'Indisponível'],
-            ]}
-          />
-          <FilterSelect
-            label="Ordenação"
-            value={filters.sort ?? 'recent'}
-            onChange={(value) =>
-              setFilters((current) => ({ ...current, sort: sortFromValue(value) }))
-            }
-            options={[
-              ['recent', 'Mais recentes'],
-              ['sales_desc', 'Mais vendidos'],
-              ['score_desc', 'Maior score'],
-              ['discount_desc', 'Maior desconto'],
-              ['commission_desc', 'Maior comissão'],
-              ['price_asc', 'Menor preço'],
-              ['price_desc', 'Maior preço'],
-            ]}
-          />
-          <NumberFilter label="Desconto mínimo (%)" value={filters.minDiscount} onChange={(value) => setNumberFilter('minDiscount', value)} />
-          <NumberFilter label="Score mínimo" value={filters.minScore} onChange={(value) => setNumberFilter('minScore', value)} />
-          <NumberFilter label="Preço mínimo" value={filters.minPrice} onChange={(value) => setNumberFilter('minPrice', value)} />
-          <NumberFilter label="Preço máximo" value={filters.maxPrice} onChange={(value) => setNumberFilter('maxPrice', value)} />
-          <NumberFilter label="Comissão mínima (%)" value={filters.minCommission} onChange={(value) => setNumberFilter('minCommission', value)} />
-          <FilterSelect
-            label="Envio"
-            value={filters.deliveryStatus ?? 'any'}
-            onChange={(value) =>
-              setFilters((current) => ({
-                ...current,
-                deliveryStatus: deliveryFromValue(value),
-              }))
-            }
-            options={[
-              ['any', 'Todos'],
-              ['not_sent', 'Ainda não enviados'],
-              ['sent', 'Já enviados'],
-            ]}
-          />
-          <DateFilter label="Capturado de" value={filters.capturedFrom} onChange={(value) => setFilters((current) => ({ ...current, capturedFrom: value || undefined }))} />
-          <DateFilter label="Capturado até" value={filters.capturedTo} onChange={(value) => setFilters((current) => ({ ...current, capturedTo: value || undefined }))} />
-          <FilterSelect
-            label="Origem"
-            value={filters.source ?? ''}
-            onChange={(value) =>
-              setFilters((current) => ({ ...current, source: sourceFromValue(value) }))
-            }
-            options={[
-              ['MOCK', 'Mock'],
-              ['MANUAL', 'Manual'],
-              ['OFFICIAL', 'Oficial'],
-            ]}
-          />
-          <div className="flex items-end gap-2">
-            <button type="submit" className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Filtrar</button>
-            <button type="button" onClick={clearFilters} className="rounded-md px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Limpar</button>
-          </div>
-        </form>
-        {categoryError ? (
-          <p className="mt-3 text-sm text-amber-700">
-            Categorias indisponíveis: {categoryError}
-          </p>
-        ) : null}
-      </section>
+          <button type="submit" className="ops-button offers-search-button">
+            Buscar
+          </button>
 
-      {loading ? <LoadingState label="Carregando ofertas" /> : null}
+          <div className="offers-quick-filter-row" aria-label="Filtros rápidos">
+            <span className="offers-filter-label">Ver por</span>
+            <div className="offers-quick-filters">
+              {quickFilters.map((quickFilter) => (
+                <button
+                  type="button"
+                  key={quickFilter.key}
+                  className={`offers-quick-filter ${selectedQuickFilter === quickFilter.key ? 'is-active' : ''}`}
+                  aria-pressed={selectedQuickFilter === quickFilter.key}
+                  onClick={() => applyQuickFilter(quickFilter)}
+                >
+                  {quickFilter.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <details className="offers-advanced-filters">
+            <summary>Refinar busca</summary>
+            <div className="offers-filter-grid">
+              <FilterSelect
+                label="Categoria"
+                value={filters.categoryId ?? ''}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    categoryId: value || undefined,
+                  }))
+                }
+                options={categories.map((category) => [
+                  category.id,
+                  safeCategoryLabel(category),
+                ])}
+              />
+              <FilterSelect
+                label="Disponibilidade"
+                value={filters.availability ?? ''}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    availability: statusFromValue(value),
+                  }))
+                }
+                options={[
+                  ['ACTIVE', 'Ativa'],
+                  ['EXPIRED', 'Expirada'],
+                  ['UNAVAILABLE', 'Indisponível'],
+                ]}
+              />
+              <FilterSelect
+                label="Ordenação"
+                value={filters.sort ?? 'recent'}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    sort: sortFromValue(value),
+                  }))
+                }
+                options={[
+                  ['recent', 'Mais recentes'],
+                  ['sales_desc', 'Mais vendidas'],
+                  ['score_desc', 'Maior score'],
+                  ['discount_desc', 'Maior desconto'],
+                  ['commission_desc', 'Maior comissão'],
+                  ['price_asc', 'Menor preço'],
+                  ['price_desc', 'Maior preço'],
+                ]}
+              />
+              <FilterSelect
+                label="Link afiliado"
+                value={filters.affiliateLink ?? ''}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    affiliateLink:
+                      value === 'present' || value === 'missing' ? value : '',
+                  }))
+                }
+                options={[
+                  ['present', 'Disponível'],
+                  ['missing', 'Ausente'],
+                ]}
+              />
+              <FilterSelect
+                label="Envio"
+                value={filters.deliveryStatus ?? 'any'}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    deliveryStatus: deliveryFromValue(value),
+                  }))
+                }
+                options={[
+                  ['any', 'Todas'],
+                  ['not_sent', 'Ainda não enviadas'],
+                  ['sent', 'Já enviadas'],
+                ]}
+              />
+              <NumberFilter
+                label="Desconto mínimo (%)"
+                value={filters.minDiscount}
+                onChange={(value) => setNumberFilter('minDiscount', value)}
+              />
+              <NumberFilter
+                label="Desconto máximo (%)"
+                value={filters.maxDiscount}
+                onChange={(value) => setNumberFilter('maxDiscount', value)}
+              />
+              <NumberFilter
+                label="Score mínimo"
+                value={filters.minScore}
+                onChange={(value) => setNumberFilter('minScore', value)}
+              />
+              <NumberFilter
+                label="Score máximo"
+                value={filters.maxScore}
+                onChange={(value) => setNumberFilter('maxScore', value)}
+              />
+              <NumberFilter
+                label="Preço mínimo"
+                value={filters.minPrice}
+                onChange={(value) => setNumberFilter('minPrice', value)}
+              />
+              <NumberFilter
+                label="Preço máximo"
+                value={filters.maxPrice}
+                onChange={(value) => setNumberFilter('maxPrice', value)}
+              />
+              <NumberFilter
+                label="Comissão mínima (%)"
+                value={filters.minCommission}
+                onChange={(value) => setNumberFilter('minCommission', value)}
+              />
+              <NumberFilter
+                label="Comissão máxima (%)"
+                value={filters.maxCommission}
+                onChange={(value) => setNumberFilter('maxCommission', value)}
+              />
+              <DateFilter
+                label="Capturada de"
+                value={filters.capturedFrom}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    capturedFrom: value || undefined,
+                  }))
+                }
+              />
+              <DateFilter
+                label="Capturada até"
+                value={filters.capturedTo}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    capturedTo: value || undefined,
+                  }))
+                }
+              />
+              <FilterSelect
+                label="Origem do catálogo"
+                value={filters.source ?? ''}
+                onChange={(value) =>
+                  setFilters((current) => ({
+                    ...current,
+                    source: sourceFromValue(value),
+                  }))
+                }
+                options={[
+                  ['MOCK', 'Demonstração'],
+                  ['MANUAL', 'Importada'],
+                  ['OFFICIAL', 'Oficial'],
+                ]}
+              />
+            </div>
+            <div className="offers-filter-actions">
+              <button type="submit" className="ops-button">
+                Aplicar filtros
+              </button>
+              <button
+                type="button"
+                className="ops-button is-quiet"
+                onClick={clearFilters}
+              >
+                Limpar
+              </button>
+            </div>
+          </details>
+        </form>
+      </OpsSection>
+
+      <OpsState
+        tone="info"
+        title="Ofertas relâmpago"
+        message="Esse tipo de sinal não está disponível no contrato atual. As ofertas abaixo usam somente dados comerciais persistidos."
+      />
+
+      {categoryError ? (
+        <OpsState
+          tone="warning"
+          title="Categorias indisponíveis"
+          message="A busca continua funcionando; alguns produtos podem aparecer sem o nome da categoria."
+        />
+      ) : null}
+
+      {error ? (
+        <OpsState
+          tone="danger"
+          title="Não foi possível carregar as ofertas"
+          message={error}
+          action={
+            <RefreshButton onClick={() => void load(filters)} busy={loading} />
+          }
+        />
+      ) : null}
+
+      {loading && !result ? <OpsLoading label="Carregando ofertas" /> : null}
+      {loading && result ? <OpsLoading label="Atualizando ofertas" /> : null}
+
       {!loading && !error && result?.items.length === 0 ? (
-        <EmptyState title="Nenhuma oferta encontrada" description="Nenhuma oferta persistida corresponde aos filtros atuais." />
+        <OpsEmpty
+          title="Nenhuma oferta encontrada"
+          message="Nenhuma oportunidade persistida corresponde aos filtros atuais."
+        />
       ) : null}
 
       {result?.items.length ? (
         <>
-          <div className="hidden overflow-x-auto rounded-lg border border-slate-200 bg-white lg:block">
-            <table className="min-w-[1550px] divide-y divide-slate-200 text-sm">
-              <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
+          <div className="offers-table-wrap">
+            <table className="offers-table">
+              <thead>
                 <tr>
-                  <th className="px-4 py-3">Produto</th><th className="px-4 py-3">Categorias</th><th className="px-4 py-3">Preço</th><th className="px-4 py-3">Score</th><th className="px-4 py-3">Vendas</th><th className="px-4 py-3">Avaliação</th><th className="px-4 py-3">Comissão</th><th className="px-4 py-3">Provider</th><th className="px-4 py-3">Disponibilidade</th><th className="px-4 py-3">Comercial</th><th className="px-4 py-3">Envio</th><th className="px-4 py-3">Snapshot</th><th className="px-4 py-3">Ações</th>
+                  <th scope="col">Oferta</th>
+                  <th scope="col">Categoria</th>
+                  <th scope="col">Preço atual</th>
+                  <th scope="col">Desconto</th>
+                  <th scope="col">Score</th>
+                  <th scope="col">Vendas</th>
+                  <th scope="col">Avaliação</th>
+                  <th scope="col">Comissão</th>
+                  <th scope="col">Estado</th>
+                  <th scope="col">Envio</th>
+                  <th scope="col">
+                    <span className="sr-only">Ações</span>
+                  </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-200">
+              <tbody>
                 {result.items.map((offer) => (
-                  <tr key={offer.id} className="align-top">
-                    <td className="max-w-sm px-4 py-3"><OfferIdentity offer={offer} /></td>
-                    <td className="max-w-48 px-4 py-3 text-xs text-slate-600">{offer.categoryIds.join(', ') || '—'}</td>
-                    <td className="px-4 py-3"><p>{formatCurrency(Number(offer.price))}</p><p className="mt-1 text-xs text-slate-500">Referência: não informada pelo provider</p><p className="text-xs text-emerald-700">{formatPercent(offer.discountRate)} off</p></td>
-                    <td className="px-4 py-3">{formatNumber(offer.bestCurrentCommercialScore)}</td>
-                    <td className="px-4 py-3">{formatNumber(offer.sales)}</td>
-                    <td className="px-4 py-3">{formatNumber(offer.rating)}</td>
-                    <td className="px-4 py-3">{formatPercent(offer.commissionRate)}</td>
-                    <td className="px-4 py-3">{sourceLabel[offer.source]}</td>
-                    <td className="px-4 py-3"><StatusBadge tone={offer.status === 'ACTIVE' ? 'ok' : 'warning'}>{statusLabel[offer.status]}</StatusBadge></td>
-                    <td className="px-4 py-3"><CommercialSummary offer={offer} /></td>
-                    <td className="px-4 py-3"><DeliverySummary offer={offer} /></td>
-                    <td className="px-4 py-3">r{offer.commercialSnapshotRevision || '—'}</td>
-                    <td className="px-4 py-3"><OfferActions offer={offer} /></td>
+                  <tr key={offer.id}>
+                    <td>
+                      <OfferIdentity offer={offer} />
+                    </td>
+                    <td>
+                      <CategoryList
+                        offer={offer}
+                        categoryMap={categoryMap}
+                        categoryError={categoryError}
+                      />
+                    </td>
+                    <td>
+                      <OfferPrice offer={offer} />
+                    </td>
+                    <td>{safePercent(offer.discountRate)}</td>
+                    <td>{safeNumber(offer.bestCurrentCommercialScore)}</td>
+                    <td>{safeNumber(offer.sales)}</td>
+                    <td>{safeNumber(offer.rating)}</td>
+                    <td>{safePercent(offer.commissionRate)}</td>
+                    <td>
+                      <div className="offers-status-stack">
+                        <OfferStatus status={offer.status} />
+                        <span className="offers-commercial-status">
+                          {commercialLabel(offer)}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <DeliverySummary offer={offer} />
+                    </td>
+                    <td>
+                      <OfferActions offer={offer} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:hidden">
+          <div className="offers-mobile-list">
             {result.items.map((offer) => (
-              <article key={offer.id} className="rounded-lg border border-slate-200 bg-white p-4">
-                <OfferIdentity offer={offer} />
-                <p className="mt-3 text-xs text-slate-600">Categorias: {offer.categoryIds.join(', ') || '—'}</p>
-                <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                  <Metric label="Preço" value={formatCurrency(Number(offer.price))} />
-                  <Metric label="Score atual" value={formatNumber(offer.bestCurrentCommercialScore)} />
-                  <Metric label="Vendas" value={formatNumber(offer.sales)} />
-                  <Metric label="Avaliação" value={formatNumber(offer.rating)} />
-                  <Metric label="Comissão" value={formatPercent(offer.commissionRate)} />
-                  <Metric label="Provider" value={sourceLabel[offer.source]} />
-                  <Metric label="Disponibilidade" value={statusLabel[offer.status]} />
-                  <Metric label="Envio" value={offer.everSent ? 'Enviado' : 'Não enviado'} />
-                  <Metric label="Snapshot" value={offer.commercialSnapshotRevision ? `r${offer.commercialSnapshotRevision}` : '—'} />
-                  <Metric label="Último envio" value={formatDateTime(offer.lastSentAt)} />
-                </dl>
-                <div className="mt-4 rounded-md bg-slate-50 p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Resumo comercial</p>
-                  <CommercialSummary offer={offer} />
+              <article key={offer.id} className="offers-card">
+                <div className="offers-card-header">
+                  <OfferIdentity offer={offer} />
+                  <OfferStatus status={offer.status} />
                 </div>
-                <div className="mt-4"><OfferActions offer={offer} /></div>
+                <div className="offers-card-category">
+                  <CategoryList
+                    offer={offer}
+                    categoryMap={categoryMap}
+                    categoryError={categoryError}
+                  />
+                </div>
+                <div className="offers-card-summary">
+                  <OfferPrice offer={offer} />
+                  <div className="offers-card-discount">
+                    <span>Desconto</span>
+                    <strong>{safePercent(offer.discountRate)}</strong>
+                  </div>
+                </div>
+                <dl className="offers-card-metrics">
+                  <Metric label="Vendas" value={safeNumber(offer.sales)} />
+                  <Metric
+                    label="Score"
+                    value={safeNumber(offer.bestCurrentCommercialScore)}
+                  />
+                  <Metric label="Avaliação" value={safeNumber(offer.rating)} />
+                  <Metric
+                    label="Comissão"
+                    value={safePercent(offer.commissionRate)}
+                  />
+                  <Metric label="Situação" value={commercialLabel(offer)} />
+                </dl>
+                <div className="offers-card-footer">
+                  <DeliverySummary offer={offer} />
+                  <OfferActions offer={offer} />
+                </div>
               </article>
             ))}
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-slate-600">Página {result.page} de {result.totalPages} · {result.total} oferta(s)</p>
-            <div className="flex gap-2"><PageButton disabled={!result.hasPreviousPage} onClick={() => changePage(result.page - 1)}>Anterior</PageButton><PageButton disabled={!result.hasNextPage} onClick={() => changePage(result.page + 1)}>Próxima</PageButton></div>
+          <div className="offers-pagination">
+            <p>
+              Página {result.page} de {result.totalPages} · {result.total}{' '}
+              {result.total === 1 ? 'oferta' : 'ofertas'}
+            </p>
+            <div className="offers-pagination-actions">
+              <PageButton
+                disabled={!result.hasPreviousPage}
+                onClick={() => changePage(result.page - 1)}
+              >
+                Anterior
+              </PageButton>
+              <PageButton
+                disabled={!result.hasNextPage}
+                onClick={() => changePage(result.page + 1)}
+              >
+                Próxima
+              </PageButton>
+            </div>
           </div>
         </>
       ) : null}
@@ -344,39 +648,235 @@ export default function ProductsPage() {
   );
 }
 
-function FilterSelect({ label, value, options, onChange }: { label: string; value: string; options: [string, string][]; onChange(value: string): void }) {
-  return <label className="block w-full"><span className="text-sm font-medium text-slate-700">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"><option value="">Todos</option>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></label>;
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: [string, string][];
+  onChange(value: string): void;
+}) {
+  return (
+    <label className="offers-filter-field">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Todas</option>
+        {options.map(([optionValue, optionLabel]) => (
+          <option key={optionValue} value={optionValue}>
+            {optionLabel}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
-function NumberFilter({ label, value, onChange }: { label: string; value: number | undefined; onChange(value: string): void }) {
-  return <label><span className="text-sm font-medium text-slate-700">{label}</span><input type="number" min="0" step="0.01" value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" /></label>;
+function NumberFilter({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number | undefined;
+  onChange(value: string): void;
+}) {
+  return (
+    <label className="offers-filter-field">
+      <span>{label}</span>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        value={value ?? ''}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
 }
 
-function DateFilter({ label, value, onChange }: { label: string; value: string | undefined; onChange(value: string): void }) {
-  return <label><span className="text-sm font-medium text-slate-700">{label}</span><input type="date" value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" /></label>;
+function DateFilter({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string | undefined;
+  onChange(value: string): void;
+}) {
+  return (
+    <label className="offers-filter-field">
+      <span>{label}</span>
+      <input
+        type="date"
+        value={value ?? ''}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
 }
 
 function OfferIdentity({ offer }: { offer: ShopeeOffer }) {
-  return <div className="flex gap-3"><SafeProductImage src={offer.imageUrl} className="h-12 w-12 shrink-0 rounded-md border border-slate-200 object-cover" /><div><p className="font-medium text-slate-950">{offer.productName}</p><p className="mt-1 text-xs text-slate-500">{offer.shopName} · {sourceLabel[offer.source]}</p></div></div>;
+  return (
+    <div className="offers-identity">
+      <SafeProductImage src={offer.imageUrl} className="offers-image" />
+      <div className="offers-identity-copy">
+        <p className="offers-product-name" title={offer.productName}>
+          {offer.productName}
+        </p>
+        <p className="offers-shop-name">{offer.shopName}</p>
+      </div>
+    </div>
+  );
 }
 
-function CommercialSummary({ offer }: { offer: ShopeeOffer }) {
+function CategoryList({
+  offer,
+  categoryMap,
+  categoryError,
+}: {
+  offer: ShopeeOffer;
+  categoryMap: Map<string, string>;
+  categoryError: boolean;
+}) {
+  if (offer.categoryIds.length === 0) {
+    return <span className="offers-muted">Sem categoria</span>;
+  }
+
+  return (
+    <span className="offers-category-list">
+      {offer.categoryIds
+        .map((categoryId) => categoryMap.get(categoryId))
+        .map((label, index) => (
+          <span key={`${label ?? 'categoria'}-${index}`}>
+            {label ??
+              (categoryError
+                ? 'Categoria indisponível'
+                : 'Categoria não disponível')}
+          </span>
+        ))}
+    </span>
+  );
+}
+
+function OfferPrice({ offer }: { offer: ShopeeOffer }) {
+  const range = priceRangeLabel(offer.priceMin, offer.priceMax);
+  return (
+    <div className="offers-price-block">
+      <span>Preço atual</span>
+      <strong>{safeCurrency(offer.price)}</strong>
+      {range ? <small>Faixa observada: {range}</small> : null}
+    </div>
+  );
+}
+
+function OfferStatus({ status }: { status: ShopeeOfferStatus }) {
+  return <OpsBadge tone={statusTone(status)}>{statusLabel[status]}</OpsBadge>;
+}
+
+function statusTone(status: ShopeeOfferStatus): OpsTone {
+  if (status === 'ACTIVE') return 'success';
+  if (status === 'EXPIRED') return 'danger';
+  return 'warning';
+}
+
+function commercialLabel(offer: ShopeeOffer) {
   const summary = offer.commercialStateSummary;
-  return <div className="text-xs text-slate-600"><p>{summary.currentCandidateCount} candidate(s)</p><p>{summary.queued} fila · {summary.copyReady} copy pronta</p></div>;
+  if (offer.status === 'EXPIRED') return 'Oferta expirada';
+  if (offer.status === 'UNAVAILABLE') return 'Oferta indisponível';
+  if (summary.blocked > 0) return 'Bloqueada no fluxo';
+  if (summary.expired > 0) return 'Candidatos expirados';
+  if (summary.copyReady > 0) return 'Texto pronto';
+  if (summary.reserved > 0) return 'Em reserva';
+  if (summary.queued > 0) return 'Em preparação';
+  if (summary.dispatched > 0 || offer.everSent) return 'Já enviada';
+  return 'Aguardando seleção';
 }
 
 function DeliverySummary({ offer }: { offer: ShopeeOffer }) {
-  return <div className="text-xs text-slate-600"><p className={offer.everSent ? 'text-emerald-700' : ''}>{offer.everSent ? 'Enviado' : 'Não enviado'}</p><p>{offer.sentDestinationCount} destino(s)</p><p>{formatDateTime(offer.lastSentAt)}</p></div>;
+  return (
+    <div className="offers-delivery-summary">
+      <span className={offer.everSent ? 'is-sent' : undefined}>
+        {offer.everSent ? 'Enviado' : 'Ainda não enviado'}
+      </span>
+      <small>
+        {offer.sentDestinationCount > 0
+          ? `${offer.sentDestinationCount} destino${offer.sentDestinationCount === 1 ? '' : 's'} · `
+          : ''}
+        {formatDateTime(offer.lastSentAt)}
+      </small>
+    </div>
+  );
 }
 
 function OfferActions({ offer }: { offer: ShopeeOffer }) {
-  return <div className="flex flex-wrap gap-2"><Link href={`/produtos/${encodeURIComponent(offer.id)}`} className="rounded-md border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">Detalhes</Link><a href={offer.productLink} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 p-2 text-slate-600 hover:bg-slate-50" aria-label="Abrir produto"><ExternalLink className="h-4 w-4" /></a><span className={`rounded-md border p-2 ${offer.affiliateLinkPresent ? 'border-emerald-200 text-emerald-700' : 'border-slate-200 text-slate-400'}`} title={offer.affiliateLinkPresent ? 'Link afiliado disponível' : 'Link afiliado ausente'}><Link2 className="h-4 w-4" /></span></div>;
+  return (
+    <div className="offers-actions">
+      <Link
+        href={`/produtos/${encodeURIComponent(offer.id)}`}
+        className="ops-button is-small"
+      >
+        Ver detalhes
+      </Link>
+      {isSafeHttpUrl(offer.productLink) ? (
+        <a
+          href={offer.productLink}
+          target="_blank"
+          rel="noreferrer"
+          className="offers-icon-action"
+          aria-label="Abrir oferta em nova aba"
+          title="Abrir oferta em nova aba"
+        >
+          <ExternalLink size={15} aria-hidden="true" />
+        </a>
+      ) : null}
+      <span
+        className={`offers-affiliate-indicator ${offer.affiliateLinkPresent ? 'is-ready' : ''}`}
+        aria-label={
+          offer.affiliateLinkPresent
+            ? 'Link afiliado disponível'
+            : 'Link afiliado ausente'
+        }
+        title={
+          offer.affiliateLinkPresent
+            ? 'Link afiliado disponível'
+            : 'Link afiliado ausente'
+        }
+      >
+        <Link2 size={15} aria-hidden="true" />
+      </span>
+    </div>
+  );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
-  return <div><dt className="text-slate-500">{label}</dt><dd className="font-medium text-slate-900">{value}</dd></div>;
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
 }
 
-function PageButton({ children, disabled, onClick }: { children: React.ReactNode; disabled: boolean; onClick(): void }) {
-  return <button type="button" onClick={onClick} disabled={disabled} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-50">{children}</button>;
+function PageButton({
+  children,
+  disabled,
+  onClick,
+}: {
+  children: React.ReactNode;
+  disabled: boolean;
+  onClick(): void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="ops-button is-small"
+    >
+      {children}
+    </button>
+  );
 }

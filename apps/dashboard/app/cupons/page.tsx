@@ -1,24 +1,58 @@
 'use client';
 
 import { TicketPercent } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { EmptyState } from '../../components/empty-state';
-import { ErrorState } from '../../components/error-state';
-import { LoadingState } from '../../components/loading-state';
-import { PageHeader } from '../../components/page-header';
-import { StatusBadge } from '../../components/status-badge';
+import { useCallback, useEffect, useState } from 'react';
+import { OffersContextNav } from '../../components/offers-context-nav';
+import {
+  OpsBadge,
+  OpsEmpty,
+  OpsLoading,
+  OpsPageHeading,
+  OpsState,
+  RefreshButton,
+  type OpsTone,
+} from '../../components/ops-components';
 import { listCoupons, type Coupon } from '../../lib/api';
 import { formatCurrency, formatDateTime } from '../../lib/format';
 
-const isExpired = (coupon: Coupon) =>
-  Boolean(coupon.endsAt && new Date(coupon.endsAt) <= new Date());
+type CouponState = {
+  label: string;
+  tone: OpsTone;
+};
+
+const toFiniteNumber = (value: string | number | null | undefined) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const couponDiscount = (coupon: Coupon) => {
+  const value = toFiniteNumber(coupon.discountValue);
+  if (value === null) return 'Não informado';
+  return coupon.discountType === 'PERCENTAGE'
+    ? `${value.toLocaleString('pt-BR')}%`
+    : formatCurrency(value);
+};
+
+const couponState = (coupon: Coupon, now = Date.now()): CouponState => {
+  const startsAt = coupon.startsAt ? new Date(coupon.startsAt).getTime() : null;
+  const endsAt = coupon.endsAt ? new Date(coupon.endsAt).getTime() : null;
+
+  if (endsAt !== null && Number.isFinite(endsAt) && endsAt <= now) {
+    return { label: 'Expirado', tone: 'danger' };
+  }
+  if (!coupon.active) return { label: 'Inativo', tone: 'neutral' };
+  if (startsAt !== null && Number.isFinite(startsAt) && startsAt > now) {
+    return { label: 'Agendado', tone: 'info' };
+  }
+  return { label: 'Disponível', tone: 'success' };
+};
 
 export default function CouponsPage() {
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -28,92 +62,94 @@ export default function CouponsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   return (
-    <div className="grid gap-6">
-      <PageHeader
-        title="Cupons manuais"
-        description="Cupons persistidos em modo somente leitura. Inclusão, edição e exclusão ficam fora do Operations Console."
+    <div className="offers-page coupons-page">
+      <OpsPageHeading
+        eyebrow="Catálogo"
+        title="Cupons"
+        description="Consulte os cupons disponíveis para complementar uma oferta."
       />
 
-      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        O console exibe somente códigos já persistidos. Não há coleta ou
-        alteração de cupons nesta versão.
+      <OffersContextNav active="coupons" />
+
+      <div className="coupons-readonly-note">
+        <div>
+          <strong>Consulta somente leitura</strong>
+          <p>
+            Aqui aparecem apenas cupons já cadastrados. Inclusão, edição e
+            exclusão continuam fora do painel diário.
+          </p>
+        </div>
       </div>
 
-      {error ? <ErrorState message={error} onRetry={load} /> : null}
-
-      {loading ? <LoadingState label="Carregando cupons" /> : null}
-      {!loading && coupons.length === 0 ? (
-        <EmptyState
-          title="Nenhum cupom cadastrado"
-          description="Nenhum cupom persistido está disponível para consulta."
+      {error ? (
+        <OpsState
+          tone="danger"
+          title="Não foi possível carregar os cupons"
+          message={error}
+          action={<RefreshButton onClick={() => void load()} busy={loading} />}
         />
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {coupons.map((coupon) => {
-          const expired = isExpired(coupon);
-          return (
-            <article
-              key={coupon.id}
-              className="rounded-lg border border-slate-200 bg-white p-5"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-start gap-3">
-                  <span className="rounded-md bg-orange-50 p-2 text-orange-700">
-                    <TicketPercent className="h-5 w-5" aria-hidden="true" />
-                  </span>
-                  <div>
-                    <h2 className="font-semibold text-slate-950">
-                      {coupon.code}
-                    </h2>
-                    <p className="mt-1 text-sm text-slate-600">
-                      {coupon.description}
-                    </p>
+      {loading && coupons.length === 0 ? (
+        <OpsLoading label="Carregando cupons" />
+      ) : null}
+
+      {!loading && !error && coupons.length === 0 ? (
+        <OpsEmpty
+          title="Nenhum cupom cadastrado"
+          message="Nenhum cupom persistido está disponível para consulta."
+        />
+      ) : null}
+
+      {coupons.length > 0 ? (
+        <div className="coupons-grid">
+          {coupons.map((coupon) => {
+            const state = couponState(coupon);
+            return (
+              <article key={coupon.id} className="coupon-card">
+                <div className="coupon-card-header">
+                  <div className="coupon-card-title">
+                    <span className="coupon-icon" aria-hidden="true">
+                      <TicketPercent size={19} />
+                    </span>
+                    <div>
+                      <h2>{coupon.code}</h2>
+                      <p>{coupon.description || 'Cupom sem descrição'}</p>
+                    </div>
                   </div>
+                  <OpsBadge tone={state.tone}>{state.label}</OpsBadge>
                 </div>
-                <StatusBadge
-                  tone={coupon.active && !expired ? 'ok' : 'warning'}
-                >
-                  {expired ? 'Vencido' : coupon.active ? 'Ativo' : 'Inativo'}
-                </StatusBadge>
-              </div>
-              <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                <Metric
-                  label="Desconto"
-                  value={
-                    coupon.discountType === 'PERCENTAGE'
-                      ? `${coupon.discountValue}%`
-                      : formatCurrency(Number(coupon.discountValue))
-                  }
-                />
-                <Metric
-                  label="Compra minima"
-                  value={
-                    coupon.minPurchase
-                      ? formatCurrency(Number(coupon.minPurchase))
-                      : 'Nao informada'
-                  }
-                />
-                <Metric
-                  label="Inicio"
-                  value={formatDateTime(coupon.startsAt ?? undefined)}
-                />
-                <Metric
-                  label="Fim"
-                  value={formatDateTime(coupon.endsAt ?? undefined)}
-                />
-              </dl>
-            </article>
-          );
-        })}
-      </div>
+                <dl className="coupon-details">
+                  <Metric label="Desconto" value={couponDiscount(coupon)} />
+                  <Metric
+                    label="Compra mínima"
+                    value={
+                      coupon.minPurchase
+                        ? formatCurrency(toFiniteNumber(coupon.minPurchase))
+                        : 'Não informada'
+                    }
+                  />
+                  <Metric
+                    label="Válido a partir de"
+                    value={formatDateTime(coupon.startsAt ?? undefined)}
+                  />
+                  <Metric
+                    label="Válido até"
+                    value={formatDateTime(coupon.endsAt ?? undefined)}
+                  />
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -121,8 +157,8 @@ export default function CouponsPage() {
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-slate-500">{label}</dt>
-      <dd className="font-medium text-slate-900">{value}</dd>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }

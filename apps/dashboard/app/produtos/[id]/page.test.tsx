@@ -1,11 +1,13 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render } from '../../../test/render';
+import { change, click, render } from '../../../test/render';
 import ProductDetailPage from './page';
 
 const detailMock = vi.fn();
 const categoriesMock = vi.fn();
 const manualOptionsMock = vi.fn();
+const previewMock = vi.fn();
+const createManualPublicationMock = vi.fn();
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'offer-1' }),
@@ -16,7 +18,9 @@ vi.mock('../../../lib/api', () => ({
   listShopeeCategories: (...args: unknown[]) => categoriesMock(...args),
   getManualPublicationOptions: (...args: unknown[]) =>
     manualOptionsMock(...args),
-  createManualPublication: vi.fn(),
+  previewShopeeOfferCopy: (...args: unknown[]) => previewMock(...args),
+  createManualPublication: (...args: unknown[]) =>
+    createManualPublicationMock(...args),
   getManualPublication: vi.fn(),
 }));
 
@@ -132,7 +136,16 @@ const detail = {
 };
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   detailMock.mockReset().mockResolvedValue(detail);
+  previewMock.mockReset().mockResolvedValue({
+    label: 'PREVIEW — NAO ENVIADO',
+    titulo: 'Oferta: Produto oficial',
+    mensagem: 'Produto oficial por R$ 99,90.',
+    cta: 'Confira a oferta no link afiliado.',
+    affiliateLink: 'https://example.invalid/affiliate',
+    coupon: null,
+  });
   categoriesMock.mockReset().mockResolvedValue({
     items: [
       {
@@ -176,6 +189,19 @@ beforeEach(() => {
       },
     ],
   });
+  createManualPublicationMock.mockReset().mockResolvedValue({
+    id: 'request-1',
+    status: 'ACCEPTED',
+    targets: [
+      {
+        id: 'target-1',
+        status: 'PENDING',
+        destination: { name: 'Grupo oficial' },
+        blockedReason: null,
+        investigationRequired: false,
+      },
+    ],
+  });
 });
 
 describe('ProductDetailPage', () => {
@@ -187,11 +213,22 @@ describe('ProductDetailPage', () => {
     expect(screen.container.textContent).toContain('Campanha oficial');
     expect(screen.container.textContent).toContain('Grupo oficial');
     expect(screen.container.textContent).toContain('Revisão 2');
-    expect(screen.container.textContent).toContain(
-      'Ofertas Relâmpago: não suportado',
+    expect(screen.container.textContent).toContain('Ofertas relâmpago');
+    expect(screen.container.textContent).toContain('Prévia da mensagem');
+    expect(screen.container.textContent).toContain('Enviar publicação manual');
+    expect(screen.container.textContent).toContain('Fluxo oficial');
+    expect(screen.container.textContent).not.toContain('Preço de referência');
+    const firstLevel = screen.container.querySelector(
+      '[data-testid="offer-first-level"]',
     );
-    expect(screen.container.textContent).toContain('Enviar publicacao manual');
-    expect(screen.container.textContent).toContain('Somente OFFICIAL');
+    expect(firstLevel?.textContent).not.toContain('offer-1');
+    expect(firstLevel?.textContent).not.toContain('product-1');
+    expect(firstLevel?.textContent).not.toContain('candidate-1');
+    expect(firstLevel?.textContent).not.toContain('fingerprint-current');
+    const technical = screen.container.querySelector(
+      '[data-testid="offer-technical-details"]',
+    );
+    expect(technical?.hasAttribute('open')).toBe(false);
     expect(
       screen.container.querySelector('input[type="radio"]'),
     ).not.toBeNull();
@@ -204,6 +241,84 @@ describe('ProductDetailPage', () => {
       'offer-1',
       expect.objectContaining({ dispatchPage: 1, snapshotPage: 1 }),
     );
+    await screen.unmount();
+  });
+
+  it('carrega prévia local sem criar publicação', async () => {
+    const screen = await render(<ProductDetailPage />);
+    const button = Array.from(screen.container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Ver prévia da mensagem',
+    );
+
+    expect(button).toBeDefined();
+    await click(button as HTMLButtonElement);
+
+    expect(previewMock).toHaveBeenCalledWith('offer-1');
+    expect(screen.container.textContent).toContain('PREVIEW — NAO ENVIADO');
+    expect(screen.container.textContent).toContain(
+      'Confira a oferta no link afiliado.',
+    );
+    await screen.unmount();
+  });
+
+  it('envia publicação manual para exatamente o grupo escolhido', async () => {
+    vi.stubGlobal('crypto', {
+      randomUUID: () => 'idempotency-test',
+    });
+    const screen = await render(<ProductDetailPage />);
+    const radio = screen.container.querySelector(
+      'input[type="radio"]',
+    ) as HTMLInputElement;
+    const confirmation = screen.container.querySelector(
+      'input[placeholder="ENVIAR_PUBLICACAO_MANUAL"]',
+    ) as HTMLInputElement;
+    const send = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Enviar publicação manual',
+    );
+
+    await click(radio);
+    await change(confirmation, 'ENVIAR_PUBLICACAO_MANUAL');
+    expect(send).toBeDefined();
+    await click(send as HTMLButtonElement);
+
+    expect(createManualPublicationMock).toHaveBeenCalledWith({
+      idempotencyKey: 'idempotency-test',
+      productId: 'offer-1',
+      destinationIds: ['destination-1'],
+      confirm: 'ENVIAR_PUBLICACAO_MANUAL',
+    });
+    expect(screen.container.textContent).toContain('Publicação manual: aceita');
+    vi.unstubAllGlobals();
+    await screen.unmount();
+  });
+
+  it('traduz oferta expirada como indisponível para ação comercial', async () => {
+    detailMock.mockResolvedValueOnce({
+      ...detail,
+      status: 'EXPIRED',
+    });
+    const screen = await render(<ProductDetailPage />);
+
+    expect(screen.container.textContent).toContain('Oferta expirada');
+    expect(screen.container.textContent).toContain(
+      'Esta oferta expirou e não deve ser tratada como uma oportunidade ativa.',
+    );
+    await screen.unmount();
+  });
+
+  it('mantém o contrato de retry no erro de carregamento', async () => {
+    detailMock
+      .mockRejectedValueOnce(new Error('temporarily offline'))
+      .mockResolvedValueOnce(detail);
+    const screen = await render(<ProductDetailPage />);
+
+    expect(screen.container.textContent).toContain('temporarily offline');
+    const retry = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Tentar novamente',
+    );
+    expect(retry).toBeDefined();
+    await click(retry as HTMLButtonElement);
+    expect(screen.container.textContent).toContain('Produto oficial');
     await screen.unmount();
   });
 });
