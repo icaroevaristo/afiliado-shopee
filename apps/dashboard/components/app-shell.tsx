@@ -148,11 +148,6 @@ function Sidebar({
       </div>
       <NavigationLinks onNavigate={onNavigate} />
       <div className="ops-sidebar-footer">
-        <span
-          className="ops-status-dot"
-          data-tone="success"
-          aria-hidden="true"
-        />
         <span>Ambiente local</span>
       </div>
     </aside>

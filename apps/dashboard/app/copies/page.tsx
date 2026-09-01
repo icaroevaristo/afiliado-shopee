@@ -30,13 +30,13 @@ export default function CopiesPage() {
   return (
     <div className="grid gap-6">
       <PageHeader
-        title="Copies"
-        description="Registro de produtos relacionados a dispatches em modo somente leitura. A geração manual não é exposta nesta versão."
+        title="Textos das ofertas"
+        description="Registro de produtos relacionados a envios em modo somente leitura. A geração manual não é exposta nesta versão."
       />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
         A geração de copy pertence aos fluxos oficiais de automação. O
-        Operations Console não inicia geração nem persiste novas copies.
+        Esta área não inicia geração nem persiste novos textos.
       </div>
 
       {error ? <ErrorState message={error} /> : null}

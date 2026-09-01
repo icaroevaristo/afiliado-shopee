@@ -337,7 +337,7 @@ export default function ProductDetailPage() {
       </details>
 
       <HistorySection
-        title="Histórico de publicação"
+        title="Histórico de envios"
         meta="Envios registrados para esta oferta, com o resultado de cada tentativa."
         empty="Nenhum envio registrado para esta oferta."
         page={detail.dispatchHistory.page}

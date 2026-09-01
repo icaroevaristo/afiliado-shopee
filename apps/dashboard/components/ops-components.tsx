@@ -185,5 +185,5 @@ export function Countdown({ target }: { target: string | null }) {
 }
 
 export function UpdatedAt({ value }: { value: string | null | undefined }) {
-  return <span className="ops-mono">{value ? formatDateTime(value) : 'sem atualizacao'}</span>;
+  return <span className="ops-mono">{value ? formatDateTime(value) : 'sem atualização'}</span>;
 }

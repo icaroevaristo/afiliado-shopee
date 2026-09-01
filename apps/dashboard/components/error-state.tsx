@@ -7,7 +7,7 @@ type ErrorStateProps = {
 };
 
 export function ErrorState({
-  title = 'Nao foi possivel carregar',
+  title = 'Não foi possível carregar',
   message,
   onRetry,
 }: ErrorStateProps) {

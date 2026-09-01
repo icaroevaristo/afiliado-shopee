@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Suspense } from 'react';
 import { GroupsManagement } from '../../components/groups-management';
@@ -20,18 +19,6 @@ function WhatsAppPageContent() {
       ) : (
         <WhatsAppInstancesManagement />
       )}
-      {view === 'groups' ? (
-        <p className="text-sm text-slate-600">
-          Precisa consultar entregas anteriores?{' '}
-          <Link
-            className="font-semibold text-orange-700 underline"
-            href="/envios"
-          >
-            Ver histórico de envios
-          </Link>
-          .
-        </p>
-      ) : null}
     </div>
   );
 }

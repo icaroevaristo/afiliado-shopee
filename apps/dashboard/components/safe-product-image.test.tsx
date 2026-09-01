@@ -60,7 +60,7 @@ describe('SafeProductImage', () => {
     expect(screen.container.querySelector('img')).toBeNull();
     expect(
       screen.container.querySelector(
-        '[aria-label="Imagem do produto indisponivel"]',
+        '[aria-label="Imagem do produto indisponível"]',
       ),
     ).not.toBeNull();
     await screen.unmount();

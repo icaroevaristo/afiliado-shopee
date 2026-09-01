@@ -78,7 +78,7 @@ describe('CommercialPipelinePage', () => {
     );
 
     const screen = await render(<CommercialPipelinePage />);
-    expect(screen.container.textContent).toContain('Carregando historico');
+    expect(screen.container.textContent).toContain('Carregando histórico');
     await act(async () => {
       release({ items: [history], page: 1, limit: 20, total: 1, totalPages: 1 });
     });
@@ -104,7 +104,7 @@ describe('CommercialPipelinePage', () => {
   it('mostra estado vazio real', async () => {
     listMock.mockResolvedValueOnce(emptyPage);
     const screen = await render(<CommercialPipelinePage />);
-    expect(screen.container.textContent).toContain('Nenhuma execucao registrada');
+    expect(screen.container.textContent).toContain('Nenhuma execução registrada');
     await screen.unmount();
   });
 
@@ -121,7 +121,7 @@ describe('CommercialPipelinePage', () => {
     expect(retry).not.toBeUndefined();
     await click(retry as HTMLButtonElement);
     expect(listMock).toHaveBeenCalledTimes(2);
-    expect(screen.container.textContent).toContain('Nenhuma execucao registrada');
+    expect(screen.container.textContent).toContain('Nenhuma execução registrada');
     await screen.unmount();
   });
 });
