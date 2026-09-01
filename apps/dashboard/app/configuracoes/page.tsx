@@ -1,261 +1,299 @@
 'use client';
 
-import { CalendarClock, Info, RefreshCw, ShieldCheck } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import {
+  Activity,
+  ArrowUpRight,
+  Globe2,
+  History,
+  MessagesSquare,
+  ShieldCheck,
+  UsersRound,
+} from 'lucide-react';
 import Link from 'next/link';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { CommercialAutomationControl } from '../../components/commercial-automation-control';
-import { ErrorState } from '../../components/error-state';
-import { LoadingState } from '../../components/loading-state';
-import { PageHeader } from '../../components/page-header';
-import { StatusBadge } from '../../components/status-badge';
 import {
-  getApiBaseUrl,
+  OpsBadge,
+  OpsLoading,
+  OpsPageHeading,
+  OpsSection,
+  RefreshButton,
+  type OpsTone,
+} from '../../components/ops-components';
+import {
+  getCommercialAutomationStatus,
   getHealth,
-  getSchedulerStatus,
-  type SchedulerStatus,
+  type CommercialAutomationStatus,
+  type HealthResponse,
 } from '../../lib/api';
-import {
-  formatSchedulerDate,
-  schedulerStatusDisplay,
-  SCHEDULER_DATE_FALLBACK,
-} from '../../lib/scheduler-display';
 
-function SettingsDetail({
+const HEALTH_ERROR_MESSAGE = 'Não foi possível consultar a API.';
+const TIMEZONE_ERROR_MESSAGE = 'Fuso horário indisponível.';
+
+function timezoneLabel(timezone: string | null) {
+  if (timezone === 'America/Sao_Paulo') return 'Horário de Brasília';
+  return timezone ?? 'Não disponível';
+}
+
+function QuickLinkCard({
+  description,
+  href,
+  icon: Icon,
   label,
-  children,
+  title,
 }: {
+  description: string;
+  href: string;
+  icon: typeof UsersRound;
   label: string;
-  children: React.ReactNode;
+  title: string;
 }) {
   return (
-    <div className="min-w-0 border-b border-slate-100 py-3 last:border-b-0">
-      <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
-        {label}
-      </dt>
-      <dd className="mt-1 break-words text-sm font-medium text-slate-900">
-        {children}
-      </dd>
+    <Link
+      href={href}
+      className="group flex min-h-[132px] min-w-0 flex-col justify-between rounded-md border border-slate-200 bg-white p-4 text-slate-900 transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2"
+    >
+      <span className="flex items-start justify-between gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-orange-50 text-orange-700">
+          <Icon size={18} aria-hidden="true" />
+        </span>
+        <ArrowUpRight
+          size={17}
+          className="text-slate-400 transition group-hover:text-slate-700"
+          aria-hidden="true"
+        />
+      </span>
+      <span className="mt-5 min-w-0">
+        <span className="block text-sm font-semibold text-slate-950">
+          {title}
+        </span>
+        <span className="mt-1 block text-sm leading-6 text-slate-600">
+          {description}
+        </span>
+        <span className="mt-3 block text-sm font-semibold text-orange-800">
+          {label}
+        </span>
+      </span>
+    </Link>
+  );
+}
+
+function HealthPanel({
+  health,
+  loading,
+  readError,
+}: {
+  health: HealthResponse | null;
+  loading: boolean;
+  readError: boolean;
+}) {
+  const online = health?.status === 'ok';
+  const tone: OpsTone = loading ? 'neutral' : online ? 'success' : 'danger';
+  const statusLabel = loading
+    ? 'Consultando…'
+    : online
+      ? 'Online'
+      : 'Indisponível';
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="flex min-w-0 items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-slate-100 text-slate-700">
+            <Activity size={18} aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-slate-950">API</h3>
+            <p
+              className="mt-1 text-sm text-slate-600"
+              aria-live="polite"
+              role="status"
+            >
+              {statusLabel}
+            </p>
+          </div>
+        </div>
+        <OpsBadge tone={tone}>{statusLabel}</OpsBadge>
+      </div>
+
+      {loading ? <OpsLoading label="Consultando saúde da API" /> : null}
+      {readError ? (
+        <p className="mt-4 text-sm leading-6 text-rose-800" role="alert">
+          {HEALTH_ERROR_MESSAGE}
+          {health ? ' Última leitura disponível.' : ''}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function TimezonePanel({
+  loading,
+  readError,
+  timezone,
+}: {
+  loading: boolean;
+  readError: boolean;
+  timezone: string | null;
+}) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-slate-100 text-slate-700">
+          <Globe2 size={18} aria-hidden="true" />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-slate-950">Fuso horário</h3>
+          <p className="mt-1 text-base font-semibold text-slate-950">
+            {loading ? 'Consultando…' : timezoneLabel(timezone)}
+          </p>
+          {timezone ? (
+            <p className="mt-1 break-words text-xs text-slate-500">
+              {timezone}
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {loading ? <OpsLoading label="Consultando fuso horário" /> : null}
+      {readError ? (
+        <p className="mt-4 text-sm leading-6 text-amber-800" role="alert">
+          {TIMEZONE_ERROR_MESSAGE}
+          {timezone ? ' Última leitura disponível.' : ''}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 export default function SettingsPage() {
-  const [loading, setLoading] = useState(true);
-  const [online, setOnline] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
-  const [schedulerLoading, setSchedulerLoading] = useState(true);
-  const [schedulerError, setSchedulerError] = useState<string | null>(null);
-  const [apiBaseUrl, setApiBaseUrl] = useState('/api');
-  const schedulerRequestInFlight = useRef(false);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [timezone, setTimezone] = useState<string | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [timezoneLoading, setTimezoneLoading] = useState(true);
+  const [healthReadError, setHealthReadError] = useState(false);
+  const [timezoneReadError, setTimezoneReadError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const requestInFlight = useRef(false);
 
-  const check = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const health = await getHealth();
-      setOnline(health.status === 'ok');
-    } catch (err) {
-      setOnline(false);
-      setError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const load = useCallback(async () => {
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
+    setRefreshing(true);
+    setHealthLoading(true);
+    setTimezoneLoading(true);
 
-  const loadScheduler = async () => {
-    if (schedulerRequestInFlight.current) return;
-    schedulerRequestInFlight.current = true;
-    setSchedulerLoading(true);
-    setSchedulerError(null);
-    try {
-      setScheduler(await getSchedulerStatus());
-    } catch (err) {
-      setSchedulerError(
-        err instanceof Error ? err.message : 'Erro inesperado.',
-      );
-    } finally {
-      schedulerRequestInFlight.current = false;
-      setSchedulerLoading(false);
-    }
-  };
+    const healthRequest = getHealth()
+      .then((nextHealth) => {
+        setHealth(nextHealth);
+        setHealthReadError(false);
+      })
+      .catch(() => {
+        setHealthReadError(true);
+      })
+      .finally(() => {
+        setHealthLoading(false);
+      });
+
+    const timezoneRequest = getCommercialAutomationStatus()
+      .then((status: CommercialAutomationStatus) => {
+        setTimezone(status.timezone || null);
+        setTimezoneReadError(false);
+      })
+      .catch(() => {
+        setTimezoneReadError(true);
+      })
+      .finally(() => {
+        setTimezoneLoading(false);
+      });
+
+    await Promise.all([healthRequest, timezoneRequest]);
+    requestInFlight.current = false;
+    setRefreshing(false);
+  }, []);
 
   useEffect(() => {
-    setApiBaseUrl(getApiBaseUrl());
-    void check();
-    void loadScheduler();
-  }, []);
+    void load();
+  }, [load]);
 
   return (
     <div className="grid gap-6">
-      <PageHeader
-        title="Sistema"
-        description="Estado local e controles seguros para a operação diária. Credenciais nunca devem ser inseridas no navegador."
+      <OpsPageHeading
+        eyebrow="Preferências"
+        title="Configurações"
+        description="Acesse preferências e informações gerais do sistema."
+        actions={
+          <RefreshButton onClick={() => void load()} busy={refreshing} />
+        }
       />
 
-      {loading ? <LoadingState label="Verificando API" /> : null}
-      {error ? <ErrorState message={error} onRetry={check} /> : null}
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold text-slate-950">API usada</h2>
-            <p className="mt-1 break-all text-sm text-slate-600">
-              {apiBaseUrl}
-            </p>
-          </div>
-          <StatusBadge tone={online ? 'ok' : 'error'}>
-            {online ? 'online' : 'offline'}
-          </StatusBadge>
+      <OpsSection title="Sistema" meta="Informações locais disponíveis agora.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <HealthPanel
+            health={health}
+            loading={healthLoading}
+            readError={healthReadError}
+          />
+          <TimezonePanel
+            loading={timezoneLoading}
+            readError={timezoneReadError}
+            timezone={timezone}
+          />
         </div>
-      </section>
+      </OpsSection>
 
-      <section className="rounded-lg border border-sky-200 bg-sky-50 p-5">
-        <h2 className="font-semibold text-slate-950">Como operar</h2>
-        <p className="mt-2 text-sm leading-6 text-slate-700">
-          O launcher liga a topologia local; esta tela não inicia nem encerra
-          processos. A pausa persistida é a autoridade para ligar ou desligar a
-          automação, enquanto agenda, readiness e próximos envios ficam em
-          Automação.
-        </p>
-        <Link
-          href="/automacao"
-          className="mt-3 inline-flex rounded-md border border-sky-300 bg-white px-3 py-2 text-sm font-medium text-sky-900 hover:bg-sky-100"
-        >
-          Abrir Automação
-        </Link>
-      </section>
-
-      <CommercialAutomationControl />
-
-      <section
-        className="rounded-lg border border-slate-200 bg-white p-5"
-        aria-labelledby="scheduler-settings-heading"
+      <OpsSection
+        title="Acessos rápidos"
+        meta="Abra a área certa para cada operação do dia."
       >
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="flex gap-3">
-            <CalendarClock
-              className="mt-0.5 h-5 w-5 shrink-0 text-slate-500"
-              aria-hidden="true"
-            />
-            <div>
-              <h2
-                id="scheduler-settings-heading"
-                className="font-semibold text-slate-950"
-              >
-                Scheduler legado
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                Estado retornado pela API para o agendamento conhecido.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => void loadScheduler()}
-            disabled={schedulerLoading}
-            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${schedulerLoading ? 'animate-spin' : ''}`}
-              aria-hidden="true"
-            />
-            Atualizar status
-          </button>
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+          <QuickLinkCard
+            description="Configure quando e com que frequência a automação pode operar."
+            href="/automacao"
+            icon={Activity}
+            label="Configurar automação"
+            title="Automação"
+          />
+          <QuickLinkCard
+            description="Gerencie os grupos que recebem ofertas e o WhatsApp responsável."
+            href="/whatsapp"
+            icon={UsersRound}
+            label="Gerenciar grupos"
+            title="Grupos"
+          />
+          <QuickLinkCard
+            description="Acompanhe as instâncias usadas nos envios."
+            href="/whatsapp?view=whatsapps"
+            icon={MessagesSquare}
+            label="Gerenciar WhatsApps"
+            title="WhatsApps"
+          />
+          <QuickLinkCard
+            description="Consulte os envios e resultados registrados."
+            href="/envios"
+            icon={History}
+            label="Ver histórico"
+            title="Histórico"
+          />
         </div>
+      </OpsSection>
 
-        <div className="mt-4 flex gap-3 border-l-4 border-sky-400 bg-sky-50 p-3 text-sm text-sky-900">
-          <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <p>
-            O Scheduler é configurado no ambiente do worker. Esta tela é somente
-            leitura.
-          </p>
-        </div>
-
-        <div className="mt-4">
-          {schedulerLoading ? (
-            <LoadingState label="Consultando status do Scheduler" />
-          ) : null}
-          {schedulerError ? (
-            <ErrorState
-              title="Status do Scheduler indisponível"
-              message={schedulerError}
-              onRetry={loadScheduler}
-            />
-          ) : null}
-          {scheduler && !schedulerLoading ? (
-            <dl className="grid gap-x-8 sm:grid-cols-2">
-              <SettingsDetail label="Habilitado">
-                {scheduler.enabled ? 'Sim' : 'Não'}
-              </SettingsDetail>
-              <SettingsDetail label="Status">
-                <StatusBadge
-                  tone={schedulerStatusDisplay[scheduler.status].tone}
-                >
-                  {schedulerStatusDisplay[scheduler.status].label}
-                </StatusBadge>
-              </SettingsDetail>
-              <SettingsDetail label="Job ID">{scheduler.jobId}</SettingsDetail>
-              <SettingsDetail label="Fila">{scheduler.queue}</SettingsDetail>
-              <SettingsDetail label="Nome do job">
-                {scheduler.jobName}
-              </SettingsDetail>
-              <SettingsDetail label="Expressão cron">
-                {scheduler.cronExpression ?? SCHEDULER_DATE_FALLBACK}
-              </SettingsDetail>
-              <SettingsDetail label="Timezone">
-                {scheduler.timezone ?? SCHEDULER_DATE_FALLBACK}
-              </SettingsDetail>
-              <SettingsDetail label="Próxima execução">
-                {formatSchedulerDate(scheduler.nextRunAt, scheduler.timezone)}
-              </SettingsDetail>
-            </dl>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex gap-3">
+      <OpsSection title="Segurança">
+        <div className="flex items-start gap-3">
           <ShieldCheck
-            className="mt-1 h-5 w-5 shrink-0 text-emerald-600"
+            className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700"
             aria-hidden="true"
           />
-          <div>
-            <h2 className="font-semibold text-slate-950">
-              Credenciais e provider WhatsApp
-            </h2>
-            <div className="mt-3 grid gap-3 text-sm leading-6 text-slate-700">
-              <p>
-                O frontend conhece apenas configurações públicas, como
-                NEXT_PUBLIC_API_URL. Chaves da Evolution API ficam no .env local
-                do worker.
-              </p>
-              <p>
-                WHATSAPP_PROVIDER=mock é o modo seguro padrão e não envia
-                mensagens reais. WHATSAPP_PROVIDER=evolution exige configuração
-                explícita no ambiente do worker.
-              </p>
-              <p>
-                O dashboard não salva segredos em localStorage e não possui
-                campo para EVOLUTION_API_KEY.
-              </p>
-            </div>
-          </div>
+          <p className="text-sm leading-6 text-slate-700">
+            Credenciais são mantidas fora do navegador.
+          </p>
         </div>
-      </section>
+      </OpsSection>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <h2 className="font-semibold text-slate-950">Limitações atuais</h2>
-        <ul className="mt-3 grid gap-2 text-sm leading-6 text-slate-700">
-          <li>Não há endpoint público de listagem completa de produtos.</li>
-          <li>
-            Não há endpoint agregado para indicadores de score e aprovação.
-          </li>
-          <li>Não há endpoint de histórico/listagem de copies geradas.</li>
-          <li>Não há endpoint de reprocessamento manual de dispatches.</li>
-        </ul>
-      </section>
+      <OpsSection title="Diagnóstico avançado" className="ops-section--quiet">
+        <p className="text-sm leading-6 text-slate-600">
+          Diagnóstico avançado será consolidado na próxima etapa.
+        </p>
+      </OpsSection>
     </div>
   );
 }

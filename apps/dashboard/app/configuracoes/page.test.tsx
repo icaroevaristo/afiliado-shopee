@@ -1,251 +1,266 @@
 import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { change, click, render } from '../../test/render';
-import type {
-  CommercialAutomationStatus,
-  SchedulerStatus,
-} from '../../lib/api';
+import { click, render } from '../../test/render';
+import type { CommercialAutomationStatus } from '../../lib/api';
 import SettingsPage from './page';
 
 const getHealthMock = vi.fn();
-const getSchedulerStatusMock = vi.fn();
 const getCommercialAutomationStatusMock = vi.fn();
-const pauseCommercialAutomationMock = vi.fn();
-const resumeCommercialAutomationMock = vi.fn();
 
 vi.mock('../../lib/api', () => ({
-  getApiBaseUrl: () => 'http://localhost:3333',
   getHealth: (...args: unknown[]) => getHealthMock(...args),
-  getSchedulerStatus: (...args: unknown[]) => getSchedulerStatusMock(...args),
   getCommercialAutomationStatus: (...args: unknown[]) =>
     getCommercialAutomationStatusMock(...args),
-  pauseCommercialAutomation: (...args: unknown[]) =>
-    pauseCommercialAutomationMock(...args),
-  resumeCommercialAutomation: (...args: unknown[]) =>
-    resumeCommercialAutomationMock(...args),
 }));
 
-const schedulerStatus: SchedulerStatus = {
-  enabled: true,
-  status: 'registered',
-  jobId: 'scheduled-pipeline-product',
-  queue: 'product-pipeline',
-  jobName: 'pipeline-product',
-  cronExpression: '0 8 * * *',
-  timezone: 'America/Sao_Paulo',
-  nextRunAt: '2026-07-25T11:00:00.000Z',
-};
-
 const automationStatus: CommercialAutomationStatus = {
-  enabled: false,
+  enabled: true,
   allowed: false,
-  reasons: ['AUTOMATION_DISABLED', 'AUTOMATION_PAUSED'],
+  reasons: ['AUTOMATION_PAUSED'],
   nextAllowedAt: null,
   globalSentToday: 0,
-  globalRemainingToday: 1,
+  globalRemainingToday: 10,
   groupSentToday: 0,
-  groupRemainingToday: 1,
+  groupRemainingToday: 5,
   lastSentAt: null,
   paused: true,
-  pausedAt: '2026-07-25T15:00:00.000Z',
+  pausedAt: '2026-08-31T15:00:00.000Z',
   resumedAt: null,
-  updatedAt: '2026-07-25T15:00:00.000Z',
+  updatedAt: '2026-08-31T15:00:00.000Z',
   allowedStartTime: '08:00',
   allowedEndTime: '20:00',
   timezone: 'America/Sao_Paulo',
-  dailyGlobalLimit: 1,
-  dailyGroupLimit: 1,
+  dailyGlobalLimit: 10,
+  dailyGroupLimit: 5,
   minimumIntervalMinutes: 60,
-  authorizedGroupCount: 0,
+  authorizedGroupCount: 1,
 };
 
 const flush = async () => {
   await act(async () => undefined);
 };
 
+const updateButton = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll('button')).find((button) =>
+    button.textContent?.includes('Atualizar'),
+  ) as HTMLButtonElement | undefined;
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+};
+
 beforeEach(() => {
+  vi.useRealTimers();
   getHealthMock.mockReset().mockResolvedValue({ status: 'ok', service: 'api' });
-  getSchedulerStatusMock.mockReset().mockResolvedValue(schedulerStatus);
   getCommercialAutomationStatusMock
     .mockReset()
     .mockResolvedValue(automationStatus);
-  pauseCommercialAutomationMock.mockReset().mockResolvedValue({
-    ...automationStatus,
-    paused: true,
-  });
-  resumeCommercialAutomationMock.mockReset().mockResolvedValue({
-    ...automationStatus,
-    paused: false,
-    reasons: ['AUTOMATION_DISABLED'],
-  });
 });
 
-describe('SettingsPage Scheduler', () => {
-  it('mostra loading isolado durante a consulta', async () => {
-    getSchedulerStatusMock.mockReturnValue(new Promise(() => undefined));
-
+describe('SettingsPage — Lote 8', () => {
+  it('apresenta título, descrição, saúde da API e timezone authoritative', async () => {
     const screen = await render(<SettingsPage />);
+    await flush();
 
-    expect(screen.container.textContent).toContain(
-      'Consultando status do Scheduler',
+    expect(screen.container.querySelector('h1')?.textContent).toBe(
+      'Configurações',
     );
-    const refreshButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Atualizar status'));
-    expect((refreshButton as HTMLButtonElement).disabled).toBe(true);
-    await screen.unmount();
-  });
-
-  it.each([
-    ['disabled', false, 'Desativado'],
-    ['registered', true, 'Agendado'],
-    ['not-registered', true, 'Não registrado'],
-  ] as const)(
-    'exibe detalhes somente leitura para %s',
-    async (status, enabled, label) => {
-      getSchedulerStatusMock.mockResolvedValue({
-        ...schedulerStatus,
-        status,
-        enabled,
-      });
-
-      const screen = await render(<SettingsPage />);
-      await flush();
-
-      expect(screen.container.textContent).toContain(label);
-      expect(screen.container.textContent).toContain(
-        'scheduled-pipeline-product',
-      );
-      expect(screen.container.textContent).toContain('product-pipeline');
-      expect(screen.container.textContent).toContain('pipeline-product');
-      expect(screen.container.textContent).toContain('0 8 * * *');
-      expect(screen.container.textContent).toContain('America/Sao_Paulo');
-      expect(screen.container.textContent).toContain('25/07/2026');
-      expect(screen.container.textContent).toContain(
-        'Esta tela é somente leitura',
-      );
-      expect(
-        screen.container.querySelector('input, textarea, select'),
-      ).toBeNull();
-      expect(screen.container.textContent).not.toContain('Ativar Scheduler');
-      expect(screen.container.textContent).not.toContain('Desativar Scheduler');
-      await screen.unmount();
-    },
-  );
-
-  it('mostra indisponibilidade como erro e faz retry', async () => {
-    getSchedulerStatusMock
-      .mockRejectedValueOnce(new Error('Consulta indisponível (503)'))
-      .mockResolvedValueOnce(schedulerStatus);
-
-    const screen = await render(<SettingsPage />);
-    await flush();
-
     expect(screen.container.textContent).toContain(
-      'Consulta indisponível (503)',
+      'Acesse preferências e informações gerais do sistema.',
     );
-    expect(screen.container.textContent).not.toContain('Desativado');
-
-    const retryButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Tentar novamente'));
-    await click(retryButton as HTMLButtonElement);
-    await flush();
-
-    expect(getSchedulerStatusMock).toHaveBeenCalledTimes(2);
-    expect(screen.container.textContent).toContain('Agendado');
+    expect(screen.container.textContent).toContain('API');
+    expect(screen.container.textContent).toContain('Online');
+    expect(screen.container.textContent).toContain('Horário de Brasília');
+    expect(screen.container.textContent).toContain('America/Sao_Paulo');
+    expect(getHealthMock).toHaveBeenCalledTimes(1);
+    expect(getCommercialAutomationStatusMock).toHaveBeenCalledTimes(1);
     await screen.unmount();
   });
 
-  it('evita chamadas duplicadas durante atualizacao', async () => {
-    const pending = new Promise<SchedulerStatus>(() => undefined);
-    getSchedulerStatusMock
-      .mockResolvedValueOnce(schedulerStatus)
-      .mockReturnValueOnce(pending);
-    const screen = await render(<SettingsPage />);
-    await flush();
+  it('mostra API indisponível sem afirmar que o sistema inteiro está operacional', async () => {
+    getHealthMock.mockRejectedValueOnce(new Error('erro interno não exibível'));
 
-    const refreshButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Atualizar status'));
-    await click(refreshButton as HTMLButtonElement);
-    await click(refreshButton as HTMLButtonElement);
-
-    expect(getSchedulerStatusMock).toHaveBeenCalledTimes(2);
-    expect((refreshButton as HTMLButtonElement).disabled).toBe(true);
-    await screen.unmount();
-  });
-});
-
-describe('SettingsPage commercial automation', () => {
-  it('mostra estados, limites, motivos e garantias de nao envio', async () => {
     const screen = await render(<SettingsPage />);
     await flush();
 
     const text = screen.container.textContent ?? '';
-    expect(text).toContain('Controle da automação');
-    expect(text).toContain('Ambiente: desabilitada');
-    expect(text).toContain('Operação: pausada');
-    expect(text).toContain('08:00–20:00');
-    expect(text).toContain('America/Sao_Paulo');
-    expect(text).toContain('0/1 · 1 restante(s)');
-    expect(text).toContain('Automação desabilitada pelo ambiente.');
-    expect(text).toContain('Automação pausada operacionalmente.');
-    expect(text).toContain('Este controle altera somente a pausa persistida.');
-    expect(text).toContain('Ligar ou desligar não envia mensagem');
+    expect(text).toContain('Indisponível');
+    expect(text).toContain('Não foi possível consultar a API.');
+    expect(text).not.toContain('erro interno não exibível');
+    expect(text).not.toContain('Sistema totalmente operacional');
     await screen.unmount();
   });
 
-  it('abre modal e so retoma com a confirmacao exata', async () => {
+  it('permite tentar novamente a leitura da API sem expor erro interno', async () => {
+    getHealthMock
+      .mockRejectedValueOnce(new Error('falha privada'))
+      .mockResolvedValueOnce({ status: 'ok', service: 'api' });
+
     const screen = await render(<SettingsPage />);
     await flush();
-
-    const resumeButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.trim() === 'Ligar automação');
-    await click(resumeButton as HTMLButtonElement);
-
-    const dialog = screen.container.querySelector('[role="dialog"]');
-    const input = screen.container.querySelector(
-      '#resume-automation-confirmation',
-    ) as HTMLInputElement;
-    const confirmButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Confirmar retomada'));
-    expect(dialog).not.toBeNull();
-    expect((confirmButton as HTMLButtonElement).disabled).toBe(true);
-
-    await change(input, 'RETOMAR_AUTOMACAO_COMERCIAL');
-    expect((confirmButton as HTMLButtonElement).disabled).toBe(false);
-    await click(confirmButton as HTMLButtonElement);
-    await flush();
-
-    expect(resumeCommercialAutomationMock).toHaveBeenCalledWith(
-      'RETOMAR_AUTOMACAO_COMERCIAL',
-      automationStatus.updatedAt,
+    expect(screen.container.textContent).toContain(
+      'Não foi possível consultar a API.',
     );
-    expect(screen.container.querySelector('[role="dialog"]')).toBeNull();
-    expect(screen.container.textContent).toContain('Operação: ativa');
+
+    await click(updateButton(screen.container)!);
+    await flush();
+
+    expect(getHealthMock).toHaveBeenCalledTimes(2);
+    expect(screen.container.textContent).toContain('Online');
+    expect(screen.container.textContent).not.toContain(
+      'Não foi possível consultar a API.',
+    );
     await screen.unmount();
   });
 
-  it('pausa diretamente sem criar confirmacao', async () => {
-    getCommercialAutomationStatusMock.mockResolvedValue({
-      ...automationStatus,
-      paused: false,
-      reasons: ['AUTOMATION_DISABLED'],
-    });
+  it('preserva a última leitura útil quando uma atualização falha', async () => {
     const screen = await render(<SettingsPage />);
     await flush();
 
-    const pauseButton = Array.from(
-      screen.container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.trim() === 'Desligar automação');
-    await click(pauseButton as HTMLButtonElement);
+    getHealthMock.mockRejectedValueOnce(new Error('offline após leitura'));
+    await click(updateButton(screen.container)!);
     await flush();
 
-    expect(pauseCommercialAutomationMock).toHaveBeenCalledOnce();
-    expect(screen.container.querySelector('[role="dialog"]')).toBeNull();
+    const text = screen.container.textContent ?? '';
+    expect(text).toContain('Online');
+    expect(text).toContain('Última leitura disponível.');
+    expect(text).not.toContain('offline após leitura');
+    await screen.unmount();
+  });
+
+  it('mantém a saúde disponível quando a leitura independente do timezone falha', async () => {
+    getCommercialAutomationStatusMock.mockRejectedValueOnce(
+      new Error('status privado'),
+    );
+
+    const screen = await render(<SettingsPage />);
+    await flush();
+
+    const text = screen.container.textContent ?? '';
+    expect(text).toContain('API');
+    expect(text).toContain('Online');
+    expect(text).toContain('Não disponível');
+    expect(text).toContain('Fuso horário indisponível.');
+    expect(text).not.toContain('status privado');
+    await screen.unmount();
+  });
+
+  it('mostra timezone retornado pela API sem inventar fallback', async () => {
+    getCommercialAutomationStatusMock.mockResolvedValueOnce({
+      ...automationStatus,
+      timezone: 'America/Fortaleza',
+    });
+
+    const screen = await render(<SettingsPage />);
+    await flush();
+
+    expect(screen.container.textContent).toContain('America/Fortaleza');
+    expect(screen.container.textContent).not.toContain('Horário de Brasília');
+    await screen.unmount();
+  });
+
+  it('oferece somente os acessos rápidos das rotas reais', async () => {
+    const screen = await render(<SettingsPage />);
+    await flush();
+
+    const links = Array.from(screen.container.querySelectorAll('a')).map(
+      (link) => ({
+        href: link.getAttribute('href'),
+        text: link.textContent ?? '',
+      }),
+    );
+
+    expect(links).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          href: '/automacao',
+          text: expect.stringContaining('Configurar automação'),
+        }),
+        expect.objectContaining({
+          href: '/whatsapp',
+          text: expect.stringContaining('Gerenciar grupos'),
+        }),
+        expect.objectContaining({
+          href: '/whatsapp?view=whatsapps',
+          text: expect.stringContaining('Gerenciar WhatsApps'),
+        }),
+        expect.objectContaining({
+          href: '/envios',
+          text: expect.stringContaining('Ver histórico'),
+        }),
+      ]),
+    );
+    await screen.unmount();
+  });
+
+  it('não duplica o controle de automação nem cria preferências locais', async () => {
+    const screen = await render(<SettingsPage />);
+    await flush();
+
+    const text = screen.container.textContent ?? '';
+    expect(text).not.toContain('Ligar automação');
+    expect(text).not.toContain('Desligar automação');
+    expect(text).not.toContain('Controle da automação');
+    expect(
+      screen.container.querySelector('input, textarea, select'),
+    ).toBeNull();
+    expect(screen.container.querySelectorAll('button')).toHaveLength(1);
+    await screen.unmount();
+  });
+
+  it('remove detalhes técnicos e limitações da experiência diária', async () => {
+    const screen = await render(<SettingsPage />);
+    await flush();
+
+    const text = screen.container.textContent ?? '';
+    for (const forbidden of [
+      'Scheduler',
+      'Job ID',
+      'product-pipeline',
+      'pipeline-product',
+      'cron',
+      'NEXT_PUBLIC_API_URL',
+      'WHATSAPP_PROVIDER',
+      'EVOLUTION_API_KEY',
+      'LOCAL_API_AUTH_TOKEN',
+      '.env',
+      'Limitações atuais',
+    ]) {
+      expect(text).not.toContain(forbidden);
+    }
+    expect(text).toContain(
+      'Diagnóstico avançado será consolidado na próxima etapa.',
+    );
+    await screen.unmount();
+  });
+
+  it('não faz polling e ignora refresh duplicado enquanto a leitura está em andamento', async () => {
+    vi.useFakeTimers();
+    const health = deferred<{ status: string; service: string }>();
+    const status = deferred<CommercialAutomationStatus>();
+    getHealthMock.mockReturnValueOnce(health.promise);
+    getCommercialAutomationStatusMock.mockReturnValueOnce(status.promise);
+
+    const screen = await render(<SettingsPage />);
+    await click(updateButton(screen.container)!);
+    await click(updateButton(screen.container)!);
+
+    expect(getHealthMock).toHaveBeenCalledTimes(1);
+    expect(getCommercialAutomationStatusMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+    });
+    expect(getHealthMock).toHaveBeenCalledTimes(1);
+    expect(getCommercialAutomationStatusMock).toHaveBeenCalledTimes(1);
+
+    health.resolve({ status: 'ok', service: 'api' });
+    status.resolve(automationStatus);
+    await flush();
     await screen.unmount();
   });
 });
