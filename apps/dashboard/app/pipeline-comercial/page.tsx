@@ -19,7 +19,7 @@ const formatDate = (value: string | null) =>
         dateStyle: 'short',
         timeStyle: 'medium',
       }).format(new Date(value))
-    : 'Nao disponivel';
+    : 'Não disponível';
 
 const statusTone = (status: CommercialPipelineRun['status']) => {
   if (status === 'completed') return 'ok' as const;
@@ -52,20 +52,20 @@ export default function CommercialPipelinePage() {
     <div className="grid gap-6">
       <PageHeader
         title="Pipeline comercial"
-        description="Historico de preparacoes e confirmacoes para auditoria. Esta tela e somente leitura."
+        description="Histórico de preparações e confirmações para auditoria. Esta tela é somente leitura."
       />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        O Operations Console nao inicia dry-run, confirmacao, dispatch ou job.
-        Acoes comerciais continuam restritas aos fluxos oficiais do backend.
+        Esta área não inicia dry-run, confirmação, dispatch ou job.
+        Ações comerciais continuam restritas aos fluxos oficiais do backend.
       </div>
 
       {error ? <ErrorState message={error} onRetry={() => void loadRuns()} /> : null}
-      {loading ? <LoadingState label="Carregando historico comercial" /> : null}
+      {loading ? <LoadingState label="Carregando histórico comercial" /> : null}
       {!loading && !error && runs.length === 0 ? (
         <EmptyState
-          title="Nenhuma execucao registrada"
-          description="Ainda nao existem runs comerciais disponiveis para consulta."
+          title="Nenhuma execução registrada"
+          description="Ainda não existem runs comerciais disponíveis para consulta."
         />
       ) : null}
 
@@ -94,12 +94,12 @@ export default function CommercialPipelinePage() {
                   <p className="mt-3 truncate font-medium text-slate-950">
                     {run.selectedProduct?.name ??
                       run.failureCode ??
-                      'Execucao sem produto selecionado'}
+                      'Execução sem produto selecionado'}
                   </p>
                   <p className="mt-1 text-sm text-slate-600">
                     {run.selectedGroup
                       ? `${run.selectedGroup.name} · ${run.selectedGroup.fingerprint}`
-                      : 'Grupo nao selecionado'}
+                      : 'Grupo não selecionado'}
                   </p>
                   <p className="mt-2 font-mono text-xs text-slate-500">
                     runId: {run.id}
@@ -114,7 +114,7 @@ export default function CommercialPipelinePage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Elegiveis</dt>
+                    <dt>Elegíveis</dt>
                     <dd className="mt-1 text-base font-semibold text-slate-950">
                       {run.eligibleCount}
                     </dd>
@@ -132,19 +132,19 @@ export default function CommercialPipelinePage() {
                 <div>
                   <span className="block text-xs text-slate-500">Produto</span>
                   <strong className="text-slate-950">
-                    {run.selectedProduct?.name ?? 'Nao selecionado'}
+                    {run.selectedProduct?.name ?? 'Não selecionado'}
                   </strong>
                 </div>
                 <div>
                   <span className="block text-xs text-slate-500">Grupo</span>
                   <strong className="text-slate-950">
-                    {run.selectedGroup?.name ?? 'Nao selecionado'}
+                    {run.selectedGroup?.name ?? 'Não selecionado'}
                   </strong>
                 </div>
                 <div>
                   <span className="block text-xs text-slate-500">Dispatch</span>
                   <strong className="text-slate-950">
-                    {run.dispatchStatus ?? 'Nao criado'}
+                    {run.dispatchStatus ?? 'Não criado'}
                   </strong>
                 </div>
               </div>
@@ -170,8 +170,8 @@ export default function CommercialPipelinePage() {
               ) : null}
               {run.investigationRequired ? (
                 <p className="mt-4 rounded-md bg-amber-50 p-3 text-sm text-amber-900">
-                  Resultado ambiguo. A leitura nao executa reprocessamento; a
-                  investigacao deve ocorrer fora do dashboard.
+                  Resultado ambíguo. A leitura não executa reprocessamento; a
+                  investigação deve ocorrer fora do dashboard.
                 </p>
               ) : null}
             </article>

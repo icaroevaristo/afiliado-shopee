@@ -164,7 +164,9 @@ function SummaryMetric({
 }
 
 function TodaySummary({ admin, status }: Pick<OverviewData, 'admin' | 'status'>) {
-  const activeGroups = admin ? admin.groups.filter((group) => group.active).length : null;
+  const activeGroups = admin
+    ? admin.groups.filter((group) => group.active && !group.paused).length
+    : null;
   const activeInstances = admin ? admin.instances.filter((instance) => instance.active).length : null;
   const timezone = admin?.automation.timezone ?? status?.timezone ?? DEFAULT_TIMEZONE;
 
@@ -185,9 +187,9 @@ function TodaySummary({ admin, status }: Pick<OverviewData, 'admin' | 'status'>)
         />
         <SummaryMetric
           icon={UsersRound}
-          label="Grupos ativos"
+          label="Grupos em operação"
           value={activeGroups === null ? 'Não disponível' : formatNumber(activeGroups)}
-          detail={activeGroups === null ? 'A API não informou' : 'grupos com estado ativo'}
+          detail={activeGroups === null ? 'A API não informou' : 'ativos e sem pausa'}
         />
         <SummaryMetric
           icon={HeartPulse}

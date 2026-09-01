@@ -190,7 +190,7 @@ describe('OverviewPage', () => {
     expect(screen.container.textContent).toContain('Automação ligada');
     expect(screen.container.textContent).toContain('2 de 60');
     expect(screen.container.textContent).toContain('08:00–22:00');
-    expect(screen.container.textContent).toContain('Grupos ativos');
+    expect(screen.container.textContent).toContain('Grupos em operação');
     expect(screen.container.textContent).toContain('Instâncias ativas');
     expect(screen.container.textContent).toContain('Último envio');
     expect(screen.container.textContent).toContain('Enviado');

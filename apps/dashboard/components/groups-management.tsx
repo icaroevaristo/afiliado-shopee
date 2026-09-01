@@ -410,20 +410,27 @@ export function GroupsManagement() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const load = async (initial = false) => {
+  const load = async (
+    initial = false,
+    { showError = true }: { showError?: boolean } = {},
+  ): Promise<boolean> => {
     if (initial) setLoading(true);
     else setRefreshing(true);
     setError(null);
     setSuccess(null);
     try {
       setOverview(await getOperationalAdmin());
+      return true;
     } catch (cause) {
-      setError(
-        operationalErrorMessage(
-          cause,
-          'Não foi possível carregar os grupos agora.',
-        ),
-      );
+      if (showError) {
+        setError(
+          operationalErrorMessage(
+            cause,
+            'Não foi possível carregar os grupos agora.',
+          ),
+        );
+      }
+      return false;
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -450,7 +457,7 @@ export function GroupsManagement() {
       ) {
         return false;
       }
-      if (campaignFilter && group.campaign?.name !== campaignFilter) {
+      if (campaignFilter && group.campaign?.id !== campaignFilter) {
         return false;
       }
       return true;
@@ -483,8 +490,12 @@ export function GroupsManagement() {
         expectedUpdatedAt: group.updatedAt,
         confirmation,
       });
-      await load();
-      setSuccess(`Grupo ${group.name} atualizado.`);
+      const refreshed = await load(false, { showError: false });
+      setSuccess(
+        refreshed
+          ? `Grupo ${group.name} atualizado.`
+          : 'Alteração concluída, mas não foi possível atualizar os dados exibidos.',
+      );
     } catch (cause) {
       setError(operationalErrorMessage(cause, 'O grupo não foi atualizado.'));
     } finally {
@@ -492,7 +503,9 @@ export function GroupsManagement() {
     }
   };
 
-  const activeCount = overview?.groups.filter((group) => group.active).length;
+  const activeCount = overview?.groups.filter(
+    (group) => group.active && !group.paused,
+  ).length;
   const pausedCount = overview?.groups.filter((group) => group.paused).length;
   const pendingCount = overview?.groups.filter(groupHasPending).length;
   const unassignedCount = overview?.groups.filter(
@@ -550,9 +563,9 @@ export function GroupsManagement() {
         <>
           <section className="ops-kpi-grid" aria-label="Resumo dos grupos">
             <SummaryCard
-              label="Grupos ativos"
+              label="Grupos em operação"
               value={activeCount ?? 0}
-              detail="com estado ativo"
+              detail="ativos e sem pausa"
             />
             <SummaryCard
               label="Grupos pausados"
@@ -625,7 +638,7 @@ export function GroupsManagement() {
                 >
                   <option value="">Todas</option>
                   {overview.campaigns.map((campaign) => (
-                    <option key={campaign.id} value={campaign.name}>
+                    <option key={campaign.id} value={campaign.id}>
                       {campaign.name}
                     </option>
                   ))}

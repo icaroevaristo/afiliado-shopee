@@ -56,7 +56,7 @@ export default function PipelinePage() {
     <div className="grid gap-6">
       <PageHeader
         title="Pipeline"
-        description="Acompanhe jobs existentes por ID. A criação manual de pipeline não é exposta no Operations Console."
+        description="Acompanhe jobs existentes por ID. A criação manual de pipeline não está disponível nesta área."
       />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">

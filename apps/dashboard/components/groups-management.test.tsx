@@ -229,7 +229,7 @@ describe('GroupsManagement', () => {
     expect(screen.container.textContent).toContain(
       'Gerencie onde as ofertas serão enviadas e qual WhatsApp é responsável.',
     );
-    expect(screen.container.textContent).toContain('Grupos ativos');
+    expect(screen.container.textContent).toContain('Grupos em operação');
     expect(screen.container.textContent).toContain('Grupos pausados');
     expect(screen.container.textContent).toContain('Com pendência');
     expect(screen.container.textContent).toContain('Sem responsável');
@@ -265,9 +265,13 @@ describe('GroupsManagement', () => {
     expect(cardByName(screen.container, 'Ofertas B')).toBeTruthy();
     expect(cardByName(screen.container, 'Ofertas A')).toBeFalsy();
 
-    await change(selects[1], 'Beleza em oferta');
-    expect(selects[1].innerHTML).not.toContain('campaign-a');
-    expect(selects[1].innerHTML).not.toContain('campaign-b');
+    await change(selects[1], 'campaign-b');
+    expect(
+      selects[1].querySelector('option[value="campaign-a"]')?.textContent,
+    ).toBe('Casa em oferta');
+    expect(
+      selects[1].querySelector('option[value="campaign-b"]')?.textContent,
+    ).toBe('Beleza em oferta');
     expect(cardByName(screen.container, 'Ofertas B')).toBeTruthy();
     expect(updateOperationalGroupMock).not.toHaveBeenCalled();
     await screen.unmount();
@@ -428,6 +432,29 @@ describe('GroupsManagement', () => {
     expect(screen.container.textContent).toContain(
       'Este grupo foi alterado em outro lugar. Atualize os dados antes de tentar novamente.',
     );
+    await screen.unmount();
+  });
+
+  it('confirma a alteração mesmo quando a leitura pós-write falha, sem repetir o write', async () => {
+    const screen = await render(<GroupsManagement />);
+    getOperationalAdminMock.mockRejectedValueOnce(new Error('refresh indisponível'));
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Pausar grupo'),
+      )!,
+    );
+
+    expect(updateOperationalGroupMock).toHaveBeenCalledTimes(1);
+    expect(screen.container.textContent).toContain(
+      'Alteração concluída, mas não foi possível atualizar os dados exibidos.',
+    );
+    expect(screen.container.textContent).not.toContain('Grupos indisponíveis');
     await screen.unmount();
   });
 

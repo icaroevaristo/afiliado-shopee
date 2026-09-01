@@ -46,7 +46,7 @@ export function SafeProductImage({
       <span
         className={`safe-product-image-fallback ${className}`}
         role="img"
-        aria-label="Imagem do produto indisponivel"
+        aria-label="Imagem do produto indisponível"
       >
         <ImageOff size={18} aria-hidden="true" />
       </span>
