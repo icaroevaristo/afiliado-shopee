@@ -246,14 +246,13 @@ export type CommercialAutomationExecutionPage = {
 
 export type CommercialDispatchOutbox = {
   id: string;
-  runId?: string | null;
-  dispatchId?: string | null;
-  jobId?: string | null;
-  status: string;
-  attempts?: number;
-  investigationRequired?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
+  commercialRunId: string | null;
+  dispatchId: string | null;
+  jobId: string | null;
+  status: 'pending' | 'published' | 'ambiguous';
+  failureCode: string | null;
+  createdAt: string;
+  publishedAt: string | null;
 };
 
 export type CommercialDispatchOutboxPage = {
