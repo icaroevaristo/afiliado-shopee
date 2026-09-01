@@ -67,36 +67,35 @@ usar `db:deploy`. A adoção chama apenas `prisma migrate resolve --applied` par
 a baseline, não executa seu SQL e comprova que schema e contagens comerciais
 permaneceram iguais.
 
-## Dashboard operacional
+## Dashboard operacional 2.0
 
-O dashboard do MVP usa somente endpoints publicos existentes da API e nao acessa
-Prisma, Redis, BullMQ ou variaveis privadas diretamente. A URL da API no
-frontend e configurada por `NEXT_PUBLIC_API_URL`, com padrao local seguro
-`http://localhost:3333`.
+O dashboard atual e a interface de operacao diaria em `apps/dashboard`. O
+navegador usa a camada centralizada de API e o proxy same-origin autenticado do
+servidor; nao acessa Prisma, Redis, BullMQ ou segredos diretamente.
 
-Paginas disponiveis:
+A navegacao principal e **Inicio**, **Ofertas**, **Grupos e WhatsApps**,
+**Automacao**, **Historico** e **Configuracoes**. As telas complementares de
+**Cupons**, **Campanhas**, **Fila** e **Diagnostico avancado** cobrem catalogo,
+agenda, ranking persistido e investigacao tecnica.
 
-- `Visao geral`: health da API, metricas reais de Analytics, ultimo job da
-  sessao, resumo somente leitura do Scheduler, atalhos e resumo de dispatches.
-- `Produtos`: catálogo paginado de `GET /shopee/offers`, sincronização segura,
-  filtros, importação manual validada e preview de copy sem envio.
-- `Cupons`: CRUD local de cupons manuais com confirmação explícita, sem coleta
-  automática ou inclusão automática em copy.
-- `Pipeline`: dispara `POST /pipeline/run`, consulta `GET /pipeline/jobs/:id`
-  e faz polling moderado enquanto o job esta ativo.
-- `Copies`: gera copy manual por `POST /copy/generate` e mantem historico
-  apenas durante a sessao da tela.
-- `WhatsApp`: lista/cria/edita destinos e lista/filtra/abre detalhes de
-  dispatches existentes.
-- `Configuracoes`: mostra URL publica da API, estado de conexao, detalhes
-  somente leitura do Scheduler, orientacoes de mock/evolution e limites atuais.
+Responsabilidades atuais:
 
-Limitacoes por contrato atual:
+- **Inicio** resume API, automacao, atividade, ultimo/proximo envio e a jornada
+  do dispatch quando houver dados persistidos.
+- **Ofertas** consulta `GET /shopee/offers` com filtros e paginacao. Ações de
+  sincronização, importação, detalhe e preview só devem ser consideradas
+  disponíveis quando estiverem autorizadas pelo proxy same-origin; esta
+  documentação não as promete como fluxo operacional atual.
+- **Grupos e WhatsApps** reutiliza as APIs protegidas de instancias, grupos,
+  autorizacao e assignments, exibindo health sanitizado e blockers.
+- **Automacao** pausa diretamente, exige confirmacao/CAS para retomada e edita horario, intervalo,
+  stagger, limites de mensagens e budgets diarios externos.
+- **Historico**, **Configuracoes** e **Diagnostico avancado** permanecem
+  sanitizados; diagnostico nao publica, recupera ou altera lifecycle.
 
-- Nao ha endpoint publico de listagem completa de produtos.
-- Nao ha metrica de produtos pontuados no contrato `AnalyticsSnapshot`.
-- Nao ha endpoint de listagem de historico de copies.
-- Nao ha endpoint de reprocessamento manual de dispatches.
+Iniciar a topologia nao liga a automacao. A pausa persistida e controlada na
+area Automacao, enquanto processos, filas, registro do Scheduler e shutdown
+continuam sob autoridade do supervisor.
 
 ## Analytics
 
@@ -155,12 +154,13 @@ Se o estado nao puder ser consultado, a API retorna HTTP 503 com
 `SCHEDULER_STATUS_UNAVAILABLE` e mensagem publica segura. O fechamento da API
 encerra a fila e a conexao criadas pela aplicacao.
 
-O dashboard consulta `GET /scheduler` somente pela camada centralizada de API.
-A Visao geral mostra status e proxima execucao, enquanto Configuracoes apresenta
-enabled, status, jobId, fila, nome do job, cron, timezone e proxima execucao. As
-consultas possuem loading, erro e retry isolados; HTTP 503 nao e convertido em
-estado desativado. A interface nao possui campos para editar cron nem acoes para
-ativar ou desativar o Scheduler.
+O cliente do dashboard consulta `GET /scheduler` somente pela camada
+centralizada de API para o agendamento legado. A agenda comercial do uso diário
+usa `/commercial-automation/scheduler` nas áreas Início, Automação e Diagnóstico
+avançado. As consultas possuem loading, erro e retry isolados; HTTP 503 não é
+convertido em estado desativado. O dashboard não registra, remove ou assume o
+Scheduler: cron, enabled e shutdown continuam sob autoridade do worker e do
+supervisor.
 
 Regras de seguranca do dashboard:
 
@@ -323,7 +323,7 @@ alteracao.
 prefixo proprio e publica somente a API em `127.0.0.1:8080` por padrao.
 PostgreSQL e Redis ficam acessiveis apenas na rede Docker da stack.
 
-`pnpm evolution:init` cria uma unica vez `infra/evolution/.env.local`, gera API
+`corepack pnpm evolution:init` cria uma unica vez `infra/evolution/.env.local`, gera API
 key e senha PostgreSQL fortes e nao mostra seus valores. O arquivo local esta
 explicitamente ignorado. `evolution:config`, `evolution:pull`, `evolution:up`,
 `evolution:down`, `evolution:status`, `evolution:logs` e `evolution:restart`
@@ -491,10 +491,10 @@ validado no Node.js 24.15.0 com `tsx` 4.23.1.
 - Para filas, testar enfileiramento, payloads e processamento sem depender de integracoes reais.
 - Para providers externos, usar mocks e contratos locais.
 - Antes de concluir uma sprint funcional, rodar:
-  - `pnpm lint`
-  - `pnpm typecheck`
-  - `pnpm test`
-  - `pnpm build` quando o escopo afetar empacotamento ou integracao entre workspaces.
+  - `corepack pnpm lint`
+  - `corepack pnpm typecheck`
+  - `corepack pnpm test`
+  - `corepack pnpm build` quando o escopo afetar empacotamento ou integracao entre workspaces.
 
 ## Definition of Done
 
@@ -639,15 +639,16 @@ ambiguo. `nextAllowedAt` e informado apenas para bloqueios temporais; estados
 que exigem acao humana retornam `null`.
 
 O singleton `CommercialAutomationSettings` nasce pausado. Pausar e direto;
-retomar exige `RETOMAR_AUTOMACAO_COMERCIAL`. A API expoe somente
-`GET /commercial-automation/status` e
-`PATCH /commercial-automation/settings`, rejeita campos extras e nunca altera
+retomar exige `RETOMAR_AUTOMACAO_COMERCIAL` e a versao observada. A API expoe
+status e mutacoes protegidas de pausa, agenda e configuracao administrativa;
+essas rotas rejeitam campos extras, usam CAS quando aplicavel e nunca alteram
 arquivos `.env`.
 
 O historico usa `WhatsAppDispatch` `SENT` de grupos e `sentAt` no dia local.
 Dry-runs, dispatches `FAILED` e runs sem envio nao contam. Runs com status final
-`AMBIGUOUS` ou investigacao pendente bloqueiam. A Sprint 17.1 nao conecta essa
-politica ao Scheduler ou pipeline e nao cria job, dispatch ou mensagem.
+`AMBIGUOUS` ou investigacao pendente bloqueiam. A politica em si nao cria job,
+dispatch ou mensagem, mas e consumida pelo Scheduler comercial antes de
+sincronizacao, geracao ou envio.
 
 O servidor Fastify usa `HOST=127.0.0.1` por padrao. Exposicao em outra interface
 so ocorre com valor explicito no ambiente.
