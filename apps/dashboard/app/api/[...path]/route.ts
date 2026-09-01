@@ -13,6 +13,7 @@ const READ_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'settings'],
   ['commercial-automation', 'schedule', 'preview'],
   ['commercial-automation', 'executions'],
+  ['commercial-automation', 'outbox'],
   ['commercial', 'campaigns'],
   ['commercial', 'campaigns', '*', 'queue'],
   ['commercial-pipeline', 'runs'],

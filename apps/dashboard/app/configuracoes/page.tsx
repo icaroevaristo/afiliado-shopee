@@ -290,9 +290,18 @@ export default function SettingsPage() {
       </OpsSection>
 
       <OpsSection title="Diagnóstico avançado" className="ops-section--quiet">
-        <p className="text-sm leading-6 text-slate-600">
-          Diagnóstico avançado será consolidado na próxima etapa.
-        </p>
+        <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="max-w-2xl text-sm leading-6 text-slate-600">
+            Consulte detalhes técnicos, estados de fila e evidências de execução quando precisar investigar.
+          </p>
+          <Link
+            href="/diagnostico"
+            className="ops-button ops-button--secondary shrink-0"
+          >
+            Abrir diagnóstico avançado
+            <ArrowUpRight size={15} aria-hidden="true" />
+          </Link>
+        </div>
       </OpsSection>
     </div>
   );

@@ -84,6 +84,45 @@ describe('dashboard API proxy', () => {
     );
   });
 
+  it('encaminha a leitura paginada do outbox comercial pela allowlist autenticada', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [], page: 1, limit: 20 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request(
+        'http://dashboard.local/api/commercial-automation/outbox?page=1&limit=20',
+      ),
+      {
+        params: Promise.resolve({
+          path: ['commercial-automation', 'outbox'],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'http://127.0.0.1:3334/commercial-automation/outbox?page=1&limit=20',
+    );
+    expect(fetchMock.mock.calls[1][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
+    );
+  });
+
   it('permite somente os caminhos de agenda explicitamente autorizados', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');

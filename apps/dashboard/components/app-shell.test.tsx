@@ -79,6 +79,7 @@ describe('AppShell', () => {
         ?.getAttribute('aria-current'),
     ).toBe('page');
     expect(screen.container.querySelector('a[href="/campanhas"]')).toBeNull();
+    expect(screen.container.querySelector('a[href="/diagnostico"]')).toBeNull();
     await screen.unmount();
   });
 

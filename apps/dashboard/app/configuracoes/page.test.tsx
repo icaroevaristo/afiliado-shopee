@@ -232,9 +232,10 @@ describe('SettingsPage — Lote 8', () => {
     ]) {
       expect(text).not.toContain(forbidden);
     }
-    expect(text).toContain(
-      'Diagnóstico avançado será consolidado na próxima etapa.',
-    );
+    expect(text).toContain('Consulte detalhes técnicos, estados de fila e evidências de execução quando precisar investigar.');
+    expect(
+      screen.container.querySelector('a[href="/diagnostico"]')?.textContent,
+    ).toContain('Abrir diagnóstico avançado');
     await screen.unmount();
   });
 
