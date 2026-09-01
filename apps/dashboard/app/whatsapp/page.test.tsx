@@ -1,12 +1,9 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { change, render, submit } from '../../test/render';
+import { render } from '../../test/render';
 import WhatsAppPage from './page';
 
 const searchParamsMock = vi.hoisted(() => vi.fn());
-const listDestinationsMock = vi.fn();
-const listDispatchesMock = vi.fn();
-const getDispatchMock = vi.fn();
 const getOperationalAdminMock = vi.fn();
 
 vi.mock('next/navigation', () => ({
@@ -17,9 +14,6 @@ vi.mock('../../lib/api', () => ({
   DashboardApiError: class DashboardApiError extends Error {
     code?: string;
   },
-  listDestinations: (...args: unknown[]) => listDestinationsMock(...args),
-  listDispatches: (...args: unknown[]) => listDispatchesMock(...args),
-  getDispatch: (...args: unknown[]) => getDispatchMock(...args),
   getOperationalAdmin: (...args: unknown[]) => getOperationalAdminMock(...args),
   updateOperationalGroup: vi.fn(),
 }));
@@ -127,9 +121,6 @@ const overview = {
 
 beforeEach(() => {
   searchParamsMock.mockReset().mockReturnValue(new URLSearchParams());
-  listDestinationsMock.mockReset().mockResolvedValue([]);
-  listDispatchesMock.mockReset().mockResolvedValue([]);
-  getDispatchMock.mockReset();
   getOperationalAdminMock.mockReset().mockResolvedValue(overview);
 });
 
@@ -142,11 +133,10 @@ describe('WhatsAppPage', () => {
       'Gerencie onde as ofertas serão enviadas e qual WhatsApp é responsável.',
     );
     expect(screen.container.textContent).toContain('Ofertas da casa');
+    expect(screen.container.textContent).not.toContain('WhatsApps cadastrados');
     expect(
       screen.container.querySelector('a[href="/envios"]')?.textContent,
     ).toContain('Ver histórico de envios');
-    expect(screen.container.textContent).not.toContain('Dispatches');
-    expect(screen.container.textContent).not.toContain('Destinos individuais');
 
     const groupsLink = screen.container.querySelector('a[href="/whatsapp"]');
     const whatsAppsLink = screen.container.querySelector(
@@ -154,67 +144,59 @@ describe('WhatsAppPage', () => {
     );
     expect(groupsLink?.getAttribute('aria-current')).toBe('page');
     expect(whatsAppsLink?.getAttribute('aria-current')).toBeNull();
-    expect(listDestinationsMock).not.toHaveBeenCalled();
-    expect(listDispatchesMock).not.toHaveBeenCalled();
+    expect(getOperationalAdminMock).toHaveBeenCalledTimes(1);
     await screen.unmount();
   });
 
-  it('preserva a apresentação de WhatsApps e os filtros técnicos na view legada', async () => {
+  it('abre a visão diária de WhatsApps sem misturar histórico técnico', async () => {
     searchParamsMock.mockReturnValue(new URLSearchParams('view=whatsapps'));
-    listDestinationsMock.mockResolvedValue([
-      {
-        id: 'destination-1',
-        name: 'Destino individual',
-        destination: 'private-destination',
-        active: true,
-      },
-    ]);
 
     const screen = await render(<WhatsAppPage />);
+
     expect(screen.container.querySelector('h1')?.textContent).toBe('WhatsApps');
-    expect(screen.container.textContent).toContain('Instâncias operacionais');
-    expect(screen.container.textContent).toContain('Destino individual');
-    expect(screen.container.textContent).toContain('Dispatches');
-    expect(screen.container.textContent).not.toContain('Ofertas da casa');
-    expect(
-      screen.container
-        .querySelector('a[href="/whatsapp?view=whatsapps"]')
-        ?.getAttribute('aria-current'),
-    ).toBe('page');
+    expect(screen.container.textContent).toContain(
+      'Acompanhe as instâncias usadas para enviar ofertas aos grupos.',
+    );
+    expect(screen.container.textContent).toContain('whatsapp-principal');
+    expect(screen.container.textContent).toContain('Estado não confirmado');
+    expect(screen.container.textContent).not.toContain('Destinos individuais');
+    expect(screen.container.textContent).not.toContain('Dispatches');
+    expect(screen.container.textContent).not.toContain('External message ID');
+    expect(screen.container.textContent).not.toContain('Copy');
+
+    const whatsAppsLink = screen.container.querySelector(
+      'a[href="/whatsapp?view=whatsapps"]',
+    );
+    expect(whatsAppsLink?.getAttribute('aria-current')).toBe('page');
     await screen.unmount();
   });
 
-  it('mantém filtros de dispatch somente na view WhatsApps', async () => {
+  it('mantém o histórico em Envios e não expõe assignments na visão diária', async () => {
     searchParamsMock.mockReturnValue(new URLSearchParams('view=whatsapps'));
+
     const screen = await render(<WhatsAppPage />);
-    const form = Array.from(screen.container.querySelectorAll('form')).find(
-      (candidate) => candidate.textContent?.includes('Destination ID'),
-    ) as HTMLFormElement;
-    const statusSelect = form.querySelector('select');
-    const productInput = form.querySelectorAll('input')[1];
 
-    await change(statusSelect as HTMLSelectElement, 'FAILED');
-    await change(productInput, 'product-1');
-    await submit(form);
-
-    expect(listDispatchesMock).toHaveBeenLastCalledWith({
-      status: 'FAILED',
-      destinationId: '',
-      productId: 'product-1',
-    });
+    expect(
+      screen.container.querySelector('a[href="/envios"]')?.textContent,
+    ).toContain('Ver histórico de envios');
+    expect(screen.container.textContent).toContain('Ver grupos');
+    expect(screen.container.textContent).not.toContain(
+      'Trocar WhatsApp responsável',
+    );
+    expect(screen.container.textContent).not.toContain('assignment');
     await screen.unmount();
   });
 
-  it('mostra vazio seguro quando a leitura administrativa não retorna grupos', async () => {
-    getOperationalAdminMock.mockResolvedValue({
-      ...overview,
-      groups: [],
-      campaigns: [],
-    });
+  it('mostra vazio seguro quando não existem instâncias', async () => {
+    searchParamsMock.mockReturnValue(new URLSearchParams('view=whatsapps'));
+    getOperationalAdminMock.mockResolvedValue({ ...overview, instances: [] });
 
     const screen = await render(<WhatsAppPage />);
-    expect(screen.container.textContent).toContain('Nenhum grupo cadastrado');
-    expect(screen.container.textContent).not.toContain('Sincronizar grupos');
+
+    expect(screen.container.textContent).toContain(
+      'Nenhum WhatsApp cadastrado',
+    );
+    expect(screen.container.textContent).toContain('Cadastrar instância');
     await screen.unmount();
   });
 });
