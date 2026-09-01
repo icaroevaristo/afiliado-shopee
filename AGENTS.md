@@ -557,64 +557,52 @@ Proximos passos previstos:
 - Adicionar novas metricas somente quando o contrato do backend for ampliado em
   sprint dedicada.
 
-## Dashboard operacional
+## Dashboard operacional 2.0
 
 Responsabilidade:
 
-- Expor uma interface operacional pessoal para consultar a API existente.
-- Disparar pipeline, consultar jobs, gerar copies manuais e administrar destinos
-  WhatsApp sem alterar regras do backend.
-- Mostrar estados indisponiveis quando a API nao possui endpoint para o dado.
+- Expor a interface diaria em `apps/dashboard` usando as APIs existentes e o
+  proxy same-origin autenticado do servidor.
+- Mostrar estado da automacao, agenda, uso de mensagens e budgets externos,
+  ofertas, grupos, WhatsApps, campanhas e historico sem inventar dados.
+- Manter diagnostico e detalhes de lifecycle sanitizados e somente leitura.
 
 Entradas:
 
-- `NEXT_PUBLIC_API_URL`, com padrao local `http://localhost:3333`.
-- Endpoints publicos de health, Analytics, Scheduler, pipeline, copy e WhatsApp.
-- Produtos derivados apenas de dispatches quando presentes.
+- `DASHBOARD_API_URL` e `LOCAL_API_AUTH_TOKEN` somente no processo server-side
+  do proxy; nenhuma dessas credenciais chega ao navegador.
+- APIs oficiais de health, analytics, scheduler, automacao, ofertas, campanhas,
+  cupons, grupos, instancias, dispatches e publicacao manual protegida.
+- Estado persistido de ofertas, snapshots, candidates, copies e lifecycles
+  conforme os contratos atuais.
 
 Saidas:
 
-- Paginas de visao geral, produtos, pipeline, copies, WhatsApp e configuracoes.
-- Sete metricas reais de `GET /analytics` na visao geral, sem metrica inventada
-  para produtos pontuados.
-- Resumo do Scheduler na Visao geral e detalhes em Configuracoes por
-  `GET /scheduler`.
-- Estados de loading, empty, erro, sucesso e retry manual.
-- Polling moderado de jobs ativos com cleanup ao desmontar a tela.
+- Navegacao principal: Inicio, Ofertas, Grupos e WhatsApps, Automacao, Historico
+  e Configuracoes.
+- Areas complementares: Cupons, Campanhas, Fila e Diagnostico avancado.
+- Estados de loading, vazio, erro, stale/offline e sucesso quando aplicavel.
+- Pausa direta; retomada e configuracao persistida com confirmacao, CAS e
+  mensagens curtas de conflito quando aplicavel.
 
 Dependencias:
 
-- Next.js App Router em `apps/dashboard`.
-- TypeScript e Tailwind.
-- `lucide-react` para icones.
-- Camada centralizada em `apps/dashboard/lib/api`.
+- Next.js App Router, TypeScript, Tailwind e `lucide-react` em
+  `apps/dashboard`.
+- Camada centralizada em `apps/dashboard/lib/api` e proxy em
+  `apps/dashboard/app/api/[...path]/route.ts`.
 - Testes Vitest/jsdom com fetch e funcoes da API mockados.
 
-Atualizacao de Analytics:
+Regras de autoridade:
 
-- A consulta inicial e o retry afetam apenas a secao de metricas.
-- O botao `Atualizar metricas` permite uma nova consulta depois da conclusao do
-  pipeline, sem polling permanente e sem dependencia circular entre paginas.
-- Os dados nao possuem cache no dashboard.
-
-Consulta do Scheduler:
-
-- A camada centralizada usa `GET /scheduler`, sem `fetch` direto nas paginas.
-- `disabled`, `registered` e `not-registered` sao exibidos como Desativado,
-  Agendado e Nao registrado.
-- Data e hora usam formato pt-BR e timezone informado, com fallback seguro.
-- Loading, HTTP 503 e retry ficam isolados das outras secoes.
-- Configuracoes e somente leitura; cron e enabled permanecem no ambiente do
-  worker.
-
-Restricoes:
-
-- Nao acessar Prisma, Redis ou BullMQ diretamente pelo dashboard.
-- Nao expor `EVOLUTION_API_KEY` ou segredos no frontend.
-- Nao exibir Redis URL, stack ou detalhes internos do Scheduler.
-- Nao criar campos ou acoes para editar, ativar ou desativar Scheduler.
-- Nao criar acoes sem endpoint existente, como envio manual real ou
-  reprocessamento manual de dispatch.
+- A area **Automacao** controla pausa, retomada e regras persistidas; iniciar a
+  topologia nao remove `paused=true`.
+- O dashboard nao registra, remove ou assume o Scheduler e nao inicia workers.
+  Processos, filas, recovery e shutdown permanecem sob autoridade do
+  supervisor/worker.
+- O dashboard nao acessa Prisma, Redis ou BullMQ diretamente, nao exibe URLs de
+  infraestrutura e nao cria acoes sem endpoint oficial, como retry ou
+  reprocessamento de dispatch.
 
 ## Commercial Pipeline Dry Run
 
@@ -754,11 +742,13 @@ Operacao:
 - `GET /commercial-automation/status` retorna somente decisao, motivos,
   horarios e contagens sanitizadas.
 - `PATCH /commercial-automation/settings` pausa com `{ "paused": true }` e
-  retoma somente com a confirmacao exata `RETOMAR_AUTOMACAO_COMERCIAL`.
+  retoma somente com a confirmacao exata `RETOMAR_AUTOMACAO_COMERCIAL` e a
+  versao esperada; rotas de agenda e configuracao administrativa usam suas
+  revisoes/CAS correspondentes.
 - A API usa `HOST=127.0.0.1` por padrao. Alterar o bind exige configuracao
   explicita do ambiente.
-- O dashboard apresenta o controle em Configuracoes e deixa explicito que
-  pausar/retomar nao envia mensagens nem altera o Scheduler.
+- O dashboard apresenta o controle na area Automacao e deixa explicito que
+  pausar/retomar nao envia mensagens nem assume o Scheduler.
 
 ## Commercial Automation Scheduler
 
@@ -814,8 +804,9 @@ Observabilidade:
 - `GET /commercial-automation/executions` e
   `GET /commercial-automation/executions/:id` expoem `stale`, `heartbeatAt` e
   `leaseExpiresAt`, mas nunca `ownerId`.
-- Nao existe endpoint para disparar tick ou habilitar o Scheduler, e o
-  dashboard nao ganhou controles nesta sprint.
+- Nao existe endpoint de uso diario para disparar tick ou assumir o Scheduler.
+  O dashboard pode editar regras persistidas de automacao com CAS, mas registro,
+  consumidores e shutdown continuam sob autoridade do supervisor/worker.
 - `commercial:execution:status` e somente leitura. A recuperacao aceita somente
   `commercial:execution:recover -- --execution-id=<id>
 --confirm-stale-recovery`, exige preview, automacao desabilitada/pausada e os

@@ -50,20 +50,23 @@ dados comerciais.
 
 ```bash
 cp .env.example .env
-pnpm install
+corepack pnpm install
 docker compose up -d
-pnpm --filter @shopee-auto-affiliate-ai/database db:generate
-pnpm dev
+corepack pnpm --filter @shopee-auto-affiliate-ai/database db:generate
+corepack pnpm dev
 ```
 
-A API ficará disponível em `http://localhost:3333/health` e o dashboard em `http://localhost:3000`. O bind padrão da API é local, com `HOST=127.0.0.1`.
+A API ficará disponível em `http://localhost:3333/health` e o processo de
+dashboard de desenvolvimento usará `http://localhost:3000`. O bind padrão da
+API é local, com `HOST=127.0.0.1`; o painel autenticado pelo navegador exige a
+configuração server-side descrita abaixo.
 
 Para executar cada parte separadamente:
 
 ```bash
 corepack pnpm --filter @shopee-auto-affiliate-ai/api dev
-pnpm --filter @shopee-auto-affiliate-ai/worker dev
-pnpm --filter @shopee-auto-affiliate-ai/dashboard dev
+corepack pnpm --filter @shopee-auto-affiliate-ai/worker dev
+corepack pnpm --filter @shopee-auto-affiliate-ai/dashboard dev
 ```
 
 Com o `.env` local ja configurado, a API inicia com esse unico comando depois
@@ -71,8 +74,12 @@ de `git pull` e `corepack pnpm install --frozen-lockfile`; nao e necessario
 compilar os pacotes antes. O atalho `corepack pnpm dev:api` executa o mesmo
 fluxo.
 
-O dashboard usa `NEXT_PUBLIC_API_URL` para encontrar a API. Em desenvolvimento,
-use:
+No uso normal pelo navegador, o dashboard chama o proxy same-origin `/api`, que
+usa `DASHBOARD_API_URL` e `LOCAL_API_AUTH_TOKEN` somente no processo do servidor.
+O perfil diário oficial configura esses valores localmente; o `.env.example`
+não provisiona token operacional. Em testes ou caminhos server-side que usem o
+fallback direto, `NEXT_PUBLIC_API_URL` pode apontar para a API local, mas isso
+não substitui a autenticação do proxy no navegador:
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:3333
@@ -80,6 +87,12 @@ NEXT_PUBLIC_API_URL=http://localhost:3333
 
 Nunca coloque `EVOLUTION_API_KEY` ou outros segredos em variaveis
 `NEXT_PUBLIC_*`.
+
+Exceto por `/health`, as rotas da API exigem `Authorization: Bearer <token
+local>`. Os exemplos `curl` abaixo são referências de desenvolvimento e não
+incluem credenciais; não coloque o token real em documentação, argumentos de
+atalho ou variáveis `NEXT_PUBLIC_*`. Para a operação diária, use o proxy
+autenticado do dashboard.
 
 ## Uso diario
 
@@ -98,6 +111,9 @@ Para operar o sistema sem terminal:
 
 O terminal fica reservado para manutenção e desenvolvimento. O atalho de
 encerramento usa o mesmo supervisor oficial e não força a morte de processos.
+No perfil diário instalado pelo launcher, a API local usa a porta `3433` e o
+dashboard usa `3000`; essa configuração fica no ambiente do supervisor e não
+precisa ser editada pelo usuário.
 
 ## Hunter Agent
 
@@ -124,24 +140,24 @@ Filtros opcionais aceitos: `categoria`, `precoMin`, `precoMax`, `descontoMin`, `
 
 ## Scripts
 
-- `pnpm dev`: inicia os apps em modo desenvolvimento via Turborepo.
-- `pnpm dev:api`: inicia somente a API com a resolucao ESM de desenvolvimento.
-- `pnpm test:runtime`: inicia a API em ambiente controlado, consulta `/health`
+- `corepack pnpm dev`: inicia os apps em modo desenvolvimento via Turborepo.
+- `corepack pnpm dev:api`: inicia somente a API com a resolucao ESM de desenvolvimento.
+- `corepack pnpm test:runtime`: inicia a API em ambiente controlado, consulta `/health`
   e encerra o processo filho.
 - `corepack pnpm system:stability:preview`: valida ciclos reais agendados em
   preview, reinicializações e indisponibilidades temporárias; exige a
   confirmação `--confirm-local-preview-stability-test`.
-- `pnpm evolution:init`: cria a configuração local ignorada da Evolution API
+- `corepack pnpm evolution:init`: cria a configuração local ignorada da Evolution API
   com segredos aleatórios, sem exibi-los.
-- `pnpm evolution:up`: sobe Evolution API, PostgreSQL e Redis isolados.
-- `pnpm evolution:status`: mostra estado, saúde e porta da stack Evolution.
-- `pnpm evolution:logs`: mostra as últimas 200 linhas dos containers, sem
+- `corepack pnpm evolution:up`: sobe Evolution API, PostgreSQL e Redis isolados.
+- `corepack pnpm evolution:status`: mostra estado, saúde e porta da stack Evolution.
+- `corepack pnpm evolution:logs`: mostra as últimas 200 linhas dos containers, sem
   imprimir o ambiente.
-- `pnpm evolution:restart`: reinicia a stack Evolution sem apagar dados.
-- `pnpm evolution:down`: para a stack Evolution e preserva os volumes.
-- `pnpm whatsapp:group-test`: valida o diretorio de grupos em dry-run, sem
+- `corepack pnpm evolution:restart`: reinicia a stack Evolution sem apagar dados.
+- `corepack pnpm evolution:down`: para a stack Evolution e preserva os volumes.
+- `corepack pnpm whatsapp:group-test`: valida o diretorio de grupos em dry-run, sem
   criar dispatch, job, worker ou mensagem.
-- `pnpm shopee:import -- --file caminho.json`: valida importacao manual em
+- `corepack pnpm shopee:import -- --file caminho.json`: valida importacao manual em
   dry-run; somente `--confirm-import` permite persistir.
 - `corepack pnpm commercial:automation:preview`: executa um unico preview
   comercial local, com os Schedulers desligados e sem enviar mensagem.
@@ -151,10 +167,10 @@ Filtros opcionais aceitos: `categoria`, `precoMin`, `precoMax`, `descontoMin`, `
 - `corepack pnpm commercial:official:diagnose`: explica localmente a
   elegibilidade e a distribuicao de score dos produtos `OFFICIAL` persistidos,
   sem provider externo ou escrita no banco.
-- `pnpm build`: compila todos os pacotes e aplicações.
-- `pnpm lint`: executa ESLint.
-- `pnpm typecheck`: executa TypeScript sem emissão.
-- `pnpm test`: executa os testes mínimos.
+- `corepack pnpm build`: compila todos os pacotes e aplicações.
+- `corepack pnpm lint`: executa ESLint.
+- `corepack pnpm typecheck`: executa TypeScript sem emissão.
+- `corepack pnpm test`: executa os testes mínimos.
 
 ## Runtime ESM dos workspaces
 
@@ -191,11 +207,11 @@ A infraestrutura isolada fica em `infra/evolution` e usa três containers:
 Para preparar e iniciar no Windows/PowerShell:
 
 ```powershell
-pnpm evolution:init
-pnpm evolution:config
-pnpm evolution:pull
-pnpm evolution:up
-pnpm evolution:status
+corepack pnpm evolution:init
+corepack pnpm evolution:config
+corepack pnpm evolution:pull
+corepack pnpm evolution:up
+corepack pnpm evolution:status
 ```
 
 A API fica em `http://localhost:8080` e a rota pública `/` funciona como status
@@ -545,12 +561,13 @@ O endpoint e somente leitura: nao registra, edita ou remove cron e nao executa
 o pipeline. Quando o estado nao pode ser consultado, responde HTTP 503 com o
 codigo `SCHEDULER_STATUS_UNAVAILABLE`, sem detalhes do Redis ou stack.
 
-O dashboard consome `GET /scheduler` pela camada HTTP centralizada. A Visao
-geral mostra status e proxima execucao em um resumo independente; Configuracoes
-exibe todos os campos publicos e permite apenas atualizar a consulta. Cron,
-enabled e timezone continuam configurados exclusivamente no ambiente do worker.
-HTTP 503 aparece como indisponibilidade, nunca como Scheduler desativado, e
-nenhum segredo ou detalhe interno e renderizado.
+O cliente do dashboard mantém `GET /scheduler` pela camada HTTP centralizada
+para o agendamento legado. No caminho diário, a agenda comercial é exibida por
+`/commercial-automation/scheduler` em **Início**, **Automação** e
+**Diagnóstico avançado**. Em ambos os casos, o dashboard apenas consulta o
+estado: registro, cron, enabled e shutdown continuam sob autoridade do
+worker/supervisor. HTTP 503 aparece como indisponibilidade, nunca como Scheduler
+desativado, e nenhum segredo ou detalhe interno e renderizado.
 
 ### Provider mock
 
@@ -799,65 +816,57 @@ Loading, erro e retry de Analytics ficam isolados do restante da pagina. Depois
 que um pipeline concluir, o botao `Atualizar metricas` faz uma nova consulta
 explicita, sem polling permanente ou cache.
 
-## Dashboard operacional MVP
+## Dashboard operacional 2.0
 
-O dashboard em `apps/dashboard` foi expandido para uma interface operacional em
-Next.js App Router, TypeScript e Tailwind. Ele usa uma camada centralizada em
-`apps/dashboard/lib/api` com URL configuravel, timeout, tratamento de respostas
-nao JSON, HTTP 400/404/500 e mensagem amigavel quando a API esta indisponivel.
+O dashboard em `apps/dashboard` e a interface principal da operacao diaria. Ele
+usa Next.js App Router, uma camada de API centralizada e um proxy same-origin
+autenticado no servidor. O navegador nao acessa Prisma, Redis, BullMQ ou
+segredos diretamente.
 
-Paginas disponiveis:
+A navegacao principal e composta por:
 
-- Visao geral: estado da API, ultimo job da sessao, atalhos e resumo de
-  dispatches/destinos.
-- Produtos: tabela desktop, cards mobile, busca, filtros, ordenacao e paginacao
-  local para produtos conhecidos via dispatches.
-- Pipeline: formulario com filtros reais, disparo de `POST /pipeline/run`,
-  consulta manual de jobId e polling moderado de `GET /pipeline/jobs/:id`.
-- Copies: geracao manual por `POST /copy/generate`, botao de copiar e historico
-  apenas durante a sessao da tela.
-- WhatsApp: criacao/listagem/edicao de destinos individuais, diretorio
-  responsivo de grupos com sincronizacao/autorizacao explicita e
-  listagem/filtro/detalhes de dispatches.
-- Configuracoes: URL da API, estado de conexao, orientacoes de mock/evolution e
-  lembrete de credenciais fora do navegador.
+- **Inicio**: estado da API, estado da automacao, ultimo e proximo envio,
+  atividade recente e a jornada do dispatch quando houver dados.
+- **Ofertas**: catalogo paginado retornado por `GET /shopee/offers`, busca e
+  filtros. Ações de sincronização, importação manual, detalhe e preview não
+  são declaradas como fluxo operacional garantido aqui enquanto suas rotas não
+  estiverem integralmente autorizadas pelo proxy same-origin.
+- **Grupos e WhatsApps**: diretorio e autorizacao de grupos, instancias,
+  assignments e estados derivados de health, disponibilidade e blockers.
+- **Automacao**: pausa direta e retomada confirmada com CAS, horario, intervalo, stagger,
+  limites de mensagens e limites diarios de Shopee/OpenAI, previsao de agenda,
+  uso do dia e blockers.
+- **Historico**: envios registrados, status, tentativas e detalhes sanitizados.
+- **Configuracoes**: saude local, fuso horario, atalhos para as areas
+  operacionais e acesso ao diagnostico avancado.
 
-Endpoints usados pelo dashboard:
+As telas de **Cupons**, **Campanhas**, **Fila** e **Diagnostico avancado** sao
+areas complementares. As rotas legadas continuam disponiveis quando necessario
+para compatibilidade ou investigacao, mas nao substituem a navegacao principal
+do Dashboard 2.0.
 
-- `GET /health`
-- `GET /analytics`
-- `GET /scheduler`
-- `POST /pipeline/run`
-- `GET /pipeline/jobs/:id`
-- `POST /copy/generate`
-- `POST /whatsapp/destinations`
-- `GET /whatsapp/destinations`
-- `PATCH /whatsapp/destinations/:id`
-- `GET /whatsapp/dispatches`
-- `GET /whatsapp/dispatches/:id`
-- `POST /whatsapp/groups/sync`
-- `GET /whatsapp/groups`
-- `GET /whatsapp/groups/:id`
-- `PATCH /whatsapp/groups/:id`
+O controle de automacao e separado do lifecycle do sistema: iniciar a
+topologia pelo supervisor nao remove a pausa persistida. A area Automacao e a
+autoridade para pausar, retomar e editar as regras persistidas; o supervisor
+continua sendo a autoridade para processos, filas e shutdown.
 
-Limitacoes atuais:
+Limitacoes que permanecem contratuais:
 
-- Nao ha endpoint publico para listar todos os produtos; a tela de produtos
-  mostra apenas produtos vinculados a dispatches existentes.
-- Nao ha campo agregado para produtos pontuados em `AnalyticsSnapshot`; esse
-  indicador nao e inventado pelo dashboard.
-- Nao ha endpoint de historico de copies; o historico da tela e somente da
-  sessao atual.
 - Nao ha endpoint de reprocessamento manual de dispatches; o dashboard nao
   inventa essa acao.
+- O Diagnostico avancado e somente leitura e nao oferece recovery, envio ou
+  alteracao de lifecycle.
+- Campos que nao estao disponiveis nas APIs aparecem como indisponiveis, sem
+  metricas ou dados inventados.
 
 Seguranca:
 
-- O dashboard nao armazena credenciais no navegador.
-- O provider mock continua seguro por padrao.
-- Evolution API so envia mensagens quando configurada explicitamente no ambiente
-  do worker.
-- Chaves como `EVOLUTION_API_KEY` devem ficar somente no `.env` local do worker.
+- O proxy do dashboard valida um destino local e envia a autorizacao ao
+  backend somente no processo do servidor.
+- Nenhuma credencial e armazenada ou renderizada no navegador, em variaveis
+  `NEXT_PUBLIC_*`, HTML ou links.
+- O provider mock continua seguro por padrao; Evolution e demais providers
+  externos dependem da configuracao e dos guardrails do worker.
 
 ## Pipeline comercial em dry-run
 
@@ -939,8 +948,11 @@ existe endpoint de publicacao.
 
 ## Controles operacionais da automacao comercial
 
-A Sprint 17.1 adiciona uma politica somente de avaliacao. Ela nao esta ligada ao
-Scheduler e nao executa o pipeline comercial. Os defaults sao conservadores:
+A politica persistida governa a autorizacao de novos trabalhos comerciais. A
+area **Automacao** do dashboard mostra o estado atual, os limites, o uso do dia,
+os horarios previstos e os blockers. O sistema pode estar online enquanto a
+automacao permanece pausada; iniciar ou parar a topologia nao altera essa pausa.
+Os defaults sao conservadores:
 
 ```env
 COMMERCIAL_AUTOMATION_ENABLED=false
@@ -953,19 +965,25 @@ COMMERCIAL_MIN_INTERVAL_MINUTES=60
 ```
 
 O estado persistido tambem nasce pausado. Retomar exige a frase exata
-`RETOMAR_AUTOMACAO_COMERCIAL`; essa acao remove apenas a pausa e nao envia
-mensagem, nao cria job e nao ativa o Scheduler.
+`RETOMAR_AUTOMACAO_COMERCIAL` e a versao observada pela tela; essa acao remove
+apenas a pausa e nao envia mensagem diretamente. O Scheduler e os workers
+continuam sujeitos a janela, quota, readiness, assignment e demais guardrails.
 
 Endpoints:
 
 - `GET /commercial-automation/status`: decisao, motivos, janela, limites,
   historico real `SENT` e proxima permissao calculavel;
-- `PATCH /commercial-automation/settings`: aceita somente `{ "paused": true }`
-  ou `{ "paused": false, "confirmation": "RETOMAR_AUTOMACAO_COMERCIAL" }`.
+- `PATCH /commercial-automation/settings`: pausa diretamente; a retomada exige
+  a confirmacao exata e `expectedUpdatedAt` da leitura atual.
+- `PATCH /commercial-automation/settings/schedule`: altera horario, intervalo e
+  stagger com a revisao esperada;
+- `PATCH /commercial-automation/settings/admin`: altera limites de mensagens e
+  budgets diarios externos com confirmacao e a revisao esperada.
 
-O dashboard mostra esse estado em Configuracoes, com pausa direta e retomada em
-modal. O Scheduler comercial usa `evaluateAutomationReadiness()` antes de
-qualquer sincronizacao ou dry-run.
+O dashboard mostra esse estado em **Automacao**, com pausa direta e retomada em
+modal. A leitura protegida e as mutacoes passam pelo proxy oficial. O Scheduler
+comercial usa `evaluateAutomationReadiness()` antes de qualquer sincronizacao,
+geracao ou trabalho de envio.
 
 A API faz bind em `127.0.0.1` por padrao por meio de `HOST`. Use outro host
 somente por configuracao explicita de ambiente quando a exposicao for realmente
@@ -1024,8 +1042,10 @@ Endpoints somente leitura:
 - `GET /commercial-automation/executions?page=1&limit=20`;
 - `GET /commercial-automation/executions/:id`.
 
-Nao existe endpoint para executar um tick, habilitar o Scheduler ou alterar a
-agenda. O dashboard nao foi modificado nesta sprint.
+Nao existe endpoint de uso diario para executar um tick ou assumir o lifecycle
+do Scheduler. A agenda persistida pode ser editada na area **Automacao** com a
+revisao esperada; registro, consumidores e shutdown do Scheduler continuam sob
+autoridade do supervisor/worker.
 
 Consulta e recuperacao manual conservadora:
 

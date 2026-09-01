@@ -5,6 +5,10 @@
 > Os documentos `docs/phase-*.md`, `docs/shopee-affiliate.md` e outros contratos técnicos continuam sendo a fonte detalhada de cada subsistema. Quando uma documentação antiga divergir deste documento sobre **escopo final do MVP** ou **status atual**, prevalece este documento. Não se pretende reescrever os contratos técnicos existentes.
 >
 > Estado final auditado contra `main` em `6863261d2da2ae0f845d1ada8f0a2ea227495672`; Fases 1–20 certificadas como concluídas e `PROJECT_DONE=true` certificado em 2026-08-30.
+>
+> O SHA acima é o checkpoint da certificação macro e não representa
+> necessariamente o HEAD atual. Antes de operar ou desenvolver, confirme o
+> estado real no Git.
 
 ## 1. Objetivo final
 
@@ -185,6 +189,12 @@ Não criar endpoint direto de send para o painel e não permitir retry cego apó
 **DONE para os requisitos administrativos da Fase 18, com o envio manual seguro da Fase 17 preservado.** O painel suporta cadastro/listagem de instâncias, active/inactive, pause/unpause, administração de grupos, assignment, horários, intervalos, stagger, limites, hard caps, próximo envio, último envio, blockers, executions/reservations, status de filas, catálogo e envio manual.
 
 `docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Health é derivado/sanitizado; `nextSend` vem do planner, `lastSend` de `WhatsAppDispatch=SENT` e blockers são derivados, sem tabelas duplicadas para esses estados.
+
+A experiência diária consolidada do Dashboard 2.0 está organizada em **Início**,
+**Ofertas**, **Grupos**, **WhatsApps**, **Automação** e **Histórico**, com
+**Configurações** e **Diagnóstico avançado** como áreas de apoio. Esta lista
+descreve a experiência do produto; branch e HEAD devem ser confirmados no Git
+antes de qualquer operação ou desenvolvimento.
 
 ### Painel exigido pelo MVP
 

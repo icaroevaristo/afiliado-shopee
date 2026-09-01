@@ -1,5 +1,9 @@
 # Shopee Operations Console
 
+> **Documento histórico.** Este arquivo registra o design operacional anterior ao
+> Dashboard 2.0 e não deve ser usado isoladamente como especificação da
+> interface atual. Para o design vigente, consulte `apps/dashboard/DESIGN.md`.
+
 ## Conceito
 
 Uma control room local para acompanhar a automacao comercial de afiliados.
