@@ -265,15 +265,19 @@ function AdvancedDispatchDetails({ dispatch }: { dispatch: WhatsAppDispatch }) {
 
 function SendHistoryDrawer({
   dispatch,
+  groupNames,
   onClose,
 }: {
   dispatch: WhatsAppDispatch;
+  groupNames: Readonly<Record<string, string>>;
   onClose: () => void;
 }) {
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const productName = dispatch.product?.nome ?? 'Envio comercial';
+  const groupName = resolveGroupName(dispatch, groupNames);
+  const price = formatHistoryPrice(dispatch.product?.preco);
   const error = presentSendHistoryError(dispatch.errorMessage, dispatch.status);
   const isUncertain = dispatch.status === 'PROCESSING';
 
@@ -371,19 +375,11 @@ function SendHistoryDrawer({
           <div className="ops-detail-grid mt-5">
             <div>
               <div className="ops-detail-label">Grupo</div>
-              <div className="ops-detail-value">
-                {dispatch.destination?.name ?? 'Grupo não disponível'}
-              </div>
+              <div className="ops-detail-value">{groupName}</div>
             </div>
             <div>
               <div className="ops-detail-label">Preço</div>
-              <div className="ops-detail-value">
-                {formatCurrency(
-                  typeof dispatch.product?.preco === 'number'
-                    ? dispatch.product.preco
-                    : null,
-                )}
-              </div>
+              <div className="ops-detail-value">{price}</div>
             </div>
             <div>
               <HistoryTimestamp dispatch={dispatch} />
@@ -570,6 +566,7 @@ export default function SendsPage() {
       {selected ? (
         <SendHistoryDrawer
           dispatch={selected}
+          groupNames={groupNames}
           onClose={() => setSelected(null)}
         />
       ) : null}

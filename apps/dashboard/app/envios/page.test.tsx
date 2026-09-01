@@ -276,6 +276,10 @@ describe('SendsPage — Lote 7', () => {
     await click(record);
 
     const details = screen.container.querySelector('details')!;
+    expect(screen.container.textContent).toContain('Grupo Casa');
+    expect(screen.container.textContent?.replace(/\u00a0/g, ' ')).toContain(
+      'R$ 79,90',
+    );
     expect(details.open).toBe(false);
     expect(details.textContent).toContain('candidateId');
     expect(details.textContent).toContain('dispatchId');
