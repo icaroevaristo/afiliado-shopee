@@ -11,8 +11,10 @@ import {
 import {
   DashboardApiError,
   listDispatches,
+  listWhatsAppGroups,
   type DispatchFilters,
   type WhatsAppDispatch,
+  type WhatsAppGroup,
 } from '../../lib/api';
 import {
   CopyIdButton,
@@ -38,6 +40,26 @@ const TIMEZONE = 'America/Sao_Paulo';
 
 const formatHistoryDate = (value: string, fallback: string) =>
   formatDateTimeInTimezone(value, TIMEZONE, fallback, 'medium');
+
+const formatHistoryPrice = (value: unknown) => {
+  const numericValue =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim()
+        ? Number(value)
+        : null;
+  return typeof numericValue === 'number' && Number.isFinite(numericValue)
+    ? formatCurrency(numericValue)
+    : '—';
+};
+
+const resolveGroupName = (
+  dispatch: WhatsAppDispatch,
+  groupNames: Readonly<Record<string, string>>,
+) =>
+  groupNames[dispatch.destinationId] ??
+  dispatch.destination?.name ??
+  'Grupo não disponível';
 
 const readErrorMessage = (cause: unknown) => {
   if (cause instanceof DashboardApiError) return cause.message;
@@ -74,16 +96,16 @@ function HistoryTimestamp({ dispatch }: { dispatch: WhatsAppDispatch }) {
 
 function HistoryRecord({
   dispatch,
+  groupNames,
   onOpen,
 }: {
   dispatch: WhatsAppDispatch;
+  groupNames: Readonly<Record<string, string>>;
   onOpen: (dispatch: WhatsAppDispatch) => void;
 }) {
   const productName = dispatch.product?.nome ?? 'Produto não informado';
-  const groupName = dispatch.destination?.name ?? 'Grupo não disponível';
-  const price = formatCurrency(
-    typeof dispatch.product?.preco === 'number' ? dispatch.product.preco : null,
-  );
+  const groupName = resolveGroupName(dispatch, groupNames);
+  const price = formatHistoryPrice(dispatch.product?.preco);
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLTableRowElement>) => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -129,16 +151,16 @@ function HistoryRecord({
 
 function HistoryCard({
   dispatch,
+  groupNames,
   onOpen,
 }: {
   dispatch: WhatsAppDispatch;
+  groupNames: Readonly<Record<string, string>>;
   onOpen: (dispatch: WhatsAppDispatch) => void;
 }) {
   const productName = dispatch.product?.nome ?? 'Produto não informado';
-  const groupName = dispatch.destination?.name ?? 'Grupo não disponível';
-  const price = formatCurrency(
-    typeof dispatch.product?.preco === 'number' ? dispatch.product.preco : null,
-  );
+  const groupName = resolveGroupName(dispatch, groupNames);
+  const price = formatHistoryPrice(dispatch.product?.preco);
 
   return (
     <button
@@ -274,7 +296,10 @@ function SendHistoryDrawer({
         drawerRef.current.querySelectorAll<HTMLElement>(
           'button:not([disabled]):not([tabindex="-1"]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
         ),
-      );
+      ).filter((element) => {
+        const closedDetails = element.closest('details:not([open])');
+        return !closedDetails || element.matches('summary');
+      });
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -394,6 +419,7 @@ export default function SendsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   const requestIdRef = useRef(0);
   const refreshInFlightRef = useRef(false);
 
@@ -413,8 +439,18 @@ export default function SendsPage() {
 
       try {
         const filters: DispatchFilters = filter ? { status: filter } : {};
-        const nextDispatches = await listDispatches(filters);
-        if (requestId === requestIdRef.current) setDispatches(nextDispatches);
+        const [nextDispatches, nextGroupNames] = await Promise.all([
+          listDispatches(filters),
+          listWhatsAppGroups()
+            .then((groups: WhatsAppGroup[]) =>
+              Object.fromEntries(groups.map((group) => [group.id, group.name])),
+            )
+            .catch(() => null),
+        ]);
+        if (requestId === requestIdRef.current) {
+          setDispatches(nextDispatches);
+          if (nextGroupNames) setGroupNames(nextGroupNames);
+        }
       } catch (cause) {
         if (requestId === requestIdRef.current)
           setError(readErrorMessage(cause));
@@ -511,6 +547,7 @@ export default function SendsPage() {
                     <HistoryRecord
                       key={dispatch.id}
                       dispatch={dispatch}
+                      groupNames={groupNames}
                       onOpen={openDetails}
                     />
                   ))}
@@ -522,6 +559,7 @@ export default function SendsPage() {
                 <HistoryCard
                   key={dispatch.id}
                   dispatch={dispatch}
+                  groupNames={groupNames}
                   onOpen={openDetails}
                 />
               ))}

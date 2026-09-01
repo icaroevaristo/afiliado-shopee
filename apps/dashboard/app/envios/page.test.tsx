@@ -4,23 +4,26 @@ import { click, render } from '../../test/render';
 import type { WhatsAppDispatch } from '../../lib/api';
 import SendsPage from './page';
 
-const { listDispatchesMock, DashboardApiErrorMock } = vi.hoisted(() => ({
-  listDispatchesMock: vi.fn(),
-  DashboardApiErrorMock: class FakeDashboardApiError extends Error {
-    constructor(
-      message: string,
-      public readonly status?: number,
-      public readonly code?: string,
-    ) {
-      super(message);
-      this.name = 'DashboardApiError';
-    }
-  },
-}));
+const { listDispatchesMock, listWhatsAppGroupsMock, DashboardApiErrorMock } =
+  vi.hoisted(() => ({
+    listDispatchesMock: vi.fn(),
+    listWhatsAppGroupsMock: vi.fn(),
+    DashboardApiErrorMock: class FakeDashboardApiError extends Error {
+      constructor(
+        message: string,
+        public readonly status?: number,
+        public readonly code?: string,
+      ) {
+        super(message);
+        this.name = 'DashboardApiError';
+      }
+    },
+  }));
 
 vi.mock('../../lib/api', () => ({
   DashboardApiError: DashboardApiErrorMock,
   listDispatches: (...args: unknown[]) => listDispatchesMock(...args),
+  listWhatsAppGroups: (...args: unknown[]) => listWhatsAppGroupsMock(...args),
 }));
 
 const makeDispatch = (
@@ -48,15 +51,14 @@ const makeDispatch = (
   },
   destination: {
     id: 'group-1',
-    name: 'Grupo Casa',
     destination: 'destination-private',
-  },
+  } as unknown as WhatsAppDispatch['destination'],
   product: {
     id: 'product-1',
     nome: 'Produto com um nome suficientemente longo para testar duas linhas',
-    preco: 79.9,
+    preco: '79.90',
     urlImagem: 'https://example.com/product.jpg',
-  } as WhatsAppDispatch['product'],
+  } as unknown as NonNullable<WhatsAppDispatch['product']>,
   ...overrides,
 });
 
@@ -95,6 +97,20 @@ beforeEach(() => {
       sentAt: null,
       errorMessage: null,
     }),
+  ]);
+  listWhatsAppGroupsMock.mockReset().mockResolvedValue([
+    {
+      id: 'group-1',
+      name: 'Grupo Casa',
+      fingerprint: 'group-fingerprint',
+      memberCount: 12,
+      ownerIsParticipant: true,
+      active: true,
+      available: true,
+      discoveredAt: '2026-08-20T11:00:00.000Z',
+      lastSyncedAt: '2026-08-20T11:00:00.000Z',
+      updatedAt: '2026-08-20T11:00:00.000Z',
+    },
   ]);
 });
 
@@ -293,7 +309,10 @@ describe('SendsPage — Lote 7', () => {
       dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]):not([tabindex="-1"]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
       ),
-    );
+    ).filter((element) => {
+      const closedDetails = element.closest('details:not([open])');
+      return !closedDetails || element.matches('summary');
+    });
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     last.focus();
