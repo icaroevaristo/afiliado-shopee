@@ -1,30 +1,31 @@
 'use client';
 
 import { Eye, RefreshCw, Users } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { FormEvent, Suspense, useEffect, useMemo, useState } from 'react';
 import { EmptyState } from '../../components/empty-state';
 import { ErrorState } from '../../components/error-state';
+import { GroupsManagement } from '../../components/groups-management';
 import { LoadingState } from '../../components/loading-state';
-import { PageHeader } from '../../components/page-header';
-import { StatusBadge } from '../../components/status-badge';
 import { OperationalAdminPanel } from '../../components/operational-admin-panel';
+import { OpsPageHeading } from '../../components/ops-components';
+import { StatusBadge } from '../../components/status-badge';
+import { WhatsAppContextNav } from '../../components/whatsapp-context-nav';
 import {
   getDispatch,
   listDestinations,
   listDispatches,
-  listWhatsAppGroups,
   type DispatchFilters,
   type WhatsAppDestination,
   type WhatsAppDispatch,
   type WhatsAppDispatchStatus,
-  type WhatsAppGroup,
 } from '../../lib/api';
 import { formatDateTime, maskDestination } from '../../lib/format';
 
-export default function WhatsAppPage() {
+function WhatsAppsView() {
   const [destinations, setDestinations] = useState<WhatsAppDestination[]>([]);
   const [dispatches, setDispatches] = useState<WhatsAppDispatch[]>([]);
-  const [groups, setGroups] = useState<WhatsAppGroup[]>([]);
   const [dispatchFilters, setDispatchFilters] = useState<DispatchFilters>({
     status: '',
     destinationId: '',
@@ -35,20 +36,6 @@ export default function WhatsAppPage() {
   const [loading, setLoading] = useState(true);
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [groupsLoading, setGroupsLoading] = useState(true);
-  const [groupsError, setGroupsError] = useState<string | null>(null);
-
-  const loadGroups = async () => {
-    setGroupsLoading(true);
-    setGroupsError(null);
-    try {
-      setGroups(await listWhatsAppGroups());
-    } catch (err) {
-      setGroupsError(err instanceof Error ? err.message : 'Erro inesperado.');
-    } finally {
-      setGroupsLoading(false);
-    }
-  };
 
   const loadDestinations = async () => {
     setDestinations(await listDestinations());
@@ -72,7 +59,6 @@ export default function WhatsAppPage() {
 
   useEffect(() => {
     void load();
-    void loadGroups();
   }, []);
 
   const filteredDispatches = useMemo(() => dispatches, [dispatches]);
@@ -104,153 +90,23 @@ export default function WhatsAppPage() {
 
   return (
     <div className="grid gap-6">
-      <PageHeader
-        title="Números e grupos"
-        description="Administração segura de instâncias, grupos e assignments, com dispatches e envio manual preservados em seus fluxos próprios."
+      <OpsPageHeading
+        eyebrow="Números e operação"
+        title="WhatsApps"
+        description="Consulte instâncias, destinos individuais e o histórico técnico de dispatches."
       />
 
-      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        O dashboard administra somente estado operacional persistido permitido;
-        disponibilidade, health, próximo/último envio e blockers são derivados
-        pela API. Nenhum segredo ou payload de provider chega ao browser.
-      </div>
+      <OperationalAdminPanel showGroups={false} />
 
       {error ? <ErrorState message={error} onRetry={load} /> : null}
-
-      <OperationalAdminPanel />
-
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex items-start gap-3">
-          <Users className="h-5 w-5 text-orange-600" aria-hidden="true" />
-          <div>
-            <h2 className="font-semibold text-slate-950">Grupos</h2>
-            <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-              Metadados dos grupos descobertos pela instância conectada. Esta
-              tela não sincroniza, autoriza ou desautoriza destinos.
-            </p>
-          </div>
-        </div>
-
-        {groupsError ? (
-          <div className="mt-4">
-            <ErrorState
-              title="Não foi possível carregar os grupos"
-              message={groupsError}
-              onRetry={loadGroups}
-            />
-          </div>
-        ) : null}
-        {groupsLoading ? (
-          <div className="mt-4">
-            <LoadingState label="Carregando grupos" />
-          </div>
-        ) : null}
-        {!groupsLoading && !groupsError && groups.length === 0 ? (
-          <div className="mt-4">
-            <EmptyState
-              title="Nenhum grupo disponível"
-              description="Esta conta ainda não participa de nenhum grupo disponível."
-            />
-          </div>
-        ) : null}
-
-        {!groupsLoading && groups.length > 0 ? (
-          <>
-            <div className="mt-4 hidden overflow-hidden rounded-lg border border-slate-200 md:block">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
-                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Grupo</th>
-                    <th className="px-4 py-3">Membros</th>
-                    <th className="px-4 py-3">Disponibilidade</th>
-                    <th className="px-4 py-3">Autorização</th>
-                    <th className="px-4 py-3">Última sincronização</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {groups.map((group) => (
-                    <tr key={group.id}>
-                      <td className="px-4 py-3">
-                        <p className="font-medium text-slate-950">
-                          {group.name}
-                        </p>
-                        <p className="mt-1 font-mono text-xs text-slate-500">
-                          {group.fingerprint}
-                        </p>
-                      </td>
-                      <td className="px-4 py-3 text-slate-700">
-                        {group.memberCount ?? 'Não informado'}
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge tone={group.available ? 'ok' : 'error'}>
-                          {group.available ? 'Disponível' : 'Indisponível'}
-                        </StatusBadge>
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge tone={group.active ? 'ok' : 'neutral'}>
-                          {group.active ? 'Autorizado' : 'Não autorizado'}
-                        </StatusBadge>
-                      </td>
-                      <td className="px-4 py-3 text-slate-700">
-                        {formatDateTime(group.lastSyncedAt)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="mt-4 grid gap-3 md:hidden">
-              {groups.map((group) => (
-                <article
-                  key={group.id}
-                  className="rounded-lg border border-slate-200 p-4"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="font-medium text-slate-950">
-                        {group.name}
-                      </h3>
-                      <p className="mt-1 font-mono text-xs text-slate-500">
-                        {group.fingerprint}
-                      </p>
-                    </div>
-                    <StatusBadge tone={group.available ? 'ok' : 'error'}>
-                      {group.available ? 'Disponível' : 'Indisponível'}
-                    </StatusBadge>
-                  </div>
-                  <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                    <div>
-                      <dt className="text-slate-500">Membros</dt>
-                      <dd className="mt-1 font-medium text-slate-950">
-                        {group.memberCount ?? 'Não informado'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-slate-500">Autorização</dt>
-                      <dd className="mt-1 font-medium text-slate-950">
-                        {group.active ? 'Autorizado' : 'Não autorizado'}
-                      </dd>
-                    </div>
-                    <div className="col-span-2">
-                      <dt className="text-slate-500">Última sincronização</dt>
-                      <dd className="mt-1 font-medium text-slate-950">
-                        {formatDateTime(group.lastSyncedAt)}
-                      </dd>
-                    </div>
-                  </dl>
-                </article>
-              ))}
-            </div>
-          </>
-        ) : null}
-      </section>
 
       <section className="rounded-lg border border-slate-200 bg-white p-5">
         <div className="flex items-start gap-3">
           <Users className="h-5 w-5 text-slate-500" aria-hidden="true" />
           <div>
-            <h2 className="font-semibold text-slate-950">Destinos</h2>
+            <h2 className="font-semibold text-slate-950">
+              Destinos individuais
+            </h2>
             <p className="mt-1 text-sm text-slate-600">
               Destinos persistidos e mascarados para consulta operacional.
             </p>
@@ -306,14 +162,14 @@ export default function WhatsAppPage() {
           <div>
             <h2 className="font-semibold text-slate-950">Dispatches</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Histórico de entregas; nenhuma ação de reprocessamento é
-              oferecida.
+              Histórico técnico de entregas; nenhuma ação de reprocessamento é
+              oferecida aqui.
             </p>
           </div>
           <button
             type="button"
             onClick={() => void load()}
-            className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
+            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             Atualizar leituras
@@ -375,7 +231,7 @@ export default function WhatsAppPage() {
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60 md:self-end"
+            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60 md:self-end"
           >
             Filtrar
           </button>
@@ -437,7 +293,7 @@ export default function WhatsAppPage() {
                         type="button"
                         onClick={() => void openDispatch(dispatch.id)}
                         disabled={loadingDetailId === dispatch.id}
-                        className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <Eye className="h-4 w-4" aria-hidden="true" />
                         {loadingDetailId === dispatch.id ? 'Abrindo...' : 'Ver'}
@@ -474,7 +330,7 @@ export default function WhatsAppPage() {
               <button
                 type="button"
                 onClick={() => setSelectedDispatch(null)}
-                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                className="min-h-[44px] rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
               >
                 Fechar
               </button>
@@ -525,5 +381,44 @@ export default function WhatsAppPage() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function WhatsAppPageContent() {
+  const searchParams = useSearchParams();
+  const view =
+    searchParams.get('view') === 'whatsapps' ? 'whatsapps' : 'groups';
+
+  return (
+    <div className="grid gap-6">
+      <WhatsAppContextNav active={view} />
+      {view === 'groups' ? <GroupsManagement /> : <WhatsAppsView />}
+      {view === 'groups' ? (
+        <p className="text-sm text-slate-600">
+          Precisa consultar entregas anteriores?{' '}
+          <Link
+            className="font-semibold text-orange-700 underline"
+            href="/envios"
+          >
+            Ver histórico de envios
+          </Link>
+          .
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export default function WhatsAppPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="ops-state" aria-live="polite">
+          Carregando área de WhatsApp…
+        </div>
+      }
+    >
+      <WhatsAppPageContent />
+    </Suspense>
   );
 }

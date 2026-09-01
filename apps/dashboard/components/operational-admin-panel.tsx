@@ -44,7 +44,11 @@ const operationalErrorMessage = (cause: unknown, fallback: string) => {
   return cause.message || fallback;
 };
 
-export function OperationalAdminPanel() {
+export function OperationalAdminPanel({
+  showGroups = true,
+}: {
+  showGroups?: boolean;
+}) {
   const [overview, setOverview] = useState<OperationalAdmin | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -220,12 +224,14 @@ export function OperationalAdminPanel() {
             id="operational-admin-title"
             className="mt-1 text-lg font-semibold text-slate-950"
           >
-            Instâncias, grupos e assignments
+            {showGroups
+              ? 'Instâncias, grupos e assignments'
+              : 'Instâncias operacionais'}
           </h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-            Controles administrativos passam pela API protegida. Health, próximo
-            envio, último envio e blockers são derivados; nenhuma credencial é
-            exibida.
+            {showGroups
+              ? 'Controles administrativos passam pela API protegida. Health, próximo envio, último envio e blockers são derivados; nenhuma credencial é exibida.'
+              : 'Controles do número passam pela API protegida. Health, próximo envio, último envio e blockers são derivados; nenhuma credencial é exibida.'}
           </p>
         </div>
         <button
@@ -421,6 +427,7 @@ export function OperationalAdminPanel() {
             })}
           </div>
 
+          {showGroups && (
           <div className="grid gap-3">
             <div>
               <h3 className="font-semibold text-slate-950">
@@ -613,6 +620,7 @@ export function OperationalAdminPanel() {
               ))
             )}
           </div>
+          )}
 
           <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
             <p className="font-medium text-slate-950">
