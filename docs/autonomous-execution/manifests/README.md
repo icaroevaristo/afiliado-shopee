@@ -1,16 +1,17 @@
 # Diretório de Manifestos
 
-Cada execução futura usa uma pasta exclusiva:
+Cada execução futura usa uma pasta exclusiva no armazenamento local ignorado:
 
 ```text
-docs/autonomous-execution/manifests/<RUN_ID>/
+.runtime/autonomous-execution/manifests/<RUN_ID>/
 ```
 
 O `<RUN_ID>` deve ser único, estável e não conter segredo. Use os doze arquivos
 definidos em `../EXECUTION_MANIFEST_PROTOCOL.md` para novas execuções. Não
 reutilize uma pasta de uma execução anterior nem sobrescreva evidência fechada.
 
-O conjunto é:
+O conjunto fechado é exatamente (sem arquivo extra, alias, duplicata ou
+subdiretório):
 
 ```text
 RUN_MANIFEST.json
@@ -27,6 +28,11 @@ FINAL_MANIFEST.json
 HANDOFF_MANIFEST.md
 ```
 
+`EXACT_MANIFEST_FILE_COUNT=12` e `EXTRA_MANIFEST_FILES=FORBIDDEN`. Um arquivo
+ausente ou extra deixa o run `BLOCKED`/`UNVERIFIED`; artifacts auxiliares devem
+ser referenciados externamente pelo `EVIDENCE_INDEX.json`, não adicionados à
+pasta do run.
+
 Regras rápidas:
 
 - preencher `BASELINE.json` antes de qualquer mutation;
@@ -42,5 +48,6 @@ Regras rápidas:
 - fechar `CHANGE_MANIFEST.json`, `GIT_MANIFEST.json`, `FINAL_MANIFEST.json` e
   `HANDOFF_MANIFEST.md`, com revisão independente quando exigida.
 
-Este diretório contém o contrato e não uma execução operacional. A ausência de
-uma pasta `<RUN_ID>` não prova readiness.
+`docs/autonomous-execution/manifests/` contém somente este contrato e não uma
+execução operacional. A ausência de uma pasta `<RUN_ID>` em `.runtime/` não
+prova readiness.

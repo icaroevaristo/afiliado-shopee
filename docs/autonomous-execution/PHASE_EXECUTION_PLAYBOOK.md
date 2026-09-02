@@ -3,6 +3,8 @@
 **Status:** `LIVE_CANONICAL`
 **Owner de governança:** `SOL_SUPERVISOR` (`READ_ONLY=true`)
 **Único mutator:** `LUNA_MAX` (`SINGLE_MUTATOR=true`)
+**Escrita de evidência:** `SOL_SUPERVISOR` somente em
+`.runtime/autonomous-execution/manifests/<RUN_ID>/` (`SOL_MANIFEST_WRITE_ALLOWED=true`)
 
 Este playbook é o lifecycle padrão para as fases R1–R9 do
 `OPERATIONAL_READINESS_ROADMAP.md`. Ele organiza a execução, não concede
@@ -15,13 +17,18 @@ task continuam superiores a este documento.
 - Um único `SOL_SUPERVISOR` congela scope, baseline, findings, gates e decisão.
 - `LUNA_MAX` é o único agente que escreve na candidate branch; reviewers e
   especialistas são READ_ONLY.
-- Cada run usa os doze arquivos de
-  `EXECUTION_MANIFEST_PROTOCOL.md`. Nenhum manifesto fechado é sobrescrito.
+- Cada run usa exatamente os doze arquivos de
+  `EXECUTION_MANIFEST_PROTOCOL.md`; nenhum extra é permitido e nenhum
+  manifesto fechado é sobrescrito.
+- `SOL_SUPERVISOR_READ_ONLY=true` significa sem escrita na candidate, runtime,
+  banco, Redis ou documentação versionada. A única exceção delimitada é a
+  criação/atualização dos doze artifacts no path de execução local/ignorado;
+  isso é escrita de evidência, não mutation da candidate.
 - Antes de qualquer mutation, registrar scope/autorização e criar
   `RUN_MANIFEST.json` e `BASELINE.json`.
-- Antes da revisão final, registrar `CANDIDATE_HEAD`, `CANDIDATE_TREE` e
-  `CANDIDATE_FROZEN=true`. Toda revisão registra `reviewedHead` e
-  `reviewedTree`.
+- Antes da revisão final, SOL atesta e o run-artifact store registra
+  `CANDIDATE_HEAD`, `CANDIDATE_TREE` e `CANDIDATE_FROZEN=true`. Toda revisão
+  registra `reviewedHead` e `reviewedTree`.
 - Mutation depois do freeze invalida o candidato e as evidências afetadas;
   exige novo freeze e nova revisão. `CLOSED_COMPONENT_REOPEN_REQUIRES_CAUSAL_FINDING=true`.
 - `AUTO_CONTINUE=true` permite a próxima ação já autorizada, dentro do scope,
@@ -315,8 +322,8 @@ Diff final provisório, ledger, manifestos, evidências e candidato a congelar.
 
 ### ALLOWED_ACTIONS
 
-O SOL_SUPERVISOR registra `CANDIDATE_HEAD`, `CANDIDATE_TREE` e
-`CANDIDATE_FROZEN=true`; Reviewer A audita segurança, escopo, contratos e
+O SOL_SUPERVISOR atesta o snapshot e registra os campos no run-artifact store
+permitido; Reviewer A audita segurança, escopo, contratos e
 testes somente nesse snapshot.
 
 ### PROHIBITED_ACTIONS
@@ -442,8 +449,12 @@ manifestos e evidence index.
 
 Tentar provar que a candidate não deve passar; procurar mismatch de SHA/tree,
 scope creep, segundo mutator, boundary perigoso, finding desaparecido, ambiente
-inseguro ou manifestos divergentes; retornar somente `SHIP` ou `FIX_FIRST` com
-findings.
+inseguro ou manifestos divergentes; retornar uma decisão normal `SHIP` ou
+`FIX_FIRST`, ou uma decisão de recovery `BLOCKED` ou `HUMAN_REQUIRED` quando a
+revisão não puder ser concluída com segurança. Esses quatro estados são
+mutuamente exclusivos e devem ser registrados como `decision`, com
+`decisionClass=normal` para os dois primeiros e `decisionClass=recovery` para os
+dois últimos.
 
 ### PROHIBITED_ACTIONS
 
@@ -453,11 +464,14 @@ provider, SEND, scheduler, unpause, migration ou produção.
 ### GATES
 
 Instância independente; `reviewedHead`/`reviewedTree` exatos; contraexemplos
-tentados; P0/P1 não permanecem sem caminho de correção.
+tentados; P0/P1 não permanecem sem caminho de correção quando a decisão é
+`SHIP`; falta de evidência ou mismatch exige `BLOCKED`/`HUMAN_REQUIRED`, nunca
+`SHIP`.
 
 ### EVIDENCE
 
-Relatório adversarial, decisão `SHIP`/`FIX_FIRST`, head/tree, findings,
+Relatório adversarial, decisão `SHIP`/`FIX_FIRST` ou recovery
+`BLOCKED`/`HUMAN_REQUIRED`, `decisionClass`, head/tree, findings,
 redactions e `EVIDENCE_ID`.
 
 ### RECOVERY
@@ -467,8 +481,10 @@ redactions e `EVIDENCE_ID`.
 
 ### EXIT_CRITERIA
 
-Adversarial conclui `SHIP` sobre o candidato exato e E10 é autorizado, ou o
-fluxo retorna a E8 com o finding preservado.
+Adversarial conclui `SHIP` sobre o candidato exato e E10 é autorizado; ou
+conclui `FIX_FIRST`, `BLOCKED` ou `HUMAN_REQUIRED` e o fluxo retorna a E8/E10
+com o finding ou impedimento preservado. Nenhum dos quatro estados é convertido
+em outro por conveniência.
 
 ## E10 — SOL_RECONCILIATION
 

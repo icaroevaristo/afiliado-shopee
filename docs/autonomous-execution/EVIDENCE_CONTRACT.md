@@ -66,8 +66,9 @@ caso o gate permanece `NOT_RUN` ou `BLOCKED`, nunca ganha um sexto estado.
 
 ## Candidate freeze
 
-Antes da revisão final, o `SOL_SUPERVISOR` registra um digest verificável da árvore
-Git junto ao SHA:
+Antes da revisão final, o `SOL_SUPERVISOR` calcula e atesta um digest verificável
+da árvore Git junto ao SHA; o registro é escrito somente no armazenamento de
+evidência local/ignorado `.runtime/autonomous-execution/manifests/<RUN_ID>/`:
 
 ```text
 CANDIDATE_HEAD=<SHA>
@@ -76,7 +77,10 @@ CANDIDATE_FROZEN=true
 ```
 
 Cada `REVIEWER_A`, `REVIEWER_B`, adversarial, ship gate e Sol reconciliation
-declara `reviewedHead` e `reviewedTree`. Uma mutation depois do freeze exige
+declara `reviewedHead` e `reviewedTree`; no `RUN_MANIFEST`/`FINAL_MANIFEST`, os
+pares são `reviewAHead`/`reviewATree`, `reviewBHead`/`reviewBTree`,
+`adversarialHead`/`adversarialTree` e
+`solReconciliationHead`/`solReconciliationTree`. Uma mutation depois do freeze exige
 `NEW_CANDIDATE_REQUIRED=true`, lista de `invalidatedEvidenceIds` e nova revisão;
 nenhuma aprovação de snapshot anterior permanece válida.
 
@@ -111,6 +115,7 @@ for relevante.
 | E30-OP-001 | operational | não executado nesta fase; readiness/queues/providers atuais são UNKNOWN |
 | E30-DOC-008 | validation | correção documental dos seis P1s, doze manifestos, papéis, freeze SHA/tree e playbook E0–E10 revalidados |
 | E30-SKILL-002 | skills | paths reais das skills aplicadas nesta correção foram verificados antes da mutation |
+| E30-DOC-009 | validation | pacote docs-only completo revalidado após o FIX_FIRST: baseline/escopo/hierarquia, schema fechado dos doze manifestos, pares SHA/tree, Sol/Luna, R5 e estados normal/recovery do E9 |
 
 Esta tabela é apenas um catálogo sanitizado dos IDs desta arquitetura; não é
 um `EVIDENCE_INDEX.json` completo. Cada execução futura deve registrar, para

@@ -100,6 +100,10 @@ um candidato congelado:
 | F30-P1-04 | P1 | FIXED | supervisor e mutator não estavam separados nominalmente | E30-DOC-008 | LUNA_MAX | roles e READ_ONLY/single-mutator são explícitos |
 | F30-P1-05 | P1 | FIXED | aprovação não estava vinculada a candidate SHA/tree | E30-DOC-008 | LUNA_MAX | mutation pós-freeze invalida review/evidence |
 | F30-P1-06 | P1 | FIXED | lifecycle E0–E10 não tinha playbook LIVE_CANONICAL | E30-DOC-008 | LUNA_MAX | playbook possui os oito campos em cada etapa |
+| F30-P1-07 | P1 | FIXED | conjunto fechado e schema mínimo dos manifestos não eram enforceáveis | E30-REDTEAM-002; E30-DOC-009 | LUNA_MAX | exatamente doze nomes, campos mínimos por arquivo e ausência de extras |
+| F30-P1-08 | P1 | FIXED | freeze e revisões não carregavam todos os pares SHA/tree nos templates | E30-REDTEAM-002; E30-DOC-009 | LUNA_MAX | GIT_MANIFEST e cada revisão têm tree obrigatório pareado ao head |
+| F30-P1-09 | P1 | FIXED | escopo READ_ONLY do Sol conflitava com escrita de manifestos/freeze | E30-REDTEAM-002; E30-DOC-009 | LUNA_MAX | Sol só escreve artifacts no run store ignorado e não edita candidate |
+| F30-P2-01 | P2 | FIXED | saída do E9 não distinguia decisão normal de recovery | E30-REDTEAM-002; E30-DOC-009 | LUNA_MAX | quatro estados e decisionClass explícitos |
 
 `FIXED` indica que a alteração causal foi aplicada, mas ainda aguarda review e
 ship gate. Após `E30-REDTEAM-002`, `E30-SOL-002` e `E30-SHIP-002`, cada item pode

@@ -8,7 +8,7 @@ skill carregada sem path real.
 
 | Papel | Estado | Regra operacional |
 | --- | --- | --- |
-| `SOL_SUPERVISOR` | `READ_ONLY=true` | congela scope/candidato, valida gates, reconcilia estado e decide SHIP/FIX_FIRST; não edita |
+| `SOL_SUPERVISOR` | `READ_ONLY=true; SOL_MANIFEST_WRITE_ALLOWED=true` | congela scope/candidato, valida gates, reconcilia estado e decide SHIP/FIX_FIRST; não edita candidate; só escreve os doze artifacts no run store ignorado |
 | `LUNA_MAX` | `SINGLE_MUTATOR=true` | único agente que implementa, testa causalmente e prepara a candidate |
 | `REVIEWER_A` | `READ_ONLY=true` | revisa somente o `CANDIDATE_HEAD`/`CANDIDATE_TREE` recebido |
 | `REVIEWER_B` | `READ_ONLY=true` | revisa somente o snapshot exato recebido |

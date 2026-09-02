@@ -1,7 +1,8 @@
 # Execution Manifest Protocol
 
 **Status:** `LIVE_CANONICAL`
-**Diretório:** `docs/autonomous-execution/manifests/<RUN_ID>/`
+**Especificação:** `docs/autonomous-execution/manifests/README.md`
+**Diretório de execução:** `.runtime/autonomous-execution/manifests/<RUN_ID>/`
 **Schema:** `2` para novas execuções; schema `1` permanece histórico e não é
 reescrito.
 
@@ -11,7 +12,7 @@ manifesto não autoriza provider, migration, volume ou remoção de pause.
 
 ## Arquivos obrigatórios
 
-Cada `<RUN_ID>` contém:
+Cada `<RUN_ID>` no diretório de execução contém:
 
 ```text
 RUN_MANIFEST.json
@@ -28,13 +29,55 @@ FINAL_MANIFEST.json
 HANDOFF_MANIFEST.md
 ```
 
-O contrato de diretório está resumido em `manifests/README.md`.
+O diretório `.runtime/` é local/ignorado e não faz parte do candidate Git. O
+contrato está resumido em `manifests/README.md`; não se deve materializar uma
+execução dentro de `docs/autonomous-execution/manifests/`, que contém apenas a
+documentação deste contrato.
+
+### Conjunto fechado e schema mínimo
+
+Para `schemaVersion: 2`, o diretório de uma execução é um conjunto fechado:
+
+```text
+EXACT_MANIFEST_FILE_COUNT=12
+EXACT_MANIFEST_FILE_SET_VERSION=2
+EXTRA_MANIFEST_FILES=FORBIDDEN
+EXTRA_MANIFEST_DIRECTORIES=FORBIDDEN
+```
+
+Os únicos nomes permitidos são exatamente os do bloco acima, sem alias,
+duplicata ou arquivo auxiliar dentro de `<RUN_ID>`. Logs e artifacts grandes
+ficam fora do diretório e são referenciados por `artifactPath`; nunca se cria um
+`THIRD_MANIFEST` para suprir um campo ausente. Um arquivo ausente, extra,
+renomeado ou com tipo diferente torna o run `BLOCKED`/`UNVERIFIED`.
 
 ## Forma mínima dos JSON
 
 Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`, `updatedAt`,
 `status` e `evidenceIds` quando aplicável. Campos desconhecidos usam `null` ou
 `UNKNOWN`; nunca são inventados.
+
+O schema mínimo obrigatório por arquivo é:
+
+| Arquivo | Campos mínimos obrigatórios |
+| --- | --- |
+| `RUN_MANIFEST.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `mission`, `scope`, `owner`, `branch`, `head`, `status`, `authorizedActions`, `prohibitedActions`, `findingIds`, `gateIds`, `evidenceIds`, `supervisor`, `singleMutator`, `reviewerA`, `reviewerB`, `finalAdversarial`, `candidateHead`, `candidateTree`, `candidateFrozen`, `reviewAHead`, `reviewATree`, `reviewAVerdict`, `reviewBHead`, `reviewBTree`, `reviewBVerdict`, `adversarialHead`, `adversarialTree`, `adversarialVerdict`, `solReconciliationHead`, `solReconciliationTree`, `solReconciliationVerdict`, `mutationsAfterFreeze`, `invalidatedEvidenceIds` |
+| `BASELINE.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `repository`, `origin`, `expectedOriginMain`, `observedHead`, `branch`, `ahead`, `behind`, `worktreeClean`, `environmentClass`, `evidenceIds` |
+| `ENVIRONMENT.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `os`, `runtimeVersions`, `timezone`, `profile`, `envPresence`, `ports`, `services`, `secretsPrinted`, `evidenceIds` |
+| `FINDINGS.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `findings`, `evidenceIds` |
+| `GATES.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `gates`, `evidenceIds` |
+| `EVIDENCE_INDEX.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `entries`, `evidenceIds`; cada entry de review também exige `reviewedHead`, `reviewedTree`, `candidateHead` e `candidateTree` |
+| `EXTERNAL_EFFECTS.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `effects`, `evidenceIds` |
+| `MONTHLY_COST_LEDGER.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `entries`, `evidenceIds` |
+| `CHANGE_MANIFEST.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `filesChanged`, `filesAdded`, `filesDeleted`, `componentsTouched`, `schemaChanged`, `migrationAdded`, `apiContractChanged`, `schedulerChanged`, `sendBoundaryChanged`, `documentationChanged`, `scopeDeviations`, `evidenceIds` |
+| `GIT_MANIFEST.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `originMainAtStart`, `originMainAtEnd`, `branch`, `baseSha`, `headAtStart`, `headSha`, `tree`, `ahead`, `behind`, `commit`, `remoteHead`, `worktreeClean`, `prCreated`, `prNumber`, `mergePerformed`, `mergeCommit`, `evidenceIds` |
+| `FINAL_MANIFEST.json` | `schemaVersion`, `runId`, `createdAt`, `updatedAt`, `status`, `statusFinal`, `phaseId`, `objective`, `decision`, `decisionClass`, `p0`, `p1`, `p2`, `blockingFindings`, `requiredGatesPassed`, `requiredGatesFailed`, `requiredGatesBlocked`, `candidateHead`, `candidateTree`, `candidateFrozen`, `reviewAHead`, `reviewATree`, `reviewAVerdict`, `reviewBHead`, `reviewBTree`, `reviewBVerdict`, `adversarialHead`, `adversarialTree`, `adversarialVerdict`, `solReconciliationHead`, `solReconciliationTree`, `solReconciliationVerdict`, `mutationsAfterFreeze`, `invalidatedEvidenceIds`, `externalEffectsSafe`, `scopeCompliant`, `documentationCurrent`, `readyForGithubReview`, `readyForNextPhase`, `dailyUseReady`, `humanRequiredReasons`, `nextRecommendedPhase`, `nextRecommendedAction`, `evidenceIds` |
+| `HANDOFF_MANIFEST.md` | headings `RUN_ID`, `STATUS_FINAL`, `DECISION`, `BASELINE`, `FINDINGS`, `GATES`, `EFFECTS`, `RECOVERY`, `BLOCKERS`, `NEXT`, `CANDIDATE_FREEZE`, `REVIEWS`, `FILES` e declaração de ausência de secrets |
+
+Os campos da tabela são obrigatórios mesmo quando o valor é `null`, `[]` ou
+`UNKNOWN`. O validador rejeita um schema 2 que omita um campo, acrescente um
+arquivo ao conjunto fechado ou use um campo de revisão sem seu par
+`reviewedHead`/`reviewedTree`.
 
 ### `RUN_MANIFEST.json`
 
@@ -64,12 +107,16 @@ Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`
   "candidateTree": null,
   "candidateFrozen": false,
   "reviewAHead": null,
+  "reviewATree": null,
   "reviewAVerdict": null,
   "reviewBHead": null,
+  "reviewBTree": null,
   "reviewBVerdict": null,
   "adversarialHead": null,
+  "adversarialTree": null,
   "adversarialVerdict": null,
   "solReconciliationHead": null,
+  "solReconciliationTree": null,
   "solReconciliationVerdict": null,
   "mutationsAfterFreeze": [],
   "invalidatedEvidenceIds": []
@@ -149,6 +196,7 @@ Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`
   "baseSha": null,
   "headAtStart": null,
   "headSha": null,
+  "tree": null,
   "ahead": null,
   "behind": null,
   "commit": null,
@@ -175,6 +223,7 @@ Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`
   "phaseId": "R1",
   "objective": "texto curto",
   "decision": "SHIP|FIX_FIRST|BLOCKED|HUMAN_REQUIRED",
+  "decisionClass": "normal|recovery",
   "p0": 0,
   "p1": 0,
   "p2": 0,
@@ -186,12 +235,16 @@ Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`
   "candidateTree": null,
   "candidateFrozen": false,
   "reviewAHead": null,
+  "reviewATree": null,
   "reviewAVerdict": null,
   "reviewBHead": null,
+  "reviewBTree": null,
   "reviewBVerdict": null,
   "adversarialHead": null,
+  "adversarialTree": null,
   "adversarialVerdict": null,
   "solReconciliationHead": null,
+  "solReconciliationTree": null,
   "solReconciliationVerdict": null,
   "mutationsAfterFreeze": [],
   "invalidatedEvidenceIds": [],
@@ -219,9 +272,13 @@ Todos os JSON de novas execuções têm `schemaVersion: 2`, `runId`, `createdAt`
 Antes de `REVIEWER_A`, registrar `candidateHead`, `candidateTree` e
 `candidateFrozen=true`. `candidateTree` é um digest verificável da árvore Git no
 mesmo snapshot do `candidateHead`; não é um nome de diretório. Cada reviewer,
-adversarial, ship gate e reconciliação registra seu próprio `reviewedHead` e
-`reviewedTree` nos campos correspondentes do `RUN_MANIFEST`/`FINAL_MANIFEST` e
-no `EVIDENCE_INDEX`.
+adversarial, ship gate e reconciliação registra seu próprio par
+`reviewedHead`/`reviewedTree` nos campos correspondentes do
+`RUN_MANIFEST`/`FINAL_MANIFEST` e no `EVIDENCE_INDEX`. Os campos concretos são
+`reviewAHead`/`reviewATree`, `reviewBHead`/`reviewBTree`,
+`adversarialHead`/`adversarialTree` e
+`solReconciliationHead`/`solReconciliationTree`; o `GIT_MANIFEST` também
+carrega o `tree` correspondente a `headSha`.
 
 Qualquer mutation depois do freeze zera `candidateFrozen`, adiciona a mutation a
 `mutationsAfterFreeze`, calcula `invalidatedEvidenceIds` e exige novo candidato.

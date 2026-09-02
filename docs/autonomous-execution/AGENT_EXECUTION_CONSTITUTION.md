@@ -14,8 +14,27 @@ segurança, o `AGENTS.md`, o usuário ou os contratos do código.
 
 O SOL_SUPERVISOR é o Orchestrator/integrador de governança: mantém o estado da
 task, a branch candidate, o finding ledger, os gates e a decisão final, mas não
-edita arquivos. A LUNA_MAX é o único agente que pode mutar a candidate branch.
-Especialistas e reviewers podem analisar em paralelo, mas são READ_ONLY.
+edita a candidate. A LUNA_MAX é o único agente que pode mutar a candidate
+branch. Especialistas e reviewers podem analisar em paralelo, mas são
+READ_ONLY.
+
+Há uma distinção explícita entre candidato e evidência de execução:
+
+```text
+SOL_SUPERVISOR_READ_ONLY=true
+SOL_CANDIDATE_WRITE=false
+SOL_MANIFEST_WRITE_ALLOWED=true
+SOL_MANIFEST_WRITE_PATH=.runtime/autonomous-execution/manifests/<RUN_ID>/**
+SINGLE_MUTATOR=LUNA_MAX
+```
+
+`SOL_MANIFEST_WRITE_ALLOWED` autoriza somente criar/atualizar os doze arquivos
+da execução no caminho local/ignorado acima, registrar o freeze e anexar
+evidência. Isso não autoriza escrever código, documentação candidata,
+configuração, banco, Redis, volume ou runtime. Se os manifestos precisarem ser
+versionados por uma task, `LUNA_MAX` faz essa mutation na candidate e o SOL
+apenas fornece/valida os valores; a escrita de evidência nunca cria um segundo
+mutator.
 Nunca existem dois mutators sobre o mesmo componente stateful.
 
 ```text
@@ -108,7 +127,8 @@ regressão proporcional e revisão independente. Para banco/runtime:
 
 ## 5.1 Candidate freeze e validade da revisão
 
-Antes do ciclo de revisão final, o SOL_SUPERVISOR registra:
+Antes do ciclo de revisão final, o SOL_SUPERVISOR calcula e atesta, e o
+manifest writer registra no armazenamento de evidência permitido:
 
 ```text
 CANDIDATE_HEAD=<SHA>
