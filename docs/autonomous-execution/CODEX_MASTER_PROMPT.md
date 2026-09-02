@@ -45,7 +45,7 @@ disponíveis e registre paths reais.
     etapa estiver autorizada, dentro do scope, sem efeito proibido e com gates
     conhecidos, registre checkpoint/manifest e continue sem perguntar “posso
     continuar?”. Se a autorização terminou, encerre como
-    `READY_FOR_NEXT_PHASE` em `decision`/`nextRecommendedAction` (com
+    `READY_FOR_NEXT_PHASE` em `nextRecommendedAction` (com
     `readyForNextPhase=true` no manifesto); não amplie o escopo.
 12. Antes da revisão final, Sol calcula/atesta e o run-artifact store registra
     `CANDIDATE_HEAD`, `CANDIDATE_TREE` e `CANDIDATE_FROZEN=true`. Toda revisão

@@ -92,8 +92,8 @@ independentes seguras, mas o bloqueio deve permanecer visível no ledger.
 O Orchestrator não deve parar entre fases/etapas apenas para relatar progresso.
 Quando a próxima etapa já estiver autorizada, dentro do scope e sem efeito
 proibido, registra checkpoint/manifest e continua. Se a autorização abranger
-somente uma fase, encerra como `READY_FOR_NEXT_PHASE` no handoff/decision, sem
-ampliar o escopo.
+somente uma fase, encerra com `readyForNextPhase=true` e
+`nextRecommendedAction=READY_FOR_NEXT_PHASE` no handoff, sem ampliar o escopo.
 
 ## 4. Gatilhos de HUMAN_REQUIRED
 

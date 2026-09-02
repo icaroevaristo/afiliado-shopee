@@ -36,7 +36,8 @@ task continuam superiores a este documento.
   de código reversível por Git. Não concede autorização nova.
 - **NÃO PARE ENTRE FASES/ETAPAS APENAS PARA RELATAR PROGRESSO.** Registre o
   checkpoint e continue quando a próxima etapa estiver autorizada e segura. Se
-  a autorização acabou, encerre como `READY_FOR_NEXT_PHASE`.
+  a autorização acabou, encerre com `readyForNextPhase=true` e
+  `nextRecommendedAction=READY_FOR_NEXT_PHASE`.
 - `HUMAN_REQUIRED`, `BLOCKED` e `UNKNOWN` preservam lacunas; não são convertidos
   em PASS por conveniência.
 
@@ -526,6 +527,6 @@ manifesto e não liberar a próxima decisão.
 
 ### EXIT_CRITERIA
 
-Candidato reconciliado e handoff fechado; `READY_FOR_NEXT_PHASE` (em
-`decision`/`nextRecommendedAction`, com `readyForNextPhase=true`) ou
+Candidato reconciliado e handoff fechado; `READY_FOR_NEXT_PHASE` somente em
+`nextRecommendedAction` com `readyForNextPhase=true`, ou
 `READY_FOR_GITHUB_REVIEW` somente com evidência e autorização compatíveis.

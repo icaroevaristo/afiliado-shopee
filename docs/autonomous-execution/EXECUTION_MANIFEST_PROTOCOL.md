@@ -263,8 +263,10 @@ arquivo ao conjunto fechado ou use um campo de revisão sem seu par
 
 `statusFinal` só pode ser `READY_FOR_GITHUB_REVIEW`, `DONE_NO_GIT_CHANGE`,
 `BLOCKED`, `HUMAN_REQUIRED` ou `FAILED_VALIDATION`.
-`READY_FOR_NEXT_PHASE` é uma decisão de handoff representada em `decision` ou
-`nextRecommendedAction`, com `readyForNextPhase=true`; não é um sexto
+`decision` só aceita `SHIP`, `FIX_FIRST`, `BLOCKED` ou `HUMAN_REQUIRED`, com
+`decisionClass=normal|recovery`. `READY_FOR_NEXT_PHASE` é somente uma decisão
+de handoff em `nextRecommendedAction`, acompanhada de
+`readyForNextPhase=true`; não é um quinto valor de `decision` nem um sexto
 `statusFinal`.
 
 ### Candidate freeze e SHA-bound review
