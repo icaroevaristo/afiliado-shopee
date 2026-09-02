@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EvolutionApiGroupDirectoryProvider } from './evolution-api-group-directory-provider';
 import { EvolutionGroupSendGuard } from './evolution-group-send-guard';
 import { EvolutionApiWhatsAppProvider } from './evolution-api-whatsapp-provider';
+import { createWhatsAppProvider } from './whatsapp-provider-factory';
 import {
   fingerprintWhatsAppGroupId,
   isWhatsAppGroupId,
@@ -189,6 +190,79 @@ describe('identidade segura de grupos', () => {
 });
 
 describe('EvolutionGroupSendGuard', () => {
+  it('bloqueia grupo quando a allowlist de grupos esta vazia', async () => {
+    const httpClient = vi.fn(async () =>
+      response({ key: { id: 'message-not-allowed' } }),
+    );
+    const provider = createWhatsAppProvider(
+      {
+        WHATSAPP_PROVIDER: 'evolution',
+        EVOLUTION_API_URL: 'http://localhost:8080',
+        EVOLUTION_API_KEY: API_KEY,
+        EVOLUTION_INSTANCE_NAME: 'test-instance',
+        EVOLUTION_SAFE_MODE: true,
+        EVOLUTION_ALLOWED_DESTINATIONS: '',
+        EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
+        WHATSAPP_GROUP_SEND_ENABLED: true,
+        WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+      },
+      { httpClient },
+    );
+
+    await expect(
+      provider.sendMessage({
+        destination: GROUP_ID,
+        destinationType: 'GROUP',
+        message: 'Mensagem bloqueada',
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_GROUP_DESTINATION_BLOCKED',
+      deliveryMayHaveStarted: false,
+    });
+    expect(httpClient).not.toHaveBeenCalled();
+  });
+
+  it('aceita allowlist de JID de grupo e bloqueia outro grupo antes do HTTP', async () => {
+    const httpClient = vi.fn(async () =>
+      response({ key: { id: 'message-allowlisted-group' } }),
+    );
+    const provider = createWhatsAppProvider(
+      {
+        WHATSAPP_PROVIDER: 'evolution',
+        EVOLUTION_API_URL: 'http://localhost:8080',
+        EVOLUTION_API_KEY: API_KEY,
+        EVOLUTION_INSTANCE_NAME: 'test-instance',
+        EVOLUTION_SAFE_MODE: true,
+        EVOLUTION_ALLOWED_DESTINATIONS: GROUP_ID,
+        EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
+        WHATSAPP_GROUP_SEND_ENABLED: true,
+        WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+      },
+      { httpClient },
+    );
+
+    await expect(
+      provider.sendMessage({
+        destination: '200000000000000000@g.us',
+        destinationType: 'GROUP',
+        message: 'Mensagem bloqueada',
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_GROUP_DESTINATION_BLOCKED',
+      deliveryMayHaveStarted: false,
+    });
+    expect(httpClient).not.toHaveBeenCalled();
+
+    await expect(
+      provider.sendMessage({
+        destination: GROUP_ID,
+        destinationType: 'GROUP',
+        message: 'Mensagem permitida',
+      }),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(httpClient).toHaveBeenCalledOnce();
+  });
+
   it('bloqueia grupo quando o master switch esta desligado', () => {
     const guard = new EvolutionGroupSendGuard({
       enabled: false,

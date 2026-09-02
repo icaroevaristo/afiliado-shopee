@@ -10,6 +10,7 @@ export type EvolutionGroupSendGuardOptions = {
   enabled: boolean;
   safeMode: boolean;
   maxMessagesPerRun: number;
+  allowedDestinations?: readonly string[];
   logger?: ProviderLogger;
 };
 
@@ -17,6 +18,7 @@ export class EvolutionGroupSendGuard {
   private currentRunId: string | undefined;
   private legacyInitiatedRequests = 0;
   private readonly initiatedRequestsByRun = new Map<string, number>();
+  private readonly allowedDestinations?: ReadonlySet<string>;
 
   constructor(private readonly options: EvolutionGroupSendGuardOptions) {
     if (
@@ -28,6 +30,10 @@ export class EvolutionGroupSendGuard {
         'WHATSAPP_GROUP_LIMIT_INVALID',
       );
     }
+    this.allowedDestinations =
+      options.allowedDestinations === undefined
+        ? undefined
+        : new Set(options.allowedDestinations.map(normalizeWhatsAppGroupId));
     options.logger?.info(
       {
         event: 'evolution.group-safe-mode.configured',
@@ -66,6 +72,16 @@ export class EvolutionGroupSendGuard {
       return this.block(
         'WHATSAPP_GROUP_SAFE_MODE_REQUIRED',
         'Safe mode e obrigatorio para envio em grupos',
+        fingerprint,
+      );
+    }
+    if (
+      this.allowedDestinations !== undefined &&
+      !this.allowedDestinations.has(normalized)
+    ) {
+      return this.block(
+        'WHATSAPP_GROUP_DESTINATION_BLOCKED',
+        'Grupo nao autorizado para envio seguro pela Evolution API',
         fingerprint,
       );
     }
