@@ -6235,6 +6235,7 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
           where: {
             destinationId,
             status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+            request: { mode: 'SEND' },
           },
         }),
       ]);
@@ -7893,6 +7894,7 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
         where: {
           destinationId: id,
           status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+          request: { mode: 'SEND' },
         },
       });
       if (dispatches + runs + outboxes + reservations + manualTargets > 0) {
