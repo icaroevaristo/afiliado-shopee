@@ -3,6 +3,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { runPreviewStabilityValidation } from './preview-stability';
 import { createPreviewStabilityDependencies } from './preview-stability-runtime';
+import { acquireLock, PREVIEW_STABILITY_PROCESS_MARKER } from './state-store';
+import {
+  composeProjectRuntimeRoot,
+  OPERATIONAL_COMPOSE_PROJECT_NAME,
+} from './runtime-identity';
+import { createSystemDependencies } from './system-dependencies';
 import { LocalSystemError } from './types';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -11,11 +17,22 @@ export const runPreviewStabilityCli = async (
   args: readonly string[] = process.argv.slice(2),
   environment: NodeJS.ProcessEnv = process.env,
 ) => {
+  let release: (() => void) | undefined;
   try {
+    const systemDependencies = createSystemDependencies();
+    release = await acquireLock(
+      composeProjectRuntimeRoot(OPERATIONAL_COMPOSE_PROJECT_NAME),
+      'start',
+      systemDependencies,
+      { processMarker: PREVIEW_STABILITY_PROCESS_MARKER },
+    );
     await runPreviewStabilityValidation({
       args,
       processEnvironment: environment,
-      dependencies: createPreviewStabilityDependencies(ROOT),
+      dependencies: createPreviewStabilityDependencies(
+        ROOT,
+        systemDependencies,
+      ),
     });
     console.log(
       JSON.stringify({
@@ -39,6 +56,8 @@ export const runPreviewStabilityCli = async (
     if (code === 'PREVIEW_STABILITY_INTERRUPTED_SIGINT') return 130;
     if (code === 'PREVIEW_STABILITY_INTERRUPTED_SIGTERM') return 143;
     return 1;
+  } finally {
+    release?.();
   }
 };
 

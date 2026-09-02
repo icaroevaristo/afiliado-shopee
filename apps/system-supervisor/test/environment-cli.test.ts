@@ -68,7 +68,10 @@ describe('local system environment', () => {
     writeFileSync(join(root, '.env'), 'COMMERCIAL_AUTOMATION_MODE=preview\n');
     expect(loadLocalSystemEnvironment(root, {}).mode).toBe('preview');
 
-    writeFileSync(join(root, 'runtime.env'), 'COMMERCIAL_AUTOMATION_MODE=invalid\n');
+    writeFileSync(
+      join(root, 'runtime.env'),
+      'COMMERCIAL_AUTOMATION_MODE=invalid\n',
+    );
     expect(() => loadLocalSystemEnvironment(root, {})).toThrowError(
       expect.objectContaining({ code: 'SYSTEM_INVALID_AUTOMATION_MODE' }),
     );
@@ -91,6 +94,16 @@ describe('local system CLI arguments', () => {
     ).toEqual({ command: 'logs', service: 'supervisor', lines: 50 });
   });
 
+  it('accepts an explicit Compose identity for isolated environments', () => {
+    expect(
+      parseSystemArgs(['status', '--compose-project-name=isolated-test']),
+    ).toEqual({
+      command: 'status',
+      json: false,
+      composeProjectName: 'isolated-test',
+    });
+  });
+
   it.each([
     ['logs', '--service=../../.env'],
     ['logs', '--lines=0'],
@@ -98,6 +111,8 @@ describe('local system CLI arguments', () => {
     ['logs', '--path=.env'],
     ['status', '--verbose'],
     ['start', '--send'],
+    ['start', '--compose-project-name=bad.name'],
+    ['status', '--compose-project-name='],
   ])('rejects unsafe or undocumented arguments: %s', (...args) => {
     expect(() => parseSystemArgs(args)).toThrow();
   });

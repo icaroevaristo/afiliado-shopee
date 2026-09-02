@@ -1103,6 +1103,14 @@ atomica por hard link, sem encerrar o ocupante; formato invalido/legado ou
 identidade indisponivel preserva o arquivo para investigacao. A liberacao
 compara token, PID e inicio, e por isso uma operacao antiga nao apaga o lock
 sucessor.
+
+No perfil operacional, o supervisor usa explicitamente o projeto Docker
+`afiliado-shopee`; portanto o volume `afiliado-shopee_postgres_data` nao muda
+quando o comando e acionado a partir de outra worktree. `system:status` informa
+essa identidade e o volume PostgreSQL montado sem credenciais. Ambientes
+isolados devem fornecer deliberadamente outro `--compose-project-name` ao
+comando do supervisor.
+
 `system:status` apenas classifica o lock como `unlocked`, `active`, `stale`,
 `invalid` ou `unavailable` e nunca mostra o token.
 

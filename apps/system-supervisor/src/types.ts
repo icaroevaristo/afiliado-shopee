@@ -21,6 +21,12 @@ export type RegisteredProcess = {
 
 export type LocalSystemState = {
   version: 1;
+  /**
+   * The Compose project is part of ownership identity. It is optional only
+   * while reading state written by pre-identity supervisor versions; active
+   * legacy state is rejected before any stop/start mutation.
+   */
+  composeProjectName?: string;
   startedAt: string;
   mode: AutomationMode;
   ports: {

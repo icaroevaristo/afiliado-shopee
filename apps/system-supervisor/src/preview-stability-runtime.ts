@@ -24,7 +24,11 @@ import { readState, runtimeDirectory } from './state-store';
 import { createSystemDependencies } from './system-dependencies';
 import {
   createServiceSpecs,
+  assertCanonicalPostgresVolume,
+  evolutionComposeArguments,
   LocalSystemSupervisor,
+  mainComposeArguments,
+  OPERATIONAL_COMPOSE_PROJECT_NAME,
   parseComposeStatuses,
   resolveEquivalentMainServiceContainer,
 } from './supervisor';
@@ -49,35 +53,47 @@ const commandSucceeded = (
   if (result.code !== 0) throw new LocalSystemError(message, code);
 };
 
-const systemCommandSucceeded = (
-  result: { code: number; stderr: string },
-  fallbackCode: string,
-  message: string,
-) => {
-  if (result.code === 0) return;
-  const reportedCode = /^([A-Z][A-Z0-9_]+):/m.exec(result.stderr)?.[1];
-  throw new LocalSystemError(message, reportedCode ?? fallbackCode);
-};
-
 const DATABASE_HELPER_CAPTURE_STAGES = [
-  'migrations', 'settings', 'executions', 'runs-total', 'runs-dry-run',
-  'runs-ambiguous', 'runs-investigation', 'dispatch-total',
-  'dispatch-processing', 'outbox-total', 'outbox-pending',
-  'outbox-ambiguous', 'table-counts',
+  'migrations',
+  'settings',
+  'executions',
+  'runs-total',
+  'runs-dry-run',
+  'runs-ambiguous',
+  'runs-investigation',
+  'dispatch-total',
+  'dispatch-processing',
+  'outbox-total',
+  'outbox-pending',
+  'outbox-ambiguous',
+  'table-counts',
 ] as const;
 
 type DatabaseHelperFailureDiagnostic = {
   code: 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED';
-  operation: 'capture' | 'executions' | 'group-instance' | 'force-pause' | 'unknown';
+  operation:
+    'capture' | 'executions' | 'group-instance' | 'force-pause' | 'unknown';
   captureStage?: (typeof DATABASE_HELPER_CAPTURE_STAGES)[number];
   captureSubstage?: 'inspect' | 'diff';
-  errorKind: 'PRISMA' | 'PRISMA_VALIDATION' | 'PRISMA_UNKNOWN' |
-    'PRISMA_INITIALIZATION' | 'DATABASE_BASELINE' | 'SYSTEM' | 'UNKNOWN';
+  errorKind:
+    | 'PRISMA'
+    | 'PRISMA_VALIDATION'
+    | 'PRISMA_UNKNOWN'
+    | 'PRISMA_INITIALIZATION'
+    | 'DATABASE_BASELINE'
+    | 'SYSTEM'
+    | 'UNKNOWN';
   errorCode?: string;
   failed: true;
 };
 
-const SAFE_DATABASE_HELPER_SYSTEM_CODES = new Set(['ENOENT','EACCES','ETIMEDOUT','ECONNREFUSED','EPIPE']);
+const SAFE_DATABASE_HELPER_SYSTEM_CODES = new Set([
+  'ENOENT',
+  'EACCES',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'EPIPE',
+]);
 const SAFE_DATABASE_BASELINE_ERROR_CODES = new Set([
   'DATABASE_BASELINE_ADOPTION_BLOCKED',
   'DATABASE_BASELINE_ARGUMENTS_INVALID',
@@ -89,10 +105,18 @@ const SAFE_DATABASE_BASELINE_ERROR_CODES = new Set([
 export const parseDatabaseHelperFailureDiagnostic = (
   stderr: string,
 ): DatabaseHelperFailureDiagnostic | null => {
-  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).reverse();
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reverse();
   for (const line of lines) {
     let value: unknown;
-    try { value = JSON.parse(line); } catch { continue; }
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (typeof value !== 'object' || value === null) continue;
     const code = Reflect.get(value, 'code');
     const operation = Reflect.get(value, 'operation');
@@ -103,32 +127,85 @@ export const parseDatabaseHelperFailureDiagnostic = (
     const failed = Reflect.get(value, 'failed');
     if (
       code !== 'PREVIEW_STABILITY_DATABASE_HELPER_FAILED' ||
-      !['capture','executions','group-instance','force-pause','unknown'].includes(typeof operation === 'string' ? operation : '') ||
-      !['PRISMA','PRISMA_VALIDATION','PRISMA_UNKNOWN','PRISMA_INITIALIZATION','DATABASE_BASELINE','SYSTEM','UNKNOWN'].includes(typeof errorKind === 'string' ? errorKind : '') ||
+      ![
+        'capture',
+        'executions',
+        'group-instance',
+        'force-pause',
+        'unknown',
+      ].includes(typeof operation === 'string' ? operation : '') ||
+      ![
+        'PRISMA',
+        'PRISMA_VALIDATION',
+        'PRISMA_UNKNOWN',
+        'PRISMA_INITIALIZATION',
+        'DATABASE_BASELINE',
+        'SYSTEM',
+        'UNKNOWN',
+      ].includes(typeof errorKind === 'string' ? errorKind : '') ||
       failed !== true
-    ) continue;
-    const validStage = typeof captureStage === 'string' && DATABASE_HELPER_CAPTURE_STAGES.includes(captureStage as (typeof DATABASE_HELPER_CAPTURE_STAGES)[number]);
+    )
+      continue;
+    const validStage =
+      typeof captureStage === 'string' &&
+      DATABASE_HELPER_CAPTURE_STAGES.includes(
+        captureStage as (typeof DATABASE_HELPER_CAPTURE_STAGES)[number],
+      );
     if (operation === 'capture' && !validStage) continue;
     if (operation !== 'capture' && captureStage !== undefined) continue;
-    const validSubstage = captureSubstage === 'inspect' || captureSubstage === 'diff';
-    if (operation === 'capture' && captureStage === 'migrations' && !validSubstage) continue;
-    if ((operation !== 'capture' || captureStage !== 'migrations') && captureSubstage !== undefined) continue;
+    const validSubstage =
+      captureSubstage === 'inspect' || captureSubstage === 'diff';
+    if (
+      operation === 'capture' &&
+      captureStage === 'migrations' &&
+      !validSubstage
+    )
+      continue;
+    if (
+      (operation !== 'capture' || captureStage !== 'migrations') &&
+      captureSubstage !== undefined
+    )
+      continue;
     const safeCode =
-      (errorKind === 'PRISMA' || errorKind === 'PRISMA_INITIALIZATION') && typeof errorCode === 'string' && /^P\d{4}$/.test(errorCode)
+      (errorKind === 'PRISMA' || errorKind === 'PRISMA_INITIALIZATION') &&
+      typeof errorCode === 'string' &&
+      /^P\d{4}$/.test(errorCode)
         ? errorCode
-        : errorKind === 'DATABASE_BASELINE' && typeof errorCode === 'string' && SAFE_DATABASE_BASELINE_ERROR_CODES.has(errorCode)
+        : errorKind === 'DATABASE_BASELINE' &&
+            typeof errorCode === 'string' &&
+            SAFE_DATABASE_BASELINE_ERROR_CODES.has(errorCode)
           ? errorCode
-          : errorKind === 'SYSTEM' && typeof errorCode === 'string' && SAFE_DATABASE_HELPER_SYSTEM_CODES.has(errorCode)
+          : errorKind === 'SYSTEM' &&
+              typeof errorCode === 'string' &&
+              SAFE_DATABASE_HELPER_SYSTEM_CODES.has(errorCode)
             ? errorCode
             : undefined;
     if (errorKind === 'PRISMA' && !safeCode) continue;
     if (errorKind === 'SYSTEM' && !safeCode) continue;
-    if (['PRISMA_VALIDATION','PRISMA_UNKNOWN','UNKNOWN'].includes(String(errorKind)) && errorCode !== undefined) continue;
-    if (['PRISMA_INITIALIZATION','DATABASE_BASELINE'].includes(String(errorKind)) && errorCode !== undefined && !safeCode) continue;
+    if (
+      ['PRISMA_VALIDATION', 'PRISMA_UNKNOWN', 'UNKNOWN'].includes(
+        String(errorKind),
+      ) &&
+      errorCode !== undefined
+    )
+      continue;
+    if (
+      ['PRISMA_INITIALIZATION', 'DATABASE_BASELINE'].includes(
+        String(errorKind),
+      ) &&
+      errorCode !== undefined &&
+      !safeCode
+    )
+      continue;
     return {
       code,
       operation: operation as DatabaseHelperFailureDiagnostic['operation'],
-      ...(operation === 'capture' ? { captureStage: captureStage as DatabaseHelperFailureDiagnostic['captureStage'] } : {}),
+      ...(operation === 'capture'
+        ? {
+            captureStage:
+              captureStage as DatabaseHelperFailureDiagnostic['captureStage'],
+          }
+        : {}),
       ...(operation === 'capture' && captureStage === 'migrations'
         ? { captureSubstage: captureSubstage as 'inspect' | 'diff' }
         : {}),
@@ -203,26 +280,6 @@ const captureQueueEvidence = async (environment: NodeJS.ProcessEnv) => {
   }
 };
 
-const createSystemCommand = (
-  root: string,
-  command: 'start' | 'stop',
-  environment: NodeJS.ProcessEnv,
-) => {
-  const rootRequire = createRequire(resolve(root, 'package.json'));
-  return {
-    command: process.execPath,
-    args: [
-      rootRequire.resolve('tsx/cli'),
-      '--tsconfig',
-      resolve(root, 'tsconfig.runtime.json'),
-      resolve(root, 'apps/system-supervisor/src/cli.ts'),
-      command,
-    ],
-    cwd: root,
-    env: environment,
-  };
-};
-
 const createDatabaseHelperCommand = (
   root: string,
   command: 'capture' | 'executions' | 'force-pause' | 'group-instance',
@@ -251,11 +308,12 @@ const waitForComposeService = async (
   dependencies: SystemDependencies,
   service: 'postgres' | 'redis',
   environment: NodeJS.ProcessEnv,
+  projectName: string,
 ) => {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const result = await dependencies.run({
       command: 'docker',
-      args: ['compose', 'ps', '--format', 'json'],
+      args: mainComposeArguments(projectName, ['ps', '--format', 'json']),
       cwd: root,
       env: environment,
     });
@@ -284,13 +342,11 @@ const waitForResolvedMainServiceHealth = async (
   containerId: string,
   environment: NodeJS.ProcessEnv,
   ports: ReturnType<typeof loadLocalSystemEnvironment>['ports'],
+  projectName: string,
 ) => {
   let observedHealth:
-    | 'healthy'
-    | 'starting'
-    | 'unhealthy'
-    | 'unavailable'
-    | 'unknown' = 'unknown';
+    'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown' =
+    'unknown';
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const resolution = await resolveEquivalentMainServiceContainer(
       root,
@@ -298,6 +354,7 @@ const waitForResolvedMainServiceHealth = async (
       environment,
       ports,
       service,
+      projectName,
     );
     if (resolution.status === 'ambiguous') {
       throw new PreviewStabilityMainInfrastructureError(
@@ -338,20 +395,31 @@ const waitForResolvedMainServiceHealth = async (
   );
 };
 
-const isExplicitSafePreviewEvolutionIsolation = (environment: NodeJS.ProcessEnv) =>
+const isExplicitSafePreviewEvolutionIsolation = (
+  environment: NodeJS.ProcessEnv,
+) =>
   environment.COMMERCIAL_AUTOMATION_MODE === 'preview' &&
   environment.WHATSAPP_PROVIDER === 'mock' &&
   environment.WHATSAPP_GROUP_SEND_ENABLED === 'false';
 
-const managedVolumes = (stdout: string, includeEvolution: boolean) =>
-  stdout
+const managedVolumes = (
+  stdout: string,
+  includeEvolution: boolean,
+  composeProjectName: string,
+) => {
+  const escapedProjectName = composeProjectName.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  );
+  const prefixes = includeEvolution
+    ? [`${escapedProjectName}(?:-|_)`, 'shopee-evolution(?:-|_)']
+    : [`${escapedProjectName}(?:-|_)`];
+  const pattern = new RegExp(`^(?:${prefixes.join('|')})`, 'i');
+  return stdout
     .split(/\r?\n/)
     .map((value) => value.trim())
-    .filter((value) =>
-      includeEvolution
-        ? /^(afiliado-shopee|shopee-evolution)/i.test(value)
-        : /^afiliado-shopee/i.test(value),
-    );
+    .filter((value) => pattern.test(value));
+};
 
 export const stopValidatedManagedProcess = async ({
   service,
@@ -393,6 +461,7 @@ export const stopValidatedManagedProcess = async ({
 
 export type PreviewStabilityRuntimeOptions = {
   loadEnvironmentFiles?: boolean;
+  composeProjectName?: string;
 };
 
 export const createPreviewStabilityDependencies = (
@@ -401,8 +470,15 @@ export const createPreviewStabilityDependencies = (
   options: PreviewStabilityRuntimeOptions = {},
 ): PreviewStabilityDependencies => {
   const loadEnvironmentFiles = options.loadEnvironmentFiles ?? true;
+  const composeProjectName =
+    options.composeProjectName ?? OPERATIONAL_COMPOSE_PROJECT_NAME;
   const supervisor = new LocalSystemSupervisor(root, dependencies, undefined, {
     loadEnvironmentFiles,
+    composeProjectName,
+    // The preview CLI owns the project-scoped lock for the whole validation;
+    // keep this status view local so the preview does not mistake its own
+    // outer lock for a competing supervisor operation.
+    operationLockRoot: root,
   });
   const environmentCache = new WeakMap<NodeJS.ProcessEnv, NodeJS.ProcessEnv>();
   const loadedEnvironment = (environment: NodeJS.ProcessEnv) => {
@@ -450,8 +526,19 @@ export const createPreviewStabilityDependencies = (
     sleep: (milliseconds) => dependencies.sleep(milliseconds),
     status: (environment) => supervisor.status(loadedEnvironment(environment)),
     async prepareMainInfrastructure(environment, reuseManagedInfrastructure) {
-      if (reuseManagedInfrastructure) return;
       const env = loadedEnvironment(environment);
+      await assertCanonicalPostgresVolume(
+        root,
+        dependencies,
+        env,
+        composeProjectName,
+        {
+          requireExisting:
+            reuseManagedInfrastructure ||
+            composeProjectName === OPERATIONAL_COMPOSE_PROJECT_NAME,
+        },
+      );
+      if (reuseManagedInfrastructure) return;
       const dockerInfo = await dependencies.run({
         command: 'docker',
         args: ['info'],
@@ -465,7 +552,12 @@ export const createPreviewStabilityDependencies = (
       );
       const started = await dependencies.run({
         command: 'docker',
-        args: ['compose', 'up', '-d', 'postgres', 'redis'],
+        args: mainComposeArguments(composeProjectName, [
+          'up',
+          '-d',
+          'postgres',
+          'redis',
+        ]),
         cwd: root,
         env,
       });
@@ -475,14 +567,30 @@ export const createPreviewStabilityDependencies = (
         'Falha ao iniciar infraestrutura principal para o preflight',
       );
       await Promise.all([
-        waitForComposeService(root, dependencies, 'postgres', env),
-        waitForComposeService(root, dependencies, 'redis', env),
+        waitForComposeService(
+          root,
+          dependencies,
+          'postgres',
+          env,
+          composeProjectName,
+        ),
+        waitForComposeService(
+          root,
+          dependencies,
+          'redis',
+          env,
+          composeProjectName,
+        ),
       ]);
     },
     async stopMainInfrastructure(environment) {
       const result = await dependencies.run({
         command: 'docker',
-        args: ['compose', 'stop', 'postgres', 'redis'],
+        args: mainComposeArguments(composeProjectName, [
+          'stop',
+          'postgres',
+          'redis',
+        ]),
         cwd: root,
         env: loadedEnvironment(environment),
       });
@@ -494,26 +602,17 @@ export const createPreviewStabilityDependencies = (
     },
     async startSystem(environment) {
       const env = loadedEnvironment(environment);
-      const result = await dependencies.run(
-        createSystemCommand(root, 'start', env),
-      );
-      systemCommandSucceeded(
-        result,
-        'PREVIEW_STABILITY_SYSTEM_START_FAILED',
-        'system:start falhou durante a validacao',
-      );
-      return supervisor.status(env);
+      return supervisor.start(env);
     },
     async stopSystem(environment) {
       const env = loadedEnvironment(environment);
-      const result = await dependencies.run(
-        createSystemCommand(root, 'stop', env),
-      );
-      systemCommandSucceeded(
-        result,
-        'PREVIEW_STABILITY_SYSTEM_STOP_FAILED',
-        'system:stop falhou durante a validacao',
-      );
+      const result = await supervisor.stop(env);
+      if (!result.stopped) {
+        throw new LocalSystemError(
+          `system:stop falhou durante a validacao: ${result.manualIntervention.join(', ')}`,
+          'PREVIEW_STABILITY_SYSTEM_STOP_FAILED',
+        );
+      }
     },
     async setAutomationPaused(paused, environment) {
       const loaded = loadLocalSystemEnvironment(root, environment, {
@@ -619,10 +718,18 @@ export const createPreviewStabilityDependencies = (
     async captureInfrastructure(environment) {
       const env = loadedEnvironment(environment);
       const skipEvolution = isExplicitSafePreviewEvolutionIsolation(env);
+      const captureSharedEvolution =
+        composeProjectName === OPERATIONAL_COMPOSE_PROJECT_NAME &&
+        !skipEvolution;
       const [main, volumes] = await Promise.all([
         dependencies.run({
           command: 'docker',
-          args: ['compose', 'ps', '-a', '--format', 'json'],
+          args: mainComposeArguments(composeProjectName, [
+            'ps',
+            '-a',
+            '--format',
+            'json',
+          ]),
           cwd: root,
           env,
         }),
@@ -643,22 +750,12 @@ export const createPreviewStabilityDependencies = (
         'PREVIEW_STABILITY_VOLUME_CAPTURE_FAILED',
         'Falha ao capturar volumes gerenciados',
       );
-      const evolutionServices = skipEvolution
+      const evolutionServices = !captureSharedEvolution
         ? []
         : await (async () => {
             const evolution = await dependencies.run({
               command: 'docker',
-              args: [
-                'compose',
-                '--env-file',
-                'infra/evolution/.env.local',
-                '-f',
-                'infra/evolution/docker-compose.yml',
-                'ps',
-                '-a',
-                '--format',
-                'json',
-              ],
+              args: evolutionComposeArguments(['ps', '-a', '--format', 'json']),
               cwd: root,
               env,
             });
@@ -669,7 +766,11 @@ export const createPreviewStabilityDependencies = (
             );
             return parseComposeStatuses(evolution.stdout);
           })();
-      const volumeNames = managedVolumes(volumes.stdout, !skipEvolution);
+      const volumeNames = managedVolumes(
+        volumes.stdout,
+        captureSharedEvolution,
+        composeProjectName,
+      );
       const services = [
         ...parseComposeStatuses(main.stdout),
         ...evolutionServices,
@@ -685,7 +786,7 @@ export const createPreviewStabilityDependencies = (
           ...Object.fromEntries(
             services.map((service) => [service.service, service.state]),
           ),
-          ...(skipEvolution ? { evolution: 'not-required' } : {}),
+          ...(!captureSharedEvolution ? { evolution: 'not-required' } : {}),
         },
         envFingerprint,
       } satisfies PreviewStabilityInfrastructure;
@@ -709,6 +810,7 @@ export const createPreviewStabilityDependencies = (
         env,
         loaded.ports,
         service,
+        composeProjectName,
       );
       if (resolution.status !== 'resolved') {
         throw new PreviewStabilityMainInfrastructureError(
@@ -778,6 +880,7 @@ export const createPreviewStabilityDependencies = (
         target.id,
         env,
         loaded.ports,
+        composeProjectName,
       );
       return { unavailableMs };
     },

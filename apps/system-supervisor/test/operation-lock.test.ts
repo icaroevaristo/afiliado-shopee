@@ -16,6 +16,7 @@ import {
   ensureRuntimeDirectory,
   inspectOperationLock,
   operationLockPath,
+  PREVIEW_STABILITY_PROCESS_MARKER,
   SUPERVISOR_PROCESS_MARKER,
   type OperationLockRecord,
 } from '../src/state-store';
@@ -104,25 +105,20 @@ const activeIdentity = (startedAt = STARTED_AT): ProcessIdentityInspection => ({
 });
 
 describe('supervisor operation lock', () => {
-  it(
-    'normalizes the real process start time to canonical ISO',
-    async () => {
-      const inspection =
-        await createSystemDependencies().inspectProcessIdentity(
-          process.pid,
-          'node',
-        );
+  it('normalizes the real process start time to canonical ISO', async () => {
+    const inspection = await createSystemDependencies().inspectProcessIdentity(
+      process.pid,
+      'node',
+    );
 
-      expect(inspection).toMatchObject({
-        running: true,
-        markerMatches: true,
-      });
-      expect(inspection.startedAt).toBe(
-        new Date(inspection.startedAt ?? '').toISOString(),
-      );
-    },
-    15_000,
-  );
+    expect(inspection).toMatchObject({
+      running: true,
+      markerMatches: true,
+    });
+    expect(inspection.startedAt).toBe(
+      new Date(inspection.startedAt ?? '').toISOString(),
+    );
+  }, 15_000);
 
   it('persists only the strict owner identity with restrictive permissions', async () => {
     const root = createRoot();
@@ -147,6 +143,25 @@ describe('supervisor operation lock', () => {
     if (process.platform !== 'win32') {
       expect(statSync(operationLockPath(root)).mode & 0o777).toBe(0o600);
     }
+    release();
+  });
+
+  it('accepts the preview stability process as an explicit project lock owner', async () => {
+    const root = createRoot();
+    const deps = dependencies(new Map([[10, activeIdentity()]]));
+
+    const release = await acquireLock(root, 'start', deps, {
+      pid: 10,
+      ownerTokenFactory: () => TOKENS[0],
+      processMarker: PREVIEW_STABILITY_PROCESS_MARKER,
+    });
+
+    expect(
+      JSON.parse(readFileSync(operationLockPath(root), 'utf8')).processMarker,
+    ).toBe(PREVIEW_STABILITY_PROCESS_MARKER);
+    await expect(inspectOperationLock(root, deps)).resolves.toMatchObject({
+      operationLock: 'active',
+    });
     release();
   });
 
@@ -330,25 +345,18 @@ describe('supervisor operation lock', () => {
     }
   });
 
-  it(
-    'allows exactly one of two OS processes recovering the same stale lock',
-    async () => {
-      const root = createRoot();
-      writeLock(root, record({ pid: 999_999, ownerToken: TOKENS[2] }));
+  it('allows exactly one of two OS processes recovering the same stale lock', async () => {
+    const root = createRoot();
+    writeLock(root, record({ pid: 999_999, ownerToken: TOKENS[2] }));
 
-      const results = await Promise.all([
-        runContender(root),
-        runContender(root),
-      ]);
+    const results = await Promise.all([runContender(root), runContender(root)]);
 
-      expect(results.sort()).toEqual([
-        'SYSTEM_OPERATION_IN_PROGRESS',
-        'acquired',
-      ]);
-      expect(existsSync(operationLockPath(root))).toBe(false);
-    },
-    25_000,
-  );
+    expect(results.sort()).toEqual([
+      'SYSTEM_OPERATION_IN_PROGRESS',
+      'acquired',
+    ]);
+    expect(existsSync(operationLockPath(root))).toBe(false);
+  }, 25_000);
 
   it('does not remove a lock whose owner token changed before release', async () => {
     const root = createRoot();
