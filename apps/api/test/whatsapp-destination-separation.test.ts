@@ -32,6 +32,12 @@ describe('separacao entre destinos individuais e grupos', () => {
         available: true,
       },
       orderBy: { name: 'asc' },
+      include: {
+        instanceAssignments: {
+          select: { instanceName: true, position: true },
+          orderBy: { position: 'asc' },
+        },
+      },
     });
   });
 

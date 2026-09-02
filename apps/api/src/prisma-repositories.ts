@@ -173,6 +173,108 @@ const decimalString = (value: PrismaDecimalLike | null | undefined) =>
 const decimalNumber = (value: PrismaDecimalLike | null | undefined) =>
   value === null || value === undefined ? 0 : Number(value.toString());
 
+const whatsappGroupAssignmentInclude = {
+  instanceAssignments: {
+    select: { instanceName: true, position: true },
+    orderBy: { position: 'asc' as const },
+  },
+} as const;
+
+const mapWhatsAppGroupRecord = (
+  record: Record<string, unknown>,
+): WhatsAppGroupRecord => {
+  const publicRecord = { ...record };
+  const assignments = Array.isArray(publicRecord.instanceAssignments)
+    ? publicRecord.instanceAssignments
+        .filter(
+          (
+            assignment,
+          ): assignment is { instanceName: string; position: number } =>
+            typeof assignment === 'object' &&
+            assignment !== null &&
+            typeof (assignment as { instanceName?: unknown }).instanceName ===
+              'string' &&
+            typeof (assignment as { position?: unknown }).position === 'number',
+        )
+        .sort((left, right) => left.position - right.position)
+    : [];
+  delete publicRecord.instanceAssignments;
+  const legacyAssignment = publicRecord.assignedInstanceName;
+  const assignmentNames = assignments.map(
+    (assignment) => assignment.instanceName,
+  );
+  return {
+    ...(publicRecord as unknown as WhatsAppGroupRecord),
+    ...(assignmentNames.length > 0
+      ? { assignedInstanceNames: assignmentNames }
+      : {}),
+    ...(typeof publicRecord.assignmentRevision === 'number'
+      ? { assignmentRevision: publicRecord.assignmentRevision }
+      : {}),
+    ...(assignmentNames.length === 0 &&
+    typeof legacyAssignment === 'string' &&
+    legacyAssignment.trim() !== ''
+      ? { assignedInstanceNames: [legacyAssignment] }
+      : {}),
+  };
+};
+
+const mapWhatsAppDestinationWithAssignments = (
+  record: Record<string, unknown>,
+): WhatsAppDispatchDetails['destination'] => {
+  const publicRecord = { ...record };
+  const assignments = Array.isArray(publicRecord.instanceAssignments)
+    ? publicRecord.instanceAssignments
+        .filter(
+          (assignment) =>
+            typeof assignment === 'object' &&
+            assignment !== null &&
+            typeof (assignment as { instanceName?: unknown }).instanceName ===
+              'string' &&
+            typeof (assignment as { position?: unknown }).position === 'number',
+        )
+        .sort(
+          (left, right) =>
+            Number((left as { position: number }).position) -
+            Number((right as { position: number }).position),
+        )
+    : [];
+  delete publicRecord.instanceAssignments;
+  const assignedInstanceNames = assignments.map((assignment) =>
+    String((assignment as { instanceName: string }).instanceName),
+  );
+  return {
+    ...publicRecord,
+    ...(assignedInstanceNames.length > 0 ? { assignedInstanceNames } : {}),
+  } as unknown as WhatsAppDispatchDetails['destination'];
+};
+
+const normalizeGroupAssignmentNames = (
+  value: unknown,
+  options: { allowEmpty: boolean },
+) => {
+  if (!Array.isArray(value)) {
+    throw new AppError(
+      'Lista ordenada de instancias do grupo e invalida',
+      'WHATSAPP_GROUP_ASSIGNMENT_INVALID',
+    );
+  }
+  const names = value.map((name) =>
+    typeof name === 'string' ? name.trim() : '',
+  );
+  if (
+    (!options.allowEmpty && names.length === 0) ||
+    names.some((name) => name === '') ||
+    new Set(names).size !== names.length
+  ) {
+    throw new AppError(
+      'Lista ordenada de instancias do grupo e invalida',
+      'WHATSAPP_GROUP_ASSIGNMENT_INVALID',
+    );
+  }
+  return names;
+};
+
 const mapProductLead = (record: Record<string, unknown>): ProductLeadRecord => {
   const publicRecord = { ...record };
   delete publicRecord.commercialSnapshotRevision;
@@ -1581,6 +1683,8 @@ const commercialCampaignInclude = {
       active: true,
       available: true,
       assignedInstanceName: true,
+      assignmentRevision: true,
+      instanceAssignments: whatsappGroupAssignmentInclude.instanceAssignments,
     },
   },
 };
@@ -1622,6 +1726,10 @@ const mapCommercialGroupCampaign = (
           active: anchor.active,
           available: anchor.available,
           assignedInstanceName: anchor.assignedInstanceName,
+          assignedInstanceNames: anchor.instanceAssignments?.map(
+            (assignment) => assignment.instanceName,
+          ),
+          assignmentRevision: anchor.assignmentRevision,
         }
       : null,
   };
@@ -2287,7 +2395,8 @@ const copyContextFailure = (
       ? current.candidate.status !== 'QUEUED' ||
         current.candidate.generatedCopyId !== null
       : current.candidate.status !== 'COPY_READY' ||
-        current.candidate.generatedCopyId !== expected.candidate.generatedCopyId ||
+        current.candidate.generatedCopyId !==
+          expected.candidate.generatedCopyId ||
         expected.candidate.generatedCopyId === null;
   if (
     candidateStateChanged ||
@@ -6126,6 +6235,7 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
           where: {
             destinationId,
             status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+            request: { mode: 'SEND' },
           },
         }),
       ]);
@@ -6676,11 +6786,18 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
     const run = await this.prisma.commercialPipelineRun.findUnique({
       where: { id: execution.commercialRunId },
       include: {
-        dispatch: { include: { destination: true } },
+        dispatch: {
+          include: { destination: { include: whatsappGroupAssignmentInclude } },
+        },
         dispatchOutbox: true,
       },
     });
     if (!run) return { execution, run: null };
+    const destination = run.dispatch?.destination
+      ? mapWhatsAppDestinationWithAssignments(
+          run.dispatch.destination as unknown as Record<string, unknown>,
+        )
+      : null;
     return {
       execution,
       run: {
@@ -6698,9 +6815,13 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
               attemptCount: run.dispatch.attemptCount,
               instanceName: run.dispatch.instanceName,
               destinationId: run.dispatch.destinationId,
-              destinationType: run.dispatch.destination.type,
+              destinationType: destination?.type,
               destinationAssignedInstanceName:
-                run.dispatch.destination.assignedInstanceName,
+                destination?.assignedInstanceNames === undefined
+                  ? destination?.assignedInstanceName
+                  : undefined,
+              destinationAssignedInstanceNames:
+                destination?.assignedInstanceNames,
               externalMessageId: run.dispatch.externalMessageId,
               sentAt: run.dispatch.sentAt,
             }
@@ -7571,38 +7692,44 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
   constructor(private readonly prisma: DatabaseClient) {}
 
   async findById(id: string): Promise<WhatsAppGroupRecord | null> {
-    return (await this.prisma.whatsAppDestination.findFirst({
+    const record = await this.prisma.whatsAppDestination.findFirst({
       where: { id, type: 'GROUP' },
-    })) as WhatsAppGroupRecord | null;
+      include: whatsappGroupAssignmentInclude,
+    });
+    return record ? mapWhatsAppGroupRecord(record) : null;
   }
 
   async findByExternalGroupId(
     sourceInstanceName: string,
     externalGroupId: string,
   ): Promise<WhatsAppGroupRecord | null> {
-    return (await this.prisma.whatsAppDestination.findFirst({
+    const record = await this.prisma.whatsAppDestination.findFirst({
       where: {
         type: 'GROUP',
         sourceInstanceName,
         destination: externalGroupId,
       },
-    })) as WhatsAppGroupRecord | null;
+      include: whatsappGroupAssignmentInclude,
+    });
+    return record ? mapWhatsAppGroupRecord(record) : null;
   }
 
   async listByInstance(
     sourceInstanceName: string,
   ): Promise<WhatsAppGroupRecord[]> {
-    return (await this.prisma.whatsAppDestination.findMany({
+    const records = await this.prisma.whatsAppDestination.findMany({
       where: { type: 'GROUP', sourceInstanceName },
       orderBy: { name: 'asc' },
-    })) as WhatsAppGroupRecord[];
+      include: whatsappGroupAssignmentInclude,
+    });
+    return records.map((record) => mapWhatsAppGroupRecord(record));
   }
 
   async list(
     sourceInstanceName: string,
     filters: WhatsAppGroupFilters = {},
   ): Promise<WhatsAppGroupRecord[]> {
-    return (await this.prisma.whatsAppDestination.findMany({
+    const records = await this.prisma.whatsAppDestination.findMany({
       where: {
         type: 'GROUP',
         sourceInstanceName,
@@ -7610,35 +7737,72 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
         available: filters.available,
       },
       orderBy: { name: 'asc' },
-    })) as WhatsAppGroupRecord[];
+      include: whatsappGroupAssignmentInclude,
+    });
+    return records.map((record) => mapWhatsAppGroupRecord(record));
   }
 
   async listAll(
     filters: WhatsAppGroupFilters = {},
   ): Promise<WhatsAppGroupRecord[]> {
-    return (await this.prisma.whatsAppDestination.findMany({
+    const records = await this.prisma.whatsAppDestination.findMany({
       where: {
         type: 'GROUP',
         active: filters.active,
         available: filters.available,
       },
       orderBy: { name: 'asc' },
-    })) as WhatsAppGroupRecord[];
+      include: whatsappGroupAssignmentInclude,
+    });
+    return records.map((record) => mapWhatsAppGroupRecord(record));
   }
 
   async create(data: WhatsAppGroupCreateData): Promise<WhatsAppGroupRecord> {
-    const assignedInstanceName =
-      data.assignedInstanceName ?? data.sourceInstanceName ?? null;
-    if (assignedInstanceName && this.prisma.whatsAppInstance) {
-      await this.prisma.whatsAppInstance.upsert({
-        where: { name: assignedInstanceName },
-        create: { name: assignedInstanceName },
-        update: {},
+    const fallbackAssignment =
+      data.assignedInstanceName ?? data.sourceInstanceName;
+    const orderedInstanceNames =
+      data.assignedInstanceNames !== undefined
+        ? normalizeGroupAssignmentNames(data.assignedInstanceNames, {
+            allowEmpty: true,
+          })
+        : normalizeGroupAssignmentNames(
+            fallbackAssignment ? [fallbackAssignment] : [],
+            { allowEmpty: true },
+          );
+    const assignedInstanceName = orderedInstanceNames[0] || null;
+    const destinationData = { ...data };
+    delete destinationData.assignedInstanceNames;
+    delete destinationData.assignmentRevision;
+    return this.prisma.$transaction(async (transaction) => {
+      for (const instanceName of orderedInstanceNames.filter(Boolean)) {
+        await transaction.whatsAppInstance.upsert({
+          where: { name: instanceName },
+          create: { name: instanceName },
+          update: {},
+        });
+      }
+      const record = await transaction.whatsAppDestination.create({
+        data: { ...destinationData, assignedInstanceName },
       });
-    }
-    return (await this.prisma.whatsAppDestination.create({
-      data: { ...data, assignedInstanceName },
-    })) as WhatsAppGroupRecord;
+      if (record.type === 'GROUP') {
+        await transaction.whatsAppGroupInstanceAssignment.createMany({
+          data: orderedInstanceNames
+            .filter(Boolean)
+            .map((instanceName, position) => ({
+              destinationId: record.id,
+              instanceName,
+              position,
+            })),
+        });
+      }
+      const withAssignments = await transaction.whatsAppDestination.findUnique({
+        where: { id: record.id },
+        include: whatsappGroupAssignmentInclude,
+      });
+      if (!withAssignments)
+        throw new AppError('Grupo nao encontrado', 'WHATSAPP_GROUP_NOT_FOUND');
+      return mapWhatsAppGroupRecord(withAssignments);
+    });
   }
 
   async update(
@@ -7647,10 +7811,11 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
   ): Promise<WhatsAppGroupRecord | null> {
     const existing = await this.findById(id);
     if (!existing) return null;
-    return (await this.prisma.whatsAppDestination.update({
+    await this.prisma.whatsAppDestination.update({
       where: { id },
       data,
-    })) as WhatsAppGroupRecord;
+    });
+    return this.findById(id);
   }
 
   async updateAdministrative(
@@ -7659,16 +7824,18 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
     },
   ): Promise<WhatsAppGroupRecord | null> {
+    if (data.assignedInstanceNames !== undefined) return null;
     const { expectedUpdatedAt, ...changes } = data;
     const result = await this.prisma.whatsAppDestination.updateMany({
       where: { id, type: 'GROUP', updatedAt: expectedUpdatedAt },
       data: changes,
     });
     if (result.count !== 1) return null;
-    return (await this.findById(id)) as WhatsAppGroupRecord | null;
+    return this.findById(id);
   }
 
   async updateAdministrativeWithLifecycleGuard(
@@ -7676,7 +7843,8 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
     data: {
       active?: boolean;
       paused?: boolean;
-      assignedInstanceName: string | null;
+      assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
       now: Date;
     },
@@ -7692,6 +7860,7 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
 
       const current = await transaction.whatsAppDestination.findFirst({
         where: { id, type: 'GROUP' },
+        include: whatsappGroupAssignmentInclude,
       });
       if (
         !current ||
@@ -7725,26 +7894,70 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
         where: {
           destinationId: id,
           status: { in: ['ACCEPTED', 'PROCESSING', 'QUEUED'] },
+          request: { mode: 'SEND' },
         },
       });
       if (dispatches + runs + outboxes + reservations + manualTargets > 0) {
         return { kind: 'ACTIVE_LIFECYCLE' as const };
       }
 
+      const currentGroup = mapWhatsAppGroupRecord(current);
+      const currentNames =
+        currentGroup.assignedInstanceNames ??
+        (currentGroup.assignedInstanceName
+          ? [currentGroup.assignedInstanceName]
+          : []);
+      const nextNames =
+        data.assignedInstanceNames !== undefined
+          ? normalizeGroupAssignmentNames(data.assignedInstanceNames, {
+              allowEmpty: true,
+            })
+          : data.assignedInstanceName !== undefined
+            ? data.assignedInstanceName === null
+              ? []
+              : normalizeGroupAssignmentNames([data.assignedInstanceName], {
+                  allowEmpty: false,
+                })
+            : currentNames;
+      const assignmentChanged =
+        currentNames.length !== nextNames.length ||
+        currentNames.some((name, index) => name !== nextNames[index]);
+
       const updated = await transaction.whatsAppDestination.updateMany({
         where: { id, type: 'GROUP', updatedAt: data.expectedUpdatedAt },
         data: {
           ...(data.active === undefined ? {} : { active: data.active }),
           ...(data.paused === undefined ? {} : { paused: data.paused }),
-          assignedInstanceName: data.assignedInstanceName,
+          assignedInstanceName: nextNames[0] ?? null,
+          ...(assignmentChanged
+            ? { assignmentRevision: { increment: 1 } }
+            : {}),
         },
       });
       if (updated.count !== 1) return { kind: 'CAS_CONFLICT' as const };
+      if (assignmentChanged) {
+        await transaction.whatsAppGroupInstanceAssignment.deleteMany({
+          where: { destinationId: id },
+        });
+        if (nextNames.length > 0) {
+          await transaction.whatsAppGroupInstanceAssignment.createMany({
+            data: nextNames.map((instanceName, position) => ({
+              destinationId: id,
+              instanceName,
+              position,
+            })),
+          });
+        }
+      }
       const group = await transaction.whatsAppDestination.findUnique({
         where: { id },
+        include: whatsappGroupAssignmentInclude,
       });
       if (!group) return { kind: 'CAS_CONFLICT' as const };
-      return { kind: 'UPDATED' as const, group: group as WhatsAppGroupRecord };
+      return {
+        kind: 'UPDATED' as const,
+        group: mapWhatsAppGroupRecord(group),
+      };
     });
   }
 }
@@ -7794,6 +8007,11 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
             fingerprint: true,
             sourceInstanceName: true,
             assignedInstanceName: true,
+            assignmentRevision: true,
+            instanceAssignments: {
+              select: { instanceName: true, position: true },
+              orderBy: { position: 'asc' },
+            },
           },
         },
         product: {
@@ -7880,6 +8098,9 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
     const promotionCandidates = record.generatedCopy.promotionCandidates ?? [];
     return {
       ...record,
+      destination: mapWhatsAppDestinationWithAssignments(
+        record.destination as unknown as Record<string, unknown>,
+      ),
       generatedCopy: {
         ...record.generatedCopy,
         promotionCandidates: promotionCandidates.map((candidate) => ({
@@ -7922,10 +8143,22 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
   async findByIdWithDetails(
     id: string,
   ): Promise<WhatsAppDispatchDetails | null> {
-    return (await this.prisma.whatsAppDispatch.findUnique({
+    const record = await this.prisma.whatsAppDispatch.findUnique({
       where: { id },
-      include: { product: true, generatedCopy: true, destination: true },
-    })) as WhatsAppDispatchDetails | null;
+      include: {
+        product: true,
+        generatedCopy: true,
+        destination: { include: whatsappGroupAssignmentInclude },
+      },
+    });
+    return record
+      ? ({
+          ...record,
+          destination: mapWhatsAppDestinationWithAssignments(
+            record.destination as unknown as Record<string, unknown>,
+          ),
+        } as unknown as WhatsAppDispatchDetails)
+      : null;
   }
 
   async list(
@@ -7937,14 +8170,24 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       ? (filters.status as WhatsAppDispatchStatus)
       : undefined;
 
-    return (await this.prisma.whatsAppDispatch.findMany({
+    const records = await this.prisma.whatsAppDispatch.findMany({
       where: {
         status,
         destinationId: filters.destinationId,
         productId: filters.productId,
       } as never,
-      include: { product: true, generatedCopy: true, destination: true },
+      include: {
+        product: true,
+        generatedCopy: true,
+        destination: { include: whatsappGroupAssignmentInclude },
+      },
       orderBy: { createdAt: 'desc' },
+    });
+    return records.map((record) => ({
+      ...record,
+      destination: mapWhatsAppDestinationWithAssignments(
+        record.destination as unknown as Record<string, unknown>,
+      ),
     })) as WhatsAppDispatchDetails[];
   }
 
@@ -7981,18 +8224,33 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
           status: true,
           instanceName: true,
           destination: {
-            select: { type: true, assignedInstanceName: true },
+            select: {
+              type: true,
+              assignedInstanceName: true,
+              instanceAssignments: {
+                select: { instanceName: true, position: true },
+                orderBy: { position: 'asc' },
+              },
+            },
           },
         },
       });
       if (!dispatch || dispatch.status !== 'PENDING') {
         return { kind: 'NOT_PENDING' as const };
       }
+      const assignedInstanceNames =
+        dispatch.destination.instanceAssignments?.map(
+          (assignment) => assignment.instanceName,
+        ) ?? [];
+      const assignmentMatches =
+        assignedInstanceNames.length > 0
+          ? assignedInstanceNames.includes(expectedAssignedInstanceName)
+          : dispatch.destination.assignedInstanceName ===
+            expectedAssignedInstanceName;
       if (
         dispatch.destination.type === 'GROUP' &&
         (dispatch.instanceName !== expectedAssignedInstanceName ||
-          dispatch.destination.assignedInstanceName !==
-            expectedAssignedInstanceName)
+          !assignmentMatches)
       ) {
         await transaction.whatsAppDispatch.updateMany({
           where: { id, status: 'PENDING' },

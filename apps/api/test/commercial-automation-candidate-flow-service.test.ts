@@ -6,6 +6,7 @@ import {
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
+import { COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED } from '../src/commercial-promotion-copy-generation-service';
 import type { CommercialPromotionMiningService } from '../src/commercial-promotion-mining-service';
 import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-service';
 import type {
@@ -1447,6 +1448,176 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
     await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
     await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('pula candidato QUEUED stale apos avancar o snapshot e seleciona o proximo', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const stale = queueItem({
+      id: 'candidate-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 1,
+    });
+    const next = queueItem({
+      id: 'candidate-2',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 2,
+    });
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [stale, next],
+      total: 2,
+    });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      candidateId === stale.id
+        ? context(
+            {
+              id: stale.id,
+              status: 'QUEUED',
+              generatedCopyId: null,
+              rankPosition: 1,
+            },
+            {
+              commercialSnapshotRevision: 2,
+              commercialSnapshotFingerprint: 'new-product-fingerprint',
+            },
+          )
+        : context({
+            id: next.id,
+            status: 'QUEUED',
+            generatedCopyId: null,
+            rankPosition: 2,
+          }),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: next.id,
+      candidateStatus: 'QUEUED',
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('nao reutiliza COPY_READY stale e retorna ausencia quando nao ha proximo', async () => {
+    const subject = createSubject();
+    subject.copies.loadContext.mockResolvedValue(
+      context(
+        { status: 'COPY_READY', generatedCopyId: 'copy-1' },
+        {
+          commercialSnapshotRevision: 2,
+          commercialSnapshotFingerprint: 'new-product-fingerprint',
+        },
+      ),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
+    });
+    expect(subject.copyGeneration.findCopy).toHaveBeenCalledWith('candidate-1');
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('classifica snapshot outdated do preview como skip apos provenance coerente', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const stale = queueItem({
+      id: 'candidate-1',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 1,
+    });
+    const next = queueItem({
+      id: 'candidate-2',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 2,
+    });
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [stale, next],
+      total: 2,
+    });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({
+        id: candidateId,
+        status: 'QUEUED',
+        generatedCopyId: null,
+        rankPosition: candidateId === stale.id ? 1 : 2,
+      }),
+    );
+    subject.copyGeneration.preview.mockImplementation(async (candidateId: string) =>
+      candidateId === stale.id
+        ? {
+            eligible: false,
+            blockers: [COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED],
+          }
+        : { eligible: true, blockers: [] },
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: next.id,
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('retorna NO_CANDIDATE para todos stale sem chamar IA', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const items = [
+      queueItem({
+        id: 'candidate-1',
+        status: 'QUEUED',
+        generatedCopyId: null,
+        rankPosition: 1,
+      }),
+      queueItem({
+        id: 'candidate-2',
+        status: 'QUEUED',
+        generatedCopyId: null,
+        rankPosition: 2,
+      }),
+    ];
+    subject.candidates.listQueue.mockResolvedValue({ items, total: items.length });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context(
+        {
+          id: candidateId,
+          status: 'QUEUED',
+          generatedCopyId: null,
+          rankPosition: candidateId === 'candidate-1' ? 1 : 2,
+        },
+        {
+          commercialSnapshotRevision: 2,
+          commercialSnapshotFingerprint: 'new-product-fingerprint',
+        },
+      ),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+      outcome: 'NO_CANDIDATE',
+    });
+    expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('mantem provenance invalida fatal em vez de converter corrupcao em skip', async () => {
+    const subject = createSubject({
+      candidate: {
+        status: 'QUEUED',
+        generatedCopyId: null,
+        snapshotId: 'snapshot-other',
+      },
+    });
+
+    await expect(subject.service.preflight(subject.target)).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_AFFILIATE_LINK_PROVENANCE_INVALID',
+    });
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
   });
 

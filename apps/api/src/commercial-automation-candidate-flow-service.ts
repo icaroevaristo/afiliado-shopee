@@ -1,6 +1,7 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
+  COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH,
   validateCommercialAffiliateLinkProvenance,
 } from './commercial-affiliate-link-provenance';
 import {
@@ -10,6 +11,7 @@ import {
 } from './commercial-promotion-mining-service';
 import {
   COMMERCIAL_AI_COPY_CONFIRMATION,
+  COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED,
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   type CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
@@ -25,6 +27,8 @@ import {
 } from './commercial-group-selection';
 import {
   filterExecutableCommercialGroups,
+  getOrderedAssignedInstanceNames,
+  isCommercialInstanceAssigned,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
 import type {
@@ -133,6 +137,11 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_MESSAGE_PRODUCT_UNAVAILABLE',
   'COMMERCIAL_MESSAGE_SNAPSHOT_EXPIRED',
   'COMMERCIAL_MESSAGE_SNAPSHOT_UNAVAILABLE',
+  // The provenance validator has already checked candidate/snapshot/product
+  // identity before returning this code. It means the product advanced to a
+  // newer official snapshot after this queue entry was materialized.
+  COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH,
+  COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED,
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
 ] as const;
@@ -247,10 +256,15 @@ export class CommercialAutomationCandidateFlowService {
   private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
     const candidates = this.options.groups.listAll
       ? (await this.options.groups.listAll({ active: true, available: true })).filter(
-        (group) =>
-            typeof group.assignedInstanceName === 'string' &&
-            isCommercialAssignedGroup(group, group.assignedInstanceName),
-        )
+        (group) => {
+          try {
+            const names = getOrderedAssignedInstanceNames(group);
+            return names.length > 0 && isCommercialAssignedGroup(group, names[0]);
+          } catch {
+            return false;
+          }
+        },
+      )
       : (await this.options.groups.list(this.options.instanceName, {
           active: true,
           available: true,
@@ -292,7 +306,9 @@ export class CommercialAutomationCandidateFlowService {
         candidate.id === target.groupId &&
         candidate.fingerprint === target.logicalGroupFingerprint &&
         (!target.instanceName ||
-          candidate.assignedInstanceName === target.instanceName),
+          isCommercialInstanceAssigned(candidate, target.instanceName)) &&
+        (target.assignmentRevision === undefined ||
+          candidate.assignmentRevision === target.assignmentRevision),
     );
     if (!group) {
       throw appError(
@@ -336,6 +352,8 @@ export class CommercialAutomationCandidateFlowService {
           groupId: group.id,
           groupName: group.name,
           instanceName: requireAssignedInstanceName(group),
+          orderedInstanceNames: getOrderedAssignedInstanceNames(group),
+          assignmentRevision: group.assignmentRevision,
           logicalGroupFingerprint: group.fingerprint,
           campaignId: campaign.id,
           nicheId: campaign.nicheId,
@@ -946,7 +964,8 @@ export class CommercialAutomationCandidateFlowService {
       group,
       executionId: options.executionId,
       existingRunId: options.existingRunId,
-      instanceName: requireAssignedInstanceName(group),
+      instanceName:
+        selection.target.instanceName ?? requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
       manualSelection: options.manualSelection ?? false,
       copyPreview: draft.caption,

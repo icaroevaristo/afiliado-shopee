@@ -234,4 +234,40 @@ describe('operational admin routes', () => {
       confirmation: OPERATIONAL_CHANGE_CONFIRMATION,
     });
   });
+
+  it('accepts an ordered assignment list and rejects oversized lists', async () => {
+    const subject = await setup();
+    const ordered = await subject.app.inject({
+      method: 'PATCH',
+      url: '/whatsapp/groups/group-1/admin',
+      payload: {
+        assignedInstanceNames: ['affiliate-bot', 'affiliate-secondary'],
+        expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      },
+    });
+    expect(ordered.statusCode).toBe(200);
+    expect(subject.service.updateGroup).toHaveBeenCalledWith({
+      id: 'group-1',
+      active: undefined,
+      paused: undefined,
+      assignedInstanceName: undefined,
+      assignedInstanceNames: ['affiliate-bot', 'affiliate-secondary'],
+      expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
+      confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+    });
+
+    const oversized = await subject.app.inject({
+      method: 'PATCH',
+      url: '/whatsapp/groups/group-1/admin',
+      payload: {
+        assignedInstanceNames: Array.from({ length: 33 }, (_, index) =>
+          `instance-${index}`,
+        ),
+        expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      },
+    });
+    expect(oversized.statusCode).toBe(400);
+  });
 });

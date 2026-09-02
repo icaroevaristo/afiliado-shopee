@@ -62,6 +62,7 @@ const POSTERIOR_MIGRATIONS = [
   '20260826100000_phase17_manual_publication_preview_mode',
   '20260828120000_phase18_operational_admin_controls',
   '20260830143000_phase23_external_provider_budgets',
+  '20260902100000_phase30_ordered_group_instance_assignments',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
@@ -125,6 +126,8 @@ const HISTORICAL_HASHES: Record<string, string> = {
     '351d4e5140137e955d5d2e6480d884e10cd1b2df009af1992f3f21b941966758',
   '20260830143000_phase23_external_provider_budgets':
     '709519b6b6d662a190737addf45ca15e7e1d8ae5665c4b9bfc69744c2119227c',
+  '20260902100000_phase30_ordered_group_instance_assignments':
+    '73a44e3814caba3a139dbce46ca59937100c250fb041bf8deac3d9a0c6ef0ef2',
 };
 
 const migration = (migrationName: string, finished = true) => ({

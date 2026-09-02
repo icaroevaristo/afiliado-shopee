@@ -46,6 +46,68 @@ describe('dashboard API proxy', () => {
     expect(await response.text()).not.toContain('proxy-test-token');
   });
 
+  it('encaminha detalhe de oferta e preview de copy pela allowlist autenticada', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'offer-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ title: 'preview' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const detail = await GET(
+      new Request('http://dashboard.local/api/shopee/offers/offer-1?dispatchPage=1'),
+      { params: Promise.resolve({ path: ['shopee', 'offers', 'offer-1'] }) },
+    );
+    const preview = await POST(
+      new Request('http://dashboard.local/api/shopee/offers/offer-1/copy-preview', {
+        method: 'POST',
+      }),
+      {
+        params: Promise.resolve({
+          path: ['shopee', 'offers', 'offer-1', 'copy-preview'],
+        }),
+      },
+    );
+
+    expect(detail.status).toBe(200);
+    expect(preview.status).toBe(200);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'http://127.0.0.1:3334/shopee/offers/offer-1?dispatchPage=1',
+    );
+    expect(fetchMock.mock.calls[3][0]).toBe(
+      'http://127.0.0.1:3334/shopee/offers/offer-1/copy-preview',
+    );
+    expect(fetchMock.mock.calls[1][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
+    );
+    expect(fetchMock.mock.calls[3][1].headers.get('authorization')).toBe(
+      'Bearer proxy-test-token',
+    );
+  });
+
   it('preserva PATCH oficial para pause/resume sem executar o controle', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');

@@ -21,6 +21,7 @@ import {
 import {
   assertActiveCommercialInstance,
   filterExecutableCommercialGroups,
+  isCommercialInstanceAssigned,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
 import type {
@@ -460,7 +461,7 @@ export class CommercialPipelineService {
               candidate.id === target.groupId &&
               candidate.name === target.groupName &&
               candidate.fingerprint === target.logicalGroupFingerprint &&
-              candidate.assignedInstanceName === target.instanceName,
+              isCommercialInstanceAssigned(candidate, target.instanceName ?? ''),
           )
         : orderedGroups.length === 1
           ? orderedGroups[0]
@@ -497,7 +498,16 @@ export class CommercialPipelineService {
           });
         }
       }
-      const assignedInstanceName = requireAssignedInstanceName(group);
+      const assignedInstanceName =
+        target?.instanceName ?? requireAssignedInstanceName(group);
+      if (!isCommercialInstanceAssigned(group, assignedInstanceName)) {
+        return await block('COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE', {
+          candidateCount: candidates.length,
+          eligibleCount: ranked.length,
+          rejectedCount: initialRejectedCount,
+          rejectionSummary,
+        });
+      }
       await ensureRun(assignedInstanceName);
       const sentChecks = await Promise.all(
         ranked.map(({ product }) =>
@@ -677,8 +687,9 @@ export class CommercialPipelineService {
         ? []
         : [`Rank da fila: ${input.candidate.rankPosition ?? 'nao informado'}`]),
     ];
-    const assignedInstanceName = requireAssignedInstanceName(input.group);
-    if (input.instanceName && input.instanceName !== assignedInstanceName) {
+    const assignedInstanceName =
+      input.instanceName ?? requireAssignedInstanceName(input.group);
+    if (!isCommercialInstanceAssigned(input.group, assignedInstanceName)) {
       throw new AppError(
         'Campanha comercial mudou de instancia atribuida',
         'COMMERCIAL_INSTANCE_ASSIGNMENT_CHANGED',

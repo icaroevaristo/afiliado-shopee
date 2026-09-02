@@ -5,6 +5,7 @@ import {
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import type { WhatsAppDispatchDetails } from './repositories';
+import { isCommercialInstanceAssigned } from './commercial-instance-stickiness';
 
 export type WhatsAppGroupSendPolicyOptions = {
   enabled: boolean;
@@ -47,10 +48,16 @@ export class WhatsAppGroupSendPolicy {
     if (destination.paused === true) {
       block('Grupo pausado para operacao', 'WHATSAPP_GROUP_PAUSED');
     }
-    const assignedInstanceName =
-      destination.assignedInstanceName ?? destination.sourceInstanceName;
     const instanceName = expectedInstanceName ?? this.options.instanceName;
-    if (!instanceName || assignedInstanceName !== instanceName) {
+    const assignmentMatches =
+      destination.assignedInstanceNames !== undefined
+        ? isCommercialInstanceAssigned(destination, instanceName ?? '')
+        : (destination.assignedInstanceName ??
+            destination.sourceInstanceName) === instanceName;
+    if (
+      !instanceName ||
+      !assignmentMatches
+    ) {
       block(
         'Grupo nao pertence a instancia atual',
         'WHATSAPP_GROUP_INSTANCE_MISMATCH',

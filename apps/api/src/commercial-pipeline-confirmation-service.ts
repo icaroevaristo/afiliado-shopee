@@ -10,7 +10,7 @@ import {
 import {
   assertActiveCommercialInstance,
   filterExecutableCommercialGroups,
-  requireAssignedInstanceName,
+  isCommercialInstanceAssigned,
 } from './commercial-instance-stickiness';
 import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
@@ -278,16 +278,13 @@ export class CommercialPipelineConfirmationService {
           'COMMERCIAL_GROUP_CHANGED',
         );
       }
-      const assignedInstanceName = requireAssignedInstanceName(group);
-      if (!run.instanceName || group.assignedInstanceName !== run.instanceName) {
+      const assignedInstanceName = run.instanceName;
+      if (
+        !assignedInstanceName ||
+        !isCommercialInstanceAssigned(group, assignedInstanceName)
+      ) {
         return changed(
           'Lifecycle comercial nao possui assignment sticky valida',
-          'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
-        );
-      }
-      if (assignedInstanceName !== run.instanceName) {
-        return changed(
-          'Lifecycle comercial possui instancia atribuida divergente',
           'COMMERCIAL_INSTANCE_ASSIGNMENT_INVALID',
         );
       }

@@ -1,4 +1,5 @@
 import type { WhatsAppGroupRecord } from './repositories';
+import { isCommercialInstanceAssigned } from './commercial-instance-stickiness';
 
 export const COMMERCIAL_GROUP_FINGERPRINT = /^grp_[a-f0-9]{12}$/;
 
@@ -11,9 +12,12 @@ export const isCommercialAuthorizedGroup = (
   group.paused !== true &&
   group.available === true &&
   group.sourceInstanceName === instanceName &&
-  (group.assignedInstanceName === undefined ||
-    group.assignedInstanceName === null ||
-    group.assignedInstanceName === instanceName) &&
+  (group.assignedInstanceNames === undefined &&
+    (group.assignedInstanceName === undefined ||
+      group.assignedInstanceName === null ||
+      group.assignedInstanceName === instanceName) ||
+    group.assignedInstanceNames !== undefined &&
+      isCommercialInstanceAssigned(group, instanceName)) &&
   COMMERCIAL_GROUP_FINGERPRINT.test(group.fingerprint);
 
 export const isCommercialAssignedGroup = (
@@ -24,7 +28,7 @@ export const isCommercialAssignedGroup = (
   group.active === true &&
   group.paused !== true &&
   group.available === true &&
-  group.assignedInstanceName === instanceName &&
+  isCommercialInstanceAssigned(group, instanceName) &&
   COMMERCIAL_GROUP_FINGERPRINT.test(group.fingerprint);
 
 export const duplicateLogicalGroupFingerprints = (

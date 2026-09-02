@@ -8,6 +8,7 @@ import {
 import type { CommercialAutomationEffectiveSchedule } from '../src/commercial-automation-policy-service';
 
 const now = new Date('2026-08-24T12:00:00.000Z');
+const MINUTE_MS = 60_000;
 
 const schedule: CommercialAutomationEffectiveSchedule = {
   timezone: 'America/Sao_Paulo',
@@ -530,5 +531,128 @@ describe('commercial automation scheduler planner', () => {
       slots: [],
       skippedTargets: [],
     });
+  });
+
+  it('vincula cada slot a uma instancia ordenada em round-robin', () => {
+    const rotatingTarget = target('rotating', {
+      instanceName: 'instance-a',
+      orderedInstanceNames: ['instance-a', 'instance-b'],
+      assignmentRevision: 4,
+      cadenceMinutes: 1,
+      instanceActive: true,
+      instanceActiveByName: { 'instance-a': true, 'instance-b': true },
+    });
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 1,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 3,
+        dailyGroupLimit: 3,
+      },
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+      horizonMinutes: 10,
+    });
+
+    expect(result.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-a',
+      'instance-b',
+      'instance-a',
+    ]);
+    expect(result.slots.every((slot) => slot.target.assignmentRevision === 4)).toBe(
+      true,
+    );
+  });
+
+  it('mantem a mesma rotação após restart/replan', () => {
+    const rotatingTarget = target('restart-rotation', {
+      orderedInstanceNames: ['instance-a', 'instance-b', 'instance-c'],
+      instanceActiveByName: {
+        'instance-a': true,
+        'instance-b': true,
+        'instance-c': true,
+      },
+      cadenceMinutes: 1,
+    });
+    const input = {
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+      horizonMinutes: 10,
+    };
+    const first = planCommercialTargetSlots(input);
+    const afterRestart = planCommercialTargetSlots({
+      ...input,
+      targets: [...input.targets],
+    });
+
+    expect(afterRestart.slots.map((slot) => slot.jobId)).toEqual(
+      first.slots.map((slot) => slot.jobId),
+    );
+    expect(afterRestart.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-a',
+      'instance-b',
+      'instance-c',
+      'instance-a',
+      'instance-b',
+      'instance-c',
+      'instance-a',
+      'instance-b',
+      'instance-c',
+      'instance-a',
+    ]);
+  });
+
+  it('bloqueia o slot da instancia indisponivel sem fallback silencioso', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [
+        target('unavailable-member', {
+          orderedInstanceNames: ['instance-a', 'instance-b'],
+          instanceActiveByName: { 'instance-a': true, 'instance-b': false },
+          cadenceMinutes: 1,
+          dailyLimit: 3,
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 10,
+    });
+
+    expect(result.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-a',
+      'instance-a',
+    ]);
+    expect(result.slots[1]?.scheduledFor.getTime()).toBe(
+      result.slots[0]!.scheduledFor.getTime() + 2 * MINUTE_MS,
+    );
+  });
+
+  it('muda a identidade do job quando assignmentRevision muda', () => {
+    const base = target('assignment-revision', {
+      orderedInstanceNames: ['instance-a', 'instance-b'],
+      assignmentRevision: 1,
+      instanceActiveByName: { 'instance-a': true, 'instance-b': true },
+      cadenceMinutes: 1,
+    });
+    const first = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [base],
+      globalSentToday: 0,
+      horizonMinutes: 2,
+    });
+    const revised = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [{ ...base, assignmentRevision: 2 }],
+      globalSentToday: 0,
+      horizonMinutes: 2,
+    });
+
+    expect(revised.slots[0]!.jobId).not.toBe(first.slots[0]!.jobId);
   });
 });

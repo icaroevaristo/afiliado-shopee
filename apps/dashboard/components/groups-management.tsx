@@ -2,6 +2,8 @@
 
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   ChevronDown,
   Edit3,
@@ -10,6 +12,7 @@ import {
   Power,
   RefreshCw,
   ShieldAlert,
+  X,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
@@ -110,6 +113,29 @@ const statusTone = (group: OperationalAdminGroup) => {
 const groupHasPending = (group: OperationalAdminGroup) =>
   group.blockers.length > 0;
 
+const groupAssignments = (group: OperationalAdminGroup) => {
+  if (group.assignedInstanceNames !== undefined) {
+    return [...group.assignedInstanceNames];
+  }
+  return group.assignedInstanceName ? [group.assignedInstanceName] : [];
+};
+
+const assignmentsEqual = (left: string[], right: string[]) =>
+  left.length === right.length &&
+  left.every((name, index) => name === right[index]);
+
+const upcomingAssignmentLabel = (group: OperationalAdminGroup) => {
+  const upcoming = group.upcomingAssignments ?? [];
+  return upcoming.length > 0
+    ? upcoming
+        .map(
+          ({ scheduledFor, instanceName }) =>
+            `${formatDateTime(scheduledFor)} · ${instanceName}`,
+        )
+        .join(' · ')
+    : 'Não planejado';
+};
+
 function SummaryCard({
   label,
   value,
@@ -194,30 +220,34 @@ function GroupCard({
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
     },
     confirmation: string,
     confirmationMessage: string,
   ) => void;
 }) {
-  const [assignment, setAssignment] = useState(
-    group.assignedInstanceName ?? '',
-  );
+  const [assignments, setAssignments] = useState(() => groupAssignments(group));
+  const [assignmentToAdd, setAssignmentToAdd] = useState('');
 
   useEffect(() => {
-    setAssignment(group.assignedInstanceName ?? '');
-  }, [group.assignedInstanceName]);
+    setAssignments(groupAssignments(group));
+    setAssignmentToAdd('');
+  }, [
+    group.assignedInstanceName,
+    group.assignedInstanceNames?.join('\u0000'),
+    group.assignmentRevision,
+    group.updatedAt,
+  ]);
 
   const activeInstances = overview.instances.filter(
     (instance) => instance.active && !instance.paused,
   );
   const hasPending = groupHasPending(group);
-  const assignmentChanged = assignment !== (group.assignedInstanceName ?? '');
-  const currentInstanceUnavailable =
-    group.assignedInstanceName !== null &&
-    group.assignedInstanceName !== undefined &&
-    !activeInstances.some(
-      (instance) => instance.name === group.assignedInstanceName,
-    );
+  const originalAssignments = groupAssignments(group);
+  const assignmentChanged = !assignmentsEqual(assignments, originalAssignments);
+  const assignmentLabel = assignments.length
+    ? assignments.join(' → ')
+    : 'Nenhum WhatsApp responsável';
 
   return (
     <article className="ops-group-card" data-pending={hasPending}>
@@ -232,9 +262,7 @@ function GroupCard({
               <OpsBadge tone="warning">Disponibilidade pendente</OpsBadge>
             )}
           </div>
-          <p className="mt-2 text-sm text-slate-600">
-            {group.assignedInstanceName ?? 'Nenhum WhatsApp responsável'}
-          </p>
+          <p className="mt-2 text-sm text-slate-600">{assignmentLabel}</p>
         </div>
         <button
           type="button"
@@ -268,6 +296,12 @@ function GroupCard({
         <div>
           <span className="ops-detail-label">Último envio</span>
           <strong>{formatDateTime(group.lastSendAt)}</strong>
+        </div>
+        <div className="sm:col-span-2">
+          <span className="ops-detail-label">Próximos slots</span>
+          <strong className="text-sm font-medium">
+            {upcomingAssignmentLabel(group)}
+          </strong>
         </div>
       </div>
 
@@ -342,52 +376,199 @@ function GroupCard({
 
           <div className="ops-group-assignment">
             <div>
-              <p className="ops-control-label">WhatsApp responsável</p>
+              <p className="ops-control-label">Números por ordem de slot</p>
               <p className="ops-control-sub">
-                A troca é explícita e fica bloqueada enquanto houver envio em
-                andamento.
+                A rotação segue esta ordem. A troca é explícita e fica bloqueada
+                enquanto houver envio em andamento.
               </p>
             </div>
-            <label className="grid gap-1 text-sm text-slate-700">
-              <span className="sr-only">Novo WhatsApp responsável</span>
-              <select
-                className="ops-input"
-                value={assignment}
-                onChange={(event) => setAssignment(event.target.value)}
-                disabled={saving}
-                aria-label={`Novo WhatsApp responsável para ${group.name}`}
-              >
-                <option value="">Nenhum WhatsApp responsável</option>
-                {currentInstanceUnavailable ? (
-                  <option value={group.assignedInstanceName ?? ''} disabled>
-                    {group.assignedInstanceName} (indisponível)
-                  </option>
-                ) : null}
-                {activeInstances.map((instance) => (
-                  <option key={instance.name} value={instance.name}>
-                    {instance.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div
+              className="grid gap-2"
+              aria-label={`Ordem de WhatsApps para ${group.name}`}
+            >
+              {assignments.length === 0 ? (
+                <p className="text-sm text-slate-500">
+                  Nenhum número atribuído.
+                </p>
+              ) : null}
+              {assignments.map((name, index) => {
+                const currentUnavailable = !activeInstances.some(
+                  (instance) => instance.name === name,
+                );
+                return (
+                  <div
+                    key={`${name}-${index}`}
+                    className="flex items-center gap-2"
+                  >
+                    <span className="w-6 text-center text-xs font-semibold text-slate-500">
+                      {index + 1}
+                    </span>
+                    <label className="min-w-0 flex-1">
+                      <span className="sr-only">
+                        WhatsApp na posição {index + 1} para {group.name}
+                      </span>
+                      <select
+                        className="ops-input"
+                        value={name}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          if (
+                            !next ||
+                            assignments.some(
+                              (item, itemIndex) =>
+                                item === next && itemIndex !== index,
+                            )
+                          )
+                            return;
+                          setAssignments((current) =>
+                            current.map((item, itemIndex) =>
+                              itemIndex === index ? next : item,
+                            ),
+                          );
+                        }}
+                        disabled={saving}
+                        aria-label={`Novo WhatsApp responsável para ${group.name} posição ${index + 1}`}
+                      >
+                        {currentUnavailable ? (
+                          <option value={name} disabled>
+                            {name} (indisponível)
+                          </option>
+                        ) : null}
+                        {activeInstances
+                          .filter(
+                            (instance) =>
+                              instance.name === name ||
+                              !assignments.includes(instance.name),
+                          )
+                          .map((instance) => (
+                            <option key={instance.name} value={instance.name}>
+                              {instance.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      aria-label={`Mover ${name} para cima`}
+                      disabled={saving || index === 0}
+                      onClick={() =>
+                        setAssignments((current) => {
+                          const next = [...current];
+                          [next[index - 1], next[index]] = [
+                            next[index],
+                            next[index - 1],
+                          ];
+                          return next;
+                        })
+                      }
+                    >
+                      <ArrowUp size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      aria-label={`Mover ${name} para baixo`}
+                      disabled={saving || index === assignments.length - 1}
+                      onClick={() =>
+                        setAssignments((current) => {
+                          const next = [...current];
+                          [next[index], next[index + 1]] = [
+                            next[index + 1],
+                            next[index],
+                          ];
+                          return next;
+                        })
+                      }
+                    >
+                      <ArrowDown size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      aria-label={`Remover ${name}`}
+                      disabled={saving}
+                      onClick={() =>
+                        setAssignments((current) =>
+                          current.filter((_, itemIndex) => itemIndex !== index),
+                        )
+                      }
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="min-w-0 flex-1">
+                  <span className="sr-only">
+                    Adicionar WhatsApp para {group.name}
+                  </span>
+                  <select
+                    className="ops-input"
+                    value={assignmentToAdd}
+                    onChange={(event) => setAssignmentToAdd(event.target.value)}
+                    disabled={saving}
+                    aria-label={`Adicionar WhatsApp para ${group.name}`}
+                  >
+                    <option value="">Adicionar número…</option>
+                    {activeInstances
+                      .filter(
+                        (instance) => !assignments.includes(instance.name),
+                      )
+                      .map((instance) => (
+                        <option key={instance.name} value={instance.name}>
+                          {instance.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="ops-button"
+                  disabled={saving || !assignmentToAdd}
+                  onClick={() => {
+                    setAssignments((current) => [...current, assignmentToAdd]);
+                    setAssignmentToAdd('');
+                  }}
+                >
+                  Adicionar
+                </button>
+              </div>
+            </div>
             <button
               type="button"
               className="ops-button"
               data-variant="primary"
               disabled={saving || !assignmentChanged}
               onClick={() => {
-                const next = assignment || null;
-                const previous = group.assignedInstanceName ?? 'nenhum';
-                const nextLabel = next ?? 'nenhum';
+                const previous = originalAssignments.length
+                  ? originalAssignments.join(' → ')
+                  : 'nenhum';
+                const nextLabel = assignments.length
+                  ? assignments.join(' → ')
+                  : 'nenhum';
+                const input =
+                  group.assignedInstanceNames !== undefined ||
+                  assignments.length > 1 ||
+                  originalAssignments.length > 1
+                    ? { assignedInstanceNames: assignments }
+                    : { assignedInstanceName: assignments[0] ?? null };
+                const confirmationMessage =
+                  assignments.length <= 1 && originalAssignments.length <= 1
+                    ? `Trocar o WhatsApp responsável de ${previous} para ${nextLabel} no grupo ${group.name}?`
+                    : `Trocar a ordem de WhatsApps de ${previous} para ${nextLabel} no grupo ${group.name}?`;
                 onChange(
                   group,
-                  { assignedInstanceName: next },
+                  input,
                   ASSIGNMENT_CONFIRMATION,
-                  `Trocar o WhatsApp responsável de ${previous} para ${nextLabel} no grupo ${group.name}?`,
+                  confirmationMessage,
                 );
               }}
             >
-              Trocar WhatsApp responsável
+              {assignments.length > 1 || originalAssignments.length > 1
+                ? 'Salvar ordem dos WhatsApps'
+                : 'Trocar WhatsApp responsável'}
             </button>
           </div>
         </div>
@@ -447,13 +628,14 @@ export function GroupsManagement() {
       if (filter === 'active' && (!group.active || group.paused)) return false;
       if (filter === 'paused' && !group.paused) return false;
       if (filter === 'pending' && !groupHasPending(group)) return false;
-      if (instanceFilter === '__none__' && group.assignedInstanceName) {
+      const assignments = groupAssignments(group);
+      if (instanceFilter === '__none__' && assignments.length > 0) {
         return false;
       }
       if (
         instanceFilter &&
         instanceFilter !== '__none__' &&
-        group.assignedInstanceName !== instanceFilter
+        !assignments.includes(instanceFilter)
       ) {
         return false;
       }
@@ -470,6 +652,7 @@ export function GroupsManagement() {
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
     },
     confirmation: string,
     confirmationMessage: string,
@@ -509,7 +692,7 @@ export function GroupsManagement() {
   const pausedCount = overview?.groups.filter((group) => group.paused).length;
   const pendingCount = overview?.groups.filter(groupHasPending).length;
   const unassignedCount = overview?.groups.filter(
-    (group) => !group.assignedInstanceName,
+    (group) => groupAssignments(group).length === 0,
   ).length;
 
   return (

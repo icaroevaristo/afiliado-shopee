@@ -1,6 +1,13 @@
 'use client';
 
-import { Plus, RefreshCw, ShieldCheck } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowUp,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
 import {
   DashboardApiError,
@@ -21,6 +28,29 @@ const blockerText = (group: OperationalAdminGroup) =>
   group.blockers.length === 0
     ? 'Nenhum blocker acionavel'
     : group.blockers.map((blocker) => blocker.code).join(' · ');
+
+const groupAssignments = (group: OperationalAdminGroup) => {
+  if (group.assignedInstanceNames !== undefined) {
+    return [...group.assignedInstanceNames];
+  }
+  return group.assignedInstanceName ? [group.assignedInstanceName] : [];
+};
+
+const assignmentsEqual = (left: string[], right: string[]) =>
+  left.length === right.length &&
+  left.every((name, index) => name === right[index]);
+
+const upcomingAssignmentLabel = (group: OperationalAdminGroup) => {
+  const upcoming = group.upcomingAssignments ?? [];
+  return upcoming.length > 0
+    ? upcoming
+        .map(
+          ({ scheduledFor, instanceName }) =>
+            `${formatDateTime(scheduledFor)} · ${instanceName}`,
+        )
+        .join(' · ')
+    : 'Não planejado';
+};
 
 const actionConfirmed = (message: string) =>
   typeof window === 'undefined' || window.confirm(message);
@@ -43,6 +73,185 @@ const operationalErrorMessage = (cause: unknown, fallback: string) => {
   }
   return cause.message || fallback;
 };
+
+function OrderedGroupAssignmentEditor({
+  group,
+  instances,
+  saving,
+  onSave,
+}: {
+  group: OperationalAdminGroup;
+  instances: OperationalAdmin['instances'];
+  saving: boolean;
+  onSave: (input: { assignedInstanceNames: string[] }) => void;
+}) {
+  const [assignments, setAssignments] = useState(() => groupAssignments(group));
+  const [assignmentToAdd, setAssignmentToAdd] = useState('');
+  const originalAssignments = groupAssignments(group);
+
+  useEffect(() => {
+    setAssignments(groupAssignments(group));
+    setAssignmentToAdd('');
+  }, [
+    group.assignedInstanceName,
+    group.assignedInstanceNames?.join('\u0000'),
+    group.assignmentRevision,
+    group.updatedAt,
+  ]);
+
+  const activeInstances = instances.filter(
+    (instance) => instance.active && !instance.paused,
+  );
+  const changed = !assignmentsEqual(assignments, originalAssignments);
+
+  return (
+    <div
+      className="grid gap-2"
+      aria-label={`Ordem de WhatsApps para ${group.name}`}
+    >
+      {assignments.length === 0 ? (
+        <p className="text-xs text-slate-500">Nenhum número atribuído.</p>
+      ) : null}
+      {assignments.map((name, index) => {
+        const unavailable = !activeInstances.some(
+          (instance) => instance.name === name,
+        );
+        return (
+          <div key={`${name}-${index}`} className="flex items-center gap-1">
+            <span className="w-5 text-center text-xs font-semibold text-slate-500">
+              {index + 1}
+            </span>
+            <select
+              className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+              value={name}
+              disabled={saving}
+              aria-label={`WhatsApp na posição ${index + 1} para ${group.name}`}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (
+                  !next ||
+                  assignments.some(
+                    (item, itemIndex) => item === next && itemIndex !== index,
+                  )
+                ) {
+                  return;
+                }
+                setAssignments((current) =>
+                  current.map((item, itemIndex) =>
+                    itemIndex === index ? next : item,
+                  ),
+                );
+              }}
+            >
+              {unavailable ? (
+                <option value={name} disabled>
+                  {name} (bloqueada)
+                </option>
+              ) : null}
+              {activeInstances
+                .filter(
+                  (instance) =>
+                    instance.name === name ||
+                    !assignments.includes(instance.name),
+                )
+                .map((instance) => (
+                  <option key={instance.name} value={instance.name}>
+                    {instance.name}
+                  </option>
+                ))}
+            </select>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 p-2 text-slate-600 disabled:opacity-50"
+              aria-label={`Mover ${name} para cima`}
+              disabled={saving || index === 0}
+              onClick={() =>
+                setAssignments((current) => {
+                  const next = [...current];
+                  [next[index - 1], next[index]] = [
+                    next[index],
+                    next[index - 1],
+                  ];
+                  return next;
+                })
+              }
+            >
+              <ArrowUp className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 p-2 text-slate-600 disabled:opacity-50"
+              aria-label={`Mover ${name} para baixo`}
+              disabled={saving || index === assignments.length - 1}
+              onClick={() =>
+                setAssignments((current) => {
+                  const next = [...current];
+                  [next[index], next[index + 1]] = [
+                    next[index + 1],
+                    next[index],
+                  ];
+                  return next;
+                })
+              }
+            >
+              <ArrowDown className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 p-2 text-slate-600 disabled:opacity-50"
+              aria-label={`Remover ${name}`}
+              disabled={saving}
+              onClick={() =>
+                setAssignments((current) =>
+                  current.filter((_, itemIndex) => itemIndex !== index),
+                )
+              }
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        );
+      })}
+      <div className="flex gap-2">
+        <select
+          className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+          value={assignmentToAdd}
+          disabled={saving}
+          aria-label={`Adicionar WhatsApp para ${group.name}`}
+          onChange={(event) => setAssignmentToAdd(event.target.value)}
+        >
+          <option value="">Adicionar número…</option>
+          {activeInstances
+            .filter((instance) => !assignments.includes(instance.name))
+            .map((instance) => (
+              <option key={instance.name} value={instance.name}>
+                {instance.name}
+              </option>
+            ))}
+        </select>
+        <button
+          type="button"
+          className="rounded-md border border-slate-300 px-2 py-2 text-xs font-medium text-slate-700 disabled:opacity-50"
+          disabled={saving || !assignmentToAdd}
+          onClick={() => {
+            setAssignments((current) => [...current, assignmentToAdd]);
+            setAssignmentToAdd('');
+          }}
+        >
+          Adicionar
+        </button>
+      </div>
+      <button
+        type="button"
+        className="rounded-md border border-orange-300 px-3 py-2 text-xs font-medium text-orange-800 disabled:opacity-50"
+        disabled={saving || !changed}
+        onClick={() => onSave({ assignedInstanceNames: assignments })}
+      >
+        Salvar ordem dos WhatsApps
+      </button>
+    </div>
+  );
+}
 
 export function OperationalAdminPanel({
   showGroups = true,
@@ -91,7 +300,7 @@ export function OperationalAdminPanel({
     ? overview.groups.filter((group) => {
         if (
           groupFilters.instance &&
-          group.assignedInstanceName !== groupFilters.instance
+          !groupAssignments(group).includes(groupFilters.instance)
         ) {
           return false;
         }
@@ -180,6 +389,7 @@ export function OperationalAdminPanel({
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
     },
     confirmation: string,
   ) => {
@@ -428,198 +638,218 @@ export function OperationalAdminPanel({
           </div>
 
           {showGroups && (
-          <div className="grid gap-3">
-            <div>
-              <h3 className="font-semibold text-slate-950">
-                Grupos e assignments
-              </h3>
-              <p className="mt-1 text-sm text-slate-600">
-                Disponibilidade e fingerprint vêm do diretório. Assignment só
-                muda com CAS e é bloqueado durante lifecycle ativo.
-              </p>
-            </div>
-            <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-4">
-              <label className="text-xs text-slate-600">
-                Instância
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
-                  value={groupFilters.instance}
-                  onChange={(event) =>
-                    setGroupFilters((current) => ({
-                      ...current,
-                      instance: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Todas</option>
-                  {overview.instances.map((instance) => (
-                    <option key={instance.name} value={instance.name}>
-                      {instance.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="text-xs text-slate-600">
-                Campanha
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
-                  value={groupFilters.campaign}
-                  onChange={(event) =>
-                    setGroupFilters((current) => ({
-                      ...current,
-                      campaign: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Todas</option>
-                  {overview.campaigns?.map((campaign) => (
-                    <option key={campaign.id} value={campaign.id}>
-                      {campaign.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="text-xs text-slate-600">
-                Estado
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
-                  value={groupFilters.active}
-                  onChange={(event) =>
-                    setGroupFilters((current) => ({
-                      ...current,
-                      active: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Todos</option>
-                  <option value="true">Ativos</option>
-                  <option value="false">Inativos</option>
-                </select>
-              </label>
-              <label className="text-xs text-slate-600">
-                Pausa
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
-                  value={groupFilters.paused}
-                  onChange={(event) =>
-                    setGroupFilters((current) => ({
-                      ...current,
-                      paused: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Todas</option>
-                  <option value="true">Pausados</option>
-                  <option value="false">Sem pausa</option>
-                </select>
-              </label>
-            </div>
-            {visibleGroups.length === 0 ? (
-              <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
-                {overview.groups.length === 0
-                  ? 'Nenhum grupo persistido.'
-                  : 'Nenhum grupo corresponde aos filtros.'}
-              </p>
-            ) : (
-              visibleGroups.map((group) => (
-                <article
-                  key={group.id}
-                  className="grid gap-3 rounded-md border border-slate-200 p-4 lg:grid-cols-[1.2fr_1fr_auto]"
-                >
-                  <div>
-                    <h4 className="font-medium text-slate-950">{group.name}</h4>
-                    <p className="mt-1 font-mono text-xs text-slate-500">
-                      {group.fingerprint ?? 'fingerprint indisponível'}
-                    </p>
-                    <p className="mt-2 text-xs text-slate-600">
-                      {group.available ? 'Disponível' : 'Indisponível'} ·{' '}
-                      {group.campaign?.name ?? 'Sem campanha'} ·{' '}
-                      {group.niche?.name ?? 'Sem nicho'}
-                    </p>
-                    <p className="mt-1 text-xs text-amber-800">
-                      {blockerText(group)}
-                    </p>
-                  </div>
-                  <div className="grid content-start gap-2 text-sm">
-                    <label>
-                      <span className="text-xs text-slate-500">
-                        Instância atribuída
-                      </span>
-                      <select
-                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
-                        value={group.assignedInstanceName ?? ''}
-                        onChange={(event) => {
-                          const next = event.target.value || null;
-                          if (next !== group.assignedInstanceName)
-                            void changeGroup(
-                              group,
-                              { assignedInstanceName: next },
-                              ASSIGNMENT_CONFIRMATION,
-                            );
-                        }}
-                      >
-                        <option value="">Não atribuída</option>
-                        {overview.instances.map((instance) => (
-                          <option
-                            key={instance.name}
-                            value={instance.name}
-                            disabled={!instance.active || instance.paused}
+            <div className="grid gap-3">
+              <div>
+                <h3 className="font-semibold text-slate-950">
+                  Grupos e assignments
+                </h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  Disponibilidade e fingerprint vêm do diretório. Assignment só
+                  muda com CAS e é bloqueado durante lifecycle ativo.
+                </p>
+              </div>
+              <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-4">
+                <label className="text-xs text-slate-600">
+                  Instância
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+                    value={groupFilters.instance}
+                    onChange={(event) =>
+                      setGroupFilters((current) => ({
+                        ...current,
+                        instance: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Todas</option>
+                    {overview.instances.map((instance) => (
+                      <option key={instance.name} value={instance.name}>
+                        {instance.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  Campanha
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+                    value={groupFilters.campaign}
+                    onChange={(event) =>
+                      setGroupFilters((current) => ({
+                        ...current,
+                        campaign: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Todas</option>
+                    {overview.campaigns?.map((campaign) => (
+                      <option key={campaign.id} value={campaign.id}>
+                        {campaign.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  Estado
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+                    value={groupFilters.active}
+                    onChange={(event) =>
+                      setGroupFilters((current) => ({
+                        ...current,
+                        active: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Todos</option>
+                    <option value="true">Ativos</option>
+                    <option value="false">Inativos</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  Pausa
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+                    value={groupFilters.paused}
+                    onChange={(event) =>
+                      setGroupFilters((current) => ({
+                        ...current,
+                        paused: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Todas</option>
+                    <option value="true">Pausados</option>
+                    <option value="false">Sem pausa</option>
+                  </select>
+                </label>
+              </div>
+              {visibleGroups.length === 0 ? (
+                <p className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
+                  {overview.groups.length === 0
+                    ? 'Nenhum grupo persistido.'
+                    : 'Nenhum grupo corresponde aos filtros.'}
+                </p>
+              ) : (
+                visibleGroups.map((group) => (
+                  <article
+                    key={group.id}
+                    className="grid gap-3 rounded-md border border-slate-200 p-4 lg:grid-cols-[1.2fr_1fr_auto]"
+                  >
+                    <div>
+                      <h4 className="font-medium text-slate-950">
+                        {group.name}
+                      </h4>
+                      <p className="mt-1 font-mono text-xs text-slate-500">
+                        {group.fingerprint ?? 'fingerprint indisponível'}
+                      </p>
+                      <p className="mt-2 text-xs text-slate-600">
+                        {group.available ? 'Disponível' : 'Indisponível'} ·{' '}
+                        {group.campaign?.name ?? 'Sem campanha'} ·{' '}
+                        {group.niche?.name ?? 'Sem nicho'}
+                      </p>
+                      <p className="mt-1 text-xs text-amber-800">
+                        {blockerText(group)}
+                      </p>
+                    </div>
+                    <div className="grid content-start gap-2 text-sm">
+                      <label>
+                        <span className="text-xs text-slate-500">
+                          Instância atribuída
+                        </span>
+                        {group.assignedInstanceNames !== undefined ? (
+                          <OrderedGroupAssignmentEditor
+                            group={group}
+                            instances={overview.instances}
+                            saving={saving === `group:${group.id}`}
+                            onSave={(input) =>
+                              void changeGroup(
+                                group,
+                                input,
+                                ASSIGNMENT_CONFIRMATION,
+                              )
+                            }
+                          />
+                        ) : (
+                          <select
+                            className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
+                            value={group.assignedInstanceName ?? ''}
+                            onChange={(event) => {
+                              const next = event.target.value || null;
+                              if (next !== group.assignedInstanceName)
+                                void changeGroup(
+                                  group,
+                                  { assignedInstanceName: next },
+                                  ASSIGNMENT_CONFIRMATION,
+                                );
+                            }}
                           >
-                            {instance.name}
-                            {!instance.active || instance.paused
-                              ? ' (bloqueada)'
-                              : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <p className="text-xs text-slate-500">
-                      Último: {formatDateTime(group.lastSendAt)} · Próximo:{' '}
-                      {formatDateTime(group.nextSendAt)}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-start gap-2 lg:flex-col">
-                    <button
-                      type="button"
-                      className="rounded-md border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-60"
-                      disabled={saving === `group:${group.id}`}
-                      onClick={() =>
-                        void changeGroup(
-                          group,
-                          { active: !group.active },
-                          CHANGE_CONFIRMATION,
-                        )
-                      }
-                    >
-                      {saving === `group:${group.id}`
-                        ? 'Salvando…'
-                        : group.active
-                          ? 'Desativar'
-                          : 'Ativar'}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-md border border-amber-300 px-3 py-2 text-xs font-medium text-amber-800 disabled:opacity-60"
-                      disabled={saving === `group:${group.id}`}
-                      onClick={() =>
-                        void changeGroup(
-                          group,
-                          { paused: !group.paused },
-                          PAUSE_CONFIRMATION,
-                        )
-                      }
-                    >
-                      {saving === `group:${group.id}`
-                        ? 'Salvando…'
-                        : group.paused
-                          ? 'Retirar pausa'
-                          : 'Pausar'}
-                    </button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
+                            <option value="">Não atribuída</option>
+                            {overview.instances.map((instance) => (
+                              <option
+                                key={instance.name}
+                                value={instance.name}
+                                disabled={!instance.active || instance.paused}
+                              >
+                                {instance.name}
+                                {!instance.active || instance.paused
+                                  ? ' (bloqueada)'
+                                  : ''}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </label>
+                      <p className="text-xs text-slate-500">
+                        Último: {formatDateTime(group.lastSendAt)} · Próximo:{' '}
+                        {formatDateTime(group.nextSendAt)}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        Próximos slots: {upcomingAssignmentLabel(group)}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-start gap-2 lg:flex-col">
+                      <button
+                        type="button"
+                        className="rounded-md border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-60"
+                        disabled={saving === `group:${group.id}`}
+                        onClick={() =>
+                          void changeGroup(
+                            group,
+                            { active: !group.active },
+                            CHANGE_CONFIRMATION,
+                          )
+                        }
+                      >
+                        {saving === `group:${group.id}`
+                          ? 'Salvando…'
+                          : group.active
+                            ? 'Desativar'
+                            : 'Ativar'}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md border border-amber-300 px-3 py-2 text-xs font-medium text-amber-800 disabled:opacity-60"
+                        disabled={saving === `group:${group.id}`}
+                        onClick={() =>
+                          void changeGroup(
+                            group,
+                            { paused: !group.paused },
+                            PAUSE_CONFIRMATION,
+                          )
+                        }
+                      >
+                        {saving === `group:${group.id}`
+                          ? 'Salvando…'
+                          : group.paused
+                            ? 'Retirar pausa'
+                            : 'Pausar'}
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
           )}
 
           <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">

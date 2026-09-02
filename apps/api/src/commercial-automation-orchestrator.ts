@@ -29,6 +29,7 @@ import type {
 } from './commercial-automation-candidate-flow-service';
 import type { CommercialPromotionMiningReport } from './commercial-promotion-mining-service';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
+import { isCommercialInstanceAssigned } from './commercial-instance-stickiness';
 import type {
   CommercialAutomationTarget,
   CommercialGroupCampaignAttemptRelease,
@@ -407,15 +408,36 @@ export class CommercialAutomationOrchestrator {
         }
         const targetReasons = new Set<string>();
         if (input.targetConstraint) {
-          const scheduledFor = Date.parse(input.targetConstraint.scheduledFor);
-          const matchingTargets = targets.filter(
-            (target) =>
-              target.campaignId === input.targetConstraint?.campaignId &&
-              target.groupId === input.targetConstraint?.groupId &&
-              target.logicalGroupFingerprint ===
-                input.targetConstraint?.logicalGroupFingerprint &&
-              target.instanceName === input.targetConstraint?.instanceName,
-          );
+          const constraint = input.targetConstraint;
+          const scheduledFor = Date.parse(constraint.scheduledFor);
+          const matchingTargets = targets.flatMap((target) => {
+            if (
+              target.campaignId !== constraint.campaignId ||
+              target.groupId !== constraint.groupId ||
+              target.logicalGroupFingerprint !==
+                constraint.logicalGroupFingerprint ||
+              !isCommercialInstanceAssigned(
+                {
+                  assignedInstanceName: target.instanceName,
+                  assignedInstanceNames: target.orderedInstanceNames,
+                },
+                constraint.instanceName,
+              ) ||
+              (constraint.assignmentRevision !== undefined &&
+                target.assignmentRevision !== constraint.assignmentRevision)
+            ) {
+              return [];
+            }
+            // The planner binds the selected member before enqueue. Preserve
+            // that binding instead of reverting to the group's primary member.
+            return [{
+              ...target,
+              instanceName: constraint.instanceName,
+              ...(constraint.assignmentRevision !== undefined
+                ? { assignmentRevision: constraint.assignmentRevision }
+                : {}),
+            }];
+          });
           if (
             !Number.isFinite(scheduledFor) ||
             scheduledFor > this.clock().getTime()

@@ -794,6 +794,9 @@ export type CommercialAutomationTarget = {
   groupId: string;
   groupName: string;
   instanceName?: string;
+  /** Ordered sender set; legacy rows fall back to instanceName. */
+  orderedInstanceNames?: string[];
+  assignmentRevision?: number;
   logicalGroupFingerprint: string;
   campaignId: string;
   nicheId: string;
@@ -885,6 +888,7 @@ export type CommercialAutomationExecutionRecoveryContext = {
               destinationId?: string;
               destinationType?: 'INDIVIDUAL' | 'GROUP';
               destinationAssignedInstanceName?: string | null;
+              destinationAssignedInstanceNames?: string[];
               externalMessageId?: string | null;
               sentAt?: Date | null;
             })
@@ -1093,6 +1097,8 @@ export type CommercialCampaignGroupSummary = {
   active: boolean;
   available: boolean;
   assignedInstanceName?: string | null;
+  assignedInstanceNames?: string[];
+  assignmentRevision?: number;
 };
 
 export type CommercialCampaignNicheSummary = Pick<
@@ -1768,6 +1774,9 @@ export type WhatsAppGroupRecord = WhatsAppDestinationRecord & {
   fingerprint: string;
   sourceInstanceName: string;
   assignedInstanceName?: string | null;
+  /** Ordered sender set; legacy rows fall back to assignedInstanceName. */
+  assignedInstanceNames?: string[];
+  assignmentRevision?: number;
   discoveredAt: Date;
   lastSyncedAt: Date;
 };
@@ -1872,7 +1881,11 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'fingerprint'
     | 'sourceInstanceName'
     | 'assignedInstanceName'
-  > & { id?: string };
+  > & {
+    id?: string;
+    assignedInstanceNames?: string[];
+    assignmentRevision?: number;
+  };
   product?: Pick<
     ProductLeadRecord,
     'comissao' | 'urlImagem' | 'affiliateLink'
@@ -1922,6 +1935,7 @@ export interface WhatsAppDestinationRepository {
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
     },
   ): Promise<WhatsAppDestinationRecord | null>;
@@ -1983,6 +1997,7 @@ export interface WhatsAppGroupDirectoryRepository {
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
     },
   ): Promise<WhatsAppGroupRecord | null>;
@@ -1991,7 +2006,8 @@ export interface WhatsAppGroupDirectoryRepository {
     data: {
       active?: boolean;
       paused?: boolean;
-      assignedInstanceName: string | null;
+      assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
       now: Date;
     },

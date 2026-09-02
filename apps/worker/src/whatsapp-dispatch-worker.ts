@@ -24,7 +24,10 @@ import {
 } from '../../api/src/manual-publication-lifecycle-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { ApplicationRepositories } from '../../api/src/application-services';
-import { assertCommercialStickyIdentity } from '../../api/src/commercial-instance-stickiness';
+import {
+  assertCommercialStickyIdentity,
+  isCommercialInstanceAssigned,
+} from '../../api/src/commercial-instance-stickiness';
 
 export type WhatsAppDispatchWorkerLogger = {
   info: (obj: unknown, msg?: string) => void;
@@ -314,7 +317,7 @@ const resolveCommercialDispatchProvider = async (input: {
   }
   if (
     run.groupDestinationId !== dispatch.destinationId ||
-    dispatch.destination.assignedInstanceName !== stickyInstanceName
+    !isCommercialInstanceAssigned(dispatch.destination, stickyInstanceName)
   ) {
     throw reservationHandoffError(
       'Assignment da instancia mudou durante o lifecycle comercial',

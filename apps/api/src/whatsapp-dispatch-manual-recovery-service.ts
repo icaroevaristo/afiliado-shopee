@@ -70,8 +70,10 @@ const assertRetryProgressIsProven = (
   }
   if (state === 'active') {
     const dispatchMatches =
-      (inspection.dispatchStatus === 'PENDING' && inspection.attemptCount === 1) ||
-      (inspection.dispatchStatus === 'PROCESSING' && inspection.attemptCount === 2);
+      (inspection.dispatchStatus === 'PENDING' &&
+        inspection.attemptCount === 1) ||
+      (inspection.dispatchStatus === 'PROCESSING' &&
+        inspection.attemptCount === 2);
     return dispatchMatches && isAmbiguousRun(inspection);
   }
   if (state === 'completed') {
@@ -99,7 +101,6 @@ const assertRetryProgressIsProven = (
   }
   return false;
 };
-
 
 const assertCommercialPolicyAllowsRetry = async (
   policy: ManualRecoveryCommercialPolicy,
@@ -139,14 +140,20 @@ export class WhatsAppDispatchManualRecoveryService {
   constructor(
     private readonly repository: WhatsAppDispatchManualRecoveryRepository,
     private readonly queue?: ManualRecoveryQueue,
-    private readonly options: { clock?: () => Date; reservationLeaseMs?: number } = {},
+    private readonly options: {
+      clock?: () => Date;
+      reservationLeaseMs?: number;
+    } = {},
     private readonly policy?: ManualRecoveryCommercialPolicy,
   ) {}
 
   async authorize(input: WhatsAppDispatchManualRecoveryInput) {
     assertConfirmation(input.confirmation);
     const now = this.options.clock?.() ?? new Date();
-    return this.repository.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now });
+    return this.repository.authorizeConfirmedNonDelivery({
+      ...input,
+      authorizedAt: now,
+    });
   }
 
   async requeueAuthorizedRetry(input: WhatsAppDispatchManualRecoveryInput) {
@@ -179,9 +186,15 @@ export class WhatsAppDispatchManualRecoveryService {
       dispatchInstanceName: inspection.instanceName,
       outboxInstanceName: inspection.instanceName,
       jobInstanceName: job.instanceName,
-      destinationAssignedInstanceName: inspection.instanceName,
+      destinationAssignedInstanceName:
+        inspection.target.orderedInstanceNames === undefined
+          ? inspection.instanceName
+          : undefined,
+      destinationAssignedInstanceNames: inspection.target.orderedInstanceNames,
     });
-    const equivalentJobIds = await this.queue.findEquivalentJobIds(inspection.dispatchId);
+    const equivalentJobIds = await this.queue.findEquivalentJobIds(
+      inspection.dispatchId,
+    );
     const foreignEquivalentJobIds = [...new Set(equivalentJobIds)].filter(
       (jobId) => jobId !== inspection.jobId,
     );
@@ -202,7 +215,12 @@ export class WhatsAppDispatchManualRecoveryService {
 
     if (inspection.recovery.requeuedAt) {
       if (existingRetryIsProven) {
-        return { kind: 'ALREADY_REQUEUED' as const, state, attemptsMade, context: inspection };
+        return {
+          kind: 'ALREADY_REQUEUED' as const,
+          state,
+          attemptsMade,
+          context: inspection,
+        };
       }
       throw new AppError(
         'Recovery marcado como requeued sem evidencia coerente do retry',
@@ -259,7 +277,8 @@ export class WhatsAppDispatchManualRecoveryService {
       state = await job.getState();
       attemptsMade = job.attemptsMade;
       inspection = await this.repository.inspectAuthorizedRecovery(input);
-      if (!assertRetryProgressIsProven(state, attemptsMade, inspection)) throw error;
+      if (!assertRetryProgressIsProven(state, attemptsMade, inspection))
+        throw error;
     }
 
     state = await job.getState();
