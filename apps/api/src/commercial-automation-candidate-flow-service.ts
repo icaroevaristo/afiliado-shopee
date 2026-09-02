@@ -1,6 +1,7 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
+  COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH,
   validateCommercialAffiliateLinkProvenance,
 } from './commercial-affiliate-link-provenance';
 import {
@@ -10,6 +11,7 @@ import {
 } from './commercial-promotion-mining-service';
 import {
   COMMERCIAL_AI_COPY_CONFIRMATION,
+  COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED,
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   type CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
@@ -135,6 +137,11 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   'COMMERCIAL_MESSAGE_PRODUCT_UNAVAILABLE',
   'COMMERCIAL_MESSAGE_SNAPSHOT_EXPIRED',
   'COMMERCIAL_MESSAGE_SNAPSHOT_UNAVAILABLE',
+  // The provenance validator has already checked candidate/snapshot/product
+  // identity before returning this code. It means the product advanced to a
+  // newer official snapshot after this queue entry was materialized.
+  COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH,
+  COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED,
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
 ] as const;

@@ -44,6 +44,8 @@ import type {
 export const COMMERCIAL_AI_COPY_CONFIRMATION = 'GERAR_COPY_COM_IA';
 export const COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED =
   'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED';
+export const COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED =
+  'COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED';
 
 export type CommercialAiCopyConfig = {
   enabled: boolean;
@@ -114,7 +116,7 @@ const candidateBlockers = (
     product.commercialSnapshotRevision !== snapshot.revision ||
     product.commercialSnapshotFingerprint !== snapshot.fingerprint
   ) {
-    blockers.push('COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED');
+    blockers.push(COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED);
   }
   if (candidate.commercialScore < niche.minimumScore) {
     blockers.push('COMMERCIAL_AI_COPY_SCORE_BELOW_MINIMUM');
