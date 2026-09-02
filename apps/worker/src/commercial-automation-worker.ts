@@ -165,6 +165,16 @@ export const processCommercialAutomationJob = async (
         'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_REQUIRED',
       );
     }
+    if (
+      target.assignmentRevision !== undefined &&
+      (!Number.isSafeInteger(target.assignmentRevision) ||
+        target.assignmentRevision < 1)
+    ) {
+      throw new AppError(
+        'Job target da automacao comercial sem revisao de assignment valida',
+        'COMMERCIAL_AUTOMATION_ASSIGNMENT_REVISION_INVALID',
+      );
+    }
     if (`commercial-target-${target.slotKey}` !== job.id) {
       throw new AppError(
         'Job target da automacao comercial com identidade divergente',

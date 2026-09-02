@@ -266,7 +266,11 @@ export class CommercialAutomationExecutionRecoveryService {
           dispatchInstanceName: run.dispatch?.instanceName,
           outboxInstanceName: run.outbox.instanceName,
           destinationAssignedInstanceName:
-            run.dispatch?.destinationAssignedInstanceName,
+            run.dispatch?.destinationAssignedInstanceNames === undefined
+              ? run.dispatch?.destinationAssignedInstanceName
+              : undefined,
+          destinationAssignedInstanceNames:
+            run.dispatch?.destinationAssignedInstanceNames,
         },
         { allowMissingJob: true },
       );
@@ -294,7 +298,11 @@ export class CommercialAutomationExecutionRecoveryService {
       dispatchInstanceName: run.dispatch?.instanceName,
       outboxInstanceName: run.outbox?.instanceName,
       destinationAssignedInstanceName:
-        run.dispatch?.destinationAssignedInstanceName,
+        run.dispatch?.destinationAssignedInstanceNames === undefined
+          ? run.dispatch?.destinationAssignedInstanceName
+          : undefined,
+      destinationAssignedInstanceNames:
+        run.dispatch?.destinationAssignedInstanceNames,
     });
     if (persistedIdentity === null) return null;
     if (!run.dispatch || !run.outbox || !run.jobId) {
@@ -318,7 +326,11 @@ export class CommercialAutomationExecutionRecoveryService {
       outboxInstanceName: run.outbox.instanceName,
       jobInstanceName: job?.instanceName,
       destinationAssignedInstanceName:
-        run.dispatch.destinationAssignedInstanceName,
+        run.dispatch.destinationAssignedInstanceNames === undefined
+          ? run.dispatch.destinationAssignedInstanceName
+          : undefined,
+      destinationAssignedInstanceNames:
+        run.dispatch.destinationAssignedInstanceNames,
     });
     if (!identity) return null;
     await assertActiveCommercialInstance(this.dependencies.instances, identity);
@@ -363,7 +375,11 @@ export class CommercialAutomationExecutionRecoveryService {
         dispatchInstanceName: run.dispatch?.instanceName,
         outboxInstanceName: run.outbox?.instanceName,
         destinationAssignedInstanceName:
-          run.dispatch?.destinationAssignedInstanceName,
+          run.dispatch?.destinationAssignedInstanceNames === undefined
+            ? run.dispatch?.destinationAssignedInstanceName
+            : undefined,
+        destinationAssignedInstanceNames:
+          run.dispatch?.destinationAssignedInstanceNames,
         jobInstanceName: job.instanceName,
       },
       { allowMissingJob: true },

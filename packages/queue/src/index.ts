@@ -91,6 +91,7 @@ export type CommercialAutomationTargetConstraint = {
   scheduledFor: string;
   slotKey: string;
   scheduleRevision: number;
+  assignmentRevision?: number;
 };
 export type CommercialAutomationJob =
   | { mode: CommercialAutomationMode; kind?: 'planner' }

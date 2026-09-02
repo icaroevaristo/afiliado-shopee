@@ -40,6 +40,7 @@ export const updateOperationalGroup = (
     active?: boolean;
     paused?: boolean;
     assignedInstanceName?: string | null;
+    assignedInstanceNames?: string[];
     expectedUpdatedAt: string;
     confirmation: string;
   },

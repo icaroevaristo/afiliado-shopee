@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { change, render, submit } from '../test/render';
+import { change, click, render, submit } from '../test/render';
 import { OperationalAdminPanel } from './operational-admin-panel';
 
 const getOperationalAdminMock = vi.fn();
@@ -166,6 +166,43 @@ describe('OperationalAdminPanel', () => {
     expect(screen.container.textContent).toContain('instance-a');
     expect(screen.container.textContent).not.toContain('Grupos e assignments');
     expect(screen.container.textContent).not.toContain('Grupo A');
+    await screen.unmount();
+  });
+
+  it('permite reorganizar vários números por slot sem editar um contador', async () => {
+    const orderedOverview = {
+      ...overview,
+      instances: [
+        ...overview.instances,
+        { ...overview.instances[0], name: 'instance-b' },
+      ],
+      groups: [
+        {
+          ...overview.groups[0],
+          assignedInstanceNames: ['instance-a', 'instance-b'],
+          assignmentRevision: 4,
+        },
+      ],
+    };
+    getOperationalAdminMock.mockReset().mockResolvedValue(orderedOverview);
+    const screen = await render(<OperationalAdminPanel />);
+
+    await click(
+      screen.container.querySelector(
+        'button[aria-label="Mover instance-b para cima"]',
+      ) as HTMLButtonElement,
+    );
+    await click(
+      Array.from(screen.container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Salvar ordem dos WhatsApps'),
+      ) as HTMLButtonElement,
+    );
+
+    expect(updateOperationalGroupMock).toHaveBeenCalledWith('group-a', {
+      assignedInstanceNames: ['instance-b', 'instance-a'],
+      expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
+      confirmation: 'CONFIRMAR_REATRIBUICAO_GRUPO',
+    });
     await screen.unmount();
   });
 });

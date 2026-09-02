@@ -183,6 +183,7 @@ class MemoryGroups implements WhatsAppGroupDirectoryRepository {
       active?: boolean;
       paused?: boolean;
       assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
     },
   ) {
@@ -198,6 +199,12 @@ class MemoryGroups implements WhatsAppGroupDirectoryRepository {
       ...(input.assignedInstanceName === undefined
         ? {}
         : { assignedInstanceName: input.assignedInstanceName }),
+      ...(input.assignedInstanceNames === undefined
+        ? {}
+        : {
+            assignedInstanceNames: input.assignedInstanceNames,
+            assignedInstanceName: input.assignedInstanceNames[0] ?? null,
+          }),
       updatedAt: new Date(NOW.getTime() + 1),
     };
     return this.record;
@@ -208,7 +215,8 @@ class MemoryGroups implements WhatsAppGroupDirectoryRepository {
     input: {
       active?: boolean;
       paused?: boolean;
-      assignedInstanceName: string | null;
+      assignedInstanceName?: string | null;
+      assignedInstanceNames?: string[];
       expectedUpdatedAt: Date;
       now: Date;
     },
@@ -501,6 +509,41 @@ describe('OperationalAdminService', () => {
       }),
     ).resolves.toMatchObject({ assignedInstanceName: null });
     expect(groups.record.assignedInstanceName).toBeNull();
+  });
+
+  it('preserva a ordem de múltiplas instâncias e usa a confirmação de assignment', async () => {
+    const { service, groups, instances } = createService();
+    instances.records.push(instance('instance-b'));
+
+    await expect(
+      service.updateGroup({
+        id: 'group-a',
+        assignedInstanceNames: ['instance-a', 'instance-b'],
+        expectedUpdatedAt: NOW.toISOString(),
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      }),
+    ).resolves.toMatchObject({
+      assignedInstanceName: 'instance-a',
+      assignedInstanceNames: ['instance-a', 'instance-b'],
+    });
+    expect(groups.record.assignedInstanceNames).toEqual([
+      'instance-a',
+      'instance-b',
+    ]);
+  });
+
+  it('rejeita lista ordenada com duplicidade antes do repository', async () => {
+    const { service, groups } = createService();
+
+    await expect(
+      service.updateGroup({
+        id: 'group-a',
+        assignedInstanceNames: ['instance-a', 'instance-a'],
+        expectedUpdatedAt: NOW.toISOString(),
+        confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,
+      }),
+    ).rejects.toMatchObject({ code: 'OPERATIONAL_ASSIGNMENT_INVALID' });
+    expect(groups.record.assignedInstanceName).toBe('instance-a');
   });
 
   it('expõe blockers de segurança do deployment sem expor configuração sensível', async () => {

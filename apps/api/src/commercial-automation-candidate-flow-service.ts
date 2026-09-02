@@ -25,6 +25,8 @@ import {
 } from './commercial-group-selection';
 import {
   filterExecutableCommercialGroups,
+  getOrderedAssignedInstanceNames,
+  isCommercialInstanceAssigned,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
 import type {
@@ -247,10 +249,15 @@ export class CommercialAutomationCandidateFlowService {
   private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
     const candidates = this.options.groups.listAll
       ? (await this.options.groups.listAll({ active: true, available: true })).filter(
-        (group) =>
-            typeof group.assignedInstanceName === 'string' &&
-            isCommercialAssignedGroup(group, group.assignedInstanceName),
-        )
+        (group) => {
+          try {
+            const names = getOrderedAssignedInstanceNames(group);
+            return names.length > 0 && isCommercialAssignedGroup(group, names[0]);
+          } catch {
+            return false;
+          }
+        },
+      )
       : (await this.options.groups.list(this.options.instanceName, {
           active: true,
           available: true,
@@ -292,7 +299,9 @@ export class CommercialAutomationCandidateFlowService {
         candidate.id === target.groupId &&
         candidate.fingerprint === target.logicalGroupFingerprint &&
         (!target.instanceName ||
-          candidate.assignedInstanceName === target.instanceName),
+          isCommercialInstanceAssigned(candidate, target.instanceName)) &&
+        (target.assignmentRevision === undefined ||
+          candidate.assignmentRevision === target.assignmentRevision),
     );
     if (!group) {
       throw appError(
@@ -336,6 +345,8 @@ export class CommercialAutomationCandidateFlowService {
           groupId: group.id,
           groupName: group.name,
           instanceName: requireAssignedInstanceName(group),
+          orderedInstanceNames: getOrderedAssignedInstanceNames(group),
+          assignmentRevision: group.assignmentRevision,
           logicalGroupFingerprint: group.fingerprint,
           campaignId: campaign.id,
           nicheId: campaign.nicheId,
@@ -946,7 +957,8 @@ export class CommercialAutomationCandidateFlowService {
       group,
       executionId: options.executionId,
       existingRunId: options.existingRunId,
-      instanceName: requireAssignedInstanceName(group),
+      instanceName:
+        selection.target.instanceName ?? requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
       manualSelection: options.manualSelection ?? false,
       copyPreview: draft.caption,

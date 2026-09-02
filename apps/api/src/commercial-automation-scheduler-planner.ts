@@ -25,6 +25,7 @@ import type {
   WhatsAppGroupDirectoryRepository,
   WhatsAppInstanceRepository,
 } from './repositories';
+import { getOrderedAssignedInstanceNames } from './commercial-instance-stickiness';
 
 const MINUTE_MS = 60_000;
 const PLANNER_HORIZON_MINUTES = 24 * 60;
@@ -67,6 +68,8 @@ export type CommercialAutomationPlannerTarget = CommercialAutomationTarget & {
   instanceActive: boolean;
   lastSentAt: Date | null;
   groupSentToday: number;
+  /** Active state is evaluated for every ordered assignment, not just the legacy primary. */
+  instanceActiveByName?: Readonly<Record<string, boolean>>;
 };
 
 export type PlannedCommercialTargetSlot = {
@@ -93,6 +96,8 @@ export type CommercialAutomationPlannerResult = {
 const canonicalTargetKey = (target: CommercialAutomationPlannerTarget) =>
   [
     target.instanceName ?? '',
+    ...(target.orderedInstanceNames ?? []),
+    target.assignmentRevision ?? '',
     target.logicalGroupFingerprint,
     target.campaignId,
     target.groupId,
@@ -112,12 +117,14 @@ const makeSlotKey = (
   scheduleRevision: number,
   target: CommercialAutomationPlannerTarget,
   scheduledFor: Date,
+  selectedInstanceName: string,
 ) =>
   createHash('sha256')
     .update(
       [
         scheduleRevision,
         canonicalTargetKey(target),
+        selectedInstanceName,
         scheduledFor.toISOString(),
       ].join('|'),
     )
@@ -202,11 +209,16 @@ export const planCommercialTargetSlots = ({
     schedule.dailyGlobalLimit - globalSentToday,
   );
   const targetStates = orderedTargets.flatMap((target) => {
+    const orderedInstanceNames = target.orderedInstanceNames?.length
+      ? target.orderedInstanceNames
+      : target.instanceName
+        ? [target.instanceName]
+        : [];
     if (
       !target.active ||
       !target.available ||
       !target.instanceActive ||
-      !target.instanceName
+      orderedInstanceNames.length === 0
     ) {
       skippedTargets.push(target.campaignId);
       return [];
@@ -224,6 +236,7 @@ export const planCommercialTargetSlots = ({
         cadenceMinutes,
         remaining: remainingForGroup,
         slotIndex: 0,
+        orderedInstanceNames,
         nextBase: new Date(
           maxTimestamp(
             now,
@@ -244,6 +257,7 @@ export const planCommercialTargetSlots = ({
     target: CommercialAutomationPlannerTarget;
     scheduledFor: Date;
     slotIndex: number;
+    selectedInstanceName: string;
   }> = [];
   let cursor = new Date(now.getTime() - schedule.staggerMinutes * MINUTE_MS);
   let madeProgress = true;
@@ -266,11 +280,9 @@ export const planCommercialTargetSlots = ({
         state.remaining = 0;
         continue;
       }
-      candidates.push({
-        target: state.target,
-        scheduledFor,
-        slotIndex: state.slotIndex,
-      });
+      const slotIndex = state.slotIndex;
+      const selectedInstanceName =
+        state.orderedInstanceNames[slotIndex % state.orderedInstanceNames.length];
       state.slotIndex += 1;
       state.remaining -= 1;
       state.nextBase = new Date(
@@ -278,6 +290,17 @@ export const planCommercialTargetSlots = ({
       );
       cursor = scheduledFor;
       madeProgress = true;
+      const selectedInstanceActive = state.target.instanceActiveByName
+        ? state.target.instanceActiveByName[selectedInstanceName] === true
+        : selectedInstanceName === state.target.instanceName &&
+          state.target.instanceActive;
+      if (!selectedInstanceActive) continue;
+      candidates.push({
+        target: state.target,
+        scheduledFor,
+        slotIndex,
+        selectedInstanceName,
+      });
     }
   }
 
@@ -291,14 +314,12 @@ export const planCommercialTargetSlots = ({
   );
 
   const slots = candidates.slice(0, globalRemaining).map((candidate) => {
-    const instanceName = candidate.target.instanceName;
-    if (!instanceName) {
-      throw new Error('COMMERCIAL_AUTOMATION_TARGET_INSTANCE_REQUIRED');
-    }
+    const instanceName = candidate.selectedInstanceName;
     const slotKey = makeSlotKey(
       schedule.scheduleRevision,
       candidate.target,
       candidate.scheduledFor,
+      instanceName,
     );
     const target: CommercialAutomationTargetConstraint = {
       campaignId: candidate.target.campaignId,
@@ -308,6 +329,9 @@ export const planCommercialTargetSlots = ({
       scheduledFor: candidate.scheduledFor.toISOString(),
       slotKey,
       scheduleRevision: schedule.scheduleRevision,
+      ...(candidate.target.assignmentRevision !== undefined
+        ? { assignmentRevision: candidate.target.assignmentRevision }
+        : {}),
     };
     return {
       slotKey,
@@ -398,7 +422,13 @@ export class CommercialAutomationSchedulerPlanner {
                   candidate.id === campaign.anchorDestinationId),
             );
             if (!group) return null;
-            const assignedInstance = group.assignedInstanceName;
+            let orderedInstanceNames: string[];
+            try {
+              orderedInstanceNames = getOrderedAssignedInstanceNames(group);
+            } catch {
+              return null;
+            }
+            const assignedInstance = orderedInstanceNames[0];
             const history = await this.dependencies.history.getSnapshot({
               groupId: group.id,
               ...dayRange,
@@ -407,6 +437,8 @@ export class CommercialAutomationSchedulerPlanner {
               groupId: group.id,
               groupName: group.name,
               instanceName: assignedInstance ?? undefined,
+              orderedInstanceNames,
+              assignmentRevision: group.assignmentRevision,
               logicalGroupFingerprint: campaign.logicalGroupFingerprint,
               campaignId: campaign.id,
               nicheId: campaign.nicheId,
@@ -418,9 +450,15 @@ export class CommercialAutomationSchedulerPlanner {
               nextEligibleAt: campaign.nextEligibleAt,
               active: campaign.active && group.active && group.paused !== true,
               available: group.available,
-              instanceActive: assignedInstance
-                ? activeInstances.has(assignedInstance)
-                : false,
+              instanceActive: orderedInstanceNames.some((name) =>
+                activeInstances.has(name),
+              ),
+              instanceActiveByName: Object.fromEntries(
+                orderedInstanceNames.map((name) => [
+                  name,
+                  activeInstances.has(name),
+                ]),
+              ),
               lastSentAt: history.groupLastSentAt ?? history.lastSentAt,
               groupSentToday: history.groupSentToday,
             };

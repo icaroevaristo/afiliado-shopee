@@ -1553,6 +1553,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       'active',
       'paused',
       'assignedInstanceName',
+      'assignedInstanceNames',
       'expectedUpdatedAt',
       'confirmation',
     ]);
@@ -1564,6 +1565,12 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       (body.assignedInstanceName !== undefined &&
         body.assignedInstanceName !== null &&
         typeof body.assignedInstanceName !== 'string') ||
+      (body.assignedInstanceNames !== undefined &&
+        (!Array.isArray(body.assignedInstanceNames) ||
+          body.assignedInstanceNames.length > 32 ||
+          body.assignedInstanceNames.some(
+            (name) => typeof name !== 'string' || name.trim() === '',
+          ))) ||
       (body.confirmation !== undefined && typeof body.confirmation !== 'string')
     ) {
       return reply.status(400).send({
@@ -1578,6 +1585,9 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         paused: body.paused as boolean | undefined,
         assignedInstanceName: body.assignedInstanceName as
           string | null | undefined,
+        ...(body.assignedInstanceNames === undefined
+          ? {}
+          : { assignedInstanceNames: body.assignedInstanceNames as string[] }),
         expectedUpdatedAt: body.expectedUpdatedAt,
         confirmation: body.confirmation as string | undefined,
       });

@@ -859,7 +859,18 @@ describe('commercial automation Prisma repositories', () => {
     expect(findRun).toHaveBeenCalledWith({
       where: { id: 'run-1' },
       include: {
-        dispatch: { include: { destination: true } },
+        dispatch: {
+          include: {
+            destination: {
+              include: {
+                instanceAssignments: {
+                  select: { instanceName: true, position: true },
+                  orderBy: { position: 'asc' },
+                },
+              },
+            },
+          },
+        },
         dispatchOutbox: true,
       },
     });

@@ -6,6 +6,7 @@ import {
   type CommercialAutomationPolicyConfig,
   type CommercialAutomationPolicyService,
 } from './commercial-automation-policy-service';
+import { getOrderedAssignedInstanceNames } from './commercial-instance-stickiness';
 import type { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type {
   CommercialExternalProviderBudgetService,
@@ -72,6 +73,8 @@ export type OperationalAdminGroup = {
   fingerprint: string | null;
   sourceInstanceName: string | null;
   assignedInstanceName: string | null;
+  assignedInstanceNames: string[];
+  assignmentRevision: number | null;
   campaign: {
     id: string;
     name: string;
@@ -84,6 +87,10 @@ export type OperationalAdminGroup = {
   } | null;
   lastSendAt: string | null;
   nextSendAt: string | null;
+  upcomingAssignments: Array<{
+    scheduledFor: string;
+    instanceName: string;
+  }>;
   blockers: OperationalAdminBlocker[];
   memberCount: number | null;
   ownerIsParticipant: boolean | null;
@@ -299,6 +306,62 @@ const campaignForGroup = (
       campaign.logicalGroupFingerprint === group.fingerprint,
   ) ?? null;
 
+const MAX_ORDERED_GROUP_ASSIGNMENTS = 32;
+
+const normalizeRequestedAssignmentNames = (input: {
+  assignedInstanceName?: string | null;
+  assignedInstanceNames?: string[];
+}) => {
+  if (input.assignedInstanceNames !== undefined) {
+    if (
+      !Array.isArray(input.assignedInstanceNames) ||
+      input.assignedInstanceNames.length > MAX_ORDERED_GROUP_ASSIGNMENTS
+    ) {
+      throw new AppError(
+        'A lista ordenada de instancias do grupo e invalida',
+        'OPERATIONAL_ASSIGNMENT_INVALID',
+      );
+    }
+    const names = input.assignedInstanceNames.map((name) =>
+      typeof name === 'string' ? name.trim() : '',
+    );
+    if (
+      names.some((name) => name === '') ||
+      new Set(names).size !== names.length
+    ) {
+      throw new AppError(
+        'A lista ordenada de instancias do grupo e invalida',
+        'OPERATIONAL_ASSIGNMENT_INVALID',
+      );
+    }
+    if (
+      input.assignedInstanceName !== undefined &&
+      input.assignedInstanceName !== null &&
+      input.assignedInstanceName.trim() !== names[0]
+    ) {
+      throw new AppError(
+        'O assignment principal precisa ser o primeiro da lista ordenada',
+        'OPERATIONAL_ASSIGNMENT_INVALID',
+      );
+    }
+    return names;
+  }
+  if (
+    input.assignedInstanceName === undefined ||
+    input.assignedInstanceName === null
+  ) {
+    return [];
+  }
+  const name = input.assignedInstanceName.trim();
+  if (!name) {
+    throw new AppError(
+      'A instancia atribuida e invalida',
+      'OPERATIONAL_ASSIGNMENT_INVALID',
+    );
+  }
+  return [name];
+};
+
 const listCampaigns = async (repository: CommercialGroupCampaignRepository) => {
   const items: CommercialGroupCampaignRecord[] = [];
   let page = 1;
@@ -317,6 +380,8 @@ const asTarget = (
   groupId: group.id,
   groupName: group.name,
   instanceName: group.assignedInstanceName ?? undefined,
+  orderedInstanceNames: group.assignedInstanceNames,
+  assignmentRevision: group.assignmentRevision,
   logicalGroupFingerprint: group.fingerprint,
   campaignId: campaign.id,
   nicheId: campaign.nicheId,
@@ -407,11 +472,24 @@ export class OperationalAdminService {
           'A identidade do grupo nao possui fingerprint comercial valido.',
       });
     }
-    const assigned = group.assignedInstanceName;
-    const instance = assigned
-      ? instances.find((candidate) => candidate.name === assigned)
-      : null;
-    if (!assigned || !instance) {
+    let assignedNames: string[] = [];
+    try {
+      assignedNames = getOrderedAssignedInstanceNames(group);
+    } catch {
+      assignedNames = [];
+    }
+    const assignedInstances = assignedNames
+      .map((name) => instances.find((candidate) => candidate.name === name))
+      .filter((instance): instance is WhatsAppInstanceRecord =>
+        Boolean(instance),
+      );
+    const executableInstance = assignedInstances.find(
+      (instance) => instance.active && instance.paused !== true,
+    );
+    if (
+      assignedNames.length === 0 ||
+      assignedInstances.length !== assignedNames.length
+    ) {
       blockers.push({
         scope: 'GROUP',
         code: 'ASSIGNMENT_INVALID',
@@ -419,19 +497,25 @@ export class OperationalAdminService {
         message: 'O grupo nao possui assignment valido para uma instancia.',
         actionHint: 'Atribua explicitamente uma instancia ativa.',
       });
-    } else if (!instance.active) {
+    } else if (
+      !executableInstance &&
+      assignedInstances.some((instance) => !instance.active)
+    ) {
       blockers.push({
         scope: 'INSTANCE',
         code: 'INSTANCE_INACTIVE',
-        entityId: instance.name,
-        message: 'A instancia atribuida esta desativada.',
+        entityId: assignedNames[0] ?? null,
+        message: 'Todas as instancias atribuidas estao desativadas.',
       });
-    } else if (instance.paused === true) {
+    } else if (
+      !executableInstance &&
+      assignedInstances.every((instance) => instance.paused === true)
+    ) {
       blockers.push({
         scope: 'INSTANCE',
         code: 'INSTANCE_PAUSED',
-        entityId: instance.name,
-        message: 'A instancia atribuida esta pausada.',
+        entityId: assignedNames[0] ?? null,
+        message: 'Todas as instancias atribuidas estao pausadas.',
       });
     }
     if (!campaign) {
@@ -567,7 +651,16 @@ export class OperationalAdminService {
     const nextByGroup = new Map<string, Date>();
     const nextByCampaign = new Map<string, Date>();
     const nextByInstance = new Map<string, Date>();
-    for (const slot of context.plan.slots) {
+    const upcomingByGroup = new Map<
+      string,
+      Array<{ scheduledFor: string; instanceName: string }>
+    >();
+    const plannedSlots = [...context.plan.slots].sort(
+      (left, right) =>
+        left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
+        left.slotKey.localeCompare(right.slotKey),
+    );
+    for (const slot of plannedSlots) {
       const groupId = slot.target.groupId;
       const currentGroup = nextByGroup.get(groupId);
       if (!currentGroup || slot.scheduledFor < currentGroup) {
@@ -580,6 +673,14 @@ export class OperationalAdminService {
       const currentInstance = nextByInstance.get(slot.target.instanceName);
       if (!currentInstance || slot.scheduledFor < currentInstance) {
         nextByInstance.set(slot.target.instanceName, slot.scheduledFor);
+      }
+      const upcoming = upcomingByGroup.get(groupId) ?? [];
+      if (upcoming.length < 4) {
+        upcoming.push({
+          scheduledFor: slot.scheduledFor.toISOString(),
+          instanceName: slot.target.instanceName,
+        });
+        upcomingByGroup.set(groupId, upcoming);
       }
     }
     const groupOutputs: OperationalAdminGroup[] = [];
@@ -601,6 +702,14 @@ export class OperationalAdminService {
         fingerprint: group.fingerprint ?? null,
         sourceInstanceName: group.sourceInstanceName ?? null,
         assignedInstanceName: group.assignedInstanceName ?? null,
+        assignedInstanceNames: (() => {
+          try {
+            return getOrderedAssignedInstanceNames(group);
+          } catch {
+            return [];
+          }
+        })(),
+        assignmentRevision: group.assignmentRevision ?? null,
         campaign: campaign
           ? { id: campaign.id, name: campaign.name, active: campaign.active }
           : null,
@@ -613,6 +722,7 @@ export class OperationalAdminService {
           : null,
         lastSendAt: iso(lastByGroup.get(group.id)),
         nextSendAt: iso(nextByGroup.get(group.id) ?? campaignNext),
+        upcomingAssignments: upcomingByGroup.get(group.id) ?? [],
         blockers: uniqueBlockers(blockers),
         memberCount: group.memberCount ?? null,
         ownerIsParticipant: group.ownerIsParticipant ?? null,
@@ -651,8 +761,8 @@ export class OperationalAdminService {
       );
     }
     const instances = context.instances.map((instance) => {
-      const assignedGroups = groupOutputs.filter(
-        (group) => group.assignedInstanceName === instance.name,
+      const assignedGroups = groupOutputs.filter((group) =>
+        group.assignedInstanceNames.includes(instance.name),
       );
       const groupBlockers = assignedGroups.flatMap((group) =>
         group.blockers.filter(
@@ -877,6 +987,7 @@ export class OperationalAdminService {
     active?: boolean;
     paused?: boolean;
     assignedInstanceName?: string | null;
+    assignedInstanceNames?: string[];
     expectedUpdatedAt: string;
     confirmation?: string;
   }) {
@@ -890,7 +1001,8 @@ export class OperationalAdminService {
     if (
       input.active === undefined &&
       input.paused === undefined &&
-      input.assignedInstanceName === undefined
+      input.assignedInstanceName === undefined &&
+      input.assignedInstanceNames === undefined
     ) {
       throw new AppError(
         'Nenhuma alteracao de grupo informada',
@@ -916,7 +1028,8 @@ export class OperationalAdminService {
       );
     }
     if (
-      input.assignedInstanceName !== undefined &&
+      (input.assignedInstanceName !== undefined ||
+        input.assignedInstanceNames !== undefined) &&
       input.confirmation !== OPERATIONAL_ASSIGNMENT_CONFIRMATION
     ) {
       throw new AppError(
@@ -928,11 +1041,14 @@ export class OperationalAdminService {
     if (!group) {
       throw new AppError('Grupo nao encontrado', 'OPERATIONAL_GROUP_NOT_FOUND');
     }
-    if (input.assignedInstanceName !== undefined) {
-      if (input.assignedInstanceName !== null) {
-        const instance = await this.dependencies.instances.findByName(
-          input.assignedInstanceName,
-        );
+    const assignmentRequested =
+      input.assignedInstanceName !== undefined ||
+      input.assignedInstanceNames !== undefined;
+    if (assignmentRequested) {
+      const nextNames = normalizeRequestedAssignmentNames(input);
+      for (const instanceName of nextNames) {
+        const instance =
+          await this.dependencies.instances.findByName(instanceName);
         if (!instance || !instance.active || instance.paused === true) {
           throw new AppError(
             'A instancia de destino precisa estar ativa e nao pausada',
@@ -977,8 +1093,18 @@ export class OperationalAdminService {
           'OPERATIONAL_ASSIGNMENT_NICHE_BLOCKED',
         );
       }
+      let currentNames: string[];
+      try {
+        currentNames = getOrderedAssignedInstanceNames(group);
+      } catch {
+        throw new AppError(
+          'O assignment persistido do grupo e invalido',
+          'OPERATIONAL_ASSIGNMENT_INVALID',
+        );
+      }
       const assignmentChanging =
-        input.assignedInstanceName !== group.assignedInstanceName;
+        currentNames.length !== nextNames.length ||
+        currentNames.some((name, index) => name !== nextNames[index]);
       if (assignmentChanging) {
         const now = this.now();
         if (
@@ -1005,7 +1131,8 @@ export class OperationalAdminService {
             {
               ...(input.active === undefined ? {} : { active: input.active }),
               ...(input.paused === undefined ? {} : { paused: input.paused }),
-              assignedInstanceName: input.assignedInstanceName ?? null,
+              assignedInstanceName: nextNames[0] ?? null,
+              assignedInstanceNames: nextNames,
               expectedUpdatedAt,
               now,
             },
@@ -1024,6 +1151,13 @@ export class OperationalAdminService {
         }
         return result.group;
       }
+      if (
+        input.active === undefined &&
+        input.paused === undefined &&
+        input.assignedInstanceName === undefined
+      ) {
+        return group;
+      }
     }
     if (!this.dependencies.groups.updateAdministrative) {
       throw new AppError(
@@ -1036,7 +1170,8 @@ export class OperationalAdminService {
       {
         ...(input.active === undefined ? {} : { active: input.active }),
         ...(input.paused === undefined ? {} : { paused: input.paused }),
-        ...(input.assignedInstanceName === undefined
+        ...(input.assignedInstanceName === undefined ||
+        input.assignedInstanceNames !== undefined
           ? {}
           : { assignedInstanceName: input.assignedInstanceName }),
         expectedUpdatedAt,

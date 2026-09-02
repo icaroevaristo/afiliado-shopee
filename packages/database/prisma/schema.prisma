@@ -137,6 +137,8 @@ model WhatsAppDestination {
   sourceInstanceName     String?
   assignedInstanceName   String?
   assignedInstance       WhatsAppInstance?       @relation(fields: [assignedInstanceName], references: [name], onDelete: Restrict)
+  assignmentRevision     Int                     @default(1)
+  instanceAssignments    WhatsAppGroupInstanceAssignment[]
   memberCount            Int?
   ownerIsParticipant     Boolean?
   discoveredAt           DateTime?
@@ -162,8 +164,24 @@ model WhatsAppInstance {
   whatsappDispatches        WhatsAppDispatch[]
   commercialDispatchOutboxes CommercialDispatchOutbox[]
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetInstance")
+  groupInstanceAssignments WhatsAppGroupInstanceAssignment[]
   createdAt                 DateTime                     @default(now())
   updatedAt                 DateTime                     @updatedAt
+}
+
+model WhatsAppGroupInstanceAssignment {
+  id            String             @id @default(cuid())
+  destinationId String
+  destination   WhatsAppDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  instanceName  String
+  instance      WhatsAppInstance   @relation(fields: [instanceName], references: [name], onDelete: Restrict)
+  position      Int
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@unique([destinationId, position])
+  @@unique([destinationId, instanceName])
+  @@index([instanceName])
 }
 
 model CommercialNiche {

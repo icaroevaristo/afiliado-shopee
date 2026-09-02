@@ -114,10 +114,16 @@ export type OperationalAdminGroup = {
   fingerprint: string | null;
   sourceInstanceName: string | null;
   assignedInstanceName: string | null;
+  assignedInstanceNames?: string[];
+  assignmentRevision?: number | null;
   campaign: { id: string; name: string; active: boolean } | null;
   niche: { id: string; name: string; active: boolean } | null;
   lastSendAt: string | null;
   nextSendAt: string | null;
+  upcomingAssignments?: Array<{
+    scheduledFor: string;
+    instanceName: string;
+  }>;
   blockers: OperationalAdminBlocker[];
   memberCount: number | null;
   ownerIsParticipant: boolean | null;

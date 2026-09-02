@@ -5,7 +5,11 @@ import {
   isCommercialAssignedGroup,
   isCommercialAuthorizedGroup,
 } from './commercial-group-selection';
-import { filterExecutableCommercialGroups } from './commercial-instance-stickiness';
+import {
+  filterExecutableCommercialGroups,
+  getOrderedAssignedInstanceNames,
+  isCommercialInstanceAssigned,
+} from './commercial-instance-stickiness';
 import type {
   CommercialAutomationTarget,
   CommercialAutomationHistoryRepository,
@@ -500,12 +504,17 @@ export class CommercialAutomationPolicyService {
         ),
         this.dependencies.history.hasStaleCommercialExecution(now),
       ]);
-    const authorizedCandidates = groups.filter((group) =>
-      this.dependencies.groups.listAll
-        ? typeof group.assignedInstanceName === 'string' &&
-          isCommercialAssignedGroup(group, group.assignedInstanceName)
-        : isCommercialAuthorizedGroup(group, this.dependencies.instanceName),
-    );
+    const authorizedCandidates = groups.filter((group) => {
+      if (!this.dependencies.groups.listAll) {
+        return isCommercialAuthorizedGroup(group, this.dependencies.instanceName);
+      }
+      try {
+        const names = getOrderedAssignedInstanceNames(group);
+        return names.length > 0 && isCommercialAssignedGroup(group, names[0]);
+      } catch {
+        return false;
+      }
+    });
     const authorizedGroups = await filterExecutableCommercialGroups(
       authorizedCandidates,
       this.dependencies.instances,
@@ -517,7 +526,9 @@ export class CommercialAutomationPolicyService {
           (group) =>
             group.id === target.groupId &&
             group.fingerprint === target.logicalGroupFingerprint &&
-            group.assignedInstanceName === target.instanceName,
+            isCommercialInstanceAssigned(group, target.instanceName ?? '') &&
+            (target.assignmentRevision === undefined ||
+              group.assignmentRevision === target.assignmentRevision),
         )
       : undefined;
     const history = await this.dependencies.history.getSnapshot({

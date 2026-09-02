@@ -20,7 +20,10 @@ import {
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
   type CommercialMessageDraftService,
 } from './commercial-message-draft-service';
-import { assertActiveCommercialInstance } from './commercial-instance-stickiness';
+import {
+  assertActiveCommercialInstance,
+  isCommercialInstanceAssigned,
+} from './commercial-instance-stickiness';
 import type { WhatsAppInstanceRepository } from './repositories';
 
 export type SenderServiceOptions = {
@@ -308,7 +311,10 @@ export class SenderService {
         const hasStickyInstance = typeof stickyInstanceName === 'string';
         if (
           hasStickyInstance &&
-          dispatch.destination.assignedInstanceName !== stickyInstanceName
+          !isCommercialInstanceAssigned(
+            dispatch.destination,
+            stickyInstanceName,
+          )
         ) {
           await this.options.dispatches.markFailed(
             dispatch.id,
