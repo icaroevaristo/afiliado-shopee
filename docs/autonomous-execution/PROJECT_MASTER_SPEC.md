@@ -87,6 +87,27 @@ com `slotKey`, `scheduleRevision`, `scheduledFor`, `groupId` e `instanceName`.
 O schema atual não representa uma lista ordenada de instâncias por grupo; isso é
 o gap R5, não uma capacidade a presumir.
 
+### 5.1 Contrato de round-robin R5
+
+Quando R5 for implementado e autorizado, a sequência deve ser uma lista
+ordenada explícita por grupo, vinculada ao slot antes de qualquer efeito:
+
+```text
+ORDERED_GROUP_INSTANCE_ASSIGNMENTS=[N1,N2,...,N]
+SLOT_INSTANCE_BOUND_BEFORE_ENQUEUE=true
+SLOT_INSTANCE_BOUND_BEFORE_SEND=true
+SILENT_REROUTE=0
+DEFAULT_INSTANCE_FALLBACK=0
+INSTANCE_FAILURE_DOES_NOT_SHIFT_ROTATION=true
+RESTART_ROTATION_DRIFT=0
+REPLAN_ROTATION_DRIFT=0
+DUPLICATE_SEND=0
+```
+
+Se a instância prevista falhar, o slot é bloqueado e a sequência não é
+deslocada para a próxima instância saudável. A rotação não pode depender do
+número de sucessos, de disponibilidade momentânea, de restart ou de replan.
+
 ## 6. Invariantes mensuráveis
 
 Todo gate futuro deve coletar os valores abaixo, ou declarar `UNKNOWN` com

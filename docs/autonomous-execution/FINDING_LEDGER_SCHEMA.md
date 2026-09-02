@@ -85,3 +85,23 @@ Se a correção não foi implementada, o finding permanece `OPEN` ou
 O ledger inicial não afirma que gaps foram corrigidos. Fases futuras devem
 copiar os registros relevantes para o manifesto da execução e acrescentar
 evidência nova.
+
+## Findings da correção final da Fase 30
+
+Estes findings foram abertos pela revisão externa da branch documental e só
+podem ser fechados após validação causal, regressão proporcional e revisão em
+um candidato congelado:
+
+| ID | Severity | Status | Resumo | Evidência | Owner | Causal test |
+| --- | --- | --- | --- | --- | --- | --- |
+| F30-P1-01 | P1 | FIXED | `AUTO_CONTINUE` restritivo demais para mutation autorizada | E30-DOC-008 | LUNA_MAX | policy matrix: mutation autorizada continua; boundary perigoso para |
+| F30-P1-02 | P1 | FIXED | protocolo não exige CHANGE/GIT/FINAL manifest | E30-DOC-008 | LUNA_MAX | schema/lista exige 12 arquivos |
+| F30-P1-03 | P1 | FIXED | Orchestrator pode parar só para relatar progresso | E30-DOC-008 | LUNA_MAX | master prompt contém regra de continuidade |
+| F30-P1-04 | P1 | FIXED | supervisor e mutator não estavam separados nominalmente | E30-DOC-008 | LUNA_MAX | roles e READ_ONLY/single-mutator são explícitos |
+| F30-P1-05 | P1 | FIXED | aprovação não estava vinculada a candidate SHA/tree | E30-DOC-008 | LUNA_MAX | mutation pós-freeze invalida review/evidence |
+| F30-P1-06 | P1 | FIXED | lifecycle E0–E10 não tinha playbook LIVE_CANONICAL | E30-DOC-008 | LUNA_MAX | playbook possui os oito campos em cada etapa |
+
+`FIXED` indica que a alteração causal foi aplicada, mas ainda aguarda review e
+ship gate. Após `E30-REDTEAM-002`, `E30-SOL-002` e `E30-SHIP-002`, cada item pode
+passar a `CLOSED` somente se a evidência realmente existir; nenhum finding é
+removido.

@@ -45,6 +45,25 @@ converter a lacuna em PASS.
 18. Um blocker é simplesmente marcado `HUMAN_REQUIRED` sem registrar causa,
     evidência e ações seguras independentes?
 
+## Red-team da autonomia documental
+
+19. O `SOL_SUPERVISOR` consegue alterar candidate code/docs apesar de ser
+    `READ_ONLY`?
+20. Um reviewer consegue corrigir silenciosamente o próprio finding?
+21. Uma aprovação contra `HEAD`/tree antigo consegue liberar candidate novo?
+22. Dois mutators conseguem alterar o mesmo componente stateful?
+23. Componente fechado pode ser reaberto sem finding causal?
+24. Falta de ambiente seguro pode provocar criação de estado operacional?
+25. `AUTO_CONTINUE` pode atravessar SEND/provider/DB boundary sem autorização?
+26. O Orchestrator pode parar só para relatar progresso e deixar etapa autorizada
+    sem execução?
+27. Handoff pode omitir diff, Git, gates, findings ou decisão final?
+28. O adversarial recebe contexto otimista suficiente para enviesar a revisão?
+29. SHIP adversarial consegue pular Sol reconciliation?
+30. Review de SHA antigo permanece válido depois de mutation?
+31. O playbook permite subtask implícita que contorne um gate?
+32. Os doze manifestos podem divergir quanto a scope, HEAD ou efeitos?
+
 ## Resultado mínimo
 
 O reviewer deve anexar as respostas ao `EVIDENCE_INDEX`, listar contraexemplos

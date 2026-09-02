@@ -14,6 +14,10 @@
 | D30-007 | Orchestrator | 2026-09-01 | Nenhuma fase pós-MVP altera send boundary sem finding e especificação | refactor incidental do Sender | preserva contratos certificados e reduz blast radius | `E30-DOC-003` | R8 | vigente |
 | D30-008 | Orchestrator | 2026-09-01 | Todo handoff usa manifesto versionado por contrato, sem secrets | handoff apenas narrativo | evita perda de estado/evidência entre agentes | `E30-DOC-004` | toda task | vigente |
 | D30-009 | Orchestrator | 2026-09-01 | O estado operacional atual desta fase é `UNVERIFIED` | inferir runtime verde | a missão não autoriza runtime/DB/Redis; nenhum PASS é inventado | `E30-OP-001` | R1–R9 | vigente |
+| D30-010 | SOL_SUPERVISOR | 2026-09-02 | `AUTO_CONTINUE` aceita mutation de código explicitamente autorizada quando reversível e cercada por gates | restringir toda mutation a docs/read-only | autonomia não deve parar por progresso; boundaries perigosos continuam bloqueados | `E30-DOC-008` | toda task | vigente |
+| D30-011 | SOL_SUPERVISOR | 2026-09-02 | Sol supervisiona READ_ONLY e `LUNA_MAX` é o único mutator | Sol e especialistas editarem em paralelo | uma única autoridade de escrita preserva diff e finding ledger | `E30-DOC-008` | toda task | vigente |
+| D30-012 | SOL_SUPERVISOR | 2026-09-02 | Reviews e ship gate são vinculados a `CANDIDATE_HEAD` + `CANDIDATE_TREE` congelados | aceitar aprovação de SHA antigo | mutation pós-freeze exige novo candidato e invalida evidência anterior | `E30-DOC-008` | toda task | vigente |
+| D30-013 | SOL_SUPERVISOR | 2026-09-02 | E0–E10 em `PHASE_EXECUTION_PLAYBOOK.md` é o lifecycle documental LIVE_CANONICAL | checkpoints ad hoc por agente | owners, gates, recovery e saídas ficam auditáveis e não há parada por progresso | `E30-DOC-008` | R1–R9 | vigente |
 
 ## Regras para novas decisões
 

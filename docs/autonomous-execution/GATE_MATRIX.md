@@ -6,17 +6,23 @@
 
 `PASS` requer `EVIDENCE_ID` específico. Código, intenção, dashboard verde ou
 uma mensagem de agente não são evidência suficientes para gates operacionais.
+Os estados `PASS` registrados no snapshot anterior foram reabertos quando esta
+correção alterou os documentos; evidência de revisão/ship só vale novamente
+depois de um novo candidate freeze.
 
 | GATE_ID | Gate | Precondições | Evidência mínima | Estado nesta fase | Blocker/saída |
 | --- | --- | --- | --- | --- | --- |
-| G30-001 | Baseline Git | remote e worktree conhecidas | `E30-BASE-001` | PASS | diverge → HUMAN_REQUIRED |
-| G30-002 | Escopo docs-only | branch dedicada | `E30-DOC-006` | PASS | código → parar; validar antes do ship |
-| G30-003 | Hierarquia documental | fontes classificadas | `E30-DOC-001` | PASS | conflito irresolúvel → HUMAN_REQUIRED |
-| G30-004 | Skills | paths reais lidos | `E30-SKILL-001` | PASS | skill hard missing → HUMAN_REQUIRED |
-| G30-005 | Evidence contract | schema definido | `E30-DOC-006` | PASS | evidence ausente → NOT_RUN/BLOCKED; claim → UNVERIFIED |
-| G30-006 | Red-team documental | artefatos completos | `E30-REDTEAM-001` | PASS | P0/P1 → reparar e repetir |
-| G30-007 | Sol independente | review sem viés | `E30-SOL-001` | PASS | P0/P1 → reparar e repetir |
-| G30-008 | Ship docs | gates docs, secret scan | `E30-SHIP-001` | PASS | qualquer P0/P1 → FAIL |
+| G30-001 | Baseline Git | remote e worktree conhecidas | `E30-DOC-008` | PASS | diverge → HUMAN_REQUIRED |
+| G30-002 | Escopo docs-only | branch dedicada | `E30-DOC-008` | PASS | código → parar; validar antes do ship |
+| G30-003 | Hierarquia documental | fontes classificadas | `E30-DOC-008` | PASS | conflito irresolúvel → HUMAN_REQUIRED |
+| G30-004 | Skills | paths reais lidos | `E30-SKILL-002` | PASS | skill hard missing → HUMAN_REQUIRED |
+| G30-005 | Evidence contract | schema definido | `E30-DOC-008` | PASS | evidence ausente → NOT_RUN/BLOCKED; claim → UNVERIFIED |
+| G30-006 | Red-team documental | artefatos completos | `E30-REDTEAM-002` | NOT_RUN | P0/P1 → reparar e repetir |
+| G30-007 | Sol independente | review sem viés | `E30-SOL-002` | NOT_RUN | P0/P1 → reparar e repetir |
+| G30-008 | Ship docs | gates docs, secret scan | `E30-SHIP-002` | NOT_RUN | qualquer P0/P1 → FAIL |
+| G30-009 | Roles e single mutator | Sol supervisor e Luna mutator definidos | `E30-DOC-008` | PASS | papel ambíguo ou dois mutators → FAIL |
+| G30-010 | Candidate freeze | SHA/tree e invalidation definidos | `E30-DOC-008` | PASS | review sem snapshot exato → INVALID |
+| G30-011 | Phase execution playbook | E0–E10 com owner/gates/recovery | `E30-DOC-008` | PASS | etapa sem saída verificável → FAIL |
 | R1-001 | identidade Compose | runtime profile explícito | status/inspect sanitizado | NOT_RUN | ambígua → HUMAN_REQUIRED |
 | R1-002 | volume canônico | volume existe e é esperado | Docker inspect + DB identity | NOT_RUN | ausente → DO_NOT_START |
 | R1-003 | restart/stop | runtime autorizado | before/after process/volume | NOT_RUN | drift → FAIL |
@@ -48,4 +54,5 @@ Gates que não se aplicam devem registrar `NOT_RUN` com justificativa, não
 `PASS`. `BLOCKED` preserva o impedimento; `HUMAN_REQUIRED` significa que uma
 decisão/autoridade externa é necessária. A fase só avança quando todas as
 precondições do próximo gate estão cumpridas e nenhuma evidência contradiz um
-invariante.
+invariante. Os gates `G30-009`–`G30-011` são documentais nesta correção e não
+substituem os gates operacionais R1–R9.

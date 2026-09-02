@@ -21,6 +21,10 @@ O ID deve registrar no manifesto `type`, `capturedAt`, `actor`, `head`,
 `commandOrSource`, `exitCode` quando houver, `result`, `redactions` e
 `artifactPath` quando existir.
 
+Evidência de revisão deve registrar também `reviewedHead` e `reviewedTree`.
+Quando fizer parte de um candidato congelado, deve apontar para o mesmo
+`candidateHead`/`candidateTree`; divergência torna a aprovação `INVALID`.
+
 ## Tipos aceitos
 
 - saída de comando com comando, exit code e SHA;
@@ -60,6 +64,22 @@ caso o gate permanece `NOT_RUN` ou `BLOCKED`, nunca ganha um sexto estado.
 - Logs e artifacts devem passar por scan antes do handoff.
 - `UNKNOWN` é preferível a inferência otimista.
 
+## Candidate freeze
+
+Antes da revisão final, o `SOL_SUPERVISOR` registra um digest verificável da árvore
+Git junto ao SHA:
+
+```text
+CANDIDATE_HEAD=<SHA>
+CANDIDATE_TREE=<tree digest>
+CANDIDATE_FROZEN=true
+```
+
+Cada `REVIEWER_A`, `REVIEWER_B`, adversarial, ship gate e Sol reconciliation
+declara `reviewedHead` e `reviewedTree`. Uma mutation depois do freeze exige
+`NEW_CANDIDATE_REQUIRED=true`, lista de `invalidatedEvidenceIds` e nova revisão;
+nenhuma aprovação de snapshot anterior permanece válida.
+
 ## Tempo e escopo
 
 O manifesto deve separar `historical`, `static_current` e `live_current`.
@@ -89,6 +109,8 @@ for relevante.
 | E30-SOL-001 | review | Sol/Ramanujan READ_ONLY confirmou P0=0, P1=0, P2=0 e `APPROVED` no snapshot final |
 | E30-SHIP-001 | ship | escopo docs-only, secret scan e `git diff --cached --check` passaram antes do commit |
 | E30-OP-001 | operational | não executado nesta fase; readiness/queues/providers atuais são UNKNOWN |
+| E30-DOC-008 | validation | correção documental dos seis P1s, doze manifestos, papéis, freeze SHA/tree e playbook E0–E10 revalidados |
+| E30-SKILL-002 | skills | paths reais das skills aplicadas nesta correção foram verificados antes da mutation |
 
 Esta tabela é apenas um catálogo sanitizado dos IDs desta arquitetura; não é
 um `EVIDENCE_INDEX.json` completo. Cada execução futura deve registrar, para
