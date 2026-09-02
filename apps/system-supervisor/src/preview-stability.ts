@@ -107,7 +107,8 @@ export type PreviewStabilityMainInfrastructureDiagnostic = {
     | 'COMMAND_FAILED'
     | 'HEALTH_TIMEOUT'
     | 'UNEXPECTED_STATE';
-  observedHealth: 'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown';
+  observedHealth:
+    'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown';
   expectedHealth: 'healthy';
 };
 
@@ -365,7 +366,9 @@ export const assertPausedStartupEvidence = (
   before: PreviewStabilityEvidence,
   after: PreviewStabilityEvidence,
 ) => {
-  const beforeExecutionIds = idSet(before.executions.map((execution) => execution.id));
+  const beforeExecutionIds = idSet(
+    before.executions.map((execution) => execution.id),
+  );
   const newExecutions = after.executions.filter(
     (execution) => !beforeExecutionIds.has(execution.id),
   );
@@ -391,8 +394,10 @@ export const assertPausedStartupEvidence = (
     after.outboxes.total !== before.outboxes.total ||
     after.outboxes.pending !== before.outboxes.pending ||
     after.outboxes.ambiguous !== before.outboxes.ambiguous ||
-    newValues(before.queues.whatsappJobIds, after.queues.whatsappJobIds).length > 0 ||
-    newValues(before.queues.productJobIds, after.queues.productJobIds).length > 0 ||
+    newValues(before.queues.whatsappJobIds, after.queues.whatsappJobIds)
+      .length > 0 ||
+    newValues(before.queues.productJobIds, after.queues.productJobIds).length >
+      0 ||
     after.queues.legacySchedulerIds.length > 0 ||
     duplicateBullMqJobIds(after.executions);
   if (unsafe) {
@@ -479,6 +484,7 @@ const waitForPreviewCount = async (
 const hasReusableManagedMainInfrastructure = (status: SystemStatusSnapshot) => {
   const allowedServices = new Set(['postgres', 'redis']);
   return (
+    status.runtime.volumeStatus === 'canonical' &&
     status.docker.services.length === allowedServices.size &&
     status.docker.services.every(
       (service) =>
@@ -655,7 +661,9 @@ export const diagnoseRunningTopology = (
       return {
         topologyStage: 'requireRunning',
         component: 'commercial-worker',
-        observedState: observedProcessState(status.processes['commercial-worker']),
+        observedState: observedProcessState(
+          status.processes['commercial-worker'],
+        ),
         expectedState: 'running',
       };
     }
@@ -888,8 +896,7 @@ export const runPreviewStabilityValidation = async ({
   let failureCode: string | undefined;
   let topologyDiagnostic: PreviewStabilityTopologyDiagnostic | undefined;
   let mainInfrastructureDiagnostic:
-    | PreviewStabilityMainInfrastructureDiagnostic
-    | undefined;
+    PreviewStabilityMainInfrastructureDiagnostic | undefined;
   let infrastructurePrepared = false;
   let restorationRequired = false;
   let cleanupPromise: Promise<void> | undefined;
@@ -1055,7 +1062,10 @@ export const runPreviewStabilityValidation = async ({
       operationalBaseline = startupEvidence;
       await dependencies.setAutomationPaused(false, environment);
       const schedulerEvidence = await dependencies.captureEvidence(environment);
-      if (!schedulerEvidence.settings.present || schedulerEvidence.settings.paused) {
+      if (
+        !schedulerEvidence.settings.present ||
+        schedulerEvidence.settings.paused
+      ) {
         throw new LocalSystemError(
           'A automacao comercial permaneceu pausada apos a retomada',
           'PREVIEW_STABILITY_PAUSE_UPDATE_FAILED',
@@ -1114,7 +1124,8 @@ export const runPreviewStabilityValidation = async ({
       await dependencies.waitForSafeTickGap(20_000, environment);
       const beforeOutage = await dependencies.captureEvidence(environment);
       assertEvidenceInvariants(runtimeBaseline, beforeOutage);
-      const recoveryTarget = completedPreviewCount(runtimeBaseline, beforeOutage) + 1;
+      const recoveryTarget =
+        completedPreviewCount(runtimeBaseline, beforeOutage) + 1;
       const outage = await dependencies.restartMainService(
         'redis',
         environment,
@@ -1353,9 +1364,7 @@ export const runPreviewStabilityValidation = async ({
       },
       bugs,
       ...(topologyDiagnostic ? { topologyDiagnostic } : {}),
-      ...(mainInfrastructureDiagnostic
-        ? { mainInfrastructureDiagnostic }
-        : {}),
+      ...(mainInfrastructureDiagnostic ? { mainInfrastructureDiagnostic } : {}),
       ...(failureCode ? { failureCode } : {}),
     };
     try {

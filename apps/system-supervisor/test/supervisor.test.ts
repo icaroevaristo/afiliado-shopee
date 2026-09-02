@@ -14,6 +14,10 @@ import {
   statePath,
   SUPERVISOR_PROCESS_MARKER,
 } from '../src/state-store';
+import {
+  composeProjectRuntimeRoot,
+  evolutionComposeArguments,
+} from '../src/runtime-identity';
 import { LocalSystemSupervisor } from '../src/supervisor';
 import type {
   CommandSpec,
@@ -79,14 +83,21 @@ const composeLines = (evolution: boolean) =>
     )
     .join('\n');
 
-const mainComposeConfig = () =>
+const mainComposeConfig = (projectName = 'afiliado-shopee') =>
   JSON.stringify({
+    name: projectName,
     services: {
       postgres: {
         image: 'postgres:16-alpine',
         ports: [{ target: 5432, published: '5432', protocol: 'tcp' }],
         healthcheck: { test: ['CMD-SHELL', 'pg_isready'] },
-        volumes: [{ type: 'volume', target: '/var/lib/postgresql/data' }],
+        volumes: [
+          {
+            type: 'volume',
+            source: 'postgres_data',
+            target: '/var/lib/postgresql/data',
+          },
+        ],
       },
       redis: {
         image: 'redis:7-alpine',
@@ -95,6 +106,7 @@ const mainComposeConfig = () =>
         volumes: [],
       },
     },
+    volumes: { postgres_data: {} },
   });
 
 type DockerInspectionFixture = {
@@ -110,6 +122,7 @@ type DockerInspectionFixture = {
   };
   Mounts: Array<{
     Type: string;
+    Name?: string;
     Destination: string;
     RW?: boolean;
     Mode?: string;
@@ -120,6 +133,7 @@ type DockerInspectionFixture = {
 const dockerInspection = (
   service: 'postgres' | 'redis',
   health: 'healthy' | 'starting' | 'unhealthy' = 'healthy',
+  projectName = 'afiliado-shopee',
 ): DockerInspectionFixture => {
   const postgres = service === 'postgres';
   return {
@@ -128,9 +142,9 @@ const dockerInspection = (
       Image: postgres ? 'postgres:16-alpine' : 'redis:7-alpine',
       Labels: {
         'com.docker.compose.service': service,
-        'com.docker.compose.project': 'equivalent-project',
-        'com.docker.compose.project.config_files': 'equivalent-compose.yml',
-        'com.docker.compose.project.working_dir': 'equivalent-workdir',
+        'com.docker.compose.project': projectName,
+        'com.docker.compose.project.config_files': 'docker-compose.yml',
+        'com.docker.compose.project.working_dir': 'canonical-workdir',
       },
       Healthcheck: {
         Test: postgres
@@ -147,7 +161,13 @@ const dockerInspection = (
       },
     },
     Mounts: postgres
-      ? [{ Type: 'volume', Destination: '/var/lib/postgresql/data' }]
+      ? [
+          {
+            Type: 'volume',
+            Name: `${projectName}_postgres_data`,
+            Destination: '/var/lib/postgresql/data',
+          },
+        ]
       : [],
   };
 };
@@ -172,14 +192,15 @@ const imageInspection = (volumeTargets: readonly string[] = []) =>
 
 const equivalentDockerDiscovery = (
   health: 'healthy' | 'starting' | 'unhealthy' = 'healthy',
+  projectName = 'afiliado-shopee',
 ): DockerDiscoveryFixture => ({
-  config: { code: 0, stdout: mainComposeConfig() },
+  config: { code: 0, stdout: mainComposeConfig(projectName) },
   list: { code: 0, stdout: 'aaaaaaaaaaaa\nbbbbbbbbbbbb\n' },
   inspect: {
     code: 0,
     stdout: JSON.stringify([
-      dockerInspection('postgres', health),
-      dockerInspection('redis', health),
+      dockerInspection('postgres', health, projectName),
+      dockerInspection('redis', health, projectName),
     ]),
   },
   imageInspect: {
@@ -199,6 +220,9 @@ const harness = (
     portOccupants?: Record<number, PortOccupant>;
     managedDescendants?: Record<number, number[]>;
     dockerDiscovery?: DockerDiscoveryFixture;
+    volumeProjectName?: string;
+    volumeNames?: string[];
+    volumeLabels?: Record<string, string> | null;
     dockerDiscoveryThrowsAt?: 'config' | 'list' | 'inspect' | 'imageInspect';
     requiredAuthToken?: string;
   } = {},
@@ -242,7 +266,7 @@ const harness = (
       const fixture = options.dockerDiscovery?.config;
       return {
         code: fixture?.code ?? 0,
-        stdout: fixture?.stdout ?? '',
+        stdout: fixture?.stdout ?? mainComposeConfig(),
         stderr: '',
       };
     }
@@ -256,7 +280,9 @@ const harness = (
       const fixture = options.dockerDiscovery?.list;
       return {
         code: fixture?.code ?? 0,
-        stdout: fixture?.stdout ?? '',
+        stdout:
+          fixture?.stdout ??
+          (mainRunning ? 'aaaaaaaaaaaa\nbbbbbbbbbbbb\n' : ''),
         stderr: '',
       };
     }
@@ -271,8 +297,8 @@ const harness = (
       const fixture =
         options.dockerDiscovery?.imageInspect?.[spec.args[2] ?? ''];
       return {
-        code: fixture?.code ?? 1,
-        stdout: fixture?.stdout ?? '',
+        code: fixture?.code ?? (mainRunning ? 0 : 1),
+        stdout: fixture?.stdout ?? (mainRunning ? imageInspection() : ''),
         stderr: '',
       };
     }
@@ -281,8 +307,19 @@ const harness = (
         throw new Error('timeout');
       const fixture = options.dockerDiscovery?.inspect;
       return {
-        code: fixture?.code ?? 0,
-        stdout: fixture?.stdout ?? '',
+        code: fixture?.code ?? (mainRunning ? 0 : 1),
+        stdout:
+          fixture?.stdout ??
+          (mainRunning
+            ? JSON.stringify([
+                dockerInspection(
+                  'postgres',
+                  'healthy',
+                  options.volumeProjectName,
+                ),
+                dockerInspection('redis', 'healthy', options.volumeProjectName),
+              ])
+            : ''),
         stderr: '',
       };
     }
@@ -292,6 +329,37 @@ const harness = (
         stdout: '',
         stderr: '',
       };
+    }
+    if (spec.command === 'docker' && spec.args[0] === 'volume') {
+      if (spec.args[1] === 'ls') {
+        const volumeProject = options.volumeProjectName ?? 'afiliado-shopee';
+        return {
+          code: 0,
+          stdout: `${(
+            options.volumeNames ?? [`${volumeProject}_postgres_data`]
+          ).join('\n')}\n`,
+          stderr: '',
+        };
+      }
+      if (spec.args[1] === 'inspect') {
+        const volumeProject = options.volumeProjectName ?? 'afiliado-shopee';
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Name: `${volumeProject}_postgres_data`,
+              Labels:
+                options.volumeLabels === undefined
+                  ? {
+                      'com.docker.compose.project': volumeProject,
+                      'com.docker.compose.volume': 'postgres_data',
+                    }
+                  : options.volumeLabels,
+            },
+          ]),
+          stderr: '',
+        };
+      }
     }
     const evolution = spec.args.includes('infra/evolution/docker-compose.yml');
     if (spec.args.includes('up') || spec.args.includes('evolution:up')) {
@@ -466,6 +534,41 @@ const dailySendReadyEnvironment = (token?: string) => ({
 });
 
 describe('LocalSystemSupervisor', () => {
+  it('pins Evolution package commands to the canonical Compose project', () => {
+    const packageJson = JSON.parse(
+      readFileSync(
+        join(import.meta.dirname, '../../..', 'package.json'),
+        'utf8',
+      ),
+    ) as { scripts: Record<string, string> };
+    for (const script of [
+      'evolution:config',
+      'evolution:pull',
+      'evolution:up',
+      'evolution:down',
+      'evolution:status',
+      'evolution:logs',
+      'evolution:restart',
+    ]) {
+      expect(packageJson.scripts[script]).toContain(
+        '--project-name shopee-evolution-local',
+      );
+    }
+  });
+
+  it('builds Evolution Compose arguments with an explicit project identity', () => {
+    expect(evolutionComposeArguments(['ps'])).toEqual([
+      'compose',
+      '--project-name',
+      'shopee-evolution-local',
+      '--env-file',
+      'infra/evolution/.env.local',
+      '-f',
+      'infra/evolution/docker-compose.yml',
+      'ps',
+    ]);
+  });
+
   it('prepares the production dashboard before infrastructure or child spawn', async () => {
     const root = createRoot();
     const state = harness();
@@ -953,7 +1056,7 @@ describe('LocalSystemSupervisor', () => {
       expect.arrayContaining([expect.objectContaining({ port: 5432 })]),
     );
   });
-  it('recognizes equivalent healthy Compose infrastructure from another project', async () => {
+  it('recognizes healthy canonical Compose infrastructure independent of cwd', async () => {
     const root = createRoot();
     const state = harness({
       dockerDiscovery: equivalentDockerDiscovery(),
@@ -986,6 +1089,7 @@ describe('LocalSystemSupervisor', () => {
     expect(
       state.commands.some(
         (command) =>
+          command.command === 'docker' &&
           command.args[0] === 'compose' &&
           command.args.includes('up') &&
           command.args.includes('-d'),
@@ -997,6 +1101,299 @@ describe('LocalSystemSupervisor', () => {
           command.command === 'docker' && command.args[0] === 'inspect',
       ),
     ).toBe(true);
+  });
+
+  it('does not reuse healthy infrastructure belonging to a foreign Compose project', async () => {
+    const root = createRoot();
+    const foreignPostgres = dockerInspection('postgres');
+    const foreignRedis = dockerInspection('redis');
+    foreignPostgres.Config.Labels['com.docker.compose.project'] =
+      'foreign-project';
+    foreignRedis.Config.Labels['com.docker.compose.project'] =
+      'foreign-project';
+    foreignPostgres.Mounts[0]!.Name = 'foreign-project_postgres_data';
+    const foreignConfig = mainComposeConfig().replace(
+      '"name":"afiliado-shopee"',
+      '"name":"foreign-project"',
+    );
+    const state = harness({
+      dockerDiscovery: {
+        ...equivalentDockerDiscovery(),
+        config: { code: 0, stdout: foreignConfig },
+        inspect: {
+          code: 0,
+          stdout: JSON.stringify([foreignPostgres, foreignRedis]),
+        },
+      },
+      portOccupants: {
+        5432: { pid: 5001, processName: 'docker-backend' },
+        6379: { pid: 5002, processName: 'docker-backend' },
+      },
+    });
+
+    await expect(
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
+    ).rejects.toMatchObject({ code: 'SYSTEM_PORT_OCCUPIED' });
+    expect(
+      state.commands.some(
+        (command) =>
+          command.command === 'docker' &&
+          command.args[0] === 'compose' &&
+          command.args.includes('up'),
+      ),
+    ).toBe(false);
+  });
+
+  it('uses one canonical Compose project across worktrees while keeping explicit isolated names separate', async () => {
+    const rootA = createRoot();
+    const rootB = createRoot();
+    const stateA = harness();
+    const stateB = harness();
+
+    await createSupervisor(rootA, stateA.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
+    await createSupervisor(rootB, stateB.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
+
+    const composeA = stateA.commands.find(
+      (command) =>
+        command.command === 'docker' && command.args[0] === 'compose',
+    );
+    const composeB = stateB.commands.find(
+      (command) =>
+        command.command === 'docker' && command.args[0] === 'compose',
+    );
+    expect(composeA?.args.slice(0, 3)).toEqual([
+      'compose',
+      '--project-name',
+      'afiliado-shopee',
+    ]);
+    expect(composeB?.args.slice(0, 3)).toEqual(composeA?.args.slice(0, 3));
+    expect(composeA?.cwd).toBe(rootA);
+    expect(composeB?.cwd).toBe(rootB);
+
+    const isolatedA = new LocalSystemSupervisor(rootA, stateA.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: 'isolated-a',
+    });
+    const isolatedB = new LocalSystemSupervisor(rootB, stateB.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: 'isolated-b',
+    });
+    await isolatedA.status(explicitSafePreviewEnvironment());
+    await isolatedB.status(explicitSafePreviewEnvironment());
+    const isolatedCommands = [...stateA.commands, ...stateB.commands].filter(
+      (command) =>
+        command.command === 'docker' && command.args[0] === 'compose',
+    );
+    expect(
+      isolatedCommands.some(
+        (command) =>
+          command.args[1] === '--project-name' &&
+          command.args[2] === 'isolated-a',
+      ),
+    ).toBe(true);
+    expect(
+      isolatedCommands.some(
+        (command) =>
+          command.args[1] === '--project-name' &&
+          command.args[2] === 'isolated-b',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps an explicitly isolated start on its own project volume', async () => {
+    const root = createRoot();
+    const state = harness({
+      dockerDiscovery: equivalentDockerDiscovery('healthy', 'isolated-a'),
+      volumeProjectName: 'isolated-a',
+    });
+    const supervisor = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: 'isolated-a',
+    });
+
+    const status = await supervisor.start(explicitSafePreviewEnvironment());
+
+    expect(status.runtime).toMatchObject({
+      composeProjectName: 'isolated-a',
+      expectedPostgresVolume: 'isolated-a_postgres_data',
+      mountedPostgresVolume: 'isolated-a_postgres_data',
+      volumeStatus: 'canonical',
+    });
+    expect(
+      state.commands.some(
+        (command) =>
+          command.command === 'docker' &&
+          command.args[0] === 'compose' &&
+          command.args.slice(0, 3).join(' ') ===
+            'compose --project-name isolated-a',
+      ),
+    ).toBe(true);
+  });
+
+  it('persists the Compose identity with managed process state', async () => {
+    const root = createRoot();
+    const state = harness();
+
+    await createSupervisor(root, state.deps).start(
+      explicitSafePreviewEnvironment(),
+    );
+
+    expect(JSON.parse(readFileSync(statePath(root), 'utf8'))).toMatchObject({
+      version: 1,
+      composeProjectName: 'afiliado-shopee',
+    });
+  });
+
+  it('rejects a state owned by another Compose project before start or stop', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSupervisor(root, state.deps);
+    await supervisor.start(explicitSafePreviewEnvironment());
+
+    const persisted = JSON.parse(readFileSync(statePath(root), 'utf8')) as {
+      composeProjectName: string;
+    };
+    persisted.composeProjectName = 'isolated-a';
+    writeFileSync(statePath(root), JSON.stringify(persisted));
+    const commandCount = state.commands.length;
+
+    await expect(
+      supervisor.start(explicitSafePreviewEnvironment()),
+    ).rejects.toMatchObject({ code: 'SYSTEM_COMPOSE_PROJECT_MISMATCH' });
+    await expect(
+      supervisor.status(explicitSafePreviewEnvironment()),
+    ).rejects.toMatchObject({ code: 'SYSTEM_COMPOSE_PROJECT_MISMATCH' });
+    await expect(
+      supervisor.stop(explicitSafePreviewEnvironment()),
+    ).resolves.toEqual({
+      stopped: false,
+      manualIntervention: [expect.stringContaining('outro projeto Compose')],
+    });
+    expect(state.commands).toHaveLength(commandCount);
+    expect(state.stopped).toEqual([]);
+  });
+
+  it('refuses to create the operational PostgreSQL volume when it is absent', async () => {
+    const root = createRoot();
+    const state = harness({ volumeNames: [] });
+
+    await expect(
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_DATABASE_VOLUME_IDENTITY_UNAVAILABLE',
+    });
+    expect(
+      state.commands.some(
+        (command) =>
+          command.command === 'docker' && command.args.includes('up'),
+      ),
+    ).toBe(false);
+  });
+
+  it('reports the canonical runtime identity and mounted PostgreSQL volume without secrets', async () => {
+    const root = createRoot();
+    const state = harness({
+      dockerDiscovery: equivalentDockerDiscovery(),
+    });
+
+    const snapshot = await createSupervisor(root, state.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
+
+    expect(snapshot.runtime).toEqual({
+      composeProjectName: 'afiliado-shopee',
+      expectedPostgresVolume: 'afiliado-shopee_postgres_data',
+      mountedPostgresVolume: 'afiliado-shopee_postgres_data',
+      mountedRedisVolumes: [],
+      volumeStatus: 'canonical',
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(
+      /postgres:postgres|private|password|token/i,
+    );
+  });
+
+  it('fails closed when a canonical Compose project mounts a non-canonical PostgreSQL volume', async () => {
+    const root = createRoot();
+    const dockerDiscovery = equivalentDockerDiscovery();
+    const postgres = dockerInspection('postgres');
+    postgres.Mounts[0]!.Name = 'phase17-gap-audit_postgres_data';
+    dockerDiscovery.inspect = {
+      code: 0,
+      stdout: JSON.stringify([postgres, dockerInspection('redis')]),
+    };
+    const state = harness({ dockerDiscovery });
+
+    const snapshot = await createSupervisor(root, state.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
+    expect(snapshot.runtime.volumeStatus).toBe('mismatch');
+    expect(snapshot.runtime.mountedPostgresVolume).toBe(
+      'phase17-gap-audit_postgres_data',
+    );
+
+    await expect(
+      createSupervisor(root, state.deps).start(
+        explicitSafePreviewEnvironment(),
+      ),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_DATABASE_VOLUME_IDENTITY_MISMATCH',
+    });
+  });
+
+  it.each([
+    null,
+    {},
+    { 'com.docker.compose.project': 'afiliado-shopee' },
+  ] as Array<Record<string, string> | null>)(
+    'fails closed when canonical volume provenance is incomplete: %s',
+    async (volumeLabels) => {
+      const root = createRoot();
+      const state = harness({ volumeLabels });
+
+      const snapshot = await createSupervisor(root, state.deps).status(
+        explicitSafePreviewEnvironment(),
+      );
+      expect(snapshot.runtime.volumeStatus).toBe('mismatch');
+
+      await expect(
+        createSupervisor(root, state.deps).start(
+          explicitSafePreviewEnvironment(),
+        ),
+      ).rejects.toMatchObject({
+        code: 'SYSTEM_DATABASE_VOLUME_IDENTITY_MISMATCH',
+      });
+    },
+  );
+
+  it('refuses to stop infrastructure without local process ownership', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.setInfrastructure(true);
+
+    const result = await createSupervisor(root, state.deps).stop(
+      explicitSafePreviewEnvironment(),
+    );
+
+    expect(result).toEqual({
+      stopped: false,
+      manualIntervention: [
+        'infraestrutura em execucao sem estado local pertencente a esta worktree',
+      ],
+    });
+    expect(
+      state.commands.some(
+        (command) =>
+          command.command === 'docker' && command.args.includes('stop'),
+      ),
+    ).toBe(false);
   });
 
   it.each([
@@ -1190,6 +1587,7 @@ describe('LocalSystemSupervisor', () => {
     expect(
       state.commands.some(
         (command) =>
+          command.command === 'docker' &&
           command.args[0] === 'compose' &&
           command.args.includes('up') &&
           command.args.includes('-d'),
@@ -1216,6 +1614,7 @@ describe('LocalSystemSupervisor', () => {
     expect(
       state.commands.some(
         (command) =>
+          command.command === 'docker' &&
           command.args[0] === 'compose' &&
           command.args.includes('up') &&
           command.args.includes('-d'),
@@ -1380,6 +1779,63 @@ describe('LocalSystemSupervisor', () => {
         command.args.includes('infra/evolution/docker-compose.yml'),
       ),
     ).toBe(false);
+  });
+
+  it('refuses to let an isolated project manage the shared Evolution stack', async () => {
+    const root = createRoot();
+    const state = harness();
+    const isolated = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: 'isolated-a',
+    });
+
+    await expect(isolated.start(environment('send'))).rejects.toMatchObject({
+      code: 'SYSTEM_ISOLATED_EVOLUTION_IDENTITY_UNAVAILABLE',
+    });
+    await expect(isolated.status(environment('send'))).rejects.toMatchObject({
+      code: 'SYSTEM_ISOLATED_EVOLUTION_IDENTITY_UNAVAILABLE',
+    });
+    await expect(isolated.stop(environment('send'))).resolves.toEqual({
+      stopped: false,
+      manualIntervention: [
+        expect.stringContaining('identidade Evolution dedicada'),
+      ],
+    });
+    expect(state.commands).toEqual([]);
+  });
+
+  it('refuses to stop a running project when infrastructure ownership is not proven', async () => {
+    const root = createRoot();
+    const dockerDiscovery = equivalentDockerDiscovery();
+    const state = harness({ dockerDiscovery });
+    const supervisor = createSupervisor(root, state.deps);
+    const safeEnvironment = explicitSafePreviewEnvironment();
+
+    await supervisor.start(safeEnvironment);
+    state.setInfrastructure(true);
+    const postgres = dockerInspection('postgres');
+    postgres.Mounts[0]!.Name = 'phase17-gap-audit_postgres_data';
+    dockerDiscovery.inspect = {
+      code: 0,
+      stdout: JSON.stringify([postgres, dockerInspection('redis')]),
+    };
+    const commandCount = state.commands.length;
+
+    await expect(supervisor.stop(safeEnvironment)).resolves.toEqual({
+      stopped: false,
+      manualIntervention: [
+        'nao foi possivel confirmar a identidade da infraestrutura principal antes do stop',
+      ],
+    });
+    expect(
+      state.commands
+        .slice(commandCount)
+        .some(
+          (command) =>
+            command.command === 'docker' && command.args.includes('stop'),
+        ),
+    ).toBe(false);
+    expect(state.stopped).toEqual([]);
   });
 
   it('fails closed before infrastructure when preview WhatsApp provider is ambiguous', async () => {
@@ -1707,6 +2163,47 @@ describe('LocalSystemSupervisor', () => {
       acquiredAt: '2026-07-25T12:00:01.000Z',
     });
     expect(JSON.stringify(status)).not.toContain('00000000-0000-4000');
+  });
+
+  it('uses one operation-lock root for the same Compose project across worktrees', async () => {
+    const rootA = createRoot();
+    const rootB = createRoot();
+    const projectName = 'shared-runtime-test';
+    const sharedLockRoot = composeProjectRuntimeRoot(projectName);
+    directories.push(sharedLockRoot);
+    const state = harness();
+    state.processes.set(77, {
+      running: true,
+      marker: SUPERVISOR_PROCESS_MARKER,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+    });
+    mkdirSync(dirname(operationLockPath(sharedLockRoot)), { recursive: true });
+    writeFileSync(
+      operationLockPath(sharedLockRoot),
+      JSON.stringify({
+        version: 1,
+        pid: 77,
+        ownerToken: '00000000-0000-4000-8000-000000000002',
+        acquiredAt: '2026-07-25T12:00:01.000Z',
+        processStartedAt: '2026-07-25T12:00:00.000Z',
+        processMarker: SUPERVISOR_PROCESS_MARKER,
+        operation: 'start',
+      }),
+    );
+
+    const snapshot = await new LocalSystemSupervisor(rootB, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectName,
+      operationLockRoot: sharedLockRoot,
+    }).status(explicitSafePreviewEnvironment());
+
+    expect(composeProjectRuntimeRoot(projectName)).toBe(sharedLockRoot);
+    expect(composeProjectRuntimeRoot('isolated-runtime-test')).not.toBe(
+      sharedLockRoot,
+    );
+    expect(snapshot.operationLock).toBe('active');
+    expect(rootA).not.toBe(rootB);
   });
 
   it('stops only validated registered processes and preserves state on PID mismatch', async () => {

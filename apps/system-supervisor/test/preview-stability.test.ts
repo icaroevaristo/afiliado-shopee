@@ -11,6 +11,7 @@ import {
   assertPausedStartupEvidence,
   assertSafePreflightEvidence,
   diagnoseRunningTopology,
+  fingerprintValues,
   installPreviewStabilitySignalCleanup,
   isSafePreviewStabilityFinalState,
   parsePreviewStabilityArgs,
@@ -37,9 +38,11 @@ const ROOT = resolve(import.meta.dirname, '../../..');
 
 const createIsolatedPreviewStabilityDependencies = (
   dependencies: SystemDependencies,
+  options: { composeProjectName?: string } = {},
 ) =>
   createPreviewStabilityDependencies(ROOT, dependencies, {
     loadEnvironmentFiles: false,
+    ...options,
   });
 
 const POSTGRES_CONTAINER_ID = 'aaaaaaaaaaaa';
@@ -48,12 +51,19 @@ const EXTRA_CONTAINER_ID = 'cccccccccccc';
 
 const mainInfrastructureComposeConfig = () =>
   JSON.stringify({
+    name: 'afiliado-shopee',
     services: {
       postgres: {
         image: 'postgres:16-alpine',
         ports: [{ target: 5432, published: '5432', protocol: 'tcp' }],
         healthcheck: { test: ['CMD-SHELL', 'pg_isready'] },
-        volumes: [{ type: 'volume', target: '/var/lib/postgresql/data' }],
+        volumes: [
+          {
+            type: 'volume',
+            source: 'postgres_data',
+            target: '/var/lib/postgresql/data',
+          },
+        ],
       },
       redis: {
         image: 'redis:7-alpine',
@@ -62,6 +72,7 @@ const mainInfrastructureComposeConfig = () =>
         volumes: [],
       },
     },
+    volumes: { postgres_data: {} },
   });
 
 const mainInfrastructureInspection = (
@@ -76,9 +87,9 @@ const mainInfrastructureInspection = (
       Image: postgres ? 'postgres:16-alpine' : 'redis:7-alpine',
       Labels: {
         'com.docker.compose.service': service,
-        'com.docker.compose.project': 'equivalent-project',
-        'com.docker.compose.project.config_files': 'equivalent-compose.yml',
-        'com.docker.compose.project.working_dir': 'equivalent-workdir',
+        'com.docker.compose.project': 'afiliado-shopee',
+        'com.docker.compose.project.config_files': 'docker-compose.yml',
+        'com.docker.compose.project.working_dir': 'canonical-workdir',
       },
       Healthcheck: {
         Test: postgres
@@ -95,7 +106,13 @@ const mainInfrastructureInspection = (
       },
     },
     Mounts: postgres
-      ? [{ Type: 'volume', Destination: '/var/lib/postgresql/data' }]
+      ? [
+          {
+            Type: 'volume',
+            Name: 'afiliado-shopee_postgres_data',
+            Destination: '/var/lib/postgresql/data',
+          },
+        ]
       : [],
   };
 };
@@ -111,6 +128,14 @@ const status = (
   operationLock,
   mode: 'preview',
   ports: { api: 3333, dashboard: 3000 },
+  runtime: {
+    composeProjectName: 'afiliado-shopee',
+    expectedPostgresVolume: 'afiliado-shopee_postgres_data',
+    mountedPostgresVolume:
+      overall === 'running' ? 'afiliado-shopee_postgres_data' : null,
+    mountedRedisVolumes: [],
+    volumeStatus: overall === 'running' ? 'canonical' : 'stopped',
+  },
   docker: { daemon: 'available', services: [] },
   evolution: {
     api: 'unavailable',
@@ -161,6 +186,8 @@ const status = (
 
 const partialTopologyStatus = (): SystemStatusSnapshot => {
   const snapshot = status('partial');
+  snapshot.runtime.volumeStatus = 'canonical';
+  snapshot.runtime.mountedPostgresVolume = 'afiliado-shopee_postgres_data';
   snapshot.docker.services = [
     { service: 'postgres', state: 'running', health: 'healthy' },
     { service: 'redis', state: 'running', health: 'healthy' },
@@ -180,6 +207,8 @@ const partialTopologyStatus = (): SystemStatusSnapshot => {
 
 const reusableInfrastructurePartialStatus = (): SystemStatusSnapshot => {
   const snapshot = status('partial');
+  snapshot.runtime.volumeStatus = 'canonical';
+  snapshot.runtime.mountedPostgresVolume = 'afiliado-shopee_postgres_data';
   snapshot.docker.services = [
     { service: 'postgres', state: 'running', health: 'healthy' },
     { service: 'redis', state: 'running', health: 'healthy' },
@@ -2178,12 +2207,36 @@ describe('preview operational stability', () => {
     }
   });
 
-  it('reuses preflight-proven healthy main infrastructure without Docker commands', async () => {
-    const run = vi.fn(async () => {
-      throw new Error(
-        'Docker must not run when preflight already proved reuse',
-      );
-    });
+  it('revalidates the canonical volume before reusing healthy infrastructure', async () => {
+    const run = vi.fn(
+      async (spec: Parameters<SystemDependencies['run']>[0]) => {
+        if (spec.args[0] === 'volume' && spec.args[1] === 'ls') {
+          return {
+            code: 0,
+            stdout: 'afiliado-shopee_postgres_data\n',
+            stderr: '',
+          };
+        }
+        if (spec.args[0] === 'volume' && spec.args[1] === 'inspect') {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              {
+                Name: 'afiliado-shopee_postgres_data',
+                Labels: {
+                  'com.docker.compose.project': 'afiliado-shopee',
+                  'com.docker.compose.volume': 'postgres_data',
+                },
+              },
+            ]),
+            stderr: '',
+          };
+        }
+        throw new Error(
+          'Docker must not run beyond the canonical volume revalidation',
+        );
+      },
+    );
     const dependencies = createInfrastructureRuntimeDependencies(run);
     const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
 
@@ -2194,7 +2247,7 @@ describe('preview operational stability', () => {
       ),
     ).resolves.toBeUndefined();
 
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('preserves compose start and health polling when reuse was not proven', async () => {
@@ -2205,10 +2258,32 @@ describe('preview operational stability', () => {
         if (spec.args[0] === 'info') {
           return { code: 0, stdout: '', stderr: '' };
         }
-        if (spec.args[0] === 'compose' && spec.args[1] === 'up') {
+        if (spec.args[0] === 'volume' && spec.args[1] === 'ls') {
+          return {
+            code: 0,
+            stdout: 'afiliado-shopee_postgres_data\n',
+            stderr: '',
+          };
+        }
+        if (spec.args[0] === 'volume' && spec.args[1] === 'inspect') {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              {
+                Name: 'afiliado-shopee_postgres_data',
+                Labels: {
+                  'com.docker.compose.project': 'afiliado-shopee',
+                  'com.docker.compose.volume': 'postgres_data',
+                },
+              },
+            ]),
+            stderr: '',
+          };
+        }
+        if (spec.args[0] === 'compose' && spec.args.includes('up')) {
           return { code: 0, stdout: '', stderr: '' };
         }
-        if (spec.args[0] === 'compose' && spec.args[1] === 'ps') {
+        if (spec.args[0] === 'compose' && spec.args.includes('ps')) {
           return {
             code: 0,
             stdout: [
@@ -2239,14 +2314,42 @@ describe('preview operational stability', () => {
     expect(commands).toContainEqual(['info']);
     expect(commands).toContainEqual([
       'compose',
+      '--project-name',
+      'afiliado-shopee',
       'up',
       '-d',
       'postgres',
       'redis',
     ]);
     expect(
-      commands.filter((args) => args[0] === 'compose' && args[1] === 'ps'),
+      commands.filter((args) => args[0] === 'compose' && args.includes('ps')),
     ).toHaveLength(2);
+  });
+
+  it('blocks preview infrastructure preparation before Compose when the canonical volume is ambiguous', async () => {
+    const commands: string[][] = [];
+    const dependencies = createInfrastructureRuntimeDependencies(
+      vi.fn(async (spec: Parameters<SystemDependencies['run']>[0]) => {
+        commands.push(spec.args);
+        if (spec.args[0] === 'volume' && spec.args[1] === 'ls') {
+          return {
+            code: 0,
+            stdout: 'phase17-gap-audit_postgres_data\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${spec.args.join(' ')}`);
+      }),
+    );
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies);
+
+    await expect(
+      runtime.prepareMainInfrastructure(
+        safePreviewEvolutionIsolationEnvironment(),
+        false,
+      ),
+    ).rejects.toMatchObject({ code: 'SYSTEM_DATABASE_VOLUME_AMBIGUOUS' });
+    expect(commands.some((args) => args.includes('up'))).toBe(false);
   });
 
   it.each([
@@ -2342,6 +2445,8 @@ describe('preview operational stability', () => {
     expect(commands).toHaveLength(2);
     expect(commands).toContainEqual([
       'compose',
+      '--project-name',
+      'afiliado-shopee',
       'ps',
       '-a',
       '--format',
@@ -2350,6 +2455,88 @@ describe('preview operational stability', () => {
     expect(commands).toContainEqual(['volume', 'ls', '--format', '{{.Name}}']);
     expect(commands.flat()).not.toContain('infra/evolution/docker-compose.yml');
     expect(commands.flat()).not.toContain('inspect');
+    expect(infrastructure.containers).toMatchObject({
+      postgres: 'running',
+      evolution: 'not-required',
+    });
+    expect(infrastructure.volumeCount).toBe(1);
+  });
+
+  it('fingerprints volumes for an explicitly isolated Compose project', async () => {
+    const commands: string[][] = [];
+    const dependencies = createInfrastructureRuntimeDependencies(
+      vi.fn(async (spec: Parameters<SystemDependencies['run']>[0]) => {
+        commands.push(spec.args);
+        if (spec.args[0] === 'compose') {
+          return { code: 0, stdout: mainInfrastructureCapture, stderr: '' };
+        }
+        if (spec.args[0] === 'volume') {
+          return {
+            code: 0,
+            stdout: 'isolated-a_postgres_data\nafiliado-shopee_postgres_data\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${spec.args.join(' ')}`);
+      }),
+    );
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies, {
+      composeProjectName: 'isolated-a',
+    });
+
+    const infrastructure = await runtime.captureInfrastructure(
+      safePreviewEvolutionIsolationEnvironment(),
+    );
+
+    expect(commands).toContainEqual([
+      'compose',
+      '--project-name',
+      'isolated-a',
+      'ps',
+      '-a',
+      '--format',
+      'json',
+    ]);
+    expect(infrastructure.volumeCount).toBe(1);
+    expect(infrastructure.volumeFingerprint).toBe(
+      fingerprintValues(['isolated-a_postgres_data']),
+    );
+  });
+
+  it('does not inspect the shared Evolution project for an isolated runtime', async () => {
+    const commands: string[][] = [];
+    const dependencies = createInfrastructureRuntimeDependencies(
+      vi.fn(async (spec: Parameters<SystemDependencies['run']>[0]) => {
+        commands.push(spec.args);
+        if (spec.args.includes('infra/evolution/docker-compose.yml')) {
+          throw new Error('isolated runtime must not inspect shared Evolution');
+        }
+        if (spec.args[0] === 'compose') {
+          return { code: 0, stdout: mainInfrastructureCapture, stderr: '' };
+        }
+        if (spec.args[0] === 'volume') {
+          return {
+            code: 0,
+            stdout:
+              'isolated-a_postgres_data\nshopee-evolution-postgres-data\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command: ${spec.args.join(' ')}`);
+      }),
+    );
+    const runtime = createIsolatedPreviewStabilityDependencies(dependencies, {
+      composeProjectName: 'isolated-a',
+    });
+
+    const infrastructure = await runtime.captureInfrastructure({
+      COMMERCIAL_AUTOMATION_MODE: 'send',
+      WHATSAPP_PROVIDER: 'evolution',
+      WHATSAPP_GROUP_SEND_ENABLED: 'true',
+    });
+
+    expect(commands).toHaveLength(2);
+    expect(commands.flat()).not.toContain('infra/evolution/docker-compose.yml');
     expect(infrastructure.containers).toMatchObject({
       postgres: 'running',
       evolution: 'not-required',

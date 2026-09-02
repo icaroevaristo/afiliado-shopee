@@ -7,6 +7,21 @@ import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/provide
 import { loadLocalSystemEnvironment } from './environment';
 import { ensureDashboardProductionBuild } from './dashboard-build';
 import {
+  evolutionComposeArguments,
+  isValidComposeProjectName,
+  mainComposeArguments,
+  MAIN_POSTGRES_VOLUME_KEY,
+  OPERATIONAL_COMPOSE_PROJECT_NAME,
+  postgresVolumeName,
+} from './runtime-identity';
+
+export {
+  composeProjectRuntimeRoot,
+  evolutionComposeArguments,
+  mainComposeArguments,
+  OPERATIONAL_COMPOSE_PROJECT_NAME,
+} from './runtime-identity';
+import {
   absoluteLogPath,
   appendSupervisorLog,
   clearState,
@@ -66,15 +81,6 @@ const requiredFiles = [
   'apps/worker/src/whatsapp-dispatch-runtime.ts',
 ] as const;
 
-const composeArguments = ['compose'];
-const evolutionComposeArguments = [
-  'compose',
-  '--env-file',
-  'infra/evolution/.env.local',
-  '-f',
-  'infra/evolution/docker-compose.yml',
-];
-
 export const parseComposeStatuses = (stdout: string): ComposeServiceStatus[] =>
   stdout
     .split(/\r?\n/)
@@ -103,12 +109,13 @@ export const parseComposeStatuses = (stdout: string): ComposeServiceStatus[] =>
 type MainInfrastructureService = 'postgres' | 'redis';
 
 type ExpectedMainInfrastructure = {
+  projectName: string;
   service: MainInfrastructureService;
   image: string;
   targetPort: number;
   publishedPort: number;
   healthTest: string[];
-  mounts: Array<{ type: string; target: string }>;
+  mounts: Array<{ type: string; target: string; source?: string }>;
 };
 
 type DockerInspection = {
@@ -124,6 +131,7 @@ type DockerInspection = {
   };
   Mounts?: Array<{
     Type?: string;
+    Name?: string;
     Destination?: string;
     RW?: boolean;
     Mode?: string;
@@ -148,11 +156,20 @@ const arraysEqual = (left: readonly string[], right: readonly string[]) =>
 const parseExpectedMainInfrastructure = (
   stdout: string,
   ports: LocalSystemState['ports'],
+  projectName: string,
 ): ExpectedMainInfrastructure[] | null => {
   try {
     const root = objectRecord(JSON.parse(stdout));
     const services = objectRecord(root?.services);
     if (!services) return null;
+    if (root?.name !== projectName) return null;
+    const volumeDefinitions = objectRecord(root?.volumes);
+    const resolveVolumeName = (source: string) => {
+      const definition = objectRecord(volumeDefinitions?.[source]);
+      return typeof definition?.name === 'string'
+        ? definition.name
+        : `${projectName}_${source}`;
+    };
     return (['postgres', 'redis'] as const).map((service) => {
       const definition = objectRecord(services[service]);
       if (!definition || typeof definition.image !== 'string') {
@@ -172,18 +189,27 @@ const parseExpectedMainInfrastructure = (
       }
       const healthcheck = objectRecord(definition.healthcheck);
       const healthTest = stringArray(healthcheck?.test);
-      const volumes = Array.isArray(definition.volumes)
+      const serviceVolumes = Array.isArray(definition.volumes)
         ? definition.volumes
         : [];
-      const mounts = volumes.flatMap((value) => {
+      const mounts = serviceVolumes.flatMap((value) => {
         const mount = objectRecord(value);
         return mount &&
           typeof mount.type === 'string' &&
           typeof mount.target === 'string'
-          ? [{ type: mount.type, target: mount.target }]
+          ? [
+              {
+                type: mount.type,
+                target: mount.target,
+                ...(typeof mount.source === 'string'
+                  ? { source: resolveVolumeName(mount.source) }
+                  : {}),
+              },
+            ]
           : [];
       });
       return {
+        projectName,
         service,
         image: definition.image,
         targetPort,
@@ -275,6 +301,15 @@ const mountsMatchExpected = (
     const explicitType = explicitMounts.get(mount.Destination);
     if (explicitType !== undefined) {
       if (mount.Type !== explicitType) return false;
+      const expectedMount = expected.mounts.find(
+        (candidate) => candidate.target === mount.Destination,
+      );
+      if (
+        expectedMount?.source !== undefined &&
+        mount.Name !== expectedMount.source
+      ) {
+        return false;
+      }
       continue;
     }
     if (
@@ -300,12 +335,13 @@ const inspectionMatchesExpected = (
   inspection: DockerInspection,
   expected: ExpectedMainInfrastructure,
   imageVolumeTargets: readonly string[],
+  checkMounts = true,
 ) => {
   const labels = inspection.Config?.Labels;
   if (
     !labels ||
     labels['com.docker.compose.service'] !== expected.service ||
-    !labels['com.docker.compose.project'] ||
+    labels['com.docker.compose.project'] !== expected.projectName ||
     !labels['com.docker.compose.project.config_files'] ||
     !labels['com.docker.compose.project.working_dir'] ||
     inspection.Config?.Image !== expected.image ||
@@ -331,13 +367,17 @@ const inspectionMatchesExpected = (
   ) {
     return false;
   }
-  return mountsMatchExpected(inspection, expected, imageVolumeTargets);
+  return (
+    !checkMounts ||
+    mountsMatchExpected(inspection, expected, imageVolumeTargets)
+  );
 };
 
 export type ResolvedMainInfrastructureContainer = {
   id: string;
   service: 'postgres' | 'redis';
   health: 'healthy' | 'starting' | 'unhealthy' | 'unavailable' | 'unknown';
+  volumeNames: string[];
 };
 
 const normalizedInfrastructureHealth = (value: string | undefined) =>
@@ -349,20 +389,31 @@ const normalizedInfrastructureHealth = (value: string | undefined) =>
 
 type MainInfrastructureContainerDiscovery =
   | { status: 'resolved'; containers: ResolvedMainInfrastructureContainer[] }
+  | { status: 'mismatch'; containers: ResolvedMainInfrastructureContainer[] }
   | { status: 'unproven' }
   | { status: 'ambiguous' };
 
-const discoverEquivalentMainInfrastructureContainers = async (
+type MainInfrastructureRuntimeIdentity = {
+  composeProjectName: string;
+  expectedPostgresVolume: string;
+  mountedPostgresVolume: string | null;
+  mountedRedisVolumes: string[];
+  volumeStatus:
+    'canonical' | 'stopped' | 'unavailable' | 'mismatch' | 'ambiguous';
+};
+
+const discoverMainInfrastructureContainers = async (
   root: string,
   deps: SystemDependencies,
   env: NodeJS.ProcessEnv,
   ports: LocalSystemState['ports'],
+  projectName: string,
 ): Promise<MainInfrastructureContainerDiscovery> => {
   try {
     const configResult = await deps.run(
       composeSpec(
         root,
-        [...composeArguments, 'config', '--format', 'json'],
+        mainComposeArguments(projectName, ['config', '--format', 'json']),
         env,
       ),
     );
@@ -370,11 +421,18 @@ const discoverEquivalentMainInfrastructureContainers = async (
     const expected = parseExpectedMainInfrastructure(
       configResult.stdout,
       ports,
+      projectName,
     );
     if (!expected) return { status: 'unproven' };
     const listResult = await deps.run({
       command: 'docker',
-      args: ['ps', '--format', '{{.ID}}'],
+      args: [
+        'ps',
+        '--filter',
+        `label=com.docker.compose.project=${projectName}`,
+        '--format',
+        '{{.ID}}',
+      ],
       cwd: root,
       env,
     });
@@ -400,6 +458,7 @@ const discoverEquivalentMainInfrastructureContainers = async (
     const inspections = parseDockerInspections(inspectResult.stdout);
     if (!inspections) return { status: 'unproven' };
     const containers: ResolvedMainInfrastructureContainer[] = [];
+    let topologyMismatch = false;
     for (const service of expected) {
       const imageInspectResult = await deps.run({
         command: 'docker',
@@ -417,8 +476,21 @@ const discoverEquivalentMainInfrastructureContainers = async (
         inspectionMatchesExpected(inspection, service, imageVolumeTargets),
       );
       if (candidates.length > 1) return { status: 'ambiguous' };
-      if (candidates.length === 0) return { status: 'unproven' };
-      const candidate = candidates[0];
+      let candidate = candidates[0];
+      if (!candidate) {
+        const identityCandidates = inspections.filter((inspection) =>
+          inspectionMatchesExpected(
+            inspection,
+            service,
+            imageVolumeTargets,
+            false,
+          ),
+        );
+        if (identityCandidates.length > 1) return { status: 'ambiguous' };
+        candidate = identityCandidates[0];
+        if (!candidate) return { status: 'unproven' };
+        topologyMismatch = true;
+      }
       if (!candidate?.Id || !/^[a-f0-9]{12,64}$/i.test(candidate.Id)) {
         return { status: 'unproven' };
       }
@@ -426,9 +498,18 @@ const discoverEquivalentMainInfrastructureContainers = async (
         id: candidate.Id,
         service: service.service,
         health: normalizedInfrastructureHealth(candidate.State?.Health?.Status),
+        volumeNames: (candidate.Mounts ?? [])
+          .filter(
+            (mount): mount is typeof mount & { Name: string } =>
+              mount.Type === 'volume' && typeof mount.Name === 'string',
+          )
+          .map((mount) => mount.Name),
       });
     }
-    return { status: 'resolved', containers };
+    return {
+      status: topologyMismatch ? 'mismatch' : 'resolved',
+      containers,
+    };
   } catch {
     return { status: 'unproven' };
   }
@@ -445,14 +526,17 @@ export const resolveEquivalentMainServiceContainer = async (
   env: NodeJS.ProcessEnv,
   ports: LocalSystemState['ports'],
   service: 'postgres' | 'redis',
+  projectName = OPERATIONAL_COMPOSE_PROJECT_NAME,
 ): Promise<MainInfrastructureServiceResolution> => {
-  const discovery = await discoverEquivalentMainInfrastructureContainers(
+  const discovery = await discoverMainInfrastructureContainers(
     root,
     deps,
     env,
     ports,
+    projectName,
   );
-  if (discovery.status !== 'resolved') return discovery;
+  if (discovery.status === 'ambiguous') return discovery;
+  if (discovery.status !== 'resolved') return { status: 'unproven' };
   const matches = discovery.containers.filter(
     (candidate) => candidate.service === service,
   );
@@ -461,17 +545,19 @@ export const resolveEquivalentMainServiceContainer = async (
   return { status: 'resolved', container: matches[0]! };
 };
 
-const discoverEquivalentMainInfrastructure = async (
+const discoverMainInfrastructure = async (
   root: string,
   deps: SystemDependencies,
   env: NodeJS.ProcessEnv,
   ports: LocalSystemState['ports'],
+  projectName: string,
 ): Promise<ComposeServiceStatus[]> => {
-  const discovery = await discoverEquivalentMainInfrastructureContainers(
+  const discovery = await discoverMainInfrastructureContainers(
     root,
     deps,
     env,
     ports,
+    projectName,
   );
   return discovery.status === 'resolved'
     ? discovery.containers.map(({ service, health }) => ({
@@ -480,6 +566,180 @@ const discoverEquivalentMainInfrastructure = async (
         health,
       }))
     : [];
+};
+
+const runtimeIdentityFromDiscovery = (
+  projectName: string,
+  discovery: MainInfrastructureContainerDiscovery,
+  composeServices: ComposeServiceStatus[],
+): MainInfrastructureRuntimeIdentity => {
+  const expectedPostgresVolume = postgresVolumeName(projectName);
+  if (discovery.status === 'ambiguous') {
+    return {
+      composeProjectName: projectName,
+      expectedPostgresVolume,
+      mountedPostgresVolume: null,
+      mountedRedisVolumes: [],
+      volumeStatus: 'ambiguous',
+    };
+  }
+  if (discovery.status === 'unproven') {
+    return {
+      composeProjectName: projectName,
+      expectedPostgresVolume,
+      mountedPostgresVolume: null,
+      mountedRedisVolumes: [],
+      volumeStatus: composeServices.some((item) => item.state === 'running')
+        ? 'unavailable'
+        : 'stopped',
+    };
+  }
+  const postgres = discovery.containers.find(
+    (container) => container.service === 'postgres',
+  );
+  const redis = discovery.containers.find(
+    (container) => container.service === 'redis',
+  );
+  const mountedPostgresVolume = postgres?.volumeNames[0] ?? null;
+  const mountedRedisVolumes = redis?.volumeNames ?? [];
+  return {
+    composeProjectName: projectName,
+    expectedPostgresVolume,
+    mountedPostgresVolume,
+    mountedRedisVolumes,
+    volumeStatus:
+      discovery.status === 'resolved' &&
+      postgres?.volumeNames.length === 1 &&
+      mountedPostgresVolume === expectedPostgresVolume
+        ? 'canonical'
+        : 'mismatch',
+  };
+};
+
+const runtimeVolumeStatus = (
+  discovered: MainInfrastructureRuntimeIdentity,
+  volume: PostgresVolumeIdentity,
+): MainInfrastructureRuntimeIdentity['volumeStatus'] => {
+  if (volume.status === 'ambiguous') return 'ambiguous';
+  if (volume.status === 'mismatch') return 'mismatch';
+  if (volume.status === 'unavailable') return 'unavailable';
+  if (volume.status === 'absent' && discovered.volumeStatus === 'canonical') {
+    return 'mismatch';
+  }
+  return discovered.volumeStatus;
+};
+
+type PostgresVolumeIdentityStatus =
+  'canonical' | 'absent' | 'ambiguous' | 'mismatch' | 'unavailable';
+
+export type PostgresVolumeIdentity = {
+  expectedVolume: string;
+  status: PostgresVolumeIdentityStatus;
+};
+
+export const inspectCanonicalPostgresVolume = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  projectName: string,
+): Promise<PostgresVolumeIdentity> => {
+  const expectedVolume = postgresVolumeName(projectName);
+  const listed = await deps
+    .run({
+      command: 'docker',
+      args: ['volume', 'ls', '--format', '{{.Name}}'],
+      cwd: root,
+      env,
+    })
+    .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  if (listed.code !== 0) {
+    return { expectedVolume, status: 'unavailable' };
+  }
+  const volumeNames = [
+    ...new Set(
+      listed.stdout
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!volumeNames.includes(expectedVolume)) {
+    const alternatives = volumeNames.filter((name) =>
+      /(?:^|_)postgres_data$/i.test(name),
+    );
+    if (
+      projectName === OPERATIONAL_COMPOSE_PROJECT_NAME &&
+      alternatives.length > 0
+    ) {
+      return { expectedVolume, status: 'ambiguous' };
+    }
+    return { expectedVolume, status: 'absent' };
+  }
+
+  const inspected = await deps
+    .run({
+      command: 'docker',
+      args: ['volume', 'inspect', expectedVolume],
+      cwd: root,
+      env,
+    })
+    .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  if (inspected.code !== 0) {
+    return { expectedVolume, status: 'unavailable' };
+  }
+  try {
+    const parsed: unknown = JSON.parse(inspected.stdout);
+    if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error();
+    const volume = objectRecord(parsed[0]);
+    if (!volume || volume.Name !== expectedVolume) throw new Error();
+    const labels = objectRecord(volume.Labels);
+    if (
+      !labels ||
+      labels['com.docker.compose.project'] !== projectName ||
+      labels['com.docker.compose.volume'] !== MAIN_POSTGRES_VOLUME_KEY
+    ) {
+      throw new Error();
+    }
+    return { expectedVolume, status: 'canonical' };
+  } catch {
+    return { expectedVolume, status: 'mismatch' };
+  }
+};
+
+const postgresVolumeIdentityError = (status: PostgresVolumeIdentityStatus) =>
+  new LocalSystemError(
+    status === 'ambiguous'
+      ? 'Ha mais de uma identidade possivel para o banco operacional; nenhuma sera escolhida automaticamente'
+      : status === 'unavailable' || status === 'absent'
+        ? 'Nao foi possivel verificar a identidade do volume PostgreSQL'
+        : 'O volume PostgreSQL canonico nao corresponde ao projeto esperado',
+    status === 'ambiguous'
+      ? 'SYSTEM_DATABASE_VOLUME_AMBIGUOUS'
+      : status === 'unavailable' || status === 'absent'
+        ? 'SYSTEM_DATABASE_VOLUME_IDENTITY_UNAVAILABLE'
+        : 'SYSTEM_DATABASE_VOLUME_IDENTITY_MISMATCH',
+  );
+
+export const assertCanonicalPostgresVolume = async (
+  root: string,
+  deps: SystemDependencies,
+  env: NodeJS.ProcessEnv,
+  projectName: string,
+  options: { requireExisting?: boolean } = {},
+) => {
+  const identity = await inspectCanonicalPostgresVolume(
+    root,
+    deps,
+    env,
+    projectName,
+  );
+  if (
+    identity.status === 'canonical' ||
+    (identity.status === 'absent' && !options.requireExisting)
+  ) {
+    return identity;
+  }
+  throw postgresVolumeIdentityError(identity.status);
 };
 
 const hasHealthyMainInfrastructure = (statuses: ComposeServiceStatus[]) =>
@@ -680,6 +940,12 @@ const shouldSkipEvolutionForExplicitSafePreview = (env: NodeJS.ProcessEnv) =>
   env.WHATSAPP_PROVIDER === 'mock' &&
   env.WHATSAPP_GROUP_SEND_ENABLED === 'false';
 
+const isolatedEvolutionError = () =>
+  new LocalSystemError(
+    'Ambiente Compose isolado exige uma identidade Evolution dedicada; a stack operacional compartilhada nao sera alterada',
+    'SYSTEM_ISOLATED_EVOLUTION_IDENTITY_UNAVAILABLE',
+  );
+
 const isDailySendReadyProfile = (
   mode: AutomationMode,
   env: NodeJS.ProcessEnv,
@@ -753,16 +1019,17 @@ const waitForComposeHealth = async (
     90,
   );
 
-const waitForEquivalentMainInfrastructureHealth = async (
+const waitForMainInfrastructureHealth = async (
   root: string,
   deps: SystemDependencies,
   env: NodeJS.ProcessEnv,
   ports: LocalSystemState['ports'],
+  projectName: string,
 ) =>
   waitFor(
     async () =>
       hasHealthyMainInfrastructure(
-        await discoverEquivalentMainInfrastructure(root, deps, env, ports),
+        await discoverMainInfrastructure(root, deps, env, ports, projectName),
       ),
     deps,
     'MAIN_COMPOSE_UNHEALTHY',
@@ -809,6 +1076,18 @@ const inspectRegisteredProcesses = async (
   return { valid, reused };
 };
 
+const composeProjectMismatchError = (requested: string) =>
+  new LocalSystemError(
+    `O estado local pertence a outro projeto Compose; confirme explicitamente ${requested}`,
+    'SYSTEM_COMPOSE_PROJECT_MISMATCH',
+  );
+
+const legacyComposeProjectIdentityError = () =>
+  new LocalSystemError(
+    'O estado local ativo nao informa a identidade Compose; nenhuma infraestrutura sera alterada',
+    'SYSTEM_COMPOSE_PROJECT_IDENTITY_UNAVAILABLE',
+  );
+
 const assertPortAvailable = async (
   port: number,
   ownedPid: number | undefined,
@@ -854,6 +1133,7 @@ export type SystemStatusSnapshot = OperationLockSnapshot & {
     api: number;
     dashboard: number;
   };
+  runtime: MainInfrastructureRuntimeIdentity;
   docker: {
     daemon: 'available' | 'unavailable';
     services: ComposeServiceStatus[];
@@ -994,6 +1274,8 @@ export class LocalSystemSupervisor {
   private readonly specs: ServiceSpec[];
   private readonly validateRoot: () => boolean;
   private readonly loadEnvironmentFiles: boolean;
+  private readonly composeProjectName: string;
+  private readonly operationLockRoot: string;
 
   constructor(
     private readonly root: string,
@@ -1002,6 +1284,8 @@ export class LocalSystemSupervisor {
     options: {
       validateRoot?: () => boolean;
       loadEnvironmentFiles?: boolean;
+      composeProjectName?: string;
+      operationLockRoot?: string;
     } = {},
   ) {
     this.specs = specs ?? createServiceSpecs(root);
@@ -1009,6 +1293,16 @@ export class LocalSystemSupervisor {
       options.validateRoot ??
       (() => realpathSync(process.cwd()) === realpathSync(this.root));
     this.loadEnvironmentFiles = options.loadEnvironmentFiles ?? true;
+    const composeProjectName =
+      options.composeProjectName ?? OPERATIONAL_COMPOSE_PROJECT_NAME;
+    if (!isValidComposeProjectName(composeProjectName)) {
+      throw new LocalSystemError(
+        'Identidade Docker do sistema invalida',
+        'SYSTEM_INVALID_COMPOSE_PROJECT',
+      );
+    }
+    this.composeProjectName = composeProjectName;
+    this.operationLockRoot = options.operationLockRoot ?? this.root;
   }
 
   private loadEnvironment(processEnv: NodeJS.ProcessEnv) {
@@ -1045,6 +1339,12 @@ export class LocalSystemSupervisor {
     const runtimeEnv = loaded.env;
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(runtimeEnv);
     if (
+      this.composeProjectName !== OPERATIONAL_COMPOSE_PROJECT_NAME &&
+      !skipEvolution
+    ) {
+      throw isolatedEvolutionError();
+    }
+    if (
       isDailySendReadyProfile(loaded.mode, runtimeEnv) &&
       !runtimeEnv.LOCAL_API_AUTH_TOKEN?.trim()
     ) {
@@ -1062,11 +1362,24 @@ export class LocalSystemSupervisor {
       );
     }
     const previous = readState(this.root);
+    if (
+      previous?.composeProjectName !== undefined &&
+      previous.composeProjectName !== this.composeProjectName
+    ) {
+      throw composeProjectMismatchError(this.composeProjectName);
+    }
     const inspected = await inspectRegisteredProcesses(
       previous,
       this.specs,
       this.deps,
     );
+    if (
+      previous &&
+      previous.composeProjectName === undefined &&
+      Object.keys(inspected.valid).length > 0
+    ) {
+      throw legacyComposeProjectIdentityError();
+    }
     if (
       previous &&
       previous.mode !== loaded.mode &&
@@ -1142,10 +1455,24 @@ export class LocalSystemSupervisor {
         'DOCKER_DAEMON_UNAVAILABLE',
       );
     }
+    await assertCanonicalPostgresVolume(
+      this.root,
+      this.deps,
+      runtimeEnv,
+      this.composeProjectName,
+      {
+        requireExisting:
+          this.composeProjectName === OPERATIONAL_COMPOSE_PROJECT_NAME,
+      },
+    );
     const mainBeforeStart = await this.deps.run(
       composeSpec(
         this.root,
-        [...composeArguments, 'ps', '--format', 'json'],
+        mainComposeArguments(this.composeProjectName, [
+          'ps',
+          '--format',
+          'json',
+        ]),
         runtimeEnv,
       ),
     );
@@ -1154,28 +1481,58 @@ export class LocalSystemSupervisor {
       : await this.deps.run(
           composeSpec(
             this.root,
-            [...evolutionComposeArguments, 'ps', '--format', 'json'],
+            evolutionComposeArguments(['ps', '--format', 'json']),
             runtimeEnv,
           ),
         );
     const currentMainServices = parseComposeStatuses(mainBeforeStart.stdout);
     const currentMainHealthy =
       hasHealthyMainInfrastructure(currentMainServices);
-    const equivalentMainServices = currentMainHealthy
-      ? []
-      : await discoverEquivalentMainInfrastructure(
-          this.root,
-          this.deps,
-          runtimeEnv,
-          loaded.ports,
-        );
-    const equivalentMainComplete = hasCompleteMainInfrastructure(
-      equivalentMainServices,
+    const mainDiscovery = await discoverMainInfrastructureContainers(
+      this.root,
+      this.deps,
+      runtimeEnv,
+      loaded.ports,
+      this.composeProjectName,
     );
-    const reuseEquivalentMain = !currentMainHealthy && equivalentMainComplete;
+    const mainRuntime = runtimeIdentityFromDiscovery(
+      this.composeProjectName,
+      mainDiscovery,
+      currentMainServices,
+    );
+    if (
+      mainDiscovery.status === 'ambiguous' ||
+      mainDiscovery.status === 'mismatch' ||
+      (mainDiscovery.status === 'resolved' &&
+        mainRuntime.volumeStatus !== 'canonical') ||
+      (currentMainServices.some((item) => item.state === 'running') &&
+        mainRuntime.volumeStatus !== 'canonical')
+    ) {
+      throw new LocalSystemError(
+        'A identidade da infraestrutura PostgreSQL principal nao pode ser confirmada com seguranca',
+        mainRuntime.volumeStatus === 'ambiguous'
+          ? 'SYSTEM_DATABASE_VOLUME_AMBIGUOUS'
+          : mainRuntime.volumeStatus === 'mismatch'
+            ? 'SYSTEM_DATABASE_VOLUME_IDENTITY_MISMATCH'
+            : 'SYSTEM_DATABASE_VOLUME_IDENTITY_UNAVAILABLE',
+      );
+    }
+    const discoveredMainServices =
+      mainDiscovery.status === 'resolved'
+        ? mainDiscovery.containers.map(({ service, health }) => ({
+            service,
+            state: 'running',
+            health,
+          }))
+        : [];
+    const discoveredMainComplete = hasCompleteMainInfrastructure(
+      discoveredMainServices,
+    );
+    const reuseMainInfrastructure =
+      !currentMainHealthy && discoveredMainComplete;
     const mainServices = mergeMainInfrastructureStatuses(
       currentMainServices,
-      equivalentMainServices,
+      discoveredMainServices,
     );
     const evolutionServices = parseComposeStatuses(evolutionBeforeStart.stdout);
     const managedPortChecks: Array<
@@ -1200,10 +1557,14 @@ export class LocalSystemSupervisor {
       if (!managed) await assertPortAvailable(port, undefined, this.deps);
     }
 
-    if (!reuseEquivalentMain) {
+    if (!reuseMainInfrastructure) {
       await runRequired(
         this.deps,
-        composeSpec(this.root, [...composeArguments, 'up', '-d'], runtimeEnv),
+        composeSpec(
+          this.root,
+          mainComposeArguments(this.composeProjectName, ['up', '-d']),
+          runtimeEnv,
+        ),
         'MAIN_COMPOSE_START_FAILED',
         'Falha ao iniciar PostgreSQL e Redis principais',
         this.root,
@@ -1219,20 +1580,21 @@ export class LocalSystemSupervisor {
       );
     }
     await Promise.all([
-      ...(reuseEquivalentMain
+      ...(reuseMainInfrastructure
         ? [
-            waitForEquivalentMainInfrastructureHealth(
+            waitForMainInfrastructureHealth(
               this.root,
               this.deps,
               runtimeEnv,
               loaded.ports,
+              this.composeProjectName,
             ),
           ]
         : [
             waitForComposeHealth(
               this.root,
               this.deps,
-              composeArguments,
+              mainComposeArguments(this.composeProjectName),
               ['postgres', 'redis'],
               'MAIN_COMPOSE_UNHEALTHY',
               runtimeEnv,
@@ -1244,13 +1606,38 @@ export class LocalSystemSupervisor {
             waitForComposeHealth(
               this.root,
               this.deps,
-              evolutionComposeArguments,
+              evolutionComposeArguments(),
               ['evolution-api', 'evolution-postgres', 'evolution-redis'],
               'EVOLUTION_COMPOSE_UNHEALTHY',
               runtimeEnv,
             ),
           ]),
     ]);
+    const verifiedMainDiscovery = await discoverMainInfrastructureContainers(
+      this.root,
+      this.deps,
+      runtimeEnv,
+      loaded.ports,
+      this.composeProjectName,
+    );
+    const verifiedMainRuntime = runtimeIdentityFromDiscovery(
+      this.composeProjectName,
+      verifiedMainDiscovery,
+      mainServices,
+    );
+    if (
+      verifiedMainDiscovery.status !== 'resolved' ||
+      verifiedMainRuntime.volumeStatus !== 'canonical'
+    ) {
+      throw new LocalSystemError(
+        'A infraestrutura PostgreSQL principal nao corresponde ao volume canonico esperado',
+        verifiedMainRuntime.volumeStatus === 'ambiguous'
+          ? 'SYSTEM_DATABASE_VOLUME_AMBIGUOUS'
+          : verifiedMainRuntime.volumeStatus === 'unavailable'
+            ? 'SYSTEM_DATABASE_VOLUME_IDENTITY_UNAVAILABLE'
+            : 'SYSTEM_DATABASE_VOLUME_IDENTITY_MISMATCH',
+      );
+    }
     const validatedPreviewClient =
       runtimeEnv[PREVIEW_STABILITY_PRISMA_VALIDATION] === 'true' &&
       loaded.mode === 'preview' &&
@@ -1288,6 +1675,7 @@ export class LocalSystemSupervisor {
 
     const state: LocalSystemState = {
       version: 1,
+      composeProjectName: this.composeProjectName,
       startedAt:
         Object.keys(inspected.valid).length > 0 && previous
           ? previous.startedAt
@@ -1395,8 +1783,23 @@ export class LocalSystemSupervisor {
   ): Promise<SystemStatusSnapshot> {
     const loaded = this.loadEnvironment(processEnv);
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
+    if (
+      this.composeProjectName !== OPERATIONAL_COMPOSE_PROJECT_NAME &&
+      !skipEvolution
+    ) {
+      throw isolatedEvolutionError();
+    }
     const state = readState(this.root);
-    const operationLockPromise = inspectOperationLock(this.root, this.deps);
+    if (
+      state?.composeProjectName !== undefined &&
+      state.composeProjectName !== this.composeProjectName
+    ) {
+      throw composeProjectMismatchError(this.composeProjectName);
+    }
+    const operationLockPromise = inspectOperationLock(
+      this.operationLockRoot,
+      this.deps,
+    );
     const ports = state?.ports ?? loaded.ports;
     const processStatuses = Object.fromEntries(
       await Promise.all(
@@ -1422,13 +1825,24 @@ export class LocalSystemSupervisor {
     if ((state?.mode ?? loaded.mode) === 'preview') {
       processStatuses['whatsapp-dispatch-worker'] = 'not-required';
     }
+    if (
+      state &&
+      state.composeProjectName === undefined &&
+      Object.values(processStatuses).some((value) => value === 'running')
+    ) {
+      throw legacyComposeProjectIdentityError();
+    }
 
     const [dockerResult, evolutionResult] = await Promise.all([
       this.deps
         .run(
           composeSpec(
             this.root,
-            [...composeArguments, 'ps', '--format', 'json'],
+            mainComposeArguments(this.composeProjectName, [
+              'ps',
+              '--format',
+              'json',
+            ]),
             loaded.env,
           ),
         )
@@ -1439,7 +1853,7 @@ export class LocalSystemSupervisor {
             .run(
               composeSpec(
                 this.root,
-                [...evolutionComposeArguments, 'ps', '--format', 'json'],
+                evolutionComposeArguments(['ps', '--format', 'json']),
                 loaded.env,
               ),
             )
@@ -1447,16 +1861,41 @@ export class LocalSystemSupervisor {
     ]);
     const currentDockerServices =
       dockerResult.code === 0 ? parseComposeStatuses(dockerResult.stdout) : [];
+    const mainDiscovery = await discoverMainInfrastructureContainers(
+      this.root,
+      this.deps,
+      loaded.env,
+      ports,
+      this.composeProjectName,
+    );
+    const discoveredRuntime = runtimeIdentityFromDiscovery(
+      this.composeProjectName,
+      mainDiscovery,
+      currentDockerServices,
+    );
+    const volumeIdentity = await inspectCanonicalPostgresVolume(
+      this.root,
+      this.deps,
+      loaded.env,
+      this.composeProjectName,
+    );
+    const runtime = {
+      ...discoveredRuntime,
+      volumeStatus: runtimeVolumeStatus(discoveredRuntime, volumeIdentity),
+    } satisfies MainInfrastructureRuntimeIdentity;
+    const discoveredMainServices =
+      mainDiscovery.status === 'resolved'
+        ? mainDiscovery.containers.map(({ service, health }) => ({
+            service,
+            state: 'running',
+            health,
+          }))
+        : [];
     const equivalentMainServices = hasHealthyMainInfrastructure(
       currentDockerServices,
     )
       ? []
-      : await discoverEquivalentMainInfrastructure(
-          this.root,
-          this.deps,
-          loaded.env,
-          ports,
-        );
+      : discoveredMainServices;
     const dockerServices = mergeMainInfrastructureStatuses(
       currentDockerServices,
       equivalentMainServices,
@@ -1600,14 +2039,16 @@ export class LocalSystemSupervisor {
     const infrastructureRunning =
       dockerServices.some((item) => item.state === 'running') ||
       evolutionServices.some((item) => item.state === 'running');
-    const mainHealthy = ['postgres', 'redis'].every((service) =>
-      dockerServices.some(
-        (item) =>
-          item.service === service &&
-          item.state === 'running' &&
-          item.health === 'healthy',
-      ),
-    );
+    const mainHealthy =
+      runtime.volumeStatus === 'canonical' &&
+      ['postgres', 'redis'].every((service) =>
+        dockerServices.some(
+          (item) =>
+            item.service === service &&
+            item.state === 'running' &&
+            item.health === 'healthy',
+        ),
+      );
     const evolutionHealthy =
       skipEvolution ||
       ['evolution-api', 'evolution-postgres', 'evolution-redis'].every(
@@ -1639,6 +2080,7 @@ export class LocalSystemSupervisor {
         api: ports.api,
         dashboard: ports.dashboard,
       },
+      runtime,
       docker: {
         daemon: dockerResult.code === 0 ? 'available' : 'unavailable',
         services: dockerServices,
@@ -1677,8 +2119,78 @@ export class LocalSystemSupervisor {
   async stop(processEnv: NodeJS.ProcessEnv = process.env) {
     const loaded = this.loadEnvironment(processEnv);
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
+    if (
+      this.composeProjectName !== OPERATIONAL_COMPOSE_PROJECT_NAME &&
+      !skipEvolution
+    ) {
+      return {
+        stopped: false,
+        manualIntervention: [isolatedEvolutionError().message],
+      };
+    }
     const state = readState(this.root);
     const manualIntervention: string[] = [];
+    if (
+      state?.composeProjectName !== undefined &&
+      state.composeProjectName !== this.composeProjectName
+    ) {
+      return {
+        stopped: false,
+        manualIntervention: [
+          composeProjectMismatchError(this.composeProjectName).message,
+        ],
+      };
+    }
+    if (state && state.composeProjectName === undefined) {
+      const legacyInspection = await inspectRegisteredProcesses(
+        state,
+        this.specs,
+        this.deps,
+      );
+      if (Object.keys(legacyInspection.valid).length > 0) {
+        return {
+          stopped: false,
+          manualIntervention: [legacyComposeProjectIdentityError().message],
+        };
+      }
+    }
+    const mainBeforeStop = await this.deps
+      .run(
+        composeSpec(
+          this.root,
+          mainComposeArguments(this.composeProjectName, [
+            'ps',
+            '--format',
+            'json',
+          ]),
+          loaded.env,
+        ),
+      )
+      .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+    const evolutionBeforeStop = skipEvolution
+      ? { code: 0, stdout: '', stderr: '' }
+      : await this.deps
+          .run(
+            composeSpec(
+              this.root,
+              evolutionComposeArguments(['ps', '--format', 'json']),
+              loaded.env,
+            ),
+          )
+          .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+    if (mainBeforeStop.code !== 0 || evolutionBeforeStop.code !== 0) {
+      return {
+        stopped: false,
+        manualIntervention: [
+          'nao foi possivel confirmar a propriedade da infraestrutura antes do stop',
+        ],
+      };
+    }
+
+    const validatedProcesses: Array<{
+      spec: ServiceSpec;
+      registered: RegisteredProcess;
+    }> = [];
     if (state) {
       for (const spec of [...this.specs].reverse()) {
         const registered = state.processes[spec.name];
@@ -1695,20 +2207,125 @@ export class LocalSystemSupervisor {
           );
           continue;
         }
-        if (!(await this.deps.stopProcessTree(registered.pid))) {
-          manualIntervention.push(`${spec.name}: processo nao encerrou`);
+        validatedProcesses.push({ spec, registered });
+      }
+    }
+    const mainRunning = parseComposeStatuses(mainBeforeStop.stdout).some(
+      (item) => item.state === 'running',
+    );
+    const evolutionRunning = parseComposeStatuses(
+      evolutionBeforeStop.stdout,
+    ).some((item) => item.state === 'running');
+    if (mainRunning) {
+      const mainDiscovery = await discoverMainInfrastructureContainers(
+        this.root,
+        this.deps,
+        loaded.env,
+        loaded.ports,
+        this.composeProjectName,
+      );
+      const mainRuntime = runtimeIdentityFromDiscovery(
+        this.composeProjectName,
+        mainDiscovery,
+        parseComposeStatuses(mainBeforeStop.stdout),
+      );
+      const mainVolumeIdentity = await inspectCanonicalPostgresVolume(
+        this.root,
+        this.deps,
+        loaded.env,
+        this.composeProjectName,
+      );
+      const verifiedMainRuntime = {
+        ...mainRuntime,
+        volumeStatus: runtimeVolumeStatus(mainRuntime, mainVolumeIdentity),
+      } satisfies MainInfrastructureRuntimeIdentity;
+      const discoveredMainServices =
+        mainDiscovery.status === 'resolved'
+          ? mainDiscovery.containers.map(({ service, health }) => ({
+              service,
+              state: 'running',
+              health,
+            }))
+          : [];
+      if (
+        mainDiscovery.status !== 'resolved' ||
+        !hasCompleteMainInfrastructure(discoveredMainServices) ||
+        verifiedMainRuntime.volumeStatus !== 'canonical'
+      ) {
+        return {
+          stopped: false,
+          manualIntervention: [
+            'nao foi possivel confirmar a identidade da infraestrutura principal antes do stop',
+          ],
+        };
+      }
+    }
+    const validatedPids = new Set(
+      validatedProcesses.map(({ registered }) => registered.pid),
+    );
+    const applicationPortOccupants = await Promise.all(
+      [loaded.ports.api, loaded.ports.dashboard].map(async (port) => {
+        try {
+          return {
+            port,
+            occupant: await this.deps.getPortOccupant(port),
+            unavailable: false,
+          };
+        } catch {
+          return { port, occupant: null, unavailable: true as const };
         }
+      }),
+    );
+    if (applicationPortOccupants.some((item) => item.unavailable)) {
+      return {
+        stopped: false,
+        manualIntervention: [
+          ...manualIntervention,
+          'nao foi possivel confirmar a propriedade das portas da aplicacao',
+        ],
+      };
+    }
+    const unownedApplicationProcess = applicationPortOccupants.some(
+      ({ occupant }) =>
+        occupant !== null &&
+        (!occupant.pid || !validatedPids.has(occupant.pid)),
+    );
+    if ((mainRunning || evolutionRunning) && validatedProcesses.length === 0) {
+      return {
+        stopped: false,
+        manualIntervention: [
+          ...manualIntervention,
+          'infraestrutura em execucao sem estado local pertencente a esta worktree',
+        ],
+      };
+    }
+    if (unownedApplicationProcess) {
+      return {
+        stopped: false,
+        manualIntervention: [
+          ...manualIntervention,
+          'processo de aplicacao em execucao sem estado local pertencente a esta worktree',
+        ],
+      };
+    }
+    for (const { spec, registered } of validatedProcesses) {
+      if (!(await this.deps.stopProcessTree(registered.pid))) {
+        manualIntervention.push(`${spec.name}: processo nao encerrou`);
       }
     }
     const mainStop = await this.deps.run(
-      composeSpec(this.root, [...composeArguments, 'stop'], loaded.env),
+      composeSpec(
+        this.root,
+        mainComposeArguments(this.composeProjectName, ['stop']),
+        loaded.env,
+      ),
     );
     const evolutionStop = skipEvolution
       ? { code: 0, stdout: '', stderr: '' }
       : await this.deps.run(
           composeSpec(
             this.root,
-            [...evolutionComposeArguments, 'stop'],
+            evolutionComposeArguments(['stop']),
             loaded.env,
           ),
         );
@@ -1720,7 +2337,11 @@ export class LocalSystemSupervisor {
       const status = await this.deps.run(
         composeSpec(
           this.root,
-          [...composeArguments, 'ps', '--format', 'json'],
+          mainComposeArguments(this.composeProjectName, [
+            'ps',
+            '--format',
+            'json',
+          ]),
           loaded.env,
         ),
       );
@@ -1737,7 +2358,7 @@ export class LocalSystemSupervisor {
       const status = await this.deps.run(
         composeSpec(
           this.root,
-          [...evolutionComposeArguments, 'ps', '--format', 'json'],
+          evolutionComposeArguments(['ps', '--format', 'json']),
           loaded.env,
         ),
       );

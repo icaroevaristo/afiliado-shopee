@@ -32,6 +32,11 @@ export const statePath = (root: string) =>
 export const operationLockPath = (root: string) =>
   resolve(runtimeDirectory(root), 'lock');
 export const SUPERVISOR_PROCESS_MARKER = 'apps/system-supervisor/src/cli.ts';
+export const PREVIEW_STABILITY_PROCESS_MARKER =
+  'apps/system-supervisor/src/preview-stability-cli.ts';
+
+type OperationProcessMarker =
+  typeof SUPERVISOR_PROCESS_MARKER | typeof PREVIEW_STABILITY_PROCESS_MARKER;
 
 export type OperationLockRecord = {
   version: 1;
@@ -39,7 +44,7 @@ export type OperationLockRecord = {
   ownerToken: string;
   acquiredAt: string;
   processStartedAt: string;
-  processMarker: typeof SUPERVISOR_PROCESS_MARKER;
+  processMarker: OperationProcessMarker;
   operation: 'start' | 'stop';
 };
 
@@ -52,10 +57,7 @@ export type OperationLockSnapshot = {
 
 const MAX_LOCK_ACQUISITION_ATTEMPTS = 50;
 
-const exactKeys = (
-  record: Record<string, unknown>,
-  keys: readonly string[],
-) =>
+const exactKeys = (record: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(record).length === keys.length &&
   keys.every((key) => key in record);
 
@@ -97,8 +99,21 @@ const isState = (value: unknown): value is LocalSystemState => {
   const state = value as Record<string, unknown>;
   const validTimestamp = (timestamp: unknown) =>
     typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp));
+  const hasComposeProjectName = 'composeProjectName' in state;
   if (
-    !exactKeys(state, ['version', 'startedAt', 'mode', 'ports', 'processes'])
+    !exactKeys(
+      state,
+      hasComposeProjectName
+        ? [
+            'version',
+            'composeProjectName',
+            'startedAt',
+            'mode',
+            'ports',
+            'processes',
+          ]
+        : ['version', 'startedAt', 'mode', 'ports', 'processes'],
+    )
   ) {
     return false;
   }
@@ -110,6 +125,13 @@ const isState = (value: unknown): value is LocalSystemState => {
     typeof state.ports !== 'object' ||
     !state.processes ||
     typeof state.processes !== 'object'
+  ) {
+    return false;
+  }
+  if (
+    hasComposeProjectName &&
+    (typeof state.composeProjectName !== 'string' ||
+      !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(state.composeProjectName))
   ) {
     return false;
   }
@@ -205,7 +227,8 @@ const isOperationLockRecord = (
     UUID_PATTERN.test(record.ownerToken) &&
     isIsoTimestamp(record.acquiredAt) &&
     isIsoTimestamp(record.processStartedAt) &&
-    record.processMarker === SUPERVISOR_PROCESS_MARKER &&
+    (record.processMarker === SUPERVISOR_PROCESS_MARKER ||
+      record.processMarker === PREVIEW_STABILITY_PROCESS_MARKER) &&
     (record.operation === 'start' || record.operation === 'stop')
   );
 };
@@ -371,16 +394,18 @@ export const acquireLock = async (
   root: string,
   operation: 'start' | 'stop',
   deps: Pick<SystemDependencies, 'inspectProcessIdentity' | 'now'>,
-  options: { pid?: number; ownerTokenFactory?: () => string } = {},
+  options: {
+    pid?: number;
+    ownerTokenFactory?: () => string;
+    processMarker?: OperationProcessMarker;
+  } = {},
 ) => {
   ensureRuntimeDirectory(root);
   const pid = options.pid ?? process.pid;
+  const processMarker = options.processMarker ?? SUPERVISOR_PROCESS_MARKER;
   let selfIdentity;
   try {
-    selfIdentity = await deps.inspectProcessIdentity(
-      pid,
-      SUPERVISOR_PROCESS_MARKER,
-    );
+    selfIdentity = await deps.inspectProcessIdentity(pid, processMarker);
   } catch {
     selfIdentity = undefined;
   }
@@ -400,7 +425,7 @@ export const acquireLock = async (
     ownerToken: (options.ownerTokenFactory ?? randomUUID)(),
     acquiredAt: deps.now().toISOString(),
     processStartedAt: selfIdentity.startedAt,
-    processMarker: SUPERVISOR_PROCESS_MARKER,
+    processMarker,
     operation,
   };
   if (!isOperationLockRecord(record)) {
@@ -410,11 +435,7 @@ export const acquireLock = async (
     );
   }
 
-  for (
-    let attempt = 0;
-    attempt < MAX_LOCK_ACQUISITION_ATTEMPTS;
-    attempt += 1
-  ) {
+  for (let attempt = 0; attempt < MAX_LOCK_ACQUISITION_ATTEMPTS; attempt += 1) {
     if (tryCreateOperationLock(root, record)) {
       appendLockLog(
         root,

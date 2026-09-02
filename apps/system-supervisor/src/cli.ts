@@ -3,6 +3,11 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { acquireLock, absoluteLogPath } from './state-store';
+import {
+  composeProjectRuntimeRoot,
+  isValidComposeProjectName,
+  OPERATIONAL_COMPOSE_PROJECT_NAME,
+} from './runtime-identity';
 import { createSystemDependencies } from './system-dependencies';
 import { LocalSystemSupervisor, type SystemStatusSnapshot } from './supervisor';
 import {
@@ -14,26 +19,66 @@ import {
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 type ParsedCommand =
-  | { command: 'start' | 'stop' }
-  | { command: 'status'; json: boolean }
+  | { command: 'start' | 'stop'; composeProjectName?: string }
+  | { command: 'status'; json: boolean; composeProjectName?: string }
   | { command: 'logs'; service?: LogServiceName; lines: number };
+
+const parseProjectNameFlag = (flags: readonly string[]) => {
+  let composeProjectName: string | undefined;
+  const remaining: string[] = [];
+  for (const flag of flags) {
+    if (!flag.startsWith('--compose-project-name=')) {
+      remaining.push(flag);
+      continue;
+    }
+    if (composeProjectName !== undefined) {
+      throw new LocalSystemError(
+        'Identidade Docker duplicada',
+        'SYSTEM_INVALID_COMPOSE_PROJECT',
+      );
+    }
+    composeProjectName = flag.slice('--compose-project-name='.length);
+    if (!isValidComposeProjectName(composeProjectName)) {
+      throw new LocalSystemError(
+        'Identidade Docker invalida',
+        'SYSTEM_INVALID_COMPOSE_PROJECT',
+      );
+    }
+  }
+  return { composeProjectName, remaining };
+};
 
 export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
   const normalized = args.filter((argument) => argument !== '--');
   const [command, ...flags] = normalized;
   if (command === 'start' || command === 'stop') {
-    if (flags.length > 0) {
+    const parsedFlags = parseProjectNameFlag(flags);
+    if (parsedFlags.remaining.length > 0) {
       throw new LocalSystemError(
         `O comando ${command} nao aceita argumentos`,
         'SYSTEM_INVALID_ARGUMENT',
       );
     }
-    return { command };
+    return { command, composeProjectName: parsedFlags.composeProjectName };
   }
   if (command === 'status') {
-    if (flags.length === 0) return { command, json: false };
-    if (flags.length === 1 && flags[0] === '--json') {
-      return { command, json: true };
+    const parsedFlags = parseProjectNameFlag(flags);
+    if (parsedFlags.remaining.length === 0) {
+      return {
+        command,
+        json: false,
+        composeProjectName: parsedFlags.composeProjectName,
+      };
+    }
+    if (
+      parsedFlags.remaining.length === 1 &&
+      parsedFlags.remaining[0] === '--json'
+    ) {
+      return {
+        command,
+        json: true,
+        composeProjectName: parsedFlags.composeProjectName,
+      };
     }
     throw new LocalSystemError(
       'system:status aceita somente --json',
@@ -174,6 +219,10 @@ export const formatStatus = (status: SystemStatusSnapshot) =>
     `API: ${status.processes.api} / ${status.endpoints.api}`,
     `Dashboard: ${status.processes.dashboard} / ${status.endpoints.dashboard}`,
     `Portas locais: API ${status.ports.api} / Dashboard ${status.ports.dashboard}`,
+    `Identidade Docker: ${status.runtime.composeProjectName}`,
+    `Volume PostgreSQL esperado: ${status.runtime.expectedPostgresVolume}`,
+    `Volume PostgreSQL montado: ${status.runtime.mountedPostgresVolume ?? 'nenhum'}`,
+    `Identidade do volume: ${status.runtime.volumeStatus}`,
     `Worker comercial: ${status.processes['commercial-worker']}`,
     `Worker de dispatch: ${status.processes['whatsapp-dispatch-worker']}`,
     `Scheduler legado: ${status.schedulers.legacy.status}`,
@@ -202,7 +251,13 @@ export const runSystemCli = async (
     return;
   }
   const deps = createSystemDependencies();
-  const supervisor = new LocalSystemSupervisor(resolve(ROOT), deps);
+  const composeProjectName =
+    parsed.composeProjectName ?? OPERATIONAL_COMPOSE_PROJECT_NAME;
+  const operationLockRoot = composeProjectRuntimeRoot(composeProjectName);
+  const supervisor = new LocalSystemSupervisor(resolve(ROOT), deps, undefined, {
+    composeProjectName,
+    operationLockRoot,
+  });
   if (parsed.command === 'status') {
     const status = await supervisor.status();
     console.log(
@@ -211,7 +266,7 @@ export const runSystemCli = async (
     return;
   }
 
-  const release = await acquireLock(ROOT, parsed.command, deps);
+  const release = await acquireLock(operationLockRoot, parsed.command, deps);
   const removeSignalCleanup = installOperationSignalCleanup(release);
   try {
     if (parsed.command === 'start') {
