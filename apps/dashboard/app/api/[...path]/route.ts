@@ -20,6 +20,7 @@ const READ_PATHS: readonly PathPattern[] = [
   ['coupons'],
   ['pipeline', 'jobs', '*'],
   ['shopee', 'offers'],
+  ['shopee', 'offers', '*'],
   ['whatsapp', 'destinations'],
   ['whatsapp', 'dispatches'],
   ['whatsapp', 'dispatches', '*'],
@@ -42,6 +43,7 @@ const PATCH_PATHS: readonly PathPattern[] = [
 
 const POST_PATHS: readonly PathPattern[] = [
   ['commercial-publications', 'manual'],
+  ['shopee', 'offers', '*', 'copy-preview'],
   ['whatsapp', 'instances'],
 ];
 
