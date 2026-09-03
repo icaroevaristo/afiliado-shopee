@@ -21,6 +21,7 @@ import {
 import { LocalSystemSupervisor } from '../src/supervisor';
 import type {
   CommandSpec,
+  LocalSystemState,
   PortOccupant,
   ServiceName,
   SystemDependencies,
@@ -531,6 +532,37 @@ const dailySendReadyEnvironment = (token?: string) => ({
   COMMERCIAL_SCHEDULER_ENABLED: 'true',
   SCHEDULER_ENABLED: 'false',
   ...(token ? { LOCAL_API_AUTH_TOKEN: token } : {}),
+});
+
+const writeStateFixture = (
+  root: string,
+  mode: 'preview' | 'send',
+  processes: LocalSystemState['processes'] = {},
+) => {
+  mkdirSync(dirname(statePath(root)), { recursive: true });
+  writeFileSync(
+    statePath(root),
+    JSON.stringify({
+      version: 1,
+      composeProjectName: 'afiliado-shopee',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode,
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes,
+    }),
+  );
+};
+
+const registeredProcessFixture = (name: ServiceName, pid: number) => ({
+  pid,
+  startedAt: '2026-07-25T12:00:00.000Z',
+  log: `.runtime/local-system/${name}.log`,
 });
 
 describe('LocalSystemSupervisor', () => {
@@ -2127,6 +2159,147 @@ describe('LocalSystemSupervisor', () => {
       timezone: null,
       nextRunAt: null,
     });
+  });
+
+  it('uses the loaded mode when persisted state has only stopped processes', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.processes.set(76, {
+      running: false,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+    });
+    writeStateFixture(root, 'preview', {
+      api: registeredProcessFixture('api', 76),
+    });
+
+    const status = await createSupervisor(root, state.deps).status(
+      dailySendReadyEnvironment(),
+    );
+
+    expect(status.mode).toBe('send');
+    expect(status.controlPlane.required).toBe(true);
+    expect(status.processes['whatsapp-dispatch-worker']).toBe('stopped');
+  });
+
+  it('uses the loaded preview mode when persisted state has only stopped processes', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.processes.set(75, {
+      running: false,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+    });
+    writeStateFixture(root, 'send', {
+      api: registeredProcessFixture('api', 75),
+    });
+
+    const status = await createSupervisor(root, state.deps).status(
+      explicitSafePreviewEnvironment(),
+    );
+
+    expect(status.mode).toBe('preview');
+    expect(status.processes['whatsapp-dispatch-worker']).toBe('not-required');
+    expect(status.controlPlane.required).toBe(false);
+  });
+
+  it('keeps persisted mode authoritative while a registered process is running', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.processes.set(77, {
+      running: true,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+    });
+    writeStateFixture(root, 'preview', {
+      api: registeredProcessFixture('api', 77),
+    });
+
+    const status = await createSupervisor(root, state.deps).status(
+      dailySendReadyEnvironment(),
+    );
+
+    expect(status.mode).toBe('preview');
+    expect(status.processes.api).toBe('running');
+    expect(status.processes['whatsapp-dispatch-worker']).toBe('not-required');
+    expect(status.controlPlane.required).toBe(false);
+  });
+
+  it('keeps persisted mode authoritative and degraded on identity mismatch', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.processes.set(78, {
+      running: true,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: false,
+    });
+    writeStateFixture(root, 'preview', {
+      api: registeredProcessFixture('api', 78),
+    });
+
+    const status = await createSupervisor(root, state.deps).status(
+      dailySendReadyEnvironment(),
+    );
+
+    expect(status.mode).toBe('preview');
+    expect(status.overall).toBe('partial');
+    expect(status.processes.api).toBe('identity-mismatch');
+    expect(status.controlPlane.required).toBe(false);
+  });
+
+  it('never reports running when an optional preview worker has identity mismatch', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.setInfrastructure(true);
+    const processFixtures = [
+      ['api', 77, 'api-entry', true],
+      ['dashboard', 78, 'dashboard-entry', true],
+      ['commercial-worker', 79, 'commercial-entry', true],
+      ['whatsapp-dispatch-worker', 80, 'dispatch-entry', false],
+    ] as const;
+    for (const [, pid, marker, matches] of processFixtures) {
+      state.processes.set(pid, {
+        running: true,
+        marker,
+        startedAt: '2026-07-25T12:00:00.000Z',
+        matches,
+      });
+    }
+    writeStateFixture(
+      root,
+      'preview',
+      Object.fromEntries(
+        processFixtures.map(([name, pid]) => [
+          name,
+          registeredProcessFixture(name, pid),
+        ]),
+      ) as LocalSystemState['processes'],
+    );
+
+    const status = await createSupervisor(root, state.deps).status(
+      dailySendReadyEnvironment(),
+    );
+
+    expect(status.processes['whatsapp-dispatch-worker']).toBe(
+      'identity-mismatch',
+    );
+    expect(status.overall).toBe('partial');
+  });
+
+  it('uses the loaded mode when persisted state is absent', async () => {
+    const root = createRoot();
+    const state = harness();
+
+    const status = await createSupervisor(root, state.deps).status(
+      dailySendReadyEnvironment(),
+    );
+
+    expect(status.mode).toBe('send');
+    expect(status.controlPlane.required).toBe(true);
   });
 
   it('includes sanitized active operation lock evidence in status', async () => {

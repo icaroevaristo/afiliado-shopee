@@ -962,6 +962,29 @@ const expectedServices = (mode: AutomationMode) =>
     (name) => name !== 'whatsapp-dispatch-worker' || mode === 'send',
   );
 
+type ObservedProcessStatus =
+  | 'running'
+  | 'stopped'
+  | 'identity-mismatch'
+  | 'not-required';
+
+const resolveEffectiveStatusMode = (
+  state: LocalSystemState | null,
+  processStatuses: Record<string, ObservedProcessStatus>,
+  loadedMode: AutomationMode,
+): AutomationMode => {
+  if (!state) return loadedMode;
+
+  const runtimeIsActive = Object.values(processStatuses).some(
+    (status) => status === 'running',
+  );
+  const runtimeIdentityIsAmbiguous = Object.values(processStatuses).some(
+    (status) => status === 'identity-mismatch',
+  );
+
+  return runtimeIsActive || runtimeIdentityIsAmbiguous ? state.mode : loadedMode;
+};
+
 const waitFor = async (
   operation: () => Promise<boolean>,
   deps: SystemDependencies,
@@ -1822,7 +1845,18 @@ export class LocalSystemSupervisor {
         }),
       ),
     ) as SystemStatusSnapshot['processes'];
-    if ((state?.mode ?? loaded.mode) === 'preview') {
+    const effectiveStatusMode = resolveEffectiveStatusMode(
+      state,
+      processStatuses,
+      loaded.mode,
+    );
+    const runtimeIdentityIsAmbiguous = Object.values(processStatuses).some(
+      (status) => status === 'identity-mismatch',
+    );
+    if (
+      effectiveStatusMode === 'preview' &&
+      processStatuses['whatsapp-dispatch-worker'] !== 'identity-mismatch'
+    ) {
       processStatuses['whatsapp-dispatch-worker'] = 'not-required';
     }
     if (
@@ -1937,7 +1971,7 @@ export class LocalSystemSupervisor {
     const commercial = parseCommercialScheduler(commercialBody);
     const automation = parseAutomationStatus(automationBody);
     const controlPlaneRequired = isDailySendReadyProfile(
-      state?.mode ?? loaded.mode,
+      effectiveStatusMode,
       loaded.env,
     );
     const controlPlaneConfigured = Boolean(
@@ -2032,7 +2066,7 @@ export class LocalSystemSupervisor {
         externalPortOccupants.push({ port, ...occupant });
       }
     }
-    const required = expectedServices(state?.mode ?? loaded.mode);
+    const required = expectedServices(effectiveStatusMode);
     const runningCount = required.filter(
       (name) => processStatuses[name] === 'running',
     ).length;
@@ -2060,13 +2094,14 @@ export class LocalSystemSupervisor {
               item.health === 'healthy',
           ),
       );
-    const overall =
-      runningCount === required.length &&
-      mainHealthy &&
-      evolutionHealthy &&
-      apiAvailable &&
-      dashboardHealth.ok &&
-      (!controlPlaneRequired || controlPlaneAuthenticated)
+    const overall = runtimeIdentityIsAmbiguous
+      ? 'partial'
+      : runningCount === required.length &&
+          mainHealthy &&
+          evolutionHealthy &&
+          apiAvailable &&
+          dashboardHealth.ok &&
+          (!controlPlaneRequired || controlPlaneAuthenticated)
         ? 'running'
         : runningCount === 0 && !infrastructureRunning
           ? 'stopped'
@@ -2075,7 +2110,7 @@ export class LocalSystemSupervisor {
     return {
       ...operationLock,
       overall,
-      mode: state?.mode ?? loaded.mode,
+      mode: effectiveStatusMode,
       ports: {
         api: ports.api,
         dashboard: ports.dashboard,
