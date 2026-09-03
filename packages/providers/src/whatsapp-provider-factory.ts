@@ -8,6 +8,10 @@ import {
 import { MockWhatsAppProvider, type WhatsAppProvider } from './index';
 import { EvolutionSendGuard } from './evolution-send-guard';
 import { EvolutionGroupSendGuard } from './evolution-group-send-guard';
+import {
+  isWhatsAppGroupId,
+  normalizeWhatsAppGroupId,
+} from './whatsapp-group-directory';
 
 export type WhatsAppProviderFactoryConfig = {
   WHATSAPP_PROVIDER?: 'mock' | 'evolution';
@@ -57,9 +61,15 @@ export const createWhatsAppProvider = (
           .map((destination) => destination.trim())
           .filter(Boolean)
       : allowedDestinationConfig;
+  const allowedGroupDestinations = allowedDestinations
+    .filter(isWhatsAppGroupId)
+    .map(normalizeWhatsAppGroupId);
+  const allowedIndividualDestinations = allowedDestinations.filter(
+    (destination) => !isWhatsAppGroupId(destination),
+  );
   const sendGuard = new EvolutionSendGuard({
     safeMode: config.EVOLUTION_SAFE_MODE ?? true,
-    allowedDestinations,
+    allowedDestinations: allowedIndividualDestinations,
     maxMessagesPerBoot: config.EVOLUTION_MAX_MESSAGES_PER_BOOT ?? 1,
     logger: options.logger,
   });
@@ -67,6 +77,7 @@ export const createWhatsAppProvider = (
     enabled: config.WHATSAPP_GROUP_SEND_ENABLED ?? false,
     safeMode: config.EVOLUTION_SAFE_MODE ?? true,
     maxMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN ?? 1,
+    allowedDestinations: allowedGroupDestinations,
     logger: options.logger,
   });
 
