@@ -190,6 +190,84 @@ describe('identidade segura de grupos', () => {
 });
 
 describe('EvolutionGroupSendGuard', () => {
+  it('separa uma allowlist mista entre individuo e grupo sem conversao de tipo', async () => {
+    const individual = '55 (11) 99999-8888';
+    const unallowedIndividual = '55119999999999';
+    const wrongGroup = '200000000000000000@g.us';
+    const httpClient = vi.fn(async () =>
+      response({ key: { id: 'message-mixed-allowlist' } }),
+    );
+    const provider = createWhatsAppProvider(
+      {
+        WHATSAPP_PROVIDER: 'evolution',
+        EVOLUTION_API_URL: 'http://localhost:8080',
+        EVOLUTION_API_KEY: API_KEY,
+        EVOLUTION_INSTANCE_NAME: 'test-instance',
+        EVOLUTION_SAFE_MODE: true,
+        EVOLUTION_ALLOWED_DESTINATIONS: `${individual}, ${GROUP_ID}`,
+        EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
+        WHATSAPP_GROUP_SEND_ENABLED: true,
+        WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+      },
+      { httpClient },
+    );
+
+    await expect(
+      provider.sendMessage({
+        destination: individual,
+        destinationType: 'INDIVIDUAL',
+        message: 'Individuo permitido',
+      }),
+    ).resolves.toMatchObject({ status: 'sent' });
+
+    await expect(
+      provider.sendMessage({
+        destination: `  ${GROUP_ID}  `,
+        destinationType: 'GROUP',
+        message: 'Grupo permitido',
+      }),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(httpClient).toHaveBeenCalledTimes(2);
+
+    await expect(
+      provider.sendMessage({
+        destination: unallowedIndividual,
+        destinationType: 'INDIVIDUAL',
+        message: 'Individuo bloqueado',
+      }),
+    ).rejects.toMatchObject({
+      code: 'EVOLUTION_SAFE_DESTINATION_BLOCKED',
+      deliveryMayHaveStarted: false,
+    });
+    await expect(
+      provider.sendMessage({
+        destination: wrongGroup,
+        destinationType: 'GROUP',
+        message: 'Grupo bloqueado',
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_GROUP_DESTINATION_BLOCKED',
+      deliveryMayHaveStarted: false,
+    });
+
+    await expect(
+      provider.sendMessage({
+        destination: GROUP_ID,
+        destinationType: 'INDIVIDUAL',
+        message: 'JID de grupo tratado como individuo',
+      }),
+    ).rejects.toMatchObject({ code: 'EVOLUTION_SAFE_DESTINATION_INVALID' });
+    await expect(
+      provider.sendMessage({
+        destination: individual,
+        destinationType: 'GROUP',
+        message: 'Individuo tratado como grupo',
+      }),
+    ).rejects.toThrow();
+
+    expect(httpClient).toHaveBeenCalledTimes(2);
+  });
+
   it('bloqueia grupo quando a allowlist de grupos esta vazia', async () => {
     const httpClient = vi.fn(async () =>
       response({ key: { id: 'message-not-allowed' } }),
