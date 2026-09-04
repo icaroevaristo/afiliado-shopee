@@ -2020,6 +2020,26 @@ describe('LocalSystemSupervisor', () => {
     expect(state.stopped).toEqual([]);
   });
 
+  it('stops listening descendants only when they belong to validated services', async () => {
+    const root = createRoot();
+    const portOccupants: Record<number, PortOccupant> = {};
+    const state = harness({
+      portOccupants,
+      managedDescendants: { 100: [900], 101: [901] },
+    });
+    const supervisor = createSupervisor(root, state.deps);
+
+    await supervisor.start(environment('send'));
+    portOccupants[3333] = { pid: 900, processName: 'node' };
+    portOccupants[3000] = { pid: 901, processName: 'node' };
+    await expect(supervisor.stop(environment('send'))).resolves.toEqual({
+      stopped: true,
+      manualIntervention: [],
+    });
+
+    expect(state.stopped).toEqual([103, 102, 101, 100]);
+  });
+
   it('restarts a missing API without regenerating Prisma beside live workers', async () => {
     const root = createRoot();
     const state = harness();

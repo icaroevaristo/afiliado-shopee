@@ -2320,11 +2320,22 @@ export class LocalSystemSupervisor {
         ],
       };
     }
-    const unownedApplicationProcess = applicationPortOccupants.some(
-      ({ occupant }) =>
-        occupant !== null &&
-        (!occupant.pid || !validatedPids.has(occupant.pid)),
-    );
+    const unownedApplicationProcess = (
+      await Promise.all(
+        applicationPortOccupants.map(async ({ occupant }) => {
+          if (occupant === null) return false;
+          if (!occupant.pid) return true;
+          if (validatedPids.has(occupant.pid)) return false;
+          if (!this.deps.isProcessInTree) return true;
+          const belongsToValidatedProcess = (await Promise.all(
+            validatedProcesses.map(({ registered }) =>
+              this.deps.isProcessInTree!(registered.pid, occupant.pid!),
+            ),
+          )).some(Boolean);
+          return !belongsToValidatedProcess;
+        }),
+      )
+    ).some(Boolean);
     if ((mainRunning || evolutionRunning) && validatedProcesses.length === 0) {
       return {
         stopped: false,
