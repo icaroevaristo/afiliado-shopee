@@ -202,6 +202,262 @@ describe('commercial automation scheduler planner', () => {
     );
   });
 
+  it('aplica intervalo minimo nos slots subsequentes', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 180,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 2,
+        dailyGroupLimit: 2,
+      },
+      targets: [target('minimum-interval', { cadenceMinutes: 30 })],
+      globalSentToday: 0,
+      horizonMinutes: 360,
+    });
+
+    expect(result.slots).toHaveLength(2);
+    expect(
+      result.slots[1]!.scheduledFor.getTime() -
+        result.slots[0]!.scheduledFor.getTime(),
+    ).toBeGreaterThanOrEqual(180 * MINUTE_MS);
+  });
+
+  it('preserva cadence quando ela e maior que o intervalo minimo', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 30,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 2,
+        dailyGroupLimit: 2,
+      },
+      targets: [target('cadence-dominant', { cadenceMinutes: 180 })],
+      globalSentToday: 0,
+      horizonMinutes: 360,
+    });
+
+    expect(result.slots).toHaveLength(2);
+    expect(
+      result.slots[1]!.scheduledFor.getTime() -
+        result.slots[0]!.scheduledFor.getTime(),
+    ).toBeGreaterThanOrEqual(180 * MINUTE_MS);
+  });
+
+  it('mantem a rotacao de duas instancias a cada quinze minutos', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 15,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 4,
+        dailyGroupLimit: 4,
+      },
+      targets: [
+        target('operational-rotation', {
+          instanceName: 'afiliado-shopee-local',
+          orderedInstanceNames: [
+            'afiliado-shopee-local',
+            'afiliado-shopee-secondary',
+          ],
+          assignmentRevision: 2,
+          instanceActiveByName: {
+            'afiliado-shopee-local': true,
+            'afiliado-shopee-secondary': true,
+          },
+          cadenceMinutes: 15,
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+
+    expect(result.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'afiliado-shopee-local',
+      'afiliado-shopee-secondary',
+      'afiliado-shopee-local',
+      'afiliado-shopee-secondary',
+    ]);
+    expect(
+      result.slots
+        .slice(1)
+        .every(
+          (slot, index) =>
+            slot.scheduledFor.getTime() -
+              result.slots[index]!.scheduledFor.getTime() ===
+            15 * MINUTE_MS,
+        ),
+    ).toBe(true);
+  });
+
+  it('permite os sessenta slots teoricos dentro da janela end-exclusive', () => {
+    const result = planCommercialTargetSlots({
+      now: new Date('2026-08-24T11:00:00.000Z'),
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 15,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 60,
+        dailyGroupLimit: 60,
+      },
+      targets: [
+        target('daily-theoretical-cap', {
+          dailyLimit: 60,
+          cadenceMinutes: 15,
+          instanceName: 'afiliado-shopee-local',
+          orderedInstanceNames: [
+            'afiliado-shopee-local',
+            'afiliado-shopee-secondary',
+          ],
+          instanceActiveByName: {
+            'afiliado-shopee-local': true,
+            'afiliado-shopee-secondary': true,
+          },
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 24 * 60,
+    });
+
+    expect(result.slots).toHaveLength(60);
+    expect(result.slots[0]!.scheduledFor.toISOString()).toBe(
+      '2026-08-24T11:00:00.000Z',
+    );
+    expect(result.slots.at(-1)!.scheduledFor.toISOString()).toBe(
+      '2026-08-25T01:45:00.000Z',
+    );
+    expect(
+      result.slots.every(
+        (slot) =>
+          slot.scheduledFor.getTime() < Date.parse('2026-08-25T02:00:00.000Z'),
+      ),
+    ).toBe(true);
+    expect(
+      result.slots.filter(
+        (slot) => slot.target.instanceName === 'afiliado-shopee-local',
+      ),
+    ).toHaveLength(30);
+    expect(
+      result.slots.filter(
+        (slot) => slot.target.instanceName === 'afiliado-shopee-secondary',
+      ),
+    ).toHaveLength(30);
+  });
+
+  it('mantem o intervalo dominante em tres slots do mesmo grupo', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 180,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 3,
+        dailyGroupLimit: 3,
+      },
+      targets: [target('three-slots', { cadenceMinutes: 30 })],
+      globalSentToday: 0,
+      horizonMinutes: 360,
+    });
+
+    expect(result.slots).toHaveLength(3);
+    expect(
+      result.slots
+        .slice(1)
+        .every(
+          (slot, index) =>
+            slot.scheduledFor.getTime() -
+              result.slots[index]!.scheduledFor.getTime() >=
+            180 * MINUTE_MS,
+        ),
+    ).toBe(true);
+  });
+
+  it('permanece deterministico em replan com a mesma revisao', () => {
+    const input = {
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 180,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 3,
+        dailyGroupLimit: 3,
+        scheduleRevision: 9,
+      },
+      targets: [
+        target('replan', {
+          cadenceMinutes: 30,
+          orderedInstanceNames: [
+            'afiliado-shopee-local',
+            'afiliado-shopee-secondary',
+          ],
+          instanceActiveByName: {
+            'afiliado-shopee-local': true,
+            'afiliado-shopee-secondary': true,
+          },
+          assignmentRevision: 3,
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 360,
+    };
+    const first = planCommercialTargetSlots(input);
+    const afterRestart = planCommercialTargetSlots({
+      ...input,
+      targets: [...input.targets].reverse(),
+    });
+
+    expect(
+      afterRestart.slots.map((slot) => slot.scheduledFor.toISOString()),
+    ).toEqual(first.slots.map((slot) => slot.scheduledFor.toISOString()));
+    expect(afterRestart.slots.map((slot) => slot.target.instanceName)).toEqual(
+      first.slots.map((slot) => slot.target.instanceName),
+    );
+    expect(afterRestart.slots.map((slot) => slot.slotKey)).toEqual(
+      first.slots.map((slot) => slot.slotKey),
+    );
+    expect(afterRestart.slots.map((slot) => slot.jobId)).toEqual(
+      first.slots.map((slot) => slot.jobId),
+    );
+  });
+
+  it('aplica intervalo minimo por grupo sem transformar em limite global', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: {
+        ...schedule,
+        minimumIntervalMinutes: 180,
+        staggerMinutes: 0,
+        dailyGlobalLimit: 4,
+        dailyGroupLimit: 4,
+      },
+      targets: [
+        target('group-a', { cadenceMinutes: 30 }),
+        target('group-b', { cadenceMinutes: 30 }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 360,
+    });
+    const groupA = result.slots.filter(
+      (slot) => slot.target.groupId === 'group-group-a',
+    );
+    const groupB = result.slots.filter(
+      (slot) => slot.target.groupId === 'group-group-b',
+    );
+
+    expect(groupA).toHaveLength(2);
+    expect(groupB).toHaveLength(2);
+    expect(
+      groupA[1]!.scheduledFor.getTime() - groupA[0]!.scheduledFor.getTime(),
+    ).toBeGreaterThanOrEqual(180 * MINUTE_MS);
+    expect(
+      groupB[1]!.scheduledFor.getTime() - groupB[0]!.scheduledFor.getTime(),
+    ).toBeGreaterThanOrEqual(180 * MINUTE_MS);
+    expect(groupA[0]!.scheduledFor).toEqual(groupB[0]!.scheduledFor);
+  });
+
   it('converge IDs de slots sobrepostos entre ticks do planner', () => {
     const targets = [
       target('a', {
