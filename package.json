@@ -20,6 +20,7 @@
     "evolution:test-message": "corepack pnpm --filter @shopee-auto-affiliate-ai/worker evolution:test-message",
     "whatsapp:e2e-test": "corepack pnpm --filter @shopee-auto-affiliate-ai/worker whatsapp:e2e-test",
     "whatsapp:group-test": "corepack pnpm --filter @shopee-auto-affiliate-ai/worker whatsapp:group-test",
+    "whatsapp:routing-certification": "corepack pnpm --filter @shopee-auto-affiliate-ai/worker whatsapp:routing-certification",
     "shopee:import": "corepack pnpm --filter @shopee-auto-affiliate-ai/api shopee:import",
     "shopee:official:capture-contract": "corepack pnpm --filter @shopee-auto-affiliate-ai/api shopee:official:capture-contract",
     "shopee:official:configure": "corepack pnpm --filter @shopee-auto-affiliate-ai/api shopee:official:configure",

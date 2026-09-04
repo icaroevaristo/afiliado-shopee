@@ -82,6 +82,7 @@ export type PipelineProductJob = { filters?: ProductFilters };
 export type WhatsAppDispatchJob = {
   dispatchId: string;
   instanceName?: string;
+  routingCertification?: true;
 };
 export type CommercialAutomationTargetConstraint = {
   campaignId: string;

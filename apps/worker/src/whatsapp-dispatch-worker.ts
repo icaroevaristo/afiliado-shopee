@@ -272,6 +272,48 @@ const resolveCommercialDispatchProvider = async (input: {
     input.job.data.dispatchId,
   );
   if (!run) {
+    if (
+      input.job.data.routingCertification === true &&
+      input.job.data.instanceName
+    ) {
+      const dispatch =
+        await input.repositories.whatsappDispatches.findByIdWithDetails(
+          input.job.data.dispatchId,
+        );
+      if (
+        !dispatch ||
+        dispatch.destination.type !== 'GROUP' ||
+        dispatch.instanceName !== input.job.data.instanceName ||
+        !isCommercialInstanceAssigned(
+          dispatch.destination,
+          input.job.data.instanceName,
+        )
+      ) {
+        throw reservationHandoffError(
+          'Job tecnico possui instancia sticky divergente do dispatch',
+          'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
+        );
+      }
+      const instance = await input.repositories.whatsappInstances?.findByName(
+        input.job.data.instanceName,
+      );
+      if (!instance || !instance.active || instance.paused === true) {
+        throw reservationHandoffError(
+          'Instancia do dispatch tecnico esta ausente ou inativa',
+          'COMMERCIAL_INSTANCE_INACTIVE',
+        );
+      }
+      if (!input.providerResolver) {
+        throw reservationHandoffError(
+          'Resolver de provider por instancia indisponivel',
+          'COMMERCIAL_INSTANCE_PROVIDER_RESOLVER_UNAVAILABLE',
+        );
+      }
+      return {
+        provider: await input.providerResolver(input.job.data.instanceName),
+        instanceName: input.job.data.instanceName,
+      };
+    }
     if (input.job.data.instanceName) {
       throw reservationHandoffError(
         'Job comercial possui instancia sticky sem run associado',

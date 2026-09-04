@@ -9,6 +9,7 @@
     "evolution:test-message": "tsx --tsconfig ../../tsconfig.runtime.json src/evolution-single-message-test.ts",
     "whatsapp:e2e-test": "tsx --tsconfig ../../tsconfig.runtime.json src/whatsapp-dispatch-e2e.ts",
     "whatsapp:group-test": "tsx --tsconfig ../../tsconfig.runtime.json src/whatsapp-group-test.ts",
+    "whatsapp:routing-certification": "tsx --tsconfig ../../tsconfig.runtime.json src/whatsapp-routing-certification.ts",
     "commercial:confirm": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-pipeline-confirm.ts",
     "commercial:automation:preview": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-automation-preview.ts",
     "commercial:automation:worker": "tsx --tsconfig ../../tsconfig.runtime.json src/commercial-automation-worker.ts",
