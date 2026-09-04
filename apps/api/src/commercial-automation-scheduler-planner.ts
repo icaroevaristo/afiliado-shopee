@@ -230,10 +230,14 @@ export const planCommercialTargetSlots = ({
       return [];
     }
     const cadenceMinutes = Math.max(1, target.cadenceMinutes ?? 15);
+    const effectiveTargetIntervalMinutes = Math.max(
+      schedule.minimumIntervalMinutes,
+      cadenceMinutes,
+    );
     return [
       {
         target,
-        cadenceMinutes,
+        effectiveTargetIntervalMinutes,
         remaining: remainingForGroup,
         slotIndex: 0,
         orderedInstanceNames,
@@ -243,8 +247,7 @@ export const planCommercialTargetSlots = ({
             target.lastSentAt
               ? new Date(
                   target.lastSentAt.getTime() +
-                    Math.max(schedule.minimumIntervalMinutes, cadenceMinutes) *
-                      MINUTE_MS,
+                    effectiveTargetIntervalMinutes * MINUTE_MS,
                 )
               : null,
             target.nextEligibleAt,
@@ -282,11 +285,14 @@ export const planCommercialTargetSlots = ({
       }
       const slotIndex = state.slotIndex;
       const selectedInstanceName =
-        state.orderedInstanceNames[slotIndex % state.orderedInstanceNames.length];
+        state.orderedInstanceNames[
+          slotIndex % state.orderedInstanceNames.length
+        ];
       state.slotIndex += 1;
       state.remaining -= 1;
       state.nextBase = new Date(
-        scheduledFor.getTime() + state.cadenceMinutes * MINUTE_MS,
+        scheduledFor.getTime() +
+          state.effectiveTargetIntervalMinutes * MINUTE_MS,
       );
       cursor = scheduledFor;
       madeProgress = true;
