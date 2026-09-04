@@ -364,6 +364,56 @@ describe('EvolutionApiWhatsAppProvider', () => {
     });
   });
 
+  it('registra timeout configurado pela factory sem alterar o default direto do provider', async () => {
+    vi.useFakeTimers();
+    try {
+      const httpClient = vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          }),
+      );
+      const logger = createLogger();
+      const provider = createWhatsAppProvider(
+        {
+          WHATSAPP_PROVIDER: 'evolution',
+          EVOLUTION_API_URL: 'http://localhost:8080',
+          EVOLUTION_API_KEY: API_KEY,
+          EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+          EVOLUTION_ALLOWED_DESTINATIONS: '5511999999999',
+          EVOLUTION_SEND_TIMEOUT_MS: 1000,
+        },
+        { httpClient, logger },
+      );
+
+      const send = provider.sendMessage({
+        destination: '5511999999999',
+        message: 'Oferta',
+      });
+      const outcome = send.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(httpClient).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(outcome).resolves.toMatchObject({
+        code: 'EVOLUTION_TIMEOUT',
+        deliveryMayHaveStarted: true,
+      });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerErrorCode: 'EVOLUTION_TIMEOUT',
+          configuredTimeoutMs: 1000,
+          elapsedMilliseconds: expect.any(Number),
+        }),
+        'Evolution API message failed',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('mapeia erro de rede', async () => {
     const provider = createProvider(
       vi.fn().mockRejectedValue(new TypeError('network unavailable')),
@@ -684,6 +734,18 @@ describe('createWhatsAppProvider', () => {
         EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
       }),
     ).toBeInstanceOf(EvolutionApiWhatsAppProvider);
+  });
+
+  it('mantem timeout configurado ao criar providers por instancia', () => {
+    const provider = createWhatsAppProvider({
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080',
+      EVOLUTION_API_KEY: API_KEY,
+      EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+      EVOLUTION_SEND_TIMEOUT_MS: 12345,
+    });
+
+    expect(provider).toBeInstanceOf(EvolutionApiWhatsAppProvider);
   });
 
   it.each([

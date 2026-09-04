@@ -264,6 +264,7 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const requestStartedAt = Date.now();
     let responseStatus: number | undefined;
     let deliveryMayHaveStarted = false;
 
@@ -308,6 +309,8 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
           destination: destinationPublic,
           destinationType: input.destinationType ?? 'INDIVIDUAL',
           deliveryMode: imageRequested ? 'IMAGE' : 'TEXT',
+          elapsedMilliseconds: Date.now() - requestStartedAt,
+          configuredTimeoutMs: this.timeoutMs,
         },
         'Evolution API message sent',
       );
@@ -332,6 +335,9 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
           destinationType: input.destinationType ?? 'INDIVIDUAL',
           deliveryMode: imageRequested ? 'IMAGE' : 'TEXT',
           code: mappedError.code,
+          providerErrorCode: mappedError.code,
+          elapsedMilliseconds: Date.now() - requestStartedAt,
+          configuredTimeoutMs: this.timeoutMs,
           ...(responseStatus === undefined ? {} : { status: responseStatus }),
         },
         'Evolution API message failed',

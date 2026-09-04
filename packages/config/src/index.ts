@@ -260,6 +260,9 @@ export const envSchema = z
       .optional(),
     EVOLUTION_API_KEY: z.string().trim().optional(),
     EVOLUTION_INSTANCE_NAME: z.string().trim().optional(),
+    EVOLUTION_SEND_TIMEOUT_MS: positiveIntegerFromEnv
+      .pipe(z.number().min(1000).max(60000))
+      .default(30000),
     EVOLUTION_SAFE_MODE: booleanFromEnv.default(true),
     EVOLUTION_ALLOWED_DESTINATIONS: destinationListFromEnv,
     EVOLUTION_MAX_MESSAGES_PER_BOOT: positiveIntegerFromEnv.default(1),

@@ -272,6 +272,7 @@ describe('envSchema WhatsApp provider', () => {
     const config = envSchema.parse(baseEnv);
 
     expect(config.WHATSAPP_PROVIDER).toBe('mock');
+    expect(config.EVOLUTION_SEND_TIMEOUT_MS).toBe(30000);
     expect(config.EVOLUTION_SAFE_MODE).toBe(true);
     expect(config.EVOLUTION_ALLOWED_DESTINATIONS).toEqual([]);
     expect(config.EVOLUTION_MAX_MESSAGES_PER_BOOT).toBe(1);
@@ -340,6 +341,30 @@ describe('envSchema WhatsApp provider', () => {
 
     expect(result.success).toBe(false);
   });
+
+  it.each([1000, 60000])(
+    'aceita timeout de envio Evolution no limite: %s ms',
+    (timeoutMs) => {
+      expect(
+        envSchema.parse({
+          ...baseEnv,
+          EVOLUTION_SEND_TIMEOUT_MS: String(timeoutMs),
+        }).EVOLUTION_SEND_TIMEOUT_MS,
+      ).toBe(timeoutMs);
+    },
+  );
+
+  it.each(['999', '60001', '0', '-1', '1.5', 'invalid'])(
+    'rejeita timeout de envio Evolution fora do intervalo: %s',
+    (timeoutMs) => {
+      expect(
+        envSchema.safeParse({
+          ...baseEnv,
+          EVOLUTION_SEND_TIMEOUT_MS: timeoutMs,
+        }).success,
+      ).toBe(false);
+    },
+  );
 });
 
 describe('envSchema Shopee Affiliate', () => {
