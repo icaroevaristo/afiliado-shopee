@@ -186,6 +186,37 @@ const findNextValidSlot = ({
   return null;
 };
 
+const resolveRotationAnchor = ({
+  dayStartsAt,
+  dayEndsAt,
+  schedule,
+  target,
+}: {
+  dayStartsAt: Date;
+  dayEndsAt: Date;
+  schedule: CommercialAutomationEffectiveSchedule;
+  target: CommercialAutomationPlannerTarget;
+}) =>
+  findNextValidSlot({
+    candidate: dayStartsAt,
+    horizonEnd: dayEndsAt,
+    schedule,
+    target,
+  }) ?? dayStartsAt;
+
+const getStableRotationSlotIndex = (
+  scheduledFor: Date,
+  rotationAnchor: Date,
+  intervalMinutes: number,
+) =>
+  Math.max(
+    0,
+    Math.floor(
+      (scheduledFor.getTime() - rotationAnchor.getTime()) /
+        (intervalMinutes * MINUTE_MS),
+    ),
+  );
+
 export const planCommercialTargetSlots = ({
   now,
   schedule,
@@ -239,8 +270,13 @@ export const planCommercialTargetSlots = ({
         target,
         effectiveTargetIntervalMinutes,
         remaining: remainingForGroup,
-        slotIndex: 0,
         orderedInstanceNames,
+        rotationAnchor: resolveRotationAnchor({
+          dayStartsAt: dayRange.dayStartsAt,
+          dayEndsAt: dayRange.dayEndsAt,
+          schedule,
+          target,
+        }),
         nextBase: new Date(
           maxTimestamp(
             now,
@@ -283,12 +319,15 @@ export const planCommercialTargetSlots = ({
         state.remaining = 0;
         continue;
       }
-      const slotIndex = state.slotIndex;
+      const slotIndex = getStableRotationSlotIndex(
+        scheduledFor,
+        state.rotationAnchor,
+        state.effectiveTargetIntervalMinutes,
+      );
       const selectedInstanceName =
         state.orderedInstanceNames[
           slotIndex % state.orderedInstanceNames.length
         ];
-      state.slotIndex += 1;
       state.remaining -= 1;
       state.nextBase = new Date(
         scheduledFor.getTime() +

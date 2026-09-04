@@ -862,6 +862,71 @@ describe('commercial automation scheduler planner', () => {
     ]);
   });
 
+  it('preserva a fase round-robin entre ticks sobrepostos e após envio', () => {
+    const rotatingTarget = target('replan-rotation', {
+      orderedInstanceNames: [
+        'afiliado-shopee-local',
+        'afiliado-shopee-secondary',
+      ],
+      instanceActiveByName: {
+        'afiliado-shopee-local': true,
+        'afiliado-shopee-secondary': true,
+      },
+      cadenceMinutes: 15,
+      assignmentRevision: 2,
+    });
+    const planningSchedule = {
+      ...schedule,
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 4,
+      dailyGroupLimit: 4,
+      scheduleRevision: 11,
+    };
+    const first = planCommercialTargetSlots({
+      now,
+      schedule: planningSchedule,
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const beforeFirstIsSent = planCommercialTargetSlots({
+      now: new Date(now.getTime() + 15 * MINUTE_MS),
+      schedule: planningSchedule,
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const afterFirstIsSent = planCommercialTargetSlots({
+      now: new Date(now.getTime() + 15 * MINUTE_MS),
+      schedule: planningSchedule,
+      targets: [
+        {
+          ...rotatingTarget,
+          lastSentAt: first.slots[0]!.scheduledFor,
+          groupSentToday: 1,
+        },
+      ],
+      globalSentToday: 1,
+      horizonMinutes: 60,
+    });
+
+    expect(first.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'afiliado-shopee-local',
+      'afiliado-shopee-secondary',
+      'afiliado-shopee-local',
+      'afiliado-shopee-secondary',
+    ]);
+    expect(beforeFirstIsSent.slots[0]!.target.instanceName).toBe(
+      'afiliado-shopee-secondary',
+    );
+    expect(beforeFirstIsSent.slots[0]!.jobId).toBe(first.slots[1]!.jobId);
+    expect(afterFirstIsSent.slots[0]!.target.instanceName).toBe(
+      'afiliado-shopee-secondary',
+    );
+    expect(afterFirstIsSent.slots[0]!.jobId).toBe(first.slots[1]!.jobId);
+  });
+
   it('bloqueia o slot da instancia indisponivel sem fallback silencioso', () => {
     const result = planCommercialTargetSlots({
       now,
@@ -881,6 +946,31 @@ describe('commercial automation scheduler planner', () => {
     expect(result.slots.map((slot) => slot.target.instanceName)).toEqual([
       'instance-a',
       'instance-a',
+    ]);
+    expect(result.slots[1]?.scheduledFor.getTime()).toBe(
+      result.slots[0]!.scheduledFor.getTime() + 2 * MINUTE_MS,
+    );
+  });
+
+  it('preserva a fase quando o primeiro membro esta indisponivel', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [
+        target('unavailable-first-member', {
+          orderedInstanceNames: ['instance-a', 'instance-b'],
+          instanceActiveByName: { 'instance-a': false, 'instance-b': true },
+          cadenceMinutes: 1,
+          dailyLimit: 4,
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 10,
+    });
+
+    expect(result.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-b',
+      'instance-b',
     ]);
     expect(result.slots[1]?.scheduledFor.getTime()).toBe(
       result.slots[0]!.scheduledFor.getTime() + 2 * MINUTE_MS,
