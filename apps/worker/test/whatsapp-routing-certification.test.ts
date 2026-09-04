@@ -13,8 +13,10 @@ import {
   assertNoPreviousRoutingSequence,
   buildRoutingCertificationIds,
   buildRoutingCertificationMessage,
+  createRoutingCertificationGroupDirectoryProvider,
   handleRoutingCertificationReplay,
   parseRoutingCertificationArgs,
+  ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS,
   runRoutingCertification,
   selectRoutingGroup,
   RoutingCertificationError,
@@ -310,6 +312,75 @@ const processRoutingWorkerFixture = (fixture: RoutingWorkerFixture) =>
   });
 
 describe('whatsapp routing certification', () => {
+  it('usa timeout de diretório limitado e aceita resposta válida dentro dele', async () => {
+    expect(ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS).toBe(45_000);
+    expect(
+      ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS,
+    ).toBeLessThanOrEqual(45_000);
+
+    const httpClient = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify([
+            { id: GROUP_ID, subject: 'Grupo de certificacao', size: 2 },
+          ]),
+          { status: 200 },
+        ),
+    );
+    const provider = createRoutingCertificationGroupDirectoryProvider(
+      {
+        EVOLUTION_API_URL: 'http://localhost:8080',
+        EVOLUTION_API_KEY: 'test-only-key',
+      },
+      ASSIGNMENTS[1],
+      { httpClient },
+    );
+
+    await expect(provider.listGroups()).resolves.toEqual([
+      {
+        externalGroupId: GROUP_ID,
+        name: 'Grupo de certificacao',
+        memberCount: 2,
+      },
+    ]);
+    expect(httpClient).toHaveBeenCalledTimes(1);
+  });
+
+  it('continua falhando fechado quando o diretório excede o timeout configurado', async () => {
+    vi.useFakeTimers();
+    try {
+      const httpClient = vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
+          }),
+      );
+      const provider = createRoutingCertificationGroupDirectoryProvider(
+        {
+          EVOLUTION_API_URL: 'http://localhost:8080',
+          EVOLUTION_API_KEY: 'test-only-key',
+        },
+        ASSIGNMENTS[1],
+        { httpClient },
+      );
+      const pending = provider.listGroups();
+      const timedOut = expect(pending).rejects.toMatchObject({
+        code: 'EVOLUTION_GROUPS_TIMEOUT',
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS - 1,
+      );
+      await vi.advanceTimersByTimeAsync(1);
+
+      await timedOut;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('exige fingerprint, indice, run id e sequencia seguros', () => {
     expect(parseRoutingCertificationArgs(argsFor(0))).toMatchObject({
       mode: 'dry-run',

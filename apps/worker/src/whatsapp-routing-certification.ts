@@ -7,6 +7,7 @@ import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import {
   createWhatsAppProvider,
   EvolutionApiGroupDirectoryProvider,
+  type EvolutionApiGroupDirectoryProviderOptions,
   fingerprintWhatsAppGroupId,
   isWhatsAppGroupId,
   normalizeWhatsAppGroupId,
@@ -64,6 +65,23 @@ export const WHATSAPP_ROUTING_CERTIFICATION_CONFIRM_FLAG =
 
 const ROOT_ENV_PATH = fileURLToPath(new URL('../../../.env', import.meta.url));
 const DEFAULT_JOB_TIMEOUT_MS = 30_000;
+export const ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS = 45_000;
+
+export const createRoutingCertificationGroupDirectoryProvider = (
+  config: Pick<AppEnv, 'EVOLUTION_API_URL' | 'EVOLUTION_API_KEY'>,
+  instanceName: string,
+  options: Pick<
+    EvolutionApiGroupDirectoryProviderOptions,
+    'httpClient' | 'logger'
+  > = {},
+) =>
+  new EvolutionApiGroupDirectoryProvider({
+    baseUrl: config.EVOLUTION_API_URL as string,
+    apiKey: config.EVOLUTION_API_KEY as string,
+    instanceName,
+    timeoutMs: ROUTING_CERTIFICATION_GROUP_DIRECTORY_TIMEOUT_MS,
+    ...options,
+  });
 
 type RoutingCertificationMode = 'dry-run' | 'confirmed';
 
@@ -482,11 +500,10 @@ export const runRoutingCertificationPreflight = async (
       );
     }
 
-    const directory = new EvolutionApiGroupDirectoryProvider({
-      baseUrl: apiUrl,
-      apiKey,
-      instanceName: selection.selectedInstanceName,
-    });
+    const directory = createRoutingCertificationGroupDirectoryProvider(
+      { EVOLUTION_API_URL: apiUrl, EVOLUTION_API_KEY: apiKey },
+      selection.selectedInstanceName,
+    );
     const remoteGroups = await directory.listGroups();
     if (
       !remoteGroups.some(
