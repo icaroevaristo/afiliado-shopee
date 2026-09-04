@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -21,6 +20,7 @@ import {
   enqueueControlledWhatsAppDispatch,
   JOB_NAMES,
   QUEUE_NAMES,
+  type RoutingCertificationJobMetadata,
   type WhatsAppDispatchJob,
 } from '@shopee-auto-affiliate-ai/queue';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
@@ -42,14 +42,28 @@ import {
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 import { createWhatsAppDispatchWorker } from './whatsapp-dispatch-worker';
 import { parseLocalDotEnv } from './local-env';
+import {
+  buildRoutingCertificationIds,
+  buildRoutingCertificationMessage,
+  buildRoutingCertificationMetadata,
+  isRoutingCertificationJobData,
+  sameRoutingCertificationMetadata,
+  ROUTING_CERTIFICATION_TECHNICAL_COPY_TITLE,
+  ROUTING_CERTIFICATION_TECHNICAL_PRODUCT_NAME,
+  type RoutingCertificationIds,
+} from './whatsapp-routing-certification-contract';
+
+export {
+  buildRoutingCertificationIds,
+  buildRoutingCertificationMessage,
+} from './whatsapp-routing-certification-contract';
+export type { RoutingCertificationIds } from './whatsapp-routing-certification-contract';
 
 export const WHATSAPP_ROUTING_CERTIFICATION_CONFIRM_FLAG =
   '--confirm-routing-send';
 
 const ROOT_ENV_PATH = fileURLToPath(new URL('../../../.env', import.meta.url));
 const DEFAULT_JOB_TIMEOUT_MS = 30_000;
-const TECHNICAL_PRODUCT_NAME = 'Routing certification technical product';
-const TECHNICAL_COPY_TITLE = 'Routing certification technical copy';
 
 type RoutingCertificationMode = 'dry-run' | 'confirmed';
 
@@ -59,14 +73,6 @@ export type RoutingCertificationArgs = {
   memberIndex: 0 | 1;
   certificationRunId: string;
   sequenceNumber: number;
-};
-
-export type RoutingCertificationIds = {
-  productId: string;
-  providerProductId: string;
-  copyId: string;
-  dispatchId: string;
-  jobId: string;
 };
 
 export type RoutingCertificationSelection = {
@@ -359,42 +365,6 @@ export const assertRoutingGroupSnapshot = (
   }
 };
 
-export const buildRoutingCertificationIds = (
-  input: Pick<
-    RoutingCertificationArgs,
-    'certificationRunId' | 'sequenceNumber'
-  > &
-    Pick<
-      RoutingCertificationSelection,
-      'groupFingerprint' | 'assignmentRevision' | 'selectedInstanceName'
-    >,
-): RoutingCertificationIds => {
-  const digest = createHash('sha256')
-    .update(
-      JSON.stringify([
-        input.certificationRunId,
-        input.sequenceNumber,
-        input.groupFingerprint,
-        input.assignmentRevision,
-        input.selectedInstanceName,
-      ]),
-    )
-    .digest('hex');
-  return {
-    productId: `routing-cert-product-${digest}`,
-    providerProductId: `routing-certification-${digest}`,
-    copyId: `routing-cert-copy-${digest}`,
-    dispatchId: `routing-cert-dispatch-${digest}`,
-    jobId: `routing-cert-job-${digest}`,
-  };
-};
-
-export const buildRoutingCertificationMessage = (
-  certificationRunId: string,
-  sequenceNumber: number,
-) =>
-  `Teste controlado de roteamento Afiliado Shopee. Certificacao ${certificationRunId} / passo ${sequenceNumber}. Nenhuma acao e necessaria.`;
-
 const loadLocalEnvironment = (options: RoutingCertificationOptions) => {
   const path = options.envPath ?? ROOT_ENV_PATH;
   const reader =
@@ -577,10 +547,11 @@ export type RoutingCertificationRuntime = {
     selection: RoutingCertificationSelection,
     ids: RoutingCertificationIds,
     message: string,
+    routingCertification: RoutingCertificationJobMetadata,
   ): Promise<RoutingCertificationPrepareResult>;
   enqueue(
     dispatchId: string,
-    instanceName: string,
+    routingCertification: RoutingCertificationJobMetadata,
     jobId: string,
   ): Promise<RoutingCertificationJob>;
   startWorker(
@@ -614,15 +585,18 @@ export type RoutingCertificationOptions = {
 const assertControlledJob = (
   job: RoutingCertificationJob,
   ids: RoutingCertificationIds,
-  instanceName: string,
+  routingCertification: RoutingCertificationJobMetadata,
 ) => {
   if (
     job.name !== JOB_NAMES.whatsappDispatch ||
     String(job.id) !== ids.jobId ||
     job.opts.attempts !== 1 ||
+    !isRoutingCertificationJobData(job.data) ||
     job.data.dispatchId !== ids.dispatchId ||
-    job.data.instanceName !== instanceName ||
-    job.data.routingCertification !== true
+    !sameRoutingCertificationMetadata(
+      job.data.routingCertification,
+      routingCertification,
+    )
   ) {
     throw new RoutingCertificationError(
       'Job existente nao corresponde ao contrato controlado',
@@ -638,7 +612,7 @@ const assertTechnicalProduct = (
 ) => {
   if (
     product.providerProductId !== ids.providerProductId ||
-    product.nome !== TECHNICAL_PRODUCT_NAME
+    product.nome !== ROUTING_CERTIFICATION_TECHNICAL_PRODUCT_NAME
   ) {
     throw new RoutingCertificationError(
       'Produto tecnico do routing esta ambiguo',
@@ -669,7 +643,7 @@ const ensureTechnicalProduct = async (
   }
   const created = await repositories.products.create({
     providerProductId: ids.providerProductId,
-    nome: TECHNICAL_PRODUCT_NAME,
+    nome: ROUTING_CERTIFICATION_TECHNICAL_PRODUCT_NAME,
     categoria: 'ROUTING CERTIFICATION',
     preco: 0,
     desconto: 0,
@@ -679,7 +653,7 @@ const ensureTechnicalProduct = async (
     loja: 'ROUTING CERTIFICATION',
     urlImagem: 'https://example.invalid/routing-certification-product.png',
     url: null,
-    title: TECHNICAL_PRODUCT_NAME,
+    title: ROUTING_CERTIFICATION_TECHNICAL_PRODUCT_NAME,
   });
   return assertTechnicalProduct(created, ids);
 };
@@ -693,10 +667,12 @@ const assertTechnicalCopy = (
   if (
     copy.id !== expectedCopyId ||
     copy.productId !== productId ||
-    copy.titulo !== TECHNICAL_COPY_TITLE ||
+    copy.titulo !== ROUTING_CERTIFICATION_TECHNICAL_COPY_TITLE ||
     copy.mensagem !== message ||
     copy.cta !== '' ||
     copy.hashtags !== '' ||
+    copy.source !== 'LEGACY_TEMPLATE' ||
+    copy.snapshotId !== null ||
     copy.createdFromCandidateId !== null
   ) {
     throw new RoutingCertificationError(
@@ -720,10 +696,12 @@ const ensureTechnicalCopy = async (
   const created = await repositories.generatedCopies.create({
     id: ids.copyId,
     productId,
-    titulo: TECHNICAL_COPY_TITLE,
+    titulo: ROUTING_CERTIFICATION_TECHNICAL_COPY_TITLE,
     mensagem: message,
     cta: '',
     hashtags: '',
+    source: 'LEGACY_TEMPLATE',
+    snapshotId: null,
     createdFromCandidateId: null,
   });
   return assertTechnicalCopy(created, ids.copyId, productId, message);
@@ -739,7 +717,8 @@ export const assertNoPreviousRoutingSequence = async (
     previous.some(
       (dispatch) =>
         dispatch.id !== currentDispatchId &&
-        dispatch.generatedCopy.titulo === TECHNICAL_COPY_TITLE &&
+        dispatch.generatedCopy.titulo ===
+          ROUTING_CERTIFICATION_TECHNICAL_COPY_TITLE &&
         dispatch.generatedCopy.mensagem === message &&
         dispatch.generatedCopy.createdFromCandidateId === null,
     )
@@ -774,11 +753,14 @@ const assertTechnicalDispatch = (
     dispatch.instanceName !== selection.selectedInstanceName ||
     dispatch.destination.fingerprint !== selection.groupFingerprint ||
     dispatch.destination.assignmentRevision !== selection.assignmentRevision ||
-    dispatch.generatedCopy.titulo !== TECHNICAL_COPY_TITLE ||
+    dispatch.generatedCopy.titulo !==
+      ROUTING_CERTIFICATION_TECHNICAL_COPY_TITLE ||
     dispatch.generatedCopy.mensagem !== message ||
     dispatch.generatedCopy.cta !== '' ||
     dispatch.generatedCopy.hashtags !== '' ||
     dispatch.generatedCopy.createdFromCandidateId !== null ||
+    dispatch.generatedCopy.source !== 'LEGACY_TEMPLATE' ||
+    dispatch.generatedCopy.snapshotId !== null ||
     !isCommercialInstanceAssigned(
       dispatch.destination,
       selection.selectedInstanceName,
@@ -800,6 +782,7 @@ export const handleRoutingCertificationReplay = async (input: {
   dispatch: WhatsAppDispatchDetails;
   selection: RoutingCertificationSelection;
   ids: RoutingCertificationIds;
+  routingCertification: RoutingCertificationJobMetadata;
   message: string;
   findJob(jobId: string): Promise<RoutingCertificationJob | null>;
 }): Promise<RoutingCertificationPrepareResult> => {
@@ -882,7 +865,7 @@ export const handleRoutingCertificationReplay = async (input: {
       },
     );
   }
-  assertControlledJob(job, input.ids, input.selection.selectedInstanceName);
+  assertControlledJob(job, input.ids, input.routingCertification);
   return {
     dispatchId: input.dispatch.id,
     outcome: 'READY',
@@ -946,7 +929,7 @@ const createRealRoutingCertificationRuntime = async (
         );
       }
     },
-    async prepare(selection, ids, message) {
+    async prepare(selection, ids, message, routingCertification) {
       const current = await repositories.whatsappGroups.findById(
         selection.groupId,
       );
@@ -961,6 +944,7 @@ const createRealRoutingCertificationRuntime = async (
           dispatch: existingDispatch,
           selection,
           ids,
+          routingCertification,
           message,
           findJob,
         });
@@ -1006,6 +990,7 @@ const createRealRoutingCertificationRuntime = async (
           dispatch: racedDispatch,
           selection,
           ids,
+          routingCertification,
           message,
           findJob,
         });
@@ -1016,11 +1001,11 @@ const createRealRoutingCertificationRuntime = async (
         replayed: false,
       };
     },
-    async enqueue(dispatchId, instanceName, jobId) {
+    async enqueue(dispatchId, routingCertification, jobId) {
       await queueEvents.waitUntilReady();
       const job = (await enqueueControlledWhatsAppDispatch(
         whatsappQueue,
-        { dispatchId, instanceName, routingCertification: true },
+        { dispatchId, routingCertification },
         jobId,
       )) as RoutingCertificationJob;
       if (job.opts.attempts !== 1) {
@@ -1117,6 +1102,7 @@ const executeConfirmedRoutingCertification = async (input: {
   runtime: RoutingCertificationRuntime;
   selection: RoutingCertificationSelection;
   args: RoutingCertificationArgs;
+  routingCertification: RoutingCertificationJobMetadata;
   ids: RoutingCertificationIds;
   message: string;
   timeoutMs: number;
@@ -1129,6 +1115,7 @@ const executeConfirmedRoutingCertification = async (input: {
     input.selection,
     input.ids,
     input.message,
+    input.routingCertification,
   );
   if (prepared.outcome === 'ALREADY_SENT') {
     const existing = await input.runtime.readDispatch(prepared.dispatchId);
@@ -1166,10 +1153,10 @@ const executeConfirmedRoutingCertification = async (input: {
     prepared.job ??
     (await input.runtime.enqueue(
       prepared.dispatchId,
-      input.selection.selectedInstanceName,
+      input.routingCertification,
       input.ids.jobId,
     ));
-  assertControlledJob(job, input.ids, input.selection.selectedInstanceName);
+  assertControlledJob(job, input.ids, input.routingCertification);
   await input.runtime.startWorker(input.selection, input.message);
   try {
     await input.runtime.waitForJob(job, input.timeoutMs);
@@ -1269,15 +1256,20 @@ export const runRoutingCertification = async (
         },
       );
     }
-    const ids = buildRoutingCertificationIds({
-      ...requested,
+    const routingCertification = buildRoutingCertificationMetadata({
+      certificationRunId: requested.certificationRunId,
+      sequenceNumber: requested.sequenceNumber,
+      memberIndex: requested.memberIndex,
       groupFingerprint: selection.groupFingerprint,
       assignmentRevision: selection.assignmentRevision,
+    });
+    const ids = buildRoutingCertificationIds({
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const message = buildRoutingCertificationMessage(
-      requested.certificationRunId,
-      requested.sequenceNumber,
+      routingCertification.certificationRunId,
+      routingCertification.sequenceNumber,
     );
 
     if (requested.mode === 'dry-run') {
@@ -1311,6 +1303,7 @@ export const runRoutingCertification = async (
         runtime,
         selection,
         args: requested,
+        routingCertification,
         ids,
         message,
         timeoutMs: options.jobTimeoutMs ?? DEFAULT_JOB_TIMEOUT_MS,

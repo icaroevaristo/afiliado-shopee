@@ -45,6 +45,15 @@ export const DEFAULT_PIPELINE_SCHEDULER_JOB_ID = 'scheduled-pipeline-product';
 export const DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID =
   'scheduled-commercial-automation';
 
+export type RoutingCertificationJobMetadata = {
+  version: 'v1';
+  certificationRunId: string;
+  sequenceNumber: number;
+  memberIndex: 0 | 1;
+  groupFingerprint: string;
+  assignmentRevision: number;
+};
+
 export const DEFAULT_WHATSAPP_DISPATCH_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
   backoff: { type: 'exponential', delay: 1_000 },
@@ -82,7 +91,7 @@ export type PipelineProductJob = { filters?: ProductFilters };
 export type WhatsAppDispatchJob = {
   dispatchId: string;
   instanceName?: string;
-  routingCertification?: true;
+  routingCertification?: RoutingCertificationJobMetadata;
 };
 export type CommercialAutomationTargetConstraint = {
   campaignId: string;

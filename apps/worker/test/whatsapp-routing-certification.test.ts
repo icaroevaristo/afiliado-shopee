@@ -2,6 +2,7 @@ import { fingerprintWhatsAppGroupId } from '@shopee-auto-affiliate-ai/providers'
 import {
   CONTROLLED_E2E_WHATSAPP_DISPATCH_JOB_OPTIONS,
   JOB_NAMES,
+  type RoutingCertificationJobMetadata,
 } from '@shopee-auto-affiliate-ai/queue';
 import type { WhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
 import type { Job } from 'bullmq';
@@ -11,6 +12,7 @@ import {
   assertRoutingGroupSnapshot,
   assertNoPreviousRoutingSequence,
   buildRoutingCertificationIds,
+  buildRoutingCertificationMessage,
   handleRoutingCertificationReplay,
   parseRoutingCertificationArgs,
   runRoutingCertification,
@@ -29,7 +31,23 @@ import type {
 const GROUP_ID = '120363000000000001@g.us';
 const GROUP_FINGERPRINT = fingerprintWhatsAppGroupId(GROUP_ID);
 const ASSIGNMENTS = ['afiliado-shopee-local', 'afiliado-shopee-secondary'];
-const TECHNICAL_TEST_MESSAGE = 'Mensagem tecnica de teste';
+const TECHNICAL_TEST_MESSAGE = buildRoutingCertificationMessage(
+  'run-test-1',
+  1,
+);
+
+const metadataFor = (
+  memberIndex: 0 | 1,
+  sequenceNumber = 1,
+  assignmentRevision = 7,
+): RoutingCertificationJobMetadata => ({
+  version: 'v1',
+  certificationRunId: 'run-test-1',
+  sequenceNumber,
+  memberIndex,
+  groupFingerprint: GROUP_FINGERPRINT,
+  assignmentRevision,
+});
 
 const storedGroup = (
   overrides: Partial<WhatsAppGroupRecord> = {},
@@ -99,11 +117,15 @@ const preflightFor = vi.fn(async (_config, requested) => ({
 
 const readEnvFile = () => '';
 
-const makeJob = (dispatchId: string, jobId: string, instanceName: string) =>
+const makeJob = (
+  dispatchId: string,
+  jobId: string,
+  routingCertification: RoutingCertificationJobMetadata,
+) =>
   ({
     id: jobId,
     name: JOB_NAMES.whatsappDispatch,
-    data: { dispatchId, instanceName, routingCertification: true },
+    data: { dispatchId, routingCertification },
     opts: { attempts: 1 },
     waitUntilFinished: vi.fn(async () => undefined),
   }) as unknown as RoutingCertificationJob;
@@ -153,6 +175,139 @@ const makeDispatch = (
     validationVersion: null,
   },
 });
+
+type RoutingWorkerFixture = {
+  metadata: RoutingCertificationJobMetadata;
+  ids: ReturnType<typeof buildRoutingCertificationIds>;
+  dispatch: WhatsAppDispatchDetails;
+  job: {
+    id: string;
+    name: string;
+    data: Record<string, unknown>;
+    opts: Record<string, unknown>;
+  };
+  provider: WhatsAppProvider;
+  sendMessage: ReturnType<typeof vi.fn>;
+  providerResolver: ReturnType<typeof vi.fn>;
+  repositories: Record<string, unknown>;
+};
+
+const makeRoutingWorkerFixture = (
+  input: {
+    memberIndex?: 0 | 1;
+    sequenceNumber?: number;
+    assignmentRevision?: number;
+    jobAttempts?: number | 'missing';
+    jobId?: string;
+    jobData?: Record<string, unknown>;
+    mutateDispatch?: (dispatch: WhatsAppDispatchDetails) => void;
+  } = {},
+): RoutingWorkerFixture => {
+  const memberIndex = input.memberIndex ?? 0;
+  const metadata = metadataFor(
+    memberIndex,
+    input.sequenceNumber ?? 1,
+    input.assignmentRevision ?? 7,
+  );
+  const instanceName = ASSIGNMENTS[memberIndex];
+  const ids = buildRoutingCertificationIds({
+    ...metadata,
+    selectedInstanceName: instanceName,
+  });
+  const dispatch = makeDispatch(ids.dispatchId, ids.copyId, instanceName);
+  input.mutateDispatch?.(dispatch);
+  const sendMessage = vi.fn(async () => ({
+    status: 'sent' as const,
+    externalMessageId: 'routing-worker-message',
+    sentAt: new Date('2026-08-01T12:01:00.000Z'),
+  }));
+  const provider: WhatsAppProvider = { beginRun: vi.fn(), sendMessage };
+  const providerResolver = vi.fn(async (resolvedInstanceName: string) => {
+    if (resolvedInstanceName !== instanceName) {
+      throw new Error(`unexpected instance ${resolvedInstanceName}`);
+    }
+    return provider;
+  });
+  const dispatches = {
+    findByIdWithDetails: vi.fn(async () => dispatch),
+    findByIdForSending: vi.fn(async () => dispatch),
+    claimPendingForSending: vi.fn(async () => ({
+      kind: 'CLAIMED' as const,
+    })),
+    markSent: vi.fn(async () => ({
+      ...dispatch,
+      status: 'SENT' as const,
+      attemptCount: 1,
+    })),
+    markFailed: vi.fn(),
+    markAttemptPending: vi.fn(),
+    createPending: vi.fn(),
+    list: vi.fn(),
+  };
+  const repositories = {
+    whatsappDispatches: dispatches,
+    commercialRuns: {
+      findByDispatchId: vi.fn(async () => null),
+      finalizeByDispatchId: vi.fn(async () => null),
+    },
+    whatsappInstances: {
+      findByName: vi.fn(async (name: string) => ({
+        name,
+        active: true,
+        paused: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })),
+    },
+    products: {
+      findById: vi.fn(async () => ({
+        providerProductId: ids.providerProductId,
+        nome: 'Routing certification technical product',
+        title: 'Routing certification technical product',
+        categoria: 'ROUTING CERTIFICATION',
+        loja: 'ROUTING CERTIFICATION',
+      })),
+    },
+  };
+  const jobData = {
+    dispatchId: dispatch.id,
+    routingCertification: metadata,
+    ...input.jobData,
+  };
+  const job = {
+    id: input.jobId ?? ids.jobId,
+    name: JOB_NAMES.whatsappDispatch,
+    data: jobData,
+    opts:
+      input.jobAttempts === 'missing'
+        ? {}
+        : { attempts: input.jobAttempts ?? 1 },
+  };
+  return {
+    metadata,
+    ids,
+    dispatch,
+    job,
+    provider,
+    sendMessage,
+    providerResolver,
+    repositories,
+  };
+};
+
+const processRoutingWorkerFixture = (fixture: RoutingWorkerFixture) =>
+  processWhatsAppDispatchJob(fixture.job as never, {
+    repositories: fixture.repositories as never,
+    whatsAppProvider: fixture.provider,
+    whatsAppProviderResolver: fixture.providerResolver,
+    groupSendPolicy: new WhatsAppGroupSendPolicy({
+      enabled: true,
+      safeMode: true,
+      instanceName: ASSIGNMENTS[fixture.metadata.memberIndex],
+    }),
+    messageBuilder: () => TECHNICAL_TEST_MESSAGE,
+    logger: { info: vi.fn(), error: vi.fn() },
+  });
 
 describe('whatsapp routing certification', () => {
   it('exige fingerprint, indice, run id e sequencia seguros', () => {
@@ -301,11 +456,9 @@ describe('whatsapp routing certification', () => {
         GROUP_FINGERPRINT,
         0,
       );
+      const routingCertification = metadataFor(0, 4);
       const ids = buildRoutingCertificationIds({
-        certificationRunId: 'run-test-1',
-        sequenceNumber: 4,
-        groupFingerprint: selection.groupFingerprint,
-        assignmentRevision: selection.assignmentRevision,
+        ...routingCertification,
         selectedInstanceName: selection.selectedInstanceName,
       });
       const findJob = vi.fn();
@@ -320,6 +473,7 @@ describe('whatsapp routing certification', () => {
           ),
           selection,
           ids,
+          routingCertification,
           message: TECHNICAL_TEST_MESSAGE,
           findJob,
         }),
@@ -335,11 +489,9 @@ describe('whatsapp routing certification', () => {
 
   it('bloqueia PENDING sem job deterministico em vez de reenfileirar', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 0);
+    const routingCertification = metadataFor(0, 5);
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 5,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const findJob = vi.fn(async () => null);
@@ -354,6 +506,7 @@ describe('whatsapp routing certification', () => {
         ),
         selection,
         ids,
+        routingCertification,
         message: TECHNICAL_TEST_MESSAGE,
         findJob,
       }),
@@ -363,18 +516,12 @@ describe('whatsapp routing certification', () => {
 
   it('reutiliza job deterministico existente para PENDING sem duplicar', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 0);
+    const routingCertification = metadataFor(0, 6);
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 6,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
-    const job = makeJob(
-      ids.dispatchId,
-      ids.jobId,
-      selection.selectedInstanceName,
-    );
+    const job = makeJob(ids.dispatchId, ids.jobId, routingCertification);
     const findJob = vi.fn(async () => job);
 
     const replay = await handleRoutingCertificationReplay({
@@ -386,6 +533,7 @@ describe('whatsapp routing certification', () => {
       ),
       selection,
       ids,
+      routingCertification,
       message: TECHNICAL_TEST_MESSAGE,
       findJob,
     });
@@ -400,11 +548,9 @@ describe('whatsapp routing certification', () => {
 
   it('bloqueia replay de estado ambiguo desconhecido sem consultar job', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 0);
+    const routingCertification = metadataFor(0, 7);
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 7,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const findJob = vi.fn();
@@ -421,6 +567,7 @@ describe('whatsapp routing certification', () => {
         dispatch: ambiguous,
         selection,
         ids,
+        routingCertification,
         message: TECHNICAL_TEST_MESSAGE,
         findJob,
       }),
@@ -432,11 +579,13 @@ describe('whatsapp routing certification', () => {
 
   it('nao reutiliza a mesma sequencia quando a revision muda', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 0);
+    const routingCertification = metadataFor(
+      0,
+      8,
+      selection.assignmentRevision + 1,
+    );
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 8,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision + 1,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
 
@@ -454,7 +603,7 @@ describe('whatsapp routing certification', () => {
             ]),
           },
         } as never,
-        'Mensagem tecnica de teste',
+        TECHNICAL_TEST_MESSAGE,
         ids.dispatchId,
       ),
     ).rejects.toMatchObject({
@@ -464,25 +613,18 @@ describe('whatsapp routing certification', () => {
 
   it('deriva identidades deterministicas e separa sequencias', () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 1);
+    const firstMetadata = metadataFor(1, 1);
     const first = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 1,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...firstMetadata,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const same = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 1,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...firstMetadata,
       selectedInstanceName: selection.selectedInstanceName,
     });
+    const nextMetadata = metadataFor(1, 2);
     const next = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 2,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...nextMetadata,
       selectedInstanceName: selection.selectedInstanceName,
     });
     expect(same).toEqual(first);
@@ -491,11 +633,9 @@ describe('whatsapp routing certification', () => {
 
   it('confirma secondary com dispatch sticky e runtime controlado', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 1);
+    const routingCertification = metadataFor(1, 1);
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 1,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const dispatch = makeDispatch(
@@ -511,8 +651,8 @@ describe('whatsapp routing certification', () => {
         outcome: 'READY' as const,
         replayed: false,
       })),
-      enqueue: vi.fn(async (dispatchId, instanceName, jobId) =>
-        makeJob(dispatchId, jobId, instanceName),
+      enqueue: vi.fn(async (dispatchId, metadata, jobId) =>
+        makeJob(dispatchId, jobId, metadata),
       ),
       startWorker: vi.fn(async () => undefined),
       waitForJob: vi.fn(async () => undefined),
@@ -546,21 +686,20 @@ describe('whatsapp routing certification', () => {
       expect.objectContaining({ selectedInstanceName: ASSIGNMENTS[1] }),
       expect.objectContaining({ dispatchId: ids.dispatchId }),
       expect.any(String),
+      routingCertification,
     );
     expect(runtime.enqueue).toHaveBeenCalledWith(
       ids.dispatchId,
-      ASSIGNMENTS[1],
+      routingCertification,
       ids.jobId,
     );
   });
 
   it('replay SENT retorna ALREADY_SENT sem enfileirar ou iniciar worker', async () => {
     const selection = selectRoutingGroup([storedGroup()], GROUP_FINGERPRINT, 0);
+    const routingCertification = metadataFor(0, 3);
     const ids = buildRoutingCertificationIds({
-      certificationRunId: 'run-test-1',
-      sequenceNumber: 3,
-      groupFingerprint: selection.groupFingerprint,
-      assignmentRevision: selection.assignmentRevision,
+      ...routingCertification,
       selectedInstanceName: selection.selectedInstanceName,
     });
     const runtime: RoutingCertificationRuntime = {
@@ -608,85 +747,165 @@ describe('whatsapp routing certification', () => {
     expect(runtime.startWorker).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['attempts=3', 3],
+    ['attempts ausente', 'missing'],
+  ] as const)(
+    'bloqueia routing certification com politica BullMQ invalida: %s',
+    async (_label, jobAttempts) => {
+      const fixture = makeRoutingWorkerFixture({ jobAttempts });
+
+      await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+        code: 'COMMERCIAL_ROUTING_ATTEMPTS_INVALID',
+      });
+      expect(fixture.providerResolver).not.toHaveBeenCalled();
+      expect(fixture.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bloqueia metadata incompleta antes de consultar o provider', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      jobData: { routingCertification: { version: 'v1' } },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_JOB_CONTRACT_INVALID',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('nao aceita booleano ou instanceName como fronteira de routing', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      jobData: {
+        instanceName: ASSIGNMENTS[1],
+        routingCertification: true,
+      },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_JOB_CONTRACT_INVALID',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('nao confia em instanceName adicional quando a metadata parece valida', async () => {
+    const fixture = makeRoutingWorkerFixture();
+    fixture.job.data.instanceName = ASSIGNMENTS[1];
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_JOB_CONTRACT_INVALID',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'job id divergente',
+      (fixture: RoutingWorkerFixture) => {
+        fixture.job.id = 'forged-routing-job';
+      },
+    ],
+    [
+      'dispatch id divergente',
+      (fixture: RoutingWorkerFixture) => {
+        fixture.job.data.dispatchId = 'forged-routing-dispatch';
+      },
+    ],
+  ] as const)(
+    'bloqueia identidade deterministica divergente: %s',
+    async (_label, mutate) => {
+      const fixture = makeRoutingWorkerFixture();
+      mutate(fixture);
+
+      await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+        code: 'COMMERCIAL_ROUTING_CONTRACT_MISMATCH',
+      });
+      expect(fixture.providerResolver).not.toHaveBeenCalled();
+      expect(fixture.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bloqueia assignmentRevision alterada mesmo mantendo os dois membros', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      mutateDispatch: (dispatch) => {
+        dispatch.destination.assignmentRevision = 8;
+      },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_CONTRACT_MISMATCH',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia membro divergente do assignment derivado', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      memberIndex: 0,
+      mutateDispatch: (dispatch) => {
+        dispatch.instanceName = ASSIGNMENTS[1];
+      },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_CONTRACT_MISMATCH',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia copy comercial com candidate de origem', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      mutateDispatch: (dispatch) => {
+        dispatch.generatedCopy.createdFromCandidateId = 'commercial-candidate';
+      },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_CONTRACT_MISMATCH',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia copy tecnica adulterada antes do provider', async () => {
+    const fixture = makeRoutingWorkerFixture({
+      mutateDispatch: (dispatch) => {
+        dispatch.generatedCopy.titulo = 'Commercial copy';
+      },
+    });
+
+    await expect(processRoutingWorkerFixture(fixture)).rejects.toMatchObject({
+      code: 'COMMERCIAL_ROUTING_CONTRACT_MISMATCH',
+    });
+    expect(fixture.providerResolver).not.toHaveBeenCalled();
+    expect(fixture.sendMessage).not.toHaveBeenCalled();
+  });
+
   it.each([0, 1] as const)(
     'usa o worker normal e resolve provider mock pelo membro %s',
     async (memberIndex) => {
-      const instanceName = ASSIGNMENTS[memberIndex];
-      const dispatch = makeDispatch(
-        `routing-dispatch-${memberIndex}`,
-        `routing-copy-${memberIndex}`,
-        instanceName,
-      );
-      const sendMessage = vi.fn(async () => ({
-        status: 'sent' as const,
-        externalMessageId: 'mock-secondary-message',
-        sentAt: new Date('2026-08-01T12:01:00.000Z'),
-      }));
-      const provider: WhatsAppProvider = { beginRun: vi.fn(), sendMessage };
-      const dispatches = {
-        findByIdWithDetails: vi.fn(async () => dispatch),
-        findByIdForSending: vi.fn(async () => dispatch),
-        claimPendingForSending: vi.fn(async () => ({
-          kind: 'CLAIMED' as const,
-        })),
-        markSent: vi.fn(async () => ({
-          ...dispatch,
-          status: 'SENT' as const,
-          attemptCount: 1,
-        })),
-        markFailed: vi.fn(),
-        markAttemptPending: vi.fn(),
-        createPending: vi.fn(),
-        list: vi.fn(),
-      };
-      const repositories = {
-        whatsappDispatches: dispatches,
-        commercialRuns: {
-          findByDispatchId: vi.fn(async () => null),
-          finalizeByDispatchId: vi.fn(async () => null),
-        },
-        whatsappInstances: {
-          findByName: vi.fn(async (name: string) => ({
-            name,
-            active: true,
-            paused: false,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          })),
-        },
-      } as never;
+      const fixture = makeRoutingWorkerFixture({ memberIndex });
 
-      const result = await processWhatsAppDispatchJob(
-        {
-          id: 'routing-job-secondary',
-          name: JOB_NAMES.whatsappDispatch,
-          data: {
-            dispatchId: dispatch.id,
-            instanceName,
-            routingCertification: true,
-          },
-          opts: { attempts: 1 },
-        },
-        {
-          repositories,
-          whatsAppProvider: provider,
-          whatsAppProviderResolver: vi.fn(async (instanceName: string) => {
-            expect(instanceName).toBe(ASSIGNMENTS[memberIndex]);
-            return provider;
-          }),
-          groupSendPolicy: new WhatsAppGroupSendPolicy({
-            enabled: true,
-            safeMode: true,
-            instanceName,
-          }),
-          messageBuilder: () => TECHNICAL_TEST_MESSAGE,
-          logger: { info: vi.fn(), error: vi.fn() },
-        },
-      );
+      const result = await processWhatsAppDispatchJob(fixture.job as never, {
+        repositories: fixture.repositories as never,
+        whatsAppProvider: fixture.provider,
+        whatsAppProviderResolver: fixture.providerResolver,
+        groupSendPolicy: new WhatsAppGroupSendPolicy({
+          enabled: true,
+          safeMode: true,
+          instanceName: ASSIGNMENTS[memberIndex],
+        }),
+        messageBuilder: () => TECHNICAL_TEST_MESSAGE,
+        logger: { info: vi.fn(), error: vi.fn() },
+      });
 
       expect(result).toMatchObject({ status: 'SENT', attemptCount: 1 });
-      expect(sendMessage).toHaveBeenCalledOnce();
-      expect(sendMessage).toHaveBeenCalledWith(
+      expect(fixture.sendMessage).toHaveBeenCalledOnce();
+      expect(fixture.sendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           destination: GROUP_ID,
           destinationType: 'GROUP',
