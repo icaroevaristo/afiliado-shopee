@@ -37,8 +37,28 @@ export type SenderServiceOptions = {
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
 };
 
-const providerErrorCode = (error: unknown) =>
-  error instanceof AppError ? error.code : undefined;
+const AMBIGUOUS_PROVIDER_ERROR_CODES = new Set([
+  'EVOLUTION_TIMEOUT',
+  'EVOLUTION_NETWORK_ERROR',
+  'EVOLUTION_MESSAGE_ID_MISSING',
+  'EVOLUTION_BAD_REQUEST',
+  'EVOLUTION_UNAUTHORIZED',
+  'EVOLUTION_FORBIDDEN',
+  'EVOLUTION_NOT_FOUND',
+  'EVOLUTION_RATE_LIMITED',
+  'EVOLUTION_SERVER_ERROR',
+  'EVOLUTION_HTTP_ERROR',
+]);
+
+const safeAmbiguousProviderErrorCode = (error: unknown) => {
+  if (
+    error instanceof WhatsAppSendError &&
+    AMBIGUOUS_PROVIDER_ERROR_CODES.has(error.code)
+  ) {
+    return error.code;
+  }
+  return 'UNKNOWN';
+};
 
 export const buildWhatsAppPublicMessage = (copy: {
   titulo: string;
@@ -403,17 +423,18 @@ export class SenderService {
         );
         throw error;
       }
+      const providerFailureCode = safeAmbiguousProviderErrorCode(error);
       this.options.logger.error(
         {
           event: 'whatsapp.dispatch.delivery-ambiguous',
           dispatchId,
           errorType: error instanceof Error ? error.name : 'UnknownError',
-          providerErrorCode: providerErrorCode(error),
+          providerErrorCode: providerFailureCode,
         },
         'WhatsApp dispatch delivery is ambiguous',
       );
       throw new AppError(
-        'Resultado do envio incerto; revisao manual obrigatoria',
+        `WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS:${providerFailureCode}`,
         'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
       );
     }

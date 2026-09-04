@@ -18,6 +18,7 @@ export type WhatsAppProviderFactoryConfig = {
   EVOLUTION_API_URL?: string;
   EVOLUTION_API_KEY?: string;
   EVOLUTION_INSTANCE_NAME?: string;
+  EVOLUTION_SEND_TIMEOUT_MS?: number;
   EVOLUTION_SAFE_MODE?: boolean;
   EVOLUTION_ALLOWED_DESTINATIONS?: string | readonly string[];
   EVOLUTION_MAX_MESSAGES_PER_BOOT?: number;
@@ -95,6 +96,7 @@ export const createWhatsAppProvider = (
       'EVOLUTION_INSTANCE_NAME',
     ),
     ...options,
+    timeoutMs: options.timeoutMs ?? config.EVOLUTION_SEND_TIMEOUT_MS,
     sendGuard,
     groupSendGuard,
   });

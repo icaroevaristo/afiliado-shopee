@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   fingerprintWhatsAppGroupId,
   MockWhatsAppProvider,
+  WhatsAppSendError,
   type WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
 import {
@@ -245,6 +246,60 @@ describe('SenderService', () => {
     });
     expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.whatsAppDispatch.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'EVOLUTION_TIMEOUT',
+    'EVOLUTION_NETWORK_ERROR',
+    'EVOLUTION_MESSAGE_ID_MISSING',
+  ])('preserva o codigo seguro do provider na ambiguidade: %s', async (code) => {
+    const prisma = prismaMock();
+    const provider = {
+      sendMessage: vi.fn(async () => {
+        throw new WhatsAppSendError(
+          'detalhe externo sensivel',
+          code,
+          { deliveryMayHaveStarted: true },
+        );
+      }),
+    };
+
+    const result = await createService(prisma, provider)
+      .sendDispatch('dispatch-1')
+      .catch((error: unknown) => error);
+
+    expect(result).toMatchObject({
+      code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+      message: `WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS:${code}`,
+    });
+    expect(String(result)).not.toContain('detalhe externo sensivel');
+    expect(prisma.whatsAppDispatch.update).not.toHaveBeenCalled();
+    expect(
+      JSON.stringify(logger.error.mock.calls.at(-1)),
+    ).not.toContain('detalhe externo sensivel');
+  });
+
+  it('classifica codigo de provider desconhecido como UNKNOWN sem expor detalhes', async () => {
+    const prisma = prismaMock();
+    const provider = {
+      sendMessage: vi.fn(async () => {
+        throw new WhatsAppSendError(
+          'provider detail must stay private',
+          'PROVIDER_PRIVATE_CODE',
+          { deliveryMayHaveStarted: true },
+        );
+      }),
+    };
+
+    const result = await createService(prisma, provider)
+      .sendDispatch('dispatch-1')
+      .catch((error: unknown) => error);
+
+    expect(result).toMatchObject({
+      code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+      message: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS:UNKNOWN',
+    });
+    expect(String(result)).not.toContain('provider detail must stay private');
   });
 
   it('registra FAILED quando o provider bloqueia antes do request externo', async () => {

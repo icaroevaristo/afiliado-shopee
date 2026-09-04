@@ -345,6 +345,53 @@ describe('WhatsApp provider worker bootstrap', () => {
 
     expect(providerFactory).toHaveBeenCalledTimes(1);
   });
+
+  it('propaga o timeout configurado ao provider principal e a cada resolver de instancia', async () => {
+    const providerFactory = vi.fn(createWhatsAppProvider);
+    const config = loadConfig({
+      ...baseEnv,
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080',
+      EVOLUTION_API_KEY: 'test-only-api-key',
+      EVOLUTION_INSTANCE_NAME: 'instance-a',
+      EVOLUTION_ALLOWED_DESTINATIONS: SAFE_TEST_DESTINATION,
+      EVOLUTION_SEND_TIMEOUT_MS: '12345',
+    });
+    let resolver:
+      | ((instanceName: string) => WhatsAppProvider | Promise<WhatsAppProvider>)
+      | undefined;
+    const infrastructure = createInfrastructure();
+
+    await startWorker(legacyWorkerConfig(config), {
+      logger,
+      providerFactory,
+      infrastructureFactory: () => infrastructure,
+      workerFactory: (_redisUrl, options) => {
+        resolver = options.whatsAppProviderResolver;
+        return createWorkerRuntime();
+      },
+    });
+
+    expect(resolver).toBeDefined();
+    await resolver?.('instance-a');
+    await resolver?.('instance-b');
+
+    expect(providerFactory).toHaveBeenCalledTimes(3);
+    expect(
+      vi
+        .mocked(providerFactory)
+        .mock.calls.map(([receivedConfig]) =>
+          receivedConfig.EVOLUTION_SEND_TIMEOUT_MS,
+        ),
+    ).toEqual([12345, 12345, 12345]);
+    expect(
+      vi
+        .mocked(providerFactory)
+        .mock.calls.map(([receivedConfig]) =>
+          receivedConfig.EVOLUTION_INSTANCE_NAME,
+        ),
+    ).toEqual(['instance-a', 'instance-a', 'instance-b']);
+  });
 });
 
 describe('whatsapp-dispatch worker provider integration', () => {
