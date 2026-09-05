@@ -186,6 +186,104 @@ const findNextValidSlot = ({
   return null;
 };
 
+const resolveRotationAnchor = ({
+  dayStartsAt,
+  dayEndsAt,
+  schedule,
+  target,
+}: {
+  dayStartsAt: Date;
+  dayEndsAt: Date;
+  schedule: CommercialAutomationEffectiveSchedule;
+  target: CommercialAutomationPlannerTarget;
+}) =>
+  findNextValidSlot({
+    candidate: dayStartsAt,
+    horizonEnd: dayEndsAt,
+    schedule,
+    target,
+  }) ?? dayStartsAt;
+
+const getStableRotationSlotIndex = (
+  scheduledFor: Date,
+  rotationAnchor: Date,
+  intervalMinutes: number,
+) =>
+  Math.max(
+    0,
+    Math.floor(
+      (scheduledFor.getTime() - rotationAnchor.getTime()) /
+        (intervalMinutes * MINUTE_MS),
+    ),
+  );
+
+const getGridIndexAtOrAfter = (
+  candidate: Date,
+  rotationAnchor: Date,
+  intervalMinutes: number,
+) =>
+  Math.max(
+    0,
+    Math.ceil(
+      (candidate.getTime() - rotationAnchor.getTime()) /
+        (intervalMinutes * MINUTE_MS),
+    ),
+  );
+
+const findNextGridSlot = ({
+  candidate,
+  horizonEnd,
+  schedule,
+  target,
+  rotationAnchor,
+  intervalMinutes,
+}: {
+  candidate: Date;
+  horizonEnd: Date;
+  schedule: CommercialAutomationEffectiveSchedule;
+  target: CommercialAutomationPlannerTarget;
+  rotationAnchor: Date;
+  intervalMinutes: number;
+}) => {
+  const targetTimezone = target.timezone ?? schedule.timezone;
+  const targetStartTime = target.allowedStartTime ?? schedule.allowedStartTime;
+  const targetEndTime = target.allowedEndTime ?? schedule.allowedEndTime;
+  let gridIndex = getGridIndexAtOrAfter(
+    candidate,
+    rotationAnchor,
+    intervalMinutes,
+  );
+
+  for (let attempt = 0; attempt < PLANNER_HORIZON_MINUTES * 2; attempt += 1) {
+    const timestamp =
+      rotationAnchor.getTime() + gridIndex * intervalMinutes * MINUTE_MS;
+    if (timestamp > horizonEnd.getTime()) return null;
+
+    const current = new Date(timestamp);
+    if (
+      isInsideAllowedWindow(
+        current,
+        schedule.timezone,
+        schedule.allowedStartTime,
+        schedule.allowedEndTime,
+      ) &&
+      isInsideAllowedWindow(
+        current,
+        targetTimezone,
+        targetStartTime,
+        targetEndTime,
+      )
+    ) {
+      return current;
+    }
+
+    // Keep the temporal phase even when a grid point is outside a window.
+    gridIndex += 1;
+  }
+
+  return null;
+};
+
 export const planCommercialTargetSlots = ({
   now,
   schedule,
@@ -239,8 +337,13 @@ export const planCommercialTargetSlots = ({
         target,
         effectiveTargetIntervalMinutes,
         remaining: remainingForGroup,
-        slotIndex: 0,
         orderedInstanceNames,
+        rotationAnchor: resolveRotationAnchor({
+          dayStartsAt: dayRange.dayStartsAt,
+          dayEndsAt: dayRange.dayEndsAt,
+          schedule,
+          target,
+        }),
         nextBase: new Date(
           maxTimestamp(
             now,
@@ -273,22 +376,27 @@ export const planCommercialTargetSlots = ({
         schedule.staggerMinutes > 0
           ? cursor.getTime() + schedule.staggerMinutes * MINUTE_MS
           : Number.NEGATIVE_INFINITY;
-      const scheduledFor = findNextValidSlot({
+      const scheduledFor = findNextGridSlot({
         candidate: new Date(Math.max(state.nextBase.getTime(), staggerFloor)),
         horizonEnd,
         schedule,
         target: state.target,
+        rotationAnchor: state.rotationAnchor,
+        intervalMinutes: state.effectiveTargetIntervalMinutes,
       });
       if (!scheduledFor) {
         state.remaining = 0;
         continue;
       }
-      const slotIndex = state.slotIndex;
+      const slotIndex = getStableRotationSlotIndex(
+        scheduledFor,
+        state.rotationAnchor,
+        state.effectiveTargetIntervalMinutes,
+      );
       const selectedInstanceName =
         state.orderedInstanceNames[
           slotIndex % state.orderedInstanceNames.length
         ];
-      state.slotIndex += 1;
       state.remaining -= 1;
       state.nextBase = new Date(
         scheduledFor.getTime() +
