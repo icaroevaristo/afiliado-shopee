@@ -78,6 +78,7 @@ import {
 } from './commercial-automation-scheduler-status-service';
 import { CommercialDispatchOutboxService } from './commercial-dispatch-outbox-service';
 import { CommercialNicheService } from './commercial-niche-service';
+import { CommercialNichePreviewService } from './commercial-niche-preview-service';
 import { CommercialGroupCampaignService } from './commercial-group-campaign-service';
 import { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import { OperationalAdminService } from './operational-admin-service';
@@ -197,6 +198,10 @@ export type BuildAppOptions = {
   commercialNicheService?: Pick<
     CommercialNicheService,
     'create' | 'list' | 'find' | 'update'
+  >;
+  commercialNichePreviewService?: Pick<
+    CommercialNichePreviewService,
+    'preview'
   >;
   commercialGroupCampaignService?: Pick<
     CommercialGroupCampaignService,
@@ -906,6 +911,9 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
   const commercialNicheService =
     options.commercialNicheService ??
     new CommercialNicheService(repositories.commercialNiches);
+  const commercialNichePreviewService =
+    options.commercialNichePreviewService ??
+    new CommercialNichePreviewService(repositories.commercialPromotions);
   const commercialGroupCampaignService =
     options.commercialGroupCampaignService ??
     new CommercialGroupCampaignService(
@@ -1234,6 +1242,14 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return await commercialNicheService.list(
         parseCommercialConfigurationQuery(request.query),
       );
+    } catch (error) {
+      return sendCommercialConfigurationError(reply, error);
+    }
+  });
+
+  app.post('/commercial/niches/preview', async (request, reply) => {
+    try {
+      return await commercialNichePreviewService.preview(request.body);
     } catch (error) {
       return sendCommercialConfigurationError(reply, error);
     }

@@ -7,6 +7,7 @@ import {
   Menu,
   PackageSearch,
   Settings2,
+  Tags,
   UsersRound,
   X,
 } from 'lucide-react';
@@ -27,6 +28,7 @@ const navigation = [
   // TEMPORARY_NAV_DEVIATION: ambas as áreas ainda compartilham /whatsapp.
   { href: '/whatsapp', label: 'Grupos e WhatsApps', icon: UsersRound },
   { href: '/automacao', label: 'Automação', icon: Gauge },
+  { href: '/nichos', label: 'Nichos', icon: Tags },
   { href: '/envios', label: 'Histórico', icon: History },
   { href: '/configuracoes', label: 'Configurações', icon: Settings2 },
 ];

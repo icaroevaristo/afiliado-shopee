@@ -2,10 +2,17 @@ import { apiRequest } from './client';
 import type {
   CommercialCampaignPage,
   CommercialCampaign,
+  CommercialCampaignCreate,
   CommercialCampaignScheduleUpdate,
   CommercialQueuePage,
   CommercialCandidateStatus,
 } from './types';
+
+export const createCommercialCampaign = (input: CommercialCampaignCreate) =>
+  apiRequest<CommercialCampaign>('/commercial/campaigns', {
+    method: 'POST',
+    body: input,
+  });
 
 export const listCommercialCampaigns = (page = 1, limit = 50) =>
   apiRequest<CommercialCampaignPage>(

@@ -848,12 +848,99 @@ export type CommercialCampaign = {
   updatedAt: string;
 };
 
+export type CommercialNiche = {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  categoryIds: string[];
+  includeKeywords: string[];
+  excludeKeywords: string[];
+  minPrice: string | null;
+  maxPrice: string | null;
+  minDiscountRate: number;
+  minRating: number;
+  minSales: number;
+  minCommissionRate: number;
+  minimumScore: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CommercialNicheInput = {
+  name: string;
+  active: boolean;
+  categoryIds: string[];
+  includeKeywords: string[];
+  excludeKeywords: string[];
+  minPrice: string | null;
+  maxPrice: string | null;
+  minDiscountRate: number;
+  minRating: number;
+  minSales: number;
+  minCommissionRate: number;
+  minimumScore: number;
+};
+
+export type CommercialNichePage = {
+  items: CommercialNiche[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
+export type CommercialNichePreviewMatch = {
+  productId: string;
+  productName: string;
+  price: string;
+  discountRate: number;
+  rating: number;
+  sales: number;
+  commissionRate: number;
+  finalScore: number;
+  categoryIds: string[];
+};
+
+export type CommercialNichePreviewRejection = {
+  productId: string;
+  productName: string;
+  reasons: string[];
+};
+
+export type CommercialNichePreviewReport = {
+  preview: true;
+  evaluatedCount: number;
+  matchedCount: number;
+  rejectedCount: number;
+  evaluationTruncated: boolean;
+  matchSummary: { matched: number; rejected: number };
+  rejectionSummary: Record<string, number>;
+  matches: CommercialNichePreviewMatch[];
+  rejections: CommercialNichePreviewRejection[];
+};
+
 export type CommercialCampaignScheduleUpdate = {
   cadenceMinutes?: number;
   timezone?: string;
   allowedStartTime?: string;
   allowedEndTime?: string;
   dailyLimit?: number;
+  name?: string;
+  nicheId?: string;
+};
+
+export type CommercialCampaignCreate = {
+  name: string;
+  groupDestinationId: string;
+  nicheId: string;
+  cadenceMinutes: number;
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  dailyLimit: number;
+  queueTargetSize?: number;
+  dedupeDays?: number;
 };
 
 export type CommercialCampaignPage = {

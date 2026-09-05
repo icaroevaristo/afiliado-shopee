@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   activateCommercialCampaign,
+  createCommercialCampaign,
   deactivateCommercialCampaign,
   listCommercialCampaignQueue,
   listCommercialCampaigns,
@@ -17,6 +18,35 @@ beforeEach(() => {
 });
 
 describe('commercial campaigns API', () => {
+  it('cria campanha com grupo e nicho pelo endpoint canônico', async () => {
+    await createCommercialCampaign({
+      name: 'Ofertas de áudio',
+      groupDestinationId: 'group-1',
+      nicheId: 'niche-1',
+      cadenceMinutes: 30,
+      timezone: 'America/Sao_Paulo',
+      allowedStartTime: '08:00',
+      allowedEndTime: '20:00',
+      dailyLimit: 20,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/commercial/campaigns',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Ofertas de áudio',
+          groupDestinationId: 'group-1',
+          nicheId: 'niche-1',
+          cadenceMinutes: 30,
+          timezone: 'America/Sao_Paulo',
+          allowedStartTime: '08:00',
+          allowedEndTime: '20:00',
+          dailyLimit: 20,
+        }),
+      }),
+    );
+  });
+
   it('consulta campanhas com paginacao', async () => {
     await listCommercialCampaigns(2, 25);
     expect(fetch).toHaveBeenCalledWith(

@@ -5,6 +5,8 @@ import CampaignsPage from './page';
 
 const listCampaignsMock = vi.fn();
 const listGroupsMock = vi.fn();
+const listNichesMock = vi.fn();
+const createCampaignMock = vi.fn();
 const updateCampaignMock = vi.fn();
 const activateCampaignMock = vi.fn();
 const deactivateCampaignMock = vi.fn();
@@ -12,6 +14,8 @@ const deactivateCampaignMock = vi.fn();
 vi.mock('../../lib/api', () => ({
   listCommercialCampaigns: (...args: unknown[]) => listCampaignsMock(...args),
   listWhatsAppGroups: (...args: unknown[]) => listGroupsMock(...args),
+  listCommercialNiches: (...args: unknown[]) => listNichesMock(...args),
+  createCommercialCampaign: (...args: unknown[]) => createCampaignMock(...args),
   updateCommercialCampaign: (...args: unknown[]) => updateCampaignMock(...args),
   activateCommercialCampaign: (...args: unknown[]) => activateCampaignMock(...args),
   deactivateCommercialCampaign: (...args: unknown[]) => deactivateCampaignMock(...args),
@@ -58,6 +62,32 @@ beforeEach(() => {
     totalPages: 1,
   });
   listGroupsMock.mockReset().mockResolvedValue([group]);
+  listNichesMock.mockReset().mockResolvedValue({
+    items: [
+      {
+        id: 'niche-1',
+        name: 'Audio',
+        slug: 'audio',
+        active: true,
+        categoryIds: [],
+        includeKeywords: [],
+        excludeKeywords: [],
+        minPrice: null,
+        maxPrice: null,
+        minDiscountRate: 5,
+        minRating: 0,
+        minSales: 0,
+        minCommissionRate: 0,
+        minimumScore: 60,
+        createdAt: '2026-08-24T10:00:00.000Z',
+        updatedAt: '2026-08-24T10:00:00.000Z',
+      },
+    ],
+    page: 1,
+    limit: 100,
+    total: 1,
+    totalPages: 1,
+  });
   updateCampaignMock.mockReset().mockResolvedValue({
     ...campaign,
     cadenceMinutes: 30,
@@ -65,10 +95,43 @@ beforeEach(() => {
   });
   activateCampaignMock.mockReset().mockResolvedValue({ ...campaign, active: true });
   deactivateCampaignMock.mockReset().mockResolvedValue({ ...campaign, active: false });
+  createCampaignMock.mockReset().mockResolvedValue({
+    ...campaign,
+    id: 'campaign-2',
+    name: 'Nova campanha',
+    active: false,
+  });
   vi.stubGlobal('confirm', vi.fn(() => true));
 });
 
 describe('CampaignsPage', () => {
+  it('cria campanha vinculando grupo e nicho pelo dashboard', async () => {
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    const newCampaignButton = Array.from(
+      screen.container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Nova campanha'));
+    await click(newCampaignButton as HTMLButtonElement);
+    const name = screen.container.querySelector(
+      'input[placeholder="Ex.: Ofertas para mamães"]',
+    );
+    await change(name as HTMLInputElement, 'Nova campanha');
+    const create = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Criar campanha'),
+    );
+    await click(create as HTMLButtonElement);
+
+    expect(createCampaignMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Nova campanha',
+        groupDestinationId: 'group-1',
+        nicheId: 'niche-1',
+      }),
+    );
+    await screen.unmount();
+  });
+
   it('edita cadencia e janela sem alterar autorizacao do grupo', async () => {
     const screen = await render(<CampaignsPage />);
     await act(async () => undefined);
@@ -142,6 +205,67 @@ describe('CampaignsPage', () => {
       (input) => input.getAttribute('type') === 'number' && input.getAttribute('max') === '1000000',
     );
     expect(dailyLimitInput).toBeDefined();
+    await screen.unmount();
+  });
+
+  it('mantém o nicho inativo atual e oferece alternativas ativas', async () => {
+    const inactiveCampaign = {
+      ...campaign,
+      nicheId: 'niche-old',
+      niche: { id: 'niche-old', name: 'Nicho antigo', active: false },
+    };
+    listCampaignsMock.mockResolvedValueOnce({
+      items: [inactiveCampaign],
+      page: 1,
+      limit: 50,
+      total: 1,
+      totalPages: 1,
+    });
+    listNichesMock.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'niche-new',
+          name: 'Nicho novo',
+          slug: 'nicho-novo',
+          active: true,
+          categoryIds: [],
+          includeKeywords: [],
+          excludeKeywords: [],
+          minPrice: null,
+          maxPrice: null,
+          minDiscountRate: 5,
+          minRating: 0,
+          minSales: 0,
+          minCommissionRate: 0,
+          minimumScore: 60,
+          createdAt: '2026-08-24T10:00:00.000Z',
+          updatedAt: '2026-08-24T10:00:00.000Z',
+        },
+      ],
+      page: 1,
+      limit: 100,
+      total: 1,
+      totalPages: 1,
+    });
+
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    const options = Array.from(
+      screen.container.querySelectorAll<HTMLOptionElement>('select option'),
+    );
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Nicho antigo (inativo)',
+      'Nicho novo',
+    ]);
+    expect(options.find((option) => option.value === 'niche-new')?.disabled).toBe(false);
+
+    const nicheSelect = screen.container.querySelector('select') as HTMLSelectElement;
+    await change(nicheSelect, 'niche-new');
+    expect(nicheSelect.value).toBe('niche-new');
+    expect(
+      Array.from(nicheSelect.options).some((option) => option.value === 'niche-new'),
+    ).toBe(true);
     await screen.unmount();
   });
 });

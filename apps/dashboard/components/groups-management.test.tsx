@@ -233,6 +233,11 @@ describe('GroupsManagement', () => {
     expect(screen.container.textContent).toContain('Sem responsável');
     expect(screen.container.textContent).toContain('Casa em oferta');
     expect(screen.container.textContent).toContain('Sem campanha');
+    expect(
+      screen.container.querySelector(
+        'a[href="/campanhas?groupId=group-c-internal"]',
+      ),
+    ).not.toBeNull();
     expect(screen.container.textContent).toContain('whatsapp-principal');
     expect(screen.container.textContent).toContain('Não disponível');
     expect(screen.container.textContent).toContain('28/08/2026');

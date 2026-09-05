@@ -272,6 +272,11 @@ Consulte [docs/shopee-affiliate.md](docs/shopee-affiliate.md) para os campos
 confirmados em `productOfferV2`, assinatura, transporte, formato JSON/CSV,
 configuração, score, Sub_ids, cupons e limitações operacionais da Sprint 18.1.
 
+Para a operação diária pelo Dashboard, consulte
+[docs/OPERACAO_DASHBOARD.md](docs/OPERACAO_DASHBOARD.md). Para a semântica de
+segmentação e o vínculo entre grupo, campanha e nicho, consulte
+[docs/COMMERCIAL_NICHES.md](docs/COMMERCIAL_NICHES.md).
+
 ### Histórico comercial das ofertas oficiais
 
 O sync de `OFFICIAL` persiste o estado atual e seu
@@ -1171,6 +1176,14 @@ A API oferece CRUD paginado em `/commercial/niches` e
 `/commercial/campaigns`. Nichos normalizam categorias e keywords e fazem
 matching determinístico de ofertas `OFFICIAL` por tokens/frases e critérios
 comerciais.
+
+O modelo operacional é **Grupo → Campanha → Nicho**, com **Grupo → instâncias
+ordenadas** em separado: grupo define destino, campanha define agenda/volume,
+nicho define conteúdo e instância define o remetente. O Dashboard é a
+autoridade de rotina para criar e editar esses vínculos; o preview de nicho é
+somente leitura. A operação detalhada está em
+[docs/OPERACAO_DASHBOARD.md](docs/OPERACAO_DASHBOARD.md) e a semântica do
+matcher em [docs/COMMERCIAL_NICHES.md](docs/COMMERCIAL_NICHES.md).
 
 Campanhas usam como identidade o fingerprint lógico do grupo, calculado apenas
 do JID canônico e estável entre instâncias Evolution. O destino âncora é uma

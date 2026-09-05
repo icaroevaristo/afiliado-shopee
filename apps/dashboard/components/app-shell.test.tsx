@@ -61,6 +61,7 @@ describe('AppShell', () => {
       'Ofertas',
       'Grupos e WhatsApps',
       'Automação',
+      'Nichos',
       'Histórico',
       'Configurações',
     ];

@@ -185,6 +185,99 @@ describe('dashboard API proxy', () => {
     );
   });
 
+  it('allowlista o fluxo de nichos e de campanhas pelo proxy autenticado', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const requests = [
+      GET(
+        new Request('http://dashboard.local/api/commercial/niches'),
+        { params: Promise.resolve({ path: ['commercial', 'niches'] }) },
+      ),
+      POST(
+        new Request('http://dashboard.local/api/commercial/niches', {
+          method: 'POST',
+          body: '{}',
+        }),
+        { params: Promise.resolve({ path: ['commercial', 'niches'] }) },
+      ),
+      POST(
+        new Request('http://dashboard.local/api/commercial/niches/preview', {
+          method: 'POST',
+          body: '{}',
+        }),
+        {
+          params: Promise.resolve({
+            path: ['commercial', 'niches', 'preview'],
+          }),
+        },
+      ),
+      PATCH(
+        new Request('http://dashboard.local/api/commercial/niches/niche-1', {
+          method: 'PATCH',
+          body: '{}',
+        }),
+        {
+          params: Promise.resolve({
+            path: ['commercial', 'niches', 'niche-1'],
+          }),
+        },
+      ),
+      POST(
+        new Request('http://dashboard.local/api/commercial/campaigns', {
+          method: 'POST',
+          body: '{}',
+        }),
+        { params: Promise.resolve({ path: ['commercial', 'campaigns'] }) },
+      ),
+      POST(
+        new Request(
+          'http://dashboard.local/api/commercial/campaigns/campaign-1/activate',
+          { method: 'POST', body: '{}' },
+        ),
+        {
+          params: Promise.resolve({
+            path: ['commercial', 'campaigns', 'campaign-1', 'activate'],
+          }),
+        },
+      ),
+      POST(
+        new Request(
+          'http://dashboard.local/api/commercial/campaigns/campaign-1/deactivate',
+          { method: 'POST', body: '{}' },
+        ),
+        {
+          params: Promise.resolve({
+            path: ['commercial', 'campaigns', 'campaign-1', 'deactivate'],
+          }),
+        },
+      ),
+    ];
+    const responses = await Promise.all(requests);
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    const upstreamUrls = (fetchMock.mock.calls as unknown[][]).map((call) =>
+      String(call[0]),
+    );
+    expect(upstreamUrls).toEqual(
+      expect.arrayContaining([
+        'http://127.0.0.1:3334/commercial/niches',
+        'http://127.0.0.1:3334/commercial/niches/preview',
+        'http://127.0.0.1:3334/commercial/niches/niche-1',
+        'http://127.0.0.1:3334/commercial/campaigns',
+        'http://127.0.0.1:3334/commercial/campaigns/campaign-1/activate',
+        'http://127.0.0.1:3334/commercial/campaigns/campaign-1/deactivate',
+      ]),
+    );
+  });
+
   it('permite somente os caminhos de agenda explicitamente autorizados', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
