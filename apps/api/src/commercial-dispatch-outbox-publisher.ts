@@ -68,6 +68,9 @@ const pendingDispatchIsSafe = ({
   dispatch.externalMessageId === null &&
   dispatch.sentAt === null;
 
+const hasConfirmedDispatchStatus = (status: string) =>
+  status === 'SENT' || status === 'DELIVERED' || status === 'READ';
+
 export class CommercialDispatchOutboxPublisher {
   private readonly clock: () => Date;
 
@@ -93,7 +96,7 @@ export class CommercialDispatchOutboxPublisher {
       );
     }
     if (!identitiesAreConsistent(context)) {
-      if (context.dispatch.status === 'SENT') {
+      if (hasConfirmedDispatchStatus(context.dispatch.status)) {
         return this.throwSentMetadataPending(context.outbox.id);
       }
       return this.failAmbiguous(context.outbox.id, OUTBOX_INCONSISTENT);
@@ -111,13 +114,13 @@ export class CommercialDispatchOutboxPublisher {
       existingJob !== null &&
       !this.jobMatchesOutbox(existingJob, outbox)
     ) {
-      if (context.dispatch.status === 'SENT') {
+      if (hasConfirmedDispatchStatus(context.dispatch.status)) {
         return this.throwSentMetadataPending(context.outbox.id);
       }
       return this.failAmbiguous(outbox.id, OUTBOX_INCONSISTENT);
     }
 
-    if (context.dispatch.status === 'SENT') {
+    if (hasConfirmedDispatchStatus(context.dispatch.status)) {
       if (
         outbox.status === 'PUBLISHED' &&
         jobExists &&
@@ -200,7 +203,10 @@ export class CommercialDispatchOutboxPublisher {
         );
         return current.outbox;
       }
-      if (current?.dispatch.status === 'SENT') {
+      if (
+        current &&
+        hasConfirmedDispatchStatus(current.dispatch.status)
+      ) {
         return this.throwSentMetadataPending(outbox.id);
       }
       return this.failAmbiguous(outbox.id, OUTBOX_INCONSISTENT);

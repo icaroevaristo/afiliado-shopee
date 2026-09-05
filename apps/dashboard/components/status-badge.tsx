@@ -7,8 +7,12 @@ const styles: Record<string, string> = {
   error: 'border-rose-200 bg-rose-50 text-rose-700',
   PENDING: 'border-amber-200 bg-amber-50 text-amber-800',
   PROCESSING: 'border-blue-200 bg-blue-50 text-blue-800',
+  SUBMITTED: 'border-amber-200 bg-amber-50 text-amber-800',
   SENT: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  DELIVERED: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  READ: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   FAILED: 'border-rose-200 bg-rose-50 text-rose-700',
+  AMBIGUOUS: 'border-rose-200 bg-rose-50 text-rose-700',
 };
 
 type StatusBadgeProps = {

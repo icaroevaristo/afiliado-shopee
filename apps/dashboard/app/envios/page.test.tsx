@@ -37,7 +37,6 @@ const makeDispatch = (
   attemptCount: 1,
   deliveryMode: 'IMAGE',
   provider: 'evolution',
-  externalMessageId: 'external-1',
   errorMessage: null,
   sentAt: '2026-08-20T12:00:00.000Z',
   createdAt: '2026-08-20T11:59:00.000Z',
@@ -51,8 +50,9 @@ const makeDispatch = (
   },
   destination: {
     id: 'group-1',
+    name: 'Grupo Casa',
     destination: 'destination-private',
-  } as unknown as WhatsAppDispatch['destination'],
+  },
   product: {
     id: 'product-1',
     nome: 'Produto com um nome suficientemente longo para testar duas linhas',
@@ -135,8 +135,8 @@ describe('SendsPage — Lote 7', () => {
     expect(buttonWithText(screen.container, 'Todos')).toBeDefined();
     expect(firstLevel).toContain('Enviado');
     expect(firstLevel).toContain('Não enviado');
-    expect(firstLevel).toContain('Aguardando envio');
-    expect(firstLevel).toContain('Resultado pendente');
+    expect(firstLevel).toContain('Aguardando confirmação');
+    expect(firstLevel).toContain('Em processamento');
     expect(firstLevel).toContain('Grupo Casa');
     expect(firstLevel).toContain('R$ 79,90');
     expect(screen.container.querySelectorAll('img').length).toBeGreaterThan(0);
@@ -227,7 +227,7 @@ describe('SendsPage — Lote 7', () => {
     await screen.unmount();
   });
 
-  it('mostra incerteza para PROCESSING sem oferecer retry ou reenvio', async () => {
+  it('mantém PROCESSING como processamento sem oferecer retry ou reenvio', async () => {
     listDispatchesMock.mockResolvedValueOnce([
       makeDispatch({
         status: 'PROCESSING',
@@ -241,7 +241,7 @@ describe('SendsPage — Lote 7', () => {
     const record = screen.container.querySelector(
       'tr[data-history-record]',
     ) as HTMLElement;
-    expect(record.textContent).toContain('Resultado pendente');
+    expect(record.textContent).toContain('Em processamento');
     expect(record.textContent).toContain('Criado em');
     expect(record.textContent).not.toContain('Tentar novamente');
     expect(record.textContent).not.toContain('Reenviar');
@@ -249,12 +249,7 @@ describe('SendsPage — Lote 7', () => {
 
     await click(record);
     const dialog = screen.container.querySelector('[role="dialog"]')!;
-    expect(dialog.textContent).toContain(
-      'Não foi possível confirmar com segurança se este envio chegou ao destino.',
-    );
-    expect(dialog.textContent).toContain(
-      'Nenhuma nova tentativa é oferecida aqui.',
-    );
+    expect(dialog.textContent).not.toContain('Confirmação pendente de verificação');
     expect(dialog.textContent).not.toContain('Tentar novamente');
     expect(dialog.querySelector('details')?.open).toBe(false);
     expect(dialog.querySelector('details')?.textContent).toContain(
@@ -263,7 +258,98 @@ describe('SendsPage — Lote 7', () => {
     await screen.unmount();
   });
 
-  it('usa Enviado em somente quando existe sentAt e mantém detalhes técnicos progressivos', async () => {
+  it('preserva grupo e instância do snapshot da run quando o diretório não resolve o destino', async () => {
+    listDispatchesMock.mockResolvedValueOnce([
+      makeDispatch({
+        destinationId: 'group-missing',
+        destination: {
+          id: 'group-missing',
+          name: '',
+          destination: 'masked',
+          fingerprint: null,
+        },
+        instanceName: null,
+        commercialPipelineRun: {
+          groupName: 'Ofertas da Sho | Achadinhos',
+          groupFingerprint: 'fingerprint-from-run',
+          instanceName: 'afiliado-shopee-secondary',
+        },
+      }),
+    ]);
+    const screen = await render(<SendsPage />);
+    await settle();
+
+    const record = screen.container.querySelector(
+      'tr[data-history-record]',
+    ) as HTMLElement;
+    expect(record.textContent).toContain('Ofertas da Sho | Achadinhos');
+    expect(record.textContent).toContain('fingerprint-from-run');
+    await click(record);
+    const dialog = screen.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('afiliado-shopee-secondary');
+    expect(dialog.textContent).toContain('fingerprint-from-run');
+    await screen.unmount();
+  });
+
+  it('mostra SUBMITTED e o timestamp submetido sem expor correlação externa', async () => {
+    const rawDispatch: Record<string, unknown> = {
+      ...makeDispatch({
+        status: 'SUBMITTED',
+        sentAt: null,
+        submittedAt: '2026-08-20T12:00:02.000Z',
+        destination: {
+          id: 'group-1',
+          name: 'Grupo Casa',
+          destination: 'masked',
+          fingerprint: 'group-fingerprint',
+        },
+      }),
+      externalMessageId: 'provider-message-id',
+    };
+    listDispatchesMock.mockResolvedValueOnce([
+      rawDispatch as unknown as WhatsAppDispatch,
+    ]);
+    const screen = await render(<SendsPage />);
+    await settle();
+
+    const record = screen.container.querySelector(
+      'tr[data-history-record]',
+    ) as HTMLElement;
+    expect(record.textContent).toContain('Aguardando confirmação');
+    expect(record.textContent).toContain('Enviado para confirmação em');
+    expect(record.textContent).toContain('group-fingerprint');
+    expect(screen.container.textContent).not.toContain('provider-message-id');
+    await click(record);
+    const dialog = screen.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Submetido em');
+    expect(dialog.textContent).not.toContain('provider-message-id');
+    await screen.unmount();
+  });
+
+  it('mostra AMBIGUOUS como verificação necessária sem expor identificador externo', async () => {
+    listDispatchesMock.mockResolvedValueOnce([
+      makeDispatch({
+        status: 'AMBIGUOUS',
+        sentAt: null,
+        errorMessage: null,
+      }),
+    ]);
+    const screen = await render(<SendsPage />);
+    await settle();
+
+    const record = screen.container.querySelector(
+      'tr[data-history-record]',
+    ) as HTMLElement;
+    expect(record.textContent).toContain('Precisa de investigação');
+    await click(record);
+    const dialog = screen.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Confirmação pendente de verificação');
+    expect(dialog.textContent).toContain('Nenhuma nova tentativa é oferecida aqui.');
+    expect(dialog.textContent).not.toContain('externalMessageId');
+    await screen.unmount();
+  });
+
+  it('usa Confirmado em somente quando existe sentAt e mantém detalhes técnicos progressivos', async () => {
     listDispatchesMock.mockResolvedValueOnce([makeDispatch()]);
     const screen = await render(<SendsPage />);
     await settle();
@@ -271,7 +357,7 @@ describe('SendsPage — Lote 7', () => {
     const record = screen.container.querySelector(
       'tr[data-history-record]',
     ) as HTMLElement;
-    expect(record.textContent).toContain('Enviado em');
+    expect(record.textContent).toContain('Confirmado em');
     expect(record.textContent).not.toContain('Criado em');
     await click(record);
 
@@ -285,6 +371,7 @@ describe('SendsPage — Lote 7', () => {
     expect(details.textContent).toContain('dispatchId');
     expect(details.textContent).toContain('Provider');
     expect(details.textContent).toContain('evolution');
+    expect(details.textContent).not.toContain('externalMessageId');
     await screen.unmount();
   });
 

@@ -266,6 +266,11 @@ export const envSchema = z
     EVOLUTION_SAFE_MODE: booleanFromEnv.default(true),
     EVOLUTION_ALLOWED_DESTINATIONS: destinationListFromEnv,
     EVOLUTION_MAX_MESSAGES_PER_BOOT: positiveIntegerFromEnv.default(1),
+    WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS: positiveIntegerFromEnv
+      .pipe(z.number().min(60).max(86_400))
+      .default(900),
+    WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS:
+      positiveIntegerFromEnv.pipe(z.number().min(10).max(3_600)).default(60),
     WHATSAPP_GROUP_SEND_ENABLED: booleanFromEnv.default(false),
     WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: positiveIntegerFromEnv.default(1),
     SCHEDULER_ENABLED: booleanFromEnv.default(false),

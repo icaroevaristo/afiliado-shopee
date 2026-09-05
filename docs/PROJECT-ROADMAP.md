@@ -10,6 +10,15 @@
 > necessariamente o HEAD atual. Antes de operar ou desenvolver, confirme o
 > estado real no Git.
 
+> **Correção em andamento — delivery confirmation/dashboard/scheduler:** a
+> resposta HTTP do provider é somente submissão (`SUBMITTED`), não prova de
+> envio. A confirmação durável progride por evento monotônico até `SENT`,
+> `DELIVERED` ou `READ`; ausência de confirmação no prazo permanece
+> `AMBIGUOUS` e bloqueia retry. O painel deve usar o target job pendente válido
+> como fonte do próximo envio, com preview do planner apenas como fallback.
+> Esta correção não reclassifica histórico `SENT` e ainda requer validação local
+> antes de qualquer atualização de certificação operacional.
+
 ## 1. Objetivo final
 
 O Afiliado Shopee deve operar autonomamente, para uso próprio, durante uma janela configurada, executando de ponta a ponta:
@@ -188,7 +197,7 @@ Não criar endpoint direto de send para o painel e não permitir retry cego apó
 
 **DONE para os requisitos administrativos da Fase 18, com o envio manual seguro da Fase 17 preservado.** O painel suporta cadastro/listagem de instâncias, active/inactive, pause/unpause, administração de grupos, assignment, horários, intervalos, stagger, limites, hard caps, próximo envio, último envio, blockers, executions/reservations, status de filas, catálogo e envio manual.
 
-`docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Health é derivado/sanitizado; `nextSend` vem do planner, `lastSend` de `WhatsAppDispatch=SENT` e blockers são derivados, sem tabelas duplicadas para esses estados.
+`docs/dashboard-design.md` registra o estado histórico anterior à Fase 17; sua afirmação antiga sobre ausência de SEND manual não descreve o estado atual. Health é derivado/sanitizado; `nextSend` prioriza o menor target job pendente válido e usa o planner somente como fallback, enquanto `lastSend` e as contagens consideram `SENT`, `DELIVERED` e `READ`; blockers são derivados, sem tabelas duplicadas para esses estados.
 
 A experiência diária consolidada do Dashboard 2.0 está organizada em **Início**,
 **Ofertas**, **Grupos**, **WhatsApps**, **Automação** e **Histórico**, com

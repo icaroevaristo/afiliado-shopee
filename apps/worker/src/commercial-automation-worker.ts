@@ -16,8 +16,8 @@ import {
   JOB_NAMES,
   QUEUE_NAMES,
   type CommercialAutomationJob,
-  type CommercialAutomationTargetConstraint,
   type CommercialAutomationScheduler,
+  isCommercialAutomationTargetConstraint,
 } from '@shopee-auto-affiliate-ai/queue';
 
 import {
@@ -83,25 +83,6 @@ const closeResources = async (cleanups: Array<() => Promise<unknown>>) => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-const isNonEmptyString = (value: unknown): value is string =>
-  typeof value === 'string' && value.trim().length > 0;
-
-const isCommercialAutomationTargetConstraint = (
-  value: unknown,
-): value is CommercialAutomationTargetConstraint => {
-  if (!isRecord(value)) return false;
-  return (
-    isNonEmptyString(value.campaignId) &&
-    isNonEmptyString(value.groupId) &&
-    isNonEmptyString(value.logicalGroupFingerprint) &&
-    isNonEmptyString(value.instanceName) &&
-    isNonEmptyString(value.scheduledFor) &&
-    Number.isFinite(Date.parse(value.scheduledFor)) &&
-    isNonEmptyString(value.slotKey) &&
-    Number.isSafeInteger(value.scheduleRevision)
-  );
-};
-
 export const processCommercialAutomationJob = async (
   job: Pick<Job<CommercialAutomationJob>, 'id' | 'name' | 'data'>,
   options: {
@@ -160,7 +141,10 @@ export const processCommercialAutomationJob = async (
       );
     }
     const target = jobData.target;
-    if (!Number.isSafeInteger(target.scheduleRevision)) {
+    if (
+      !Number.isSafeInteger(target.scheduleRevision) ||
+      target.scheduleRevision < 1
+    ) {
       throw new AppError(
         'Job target da automacao comercial sem revisao valida',
         'COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_REQUIRED',

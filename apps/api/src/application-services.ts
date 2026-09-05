@@ -48,6 +48,7 @@ import {
   PrismaWhatsAppDestinationRepository,
   PrismaWhatsAppInstanceRepository,
   PrismaWhatsAppDispatchRepository,
+  PrismaWhatsAppDeliveryEventInboxRepository,
   PrismaWhatsAppGroupDirectoryRepository,
   PrismaManualPublicationRequestRepository,
   PrismaOperationalStatusRepository,
@@ -75,6 +76,7 @@ import type {
   WhatsAppDestinationRepository,
   WhatsAppInstanceRepository,
   WhatsAppDispatchRepository,
+  WhatsAppDeliveryEventInboxRepository,
   WhatsAppGroupDirectoryRepository,
   ManualPublicationRequestRepository,
   OperationalStatusRepository,
@@ -105,6 +107,7 @@ export type ApplicationRepositories = {
   whatsappDestinations: WhatsAppDestinationRepository;
   whatsappInstances: WhatsAppInstanceRepository;
   whatsappDispatches: WhatsAppDispatchRepository;
+  whatsappDeliveryEvents?: WhatsAppDeliveryEventInboxRepository;
   whatsappGroups: WhatsAppGroupDirectoryRepository;
   shopeeOffers: ShopeeOfferRepository & OperationalCatalogRepository;
   coupons: CouponRepository;
@@ -309,6 +312,7 @@ export const createSenderService = ({
   draftService?: CommercialMessageDraftService;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   instanceName?: string;
+  confirmationTimeoutMs?: number;
 }) =>
   new SenderService({
     dispatches: repositories.whatsappDispatches,
@@ -319,6 +323,7 @@ export const createSenderService = ({
     draftService,
     groupSendPolicy,
     instanceName,
+    confirmationTimeoutMs,
   });
 
 export const createPrismaRepositories = (
@@ -332,6 +337,9 @@ export const createPrismaRepositories = (
     whatsappDestinations: new PrismaWhatsAppDestinationRepository(prisma),
     whatsappInstances: new PrismaWhatsAppInstanceRepository(prisma),
     whatsappDispatches: new PrismaWhatsAppDispatchRepository(prisma),
+    whatsappDeliveryEvents: new PrismaWhatsAppDeliveryEventInboxRepository(
+      prisma,
+    ),
     whatsappGroups: new PrismaWhatsAppGroupDirectoryRepository(prisma),
     shopeeOffers: new PrismaShopeeOfferRepository(prisma),
     coupons: new PrismaCouponRepository(prisma),

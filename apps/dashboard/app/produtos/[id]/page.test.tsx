@@ -99,9 +99,19 @@ const detail = {
           type: 'GROUP',
         },
         instanceName: 'instance-1',
+        submittedAt: '2026-08-24T00:59:00.000Z',
         sentAt: '2026-08-24T01:00:00.000Z',
+        deliveredAt: null,
+        readAt: null,
         attemptCount: 1,
-        run: { id: 'run-1', finalStatus: 'SENT', investigationRequired: false },
+        run: {
+          id: 'run-1',
+          groupName: 'Grupo snapshot',
+          groupFingerprint: 'snapshot-fingerprint',
+          instanceName: 'instance-snapshot',
+          finalStatus: 'SENT',
+          investigationRequired: false,
+        },
       },
     ],
     page: 1,
@@ -258,6 +268,38 @@ describe('ProductDetailPage', () => {
     expect(screen.container.textContent).toContain(
       'Confira a oferta no link afiliado.',
     );
+    await screen.unmount();
+  });
+
+  it('exibe DELIVERED/READ como estados confirmados com timestamp e fallback do snapshot', async () => {
+    detailMock.mockResolvedValueOnce({
+      ...detail,
+      dispatchHistory: {
+        ...detail.dispatchHistory,
+        items: [
+          {
+            ...detail.dispatchHistory.items[0],
+            status: 'READ',
+            destination: {
+              ...detail.dispatchHistory.items[0].destination,
+              name: '',
+              fingerprint: null,
+            },
+            instanceName: null,
+            sentAt: '2026-08-24T01:00:00.000Z',
+            deliveredAt: '2026-08-24T01:01:00.000Z',
+            readAt: '2026-08-24T01:02:00.000Z',
+          },
+        ],
+      },
+    });
+    const screen = await render(<ProductDetailPage />);
+
+    expect(screen.container.textContent).toContain('Lido');
+    expect(screen.container.textContent).toContain('Lido em');
+    expect(screen.container.textContent).toContain('Grupo snapshot');
+    expect(screen.container.textContent).toContain('snapshot-fingerprint');
+    expect(screen.container.textContent).toContain('instance-snapshot');
     await screen.unmount();
   });
 

@@ -63,6 +63,8 @@ export function OpsBadge({ tone = 'neutral', children }: { tone?: OpsTone; child
 export function toneForStatus(status?: string | null): OpsTone {
   switch (status?.toUpperCase()) {
     case 'SENT':
+    case 'DELIVERED':
+    case 'READ':
     case 'DISPATCHED':
     case 'COMPLETED':
     case 'PREVIEW_READY':
@@ -76,6 +78,7 @@ export function toneForStatus(status?: string | null): OpsTone {
     case 'COPY_READY':
       return 'info';
     case 'PENDING':
+    case 'SUBMITTED':
     case 'STARTED':
     case 'AMBIGUOUS':
     case 'RESERVED':

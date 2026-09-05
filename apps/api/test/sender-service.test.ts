@@ -173,6 +173,13 @@ const prismaMock = (dispatchData = dispatch) => {
   const client = {
     whatsAppDispatch: {
       findUnique: vi.fn(async () => rawDispatchData),
+      findUniqueOrThrow: vi.fn(async () => ({
+        ...rawDispatchData,
+        status: 'SUBMITTED',
+        externalMessageId: 'mock-whatsapp-1',
+        submittedAt: new Date('2026-08-20T12:00:00.000Z'),
+        confirmationDeadlineAt: new Date('2026-08-20T12:15:00.000Z'),
+      })),
       updateMany: vi.fn(async () => ({ count: 1 })),
       update: vi.fn(async ({ data }) => ({ ...dispatch, ...data })),
     },
@@ -209,7 +216,7 @@ const createService = (
   });
 
 describe('SenderService', () => {
-  it('altera PENDING para SENT e incrementa attemptCount', async () => {
+  it('altera PENDING para SUBMITTED e incrementa attemptCount', async () => {
     const prisma = prismaMock();
     const result = await createService(prisma).sendDispatch('dispatch-1');
 
@@ -219,15 +226,21 @@ describe('SenderService', () => {
         data: expect.objectContaining({ attemptCount: { increment: 1 } }),
       }),
     );
-    expect(prisma.whatsAppDispatch.update).toHaveBeenCalledWith(
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: 'SENT' }),
+        where: {
+          id: 'dispatch-1',
+          status: 'PROCESSING',
+          externalMessageId: null,
+        },
+        data: expect.objectContaining({ status: 'SUBMITTED' }),
       }),
     );
     expect(result).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       externalMessageId: 'mock-whatsapp-1',
-      sentAt: expect.any(Date),
+      submittedAt: expect.any(Date),
+      confirmationDeadlineAt: expect.any(Date),
     });
   });
 
@@ -405,7 +418,7 @@ describe('SenderService', () => {
     expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
   });
 
-  it('nao reenvia quando o provider respondeu mas persistir SENT falhou', async () => {
+  it('nao reenvia quando o provider respondeu mas persistir SUBMITTED falhou', async () => {
     let current = { ...dispatch };
     const prisma = {
       whatsAppDispatch: {
@@ -482,7 +495,12 @@ describe('SenderService', () => {
           persistedAssignment = 'instance-b';
           return { kind: 'STICKY_INSTANCE_MISMATCH' };
         },
-        markSent: async () => ({ ...dispatchSnapshot, status: 'SENT' }),
+        markSubmitted: async () => ({
+          ...dispatchSnapshot,
+          status: 'SUBMITTED',
+        }),
+        applyDeliveryEvent: async () => ({ kind: 'NOOP' }),
+        expireSubmittedConfirmations: async () => [],
         markFailed: async () => ({ ...dispatchSnapshot, status: 'FAILED' }),
       };
     const service = new SenderService({

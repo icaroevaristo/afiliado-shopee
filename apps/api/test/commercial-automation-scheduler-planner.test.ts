@@ -128,6 +128,27 @@ describe('commercial automation scheduler planner', () => {
     expect(revised.slots[0].jobId).not.toBe(inactive.slots[0].jobId);
   });
 
+  it('muda o compromisso lógico quando a revisão de assignment muda', () => {
+    const first = planCommercialTargetSlots({
+      now,
+      schedule,
+      targets: [target('assignment', { assignmentRevision: 3 })],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const reassigned = planCommercialTargetSlots({
+      now,
+      schedule,
+      targets: [target('assignment', { assignmentRevision: 4 })],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+
+    expect(first.slots[0]?.target.assignmentRevision).toBe(3);
+    expect(reassigned.slots[0]?.target.assignmentRevision).toBe(4);
+    expect(reassigned.slots[0]?.jobId).not.toBe(first.slots[0]?.jobId);
+  });
+
   it('respeita campaign cadence e janelas diferentes', () => {
     const result = planCommercialTargetSlots({
       now,

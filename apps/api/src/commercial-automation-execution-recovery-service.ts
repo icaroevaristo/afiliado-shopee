@@ -210,7 +210,12 @@ export class CommercialAutomationExecutionRecoveryService {
     ) {
       return this.ambiguous();
     }
-    if (run.finalStatus === 'SENT' || run.dispatch?.status === 'SENT') {
+    if (
+      run.finalStatus === 'SENT' ||
+      run.dispatch?.status === 'SENT' ||
+      run.dispatch?.status === 'DELIVERED' ||
+      run.dispatch?.status === 'READ'
+    ) {
       return { status: 'QUEUED' };
     }
     if (run.dispatch?.status === 'FAILED') {

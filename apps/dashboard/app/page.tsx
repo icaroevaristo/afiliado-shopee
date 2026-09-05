@@ -32,6 +32,7 @@ import {
 } from '../lib/api';
 import {
   homeAutomationPresentation,
+  isConfirmedDispatchStatus,
   translateHomeDispatchStatus,
   translateHomeExecutionStatus,
   translateHomeReason,
@@ -66,7 +67,57 @@ type OverviewData = {
 const DEFAULT_TIMEZONE = 'America/Sao_Paulo';
 
 const dispatchSortValue = (dispatch: WhatsAppDispatch) =>
-  new Date(dispatch.sentAt ?? dispatch.createdAt ?? 0).getTime();
+  new Date(
+    dispatch.readAt ??
+      dispatch.deliveredAt ??
+      dispatch.sentAt ??
+      dispatch.submittedAt ??
+      dispatch.createdAt ??
+      0,
+  ).getTime();
+
+const dispatchHomeTimestamp = (dispatch: WhatsAppDispatch) => {
+  switch (dispatch.status) {
+    case 'READ':
+      return dispatch.readAt ?? dispatch.createdAt;
+    case 'DELIVERED':
+      return dispatch.deliveredAt ?? dispatch.createdAt;
+    case 'SENT':
+      return dispatch.sentAt ?? dispatch.createdAt;
+    case 'SUBMITTED':
+      return dispatch.submittedAt ?? dispatch.createdAt;
+    default:
+      return dispatch.createdAt;
+  }
+};
+
+const firstPresent = (...values: Array<string | null | undefined>) =>
+  values.find((value) => typeof value === 'string' && value.trim().length > 0) ??
+  null;
+
+const dispatchGroupName = (dispatch: WhatsAppDispatch) =>
+  firstPresent(
+    dispatch.destination?.name,
+    dispatch.commercialPipelineRun?.groupName,
+  ) ?? 'Grupo não informado';
+
+const dispatchHasGroupName = (dispatch: WhatsAppDispatch) =>
+  firstPresent(
+    dispatch.destination?.name,
+    dispatch.commercialPipelineRun?.groupName,
+  ) !== null;
+
+const dispatchInstanceName = (dispatch: WhatsAppDispatch) =>
+  firstPresent(
+    dispatch.instanceName,
+    dispatch.commercialPipelineRun?.instanceName,
+  );
+
+const dispatchGroupFingerprint = (dispatch: WhatsAppDispatch) =>
+  firstPresent(
+    dispatch.destination?.fingerprint,
+    dispatch.commercialPipelineRun?.groupFingerprint,
+  );
 
 const formatHomeTime = (
   value: string | null | undefined,
@@ -220,7 +271,8 @@ function AttentionPanel({ data }: { data: OverviewData }) {
     for (const blocker of data.admin?.blockers ?? []) add(translateHomeReason(blocker.code));
     if ((data.admin?.ambiguity ?? 0) > 0) add('Existe um envio que precisa de verificação manual.');
     if ((data.admin?.investigationRequired ?? 0) > 0) add('Existe uma pendência que precisa de verificação manual.');
-    if (data.dispatches.some((dispatch) => dispatch.status === 'PROCESSING')) add('Há um envio aguardando confirmação.');
+    if (data.dispatches.some((dispatch) => dispatch.status === 'SUBMITTED')) add('Há um envio aguardando confirmação do provedor.');
+    if (data.dispatches.some((dispatch) => dispatch.status === 'AMBIGUOUS')) add('Há um envio que exige verificação manual.');
     if (data.dispatches.some((dispatch) => dispatch.status === 'FAILED')) add('Há um envio que não foi realizado.');
     if (data.health && data.health.status !== 'ok') add('A API informou que precisa de atenção.');
     if (!data.scheduler || data.scheduler.status !== 'registered') add('A agenda automática não está disponível neste momento.');
@@ -259,18 +311,27 @@ function LatestSend({ dispatch, timezone, available }: { dispatch: WhatsAppDispa
     return <OpsEmpty title="Nenhum envio registrado" message="O histórico aparecerá aqui quando houver um envio." />;
   }
 
+  const groupName = dispatchGroupName(dispatch);
+  const instanceName = dispatchInstanceName(dispatch);
+  const groupFingerprint = dispatchGroupFingerprint(dispatch);
+  const homeTimestamp = dispatchHomeTimestamp(dispatch);
+
   return (
     <div className="ops-home-latest-card">
       <div className="ops-home-latest-product">
         <SafeProductImage className="ops-product-image" src={dispatch.product?.urlImagem} />
         <div className="min-w-0">
           <strong>{dispatch.product?.nome ?? 'Produto não informado'}</strong>
-          <span>{dispatch.destination?.name ?? 'Grupo não informado'}</span>
+          <span>{groupName}</span>
+          {groupFingerprint ? (
+            <span className="ops-mono text-xs">{groupFingerprint}</span>
+          ) : null}
+          {instanceName ? <span>Instância: {instanceName}</span> : null}
         </div>
       </div>
       <div className="ops-home-latest-meta">
         <OpsBadge tone={toneForStatus(dispatch.status)}>{translateHomeDispatchStatus(dispatch.status)}</OpsBadge>
-        <span>{formatHomeTime(dispatch.sentAt ?? dispatch.createdAt, timezone, 'medium')}</span>
+        <time dateTime={homeTimestamp ?? undefined}>{formatHomeTime(homeTimestamp, timezone, 'medium')}</time>
       </div>
       <Link className="ops-button ops-button--secondary" href="/envios">
         Ver histórico <ArrowUpRight size={14} aria-hidden="true" />
@@ -290,6 +351,17 @@ function DeliveryJourney({ dispatch, available }: { dispatch: WhatsAppDispatch |
   const candidateReady = Boolean(dispatch.generatedCopy?.createdFromCandidateId);
   const copyReady = Boolean(dispatch.generatedCopy);
   const isFailed = dispatch.status === 'FAILED';
+  const groupName = dispatchGroupName(dispatch);
+  const groupFingerprint = dispatchGroupFingerprint(dispatch);
+  const instanceName = dispatchInstanceName(dispatch);
+  const groupDetails = [
+    groupName,
+    groupFingerprint ? `Fingerprint: ${groupFingerprint}` : null,
+    instanceName ? `Instância: ${instanceName}` : null,
+  ]
+    .filter((value): value is string => value !== null)
+    .join(' · ');
+  const groupAvailable = dispatchHasGroupName(dispatch);
   const stateFor = (available: boolean, complete: boolean) => {
     if (!available) return 'missing';
     if (complete) return 'complete';
@@ -299,9 +371,9 @@ function DeliveryJourney({ dispatch, available }: { dispatch: WhatsAppDispatch |
     { label: 'Produto', value: dispatch.product?.nome ?? 'Não disponível', available: Boolean(dispatch.product), complete: Boolean(dispatch.product), Icon: Package },
     { label: 'Oferta selecionada', value: candidateReady ? 'Selecionada' : 'Não disponível', available: candidateReady, complete: candidateReady, Icon: Tag },
     { label: 'Texto preparado', value: copyReady ? 'Pronto para o envio' : 'Não disponível', available: copyReady, complete: copyReady, Icon: FileText },
-    { label: 'Envio', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: dispatch.status === 'SENT', Icon: Send },
-    { label: 'Grupo', value: dispatch.destination?.name ?? 'Não disponível', available: Boolean(dispatch.destination), complete: Boolean(dispatch.destination), Icon: UsersRound },
-    { label: 'Enviado', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: dispatch.status === 'SENT', Icon: CheckCircle2 },
+    { label: 'Envio', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: isConfirmedDispatchStatus(dispatch.status), Icon: Send },
+    { label: 'Grupo', value: groupDetails, available: groupAvailable, complete: groupAvailable, Icon: UsersRound },
+    { label: 'Enviado', value: translateHomeDispatchStatus(dispatch.status), available: true, complete: isConfirmedDispatchStatus(dispatch.status), Icon: CheckCircle2 },
   ] as const;
 
   return (
@@ -336,9 +408,26 @@ function RecentActivity({
     }));
     const dispatchRows = dispatches.map((dispatch) => ({
       id: `dispatch-${dispatch.id}`,
-      time: dispatch.sentAt ?? dispatch.createdAt ?? null,
+      time:
+        dispatch.readAt ??
+        dispatch.deliveredAt ??
+        dispatch.sentAt ??
+        dispatch.submittedAt ??
+        dispatch.createdAt ??
+        null,
       title: translateHomeDispatchStatus(dispatch.status),
-      detail: `${dispatch.product?.nome ?? 'Produto não informado'} · ${dispatch.destination?.name ?? 'Grupo não informado'}`,
+      detail: [
+        dispatch.product?.nome ?? 'Produto não informado',
+        dispatchGroupName(dispatch),
+        dispatchGroupFingerprint(dispatch)
+          ? `Fingerprint: ${dispatchGroupFingerprint(dispatch)}`
+          : null,
+        dispatchInstanceName(dispatch)
+          ? `Instância: ${dispatchInstanceName(dispatch)}`
+          : null,
+      ]
+        .filter((value): value is string => value !== null)
+        .join(' · '),
       status: dispatch.status,
     }));
     return [...executionRows, ...dispatchRows]

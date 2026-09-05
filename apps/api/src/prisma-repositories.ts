@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   Prisma,
   type DatabaseClient,
@@ -103,6 +104,14 @@ import type {
   WhatsAppDispatchRecord,
   WhatsAppDispatchRepository,
   WhatsAppDispatchStatus,
+  WhatsAppDeliveryEventApplyResult,
+  WhatsAppDeliveryEventInboxInput,
+  WhatsAppDeliveryEventInboxRecord,
+  WhatsAppDeliveryEventInboxRepository,
+  WhatsAppDeliveryEventInboxState,
+  WhatsAppDeliveryEventInput,
+  WhatsAppDeliveryEventReplay,
+  WhatsAppDeliveryEventStatus,
   WhatsAppGroupCreateData,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupFilters,
@@ -831,7 +840,8 @@ const catalogSql = (filters: OperationalCatalogFilters) => {
           COUNT(DISTINCT dispatch."destinationId") AS "globalSentDestinationCount",
           MAX(dispatch."sentAt") AS "globalLastSentAt"
         FROM "WhatsAppDispatch" dispatch
-        WHERE dispatch."productId" = p."id" AND dispatch."status" = 'SENT'
+        WHERE dispatch."productId" = p."id"
+          AND dispatch."status" IN ('SENT', 'DELIVERED', 'READ')
       ) global_delivery ON true
       LEFT JOIN LATERAL (
         SELECT
@@ -839,7 +849,7 @@ const catalogSql = (filters: OperationalCatalogFilters) => {
           MAX(dispatch."sentAt") AS "scopedLastSentAt"
         FROM "WhatsAppDispatch" dispatch
         WHERE dispatch."productId" = p."id"
-          AND dispatch."status" = 'SENT'
+          AND dispatch."status" IN ('SENT', 'DELIVERED', 'READ')
           AND (${destinationId}::text IS NULL OR dispatch."destinationId" = ${destinationId})
       ) delivery ON true
       ${whereClause}
@@ -876,6 +886,9 @@ const catalogDispatchInclude = {
   commercialPipelineRun: {
     select: {
       id: true,
+      groupName: true,
+      groupFingerprint: true,
+      instanceName: true,
       finalStatus: true,
       investigationRequired: true,
     },
@@ -898,11 +911,17 @@ const catalogDispatchFromRecord = (
     type: dispatch.destination.type,
   },
   instanceName: dispatch.instanceName,
+  submittedAt: dispatch.submittedAt,
   sentAt: dispatch.sentAt,
+  deliveredAt: dispatch.deliveredAt,
+  readAt: dispatch.readAt,
   attemptCount: dispatch.attemptCount,
   run: dispatch.commercialPipelineRun
     ? {
         id: dispatch.commercialPipelineRun.id,
+        groupName: dispatch.commercialPipelineRun.groupName,
+        groupFingerprint: dispatch.commercialPipelineRun.groupFingerprint,
+        instanceName: dispatch.commercialPipelineRun.instanceName,
         finalStatus: dispatch.commercialPipelineRun.finalStatus,
         investigationRequired:
           dispatch.commercialPipelineRun.investigationRequired,
@@ -943,7 +962,7 @@ export class PrismaAnalyticsRepository implements AnalyticsRepository {
 
   totalSentDispatches(): Promise<number> {
     return this.prisma.whatsAppDispatch.count({
-      where: { status: 'SENT' },
+      where: { status: { in: ['SENT', 'DELIVERED', 'READ'] } },
     });
   }
 
@@ -1422,13 +1441,19 @@ export class PrismaShopeeOfferRepository
         catalogCurrentCandidatesSql([input.id]),
       ),
       this.prisma.whatsAppDispatch.aggregate({
-        where: { productId: input.id, status: 'SENT' },
+        where: {
+          productId: input.id,
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
+        },
         _count: { _all: true },
         _max: { sentAt: true },
       }),
       this.prisma.whatsAppDispatch.groupBy({
         by: ['destinationId'],
-        where: { productId: input.id, status: 'SENT' },
+        where: {
+          productId: input.id,
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
+        },
       }),
       this.prisma.whatsAppDispatch.findMany({
         where: { productId: input.id },
@@ -2806,7 +2831,7 @@ export class PrismaCommercialPromotionRepository
     const rows = await this.prisma.whatsAppDispatch.findMany({
       where: {
         productId: { in: input.productIds },
-        status: 'SENT',
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
         sentAt: { gte: input.sentAtOrAfter },
         destination: {
           type: 'GROUP',
@@ -2966,7 +2991,7 @@ export class PrismaCommercialPromotionRepository
             transaction.whatsAppDispatch.findFirst({
               where: {
                 productId: { in: selectedProductIds },
-                status: 'SENT',
+                status: { in: ['SENT', 'DELIVERED', 'READ'] },
                 sentAt: { gte: input.dedupeSince },
                 destination: {
                   type: 'GROUP',
@@ -4285,7 +4310,12 @@ export class PrismaCommercialPipelineRunRepository
     investigationRequired: boolean;
     dispatch: { status: string } | null;
   }) {
-    if (current.finalStatus === 'SENT' || current.dispatch?.status === 'SENT') {
+    if (
+      current.finalStatus === 'SENT' ||
+      current.dispatch?.status === 'SENT' ||
+      current.dispatch?.status === 'DELIVERED' ||
+      current.dispatch?.status === 'READ'
+    ) {
       return 'SENT' as const;
     }
     if (
@@ -4339,7 +4369,7 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
         where: {
           productId,
           destinationId: groupId,
-          status: 'SENT',
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
         },
         select: { id: true },
       }),
@@ -4360,7 +4390,7 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
     const dispatch = await this.prisma.whatsAppDispatch.findFirst({
       where: {
         destinationId: groupId,
-        status: 'SENT',
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
         sentAt: { not: null },
       },
       orderBy: { sentAt: 'desc' },
@@ -5427,7 +5457,7 @@ export class PrismaManualPublicationRequestRepository implements ManualPublicati
         };
       }
       const sentWhere = {
-        status: 'SENT' as const,
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
         sentAt: { gte: input.dayStartsAt, lt: input.dayEndsAt },
         destination: { type: 'GROUP' as const },
       };
@@ -5436,7 +5466,11 @@ export class PrismaManualPublicationRequestRepository implements ManualPublicati
         status: { in: ['PROCESSING', 'QUEUED'] as const },
         OR: [
           { dispatchId: null },
-          { dispatch: { status: { not: 'SENT' as const } } },
+          {
+            dispatch: {
+              status: { notIn: ['SENT', 'DELIVERED', 'READ'] },
+            },
+          },
         ],
       };
       const [sentGlobal, sentGroup, activeGlobal, activeGroup] =
@@ -6225,7 +6259,8 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
     const [
       activeExecutions,
       activeReservations,
-      ambiguity,
+      ambiguousRuns,
+      ambiguousDispatches,
       investigationRequired,
       pendingDispatches,
       pendingOutboxes,
@@ -6248,11 +6283,14 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
           OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
         },
       }),
+      this.prisma.whatsAppDispatch.count({
+        where: { status: 'AMBIGUOUS' },
+      }),
       this.prisma.commercialPipelineRun.count({
         where: { investigationRequired: true },
       }),
       this.prisma.whatsAppDispatch.count({
-        where: { status: { in: ['PENDING', 'PROCESSING'] } },
+        where: { status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] } },
       }),
       this.prisma.commercialDispatchOutbox.count({
         where: { status: 'PENDING' },
@@ -6262,7 +6300,7 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
     return {
       activeExecutions,
       activeReservations,
-      ambiguity,
+      ambiguity: ambiguousRuns + ambiguousDispatches,
       investigationRequired,
       pendingDispatches,
       pendingOutboxes,
@@ -6334,7 +6372,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
     dayEndsAt: Date;
   }) {
     const sentDuringDay = {
-      status: 'SENT' as const,
+      status: { in: ['SENT', 'DELIVERED', 'READ'] },
       sentAt: { gte: dayStartsAt, lt: dayEndsAt },
       destination: { type: 'GROUP' as const },
     };
@@ -6346,7 +6384,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       }),
       this.prisma.whatsAppDispatch.findFirst({
         where: {
-          status: 'SENT',
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
           sentAt: { not: null },
           destination: { type: 'GROUP' },
         },
@@ -6356,7 +6394,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       groupId
         ? this.prisma.whatsAppDispatch.findFirst({
             where: {
-              status: 'SENT',
+              status: { in: ['SENT', 'DELIVERED', 'READ'] },
               sentAt: { not: null },
               destination: { type: 'GROUP' },
               destinationId: groupId,
@@ -6417,7 +6455,11 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
           OR: [
             { mode: 'CONFIRMED', status: 'STARTED' },
             { finalStatus: 'PENDING' },
-            { dispatch: { status: { in: ['PENDING', 'PROCESSING'] } } },
+            {
+              dispatch: {
+                status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+              },
+            },
           ],
           ...(excludedRunId ? { id: { not: excludedRunId } } : {}),
         },
@@ -8034,8 +8076,214 @@ export class PrismaWhatsAppGroupDirectoryRepository implements WhatsAppGroupDire
   }
 }
 
+export const fingerprintWhatsAppDeliveryEvent = (
+  input: Pick<
+    WhatsAppDeliveryEventInboxInput,
+    'instanceName' | 'externalMessageId' | 'status'
+  >,
+) =>
+  createHash('sha256')
+    .update(
+      [input.instanceName, input.externalMessageId, input.status].join('\u0000'),
+      'utf8',
+    )
+    .digest('hex');
+
+export class PrismaWhatsAppDeliveryEventInboxRepository
+  implements WhatsAppDeliveryEventInboxRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  async record(
+    input: WhatsAppDeliveryEventInboxInput,
+  ): Promise<WhatsAppDeliveryEventInboxRecord> {
+    const fingerprint = fingerprintWhatsAppDeliveryEvent(input);
+    await this.prisma.whatsAppDeliveryEventInbox.createMany({
+      data: {
+        fingerprint,
+        instanceName: input.instanceName,
+        externalMessageId: input.externalMessageId,
+        status: input.status,
+        occurredAt: input.occurredAt,
+        receivedAt: input.receivedAt ?? new Date(),
+      },
+      skipDuplicates: true,
+    });
+    const record = await this.prisma.whatsAppDeliveryEventInbox.findUniqueOrThrow(
+      { where: { fingerprint } },
+    );
+    return {
+      id: record.id,
+      fingerprint: record.fingerprint,
+      instanceName: record.instanceName,
+      externalMessageId: record.externalMessageId,
+      status: record.status as WhatsAppDeliveryEventStatus,
+      occurredAt: record.occurredAt,
+      receivedAt: record.receivedAt,
+      state: record.state as WhatsAppDeliveryEventInboxState,
+      appliedAt: record.appliedAt,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  async markProcessed(input: {
+    fingerprint: string;
+    state: Exclude<WhatsAppDeliveryEventInboxState, 'PENDING'>;
+    processedAt: Date;
+  }): Promise<boolean> {
+    const result = await this.prisma.whatsAppDeliveryEventInbox.updateMany({
+      where: { fingerprint: input.fingerprint, state: 'PENDING' },
+      data: { state: input.state, appliedAt: input.processedAt },
+    });
+    return result.count === 1;
+  }
+}
+
+type DeliveryDispatchSnapshot = {
+  id: string;
+  status: WhatsAppDispatchStatus;
+  sentAt: Date | null;
+  deliveredAt: Date | null;
+  readAt: Date | null;
+};
+
+const deliveryStage = (status: WhatsAppDispatchStatus) => {
+  switch (status) {
+    case 'SUBMITTED':
+      return 0;
+    case 'SENT':
+      return 1;
+    case 'DELIVERED':
+      return 2;
+    case 'READ':
+      return 3;
+    default:
+      return -1;
+  }
+};
+
+const eventAlreadySatisfied = (
+  event: WhatsAppDeliveryEventStatus,
+  dispatch: DeliveryDispatchSnapshot,
+) => {
+  switch (event) {
+    case 'PENDING':
+      return true;
+    case 'SERVER_ACK':
+      return deliveryStage(dispatch.status) >= 1 && dispatch.sentAt !== null;
+    case 'DELIVERY_ACK':
+      return (
+        deliveryStage(dispatch.status) >= 2 && dispatch.deliveredAt !== null
+      );
+    case 'READ':
+      return deliveryStage(dispatch.status) >= 3 && dispatch.readAt !== null;
+    case 'ERROR':
+      return (
+        dispatch.status === 'FAILED' || deliveryStage(dispatch.status) >= 1
+      );
+  }
+};
+
+const eventBlockedByTerminalState = (
+  event: WhatsAppDeliveryEventStatus,
+  dispatch: DeliveryDispatchSnapshot,
+) =>
+  (dispatch.status === 'FAILED' || dispatch.status === 'AMBIGUOUS') &&
+  !eventAlreadySatisfied(event, dispatch);
+
+const deliverySnapshotFromRecord = (
+  dispatch: WhatsAppDispatchRecord,
+): DeliveryDispatchSnapshot => ({
+  id: dispatch.id,
+  status: dispatch.status,
+  sentAt: dispatch.sentAt ?? null,
+  deliveredAt: dispatch.deliveredAt ?? null,
+  readAt: dispatch.readAt ?? null,
+});
+
 export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchRepository {
   constructor(private readonly prisma: DatabaseClient) {}
+
+  private async readDeliveryDispatch(id: string) {
+    const dispatch = (await this.prisma.whatsAppDispatch.findUniqueOrThrow({
+      where: { id },
+    })) as WhatsAppDispatchRecord;
+    return {
+      dispatch,
+      snapshot: deliverySnapshotFromRecord(dispatch),
+    };
+  }
+
+  private async processPendingDeliveryEvent(
+    event: WhatsAppDeliveryEventInboxRecord,
+  ): Promise<WhatsAppDeliveryEventApplyResult> {
+    return this.applyDeliveryEvent({
+      instanceName: event.instanceName,
+      externalMessageId: event.externalMessageId,
+      status: event.status,
+      occurredAt: event.occurredAt,
+    });
+  }
+
+  private async drainPendingDeliveryEvents(
+    dispatch: WhatsAppDispatchRecord,
+  ): Promise<WhatsAppDispatchRecord> {
+    if (
+      !dispatch.instanceName ||
+      !dispatch.externalMessageId ||
+      !this.prisma.whatsAppDeliveryEventInbox
+    ) {
+      return dispatch;
+    }
+    const pending = await this.prisma.whatsAppDeliveryEventInbox.findMany({
+      where: {
+        instanceName: dispatch.instanceName,
+        externalMessageId: dispatch.externalMessageId,
+        state: 'PENDING',
+      },
+      orderBy: [{ occurredAt: 'asc' }, { receivedAt: 'asc' }, { id: 'asc' }],
+    });
+    for (const event of pending) {
+      const result = await this.processPendingDeliveryEvent(
+        event as WhatsAppDeliveryEventInboxRecord,
+      );
+      if (
+        result.kind === 'AMBIGUOUS' ||
+        (result.kind === 'NOOP' && !result.dispatch)
+      ) {
+        await this.prisma.whatsAppDeliveryEventInbox.updateMany({
+          where: { id: event.id, state: 'PENDING' },
+          data: { state: 'AMBIGUOUS', appliedAt: new Date() },
+        });
+      }
+    }
+    return (await this.prisma.whatsAppDispatch.findUniqueOrThrow({
+      where: { id: dispatch.id },
+    })) as WhatsAppDispatchRecord;
+  }
+
+  async replayPendingDeliveryEvents(): Promise<WhatsAppDeliveryEventReplay[]> {
+    if (!this.prisma.whatsAppDeliveryEventInbox) return [];
+    const pending = await this.prisma.whatsAppDeliveryEventInbox.findMany({
+      where: { state: 'PENDING' },
+      orderBy: [{ occurredAt: 'asc' }, { receivedAt: 'asc' }, { id: 'asc' }],
+    });
+    const replayed: WhatsAppDeliveryEventReplay[] = [];
+    for (const event of pending) {
+      const result = await this.processPendingDeliveryEvent(
+        event as WhatsAppDeliveryEventInboxRecord,
+      );
+      if (
+        result.kind === 'UPDATED' ||
+        result.kind === 'NOOP' ||
+        result.kind === 'AMBIGUOUS'
+      ) {
+        replayed.push({ fingerprint: event.fingerprint, result });
+      }
+    }
+    return replayed;
+  }
 
   async createPending(
     data: WhatsAppDispatchCreateData,
@@ -8065,7 +8313,11 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         status: true,
         attemptCount: true,
         errorMessage: true,
+        submittedAt: true,
+        confirmationDeadlineAt: true,
         sentAt: true,
+        deliveredAt: true,
+        readAt: true,
         createdAt: true,
         updatedAt: true,
         destination: {
@@ -8221,6 +8473,13 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         product: true,
         generatedCopy: true,
         destination: { include: whatsappGroupAssignmentInclude },
+        commercialPipelineRun: {
+          select: {
+            groupName: true,
+            groupFingerprint: true,
+            instanceName: true,
+          },
+        },
       },
     });
     return record
@@ -8237,7 +8496,16 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
     filters: WhatsAppDispatchFilters,
   ): Promise<WhatsAppDispatchDetails[]> {
     const status = (
-      ['PENDING', 'PROCESSING', 'SENT', 'FAILED'] as WhatsAppDispatchStatus[]
+      [
+        'PENDING',
+        'PROCESSING',
+        'SUBMITTED',
+        'SENT',
+        'DELIVERED',
+        'READ',
+        'FAILED',
+        'AMBIGUOUS',
+      ] as WhatsAppDispatchStatus[]
     ).includes(filters.status as WhatsAppDispatchStatus)
       ? (filters.status as WhatsAppDispatchStatus)
       : undefined;
@@ -8252,6 +8520,13 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         product: true,
         generatedCopy: true,
         destination: { include: whatsappGroupAssignmentInclude },
+        commercialPipelineRun: {
+          select: {
+            groupName: true,
+            groupFingerprint: true,
+            instanceName: true,
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -8259,6 +8534,31 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
       ...record,
       destination: mapWhatsAppDestinationWithAssignments(
         record.destination as unknown as Record<string, unknown>,
+      ),
+    })) as WhatsAppDispatchDetails[];
+  }
+
+  async listConfirmed(): Promise<WhatsAppDispatchDetails[]> {
+    const records = await this.prisma.whatsAppDispatch.findMany({
+      where: { status: { in: ['SENT', 'DELIVERED', 'READ'] } },
+      include: {
+        product: true,
+        generatedCopy: true,
+        destination: { include: whatsappGroupAssignmentInclude },
+        commercialPipelineRun: {
+          select: {
+            groupName: true,
+            groupFingerprint: true,
+            instanceName: true,
+          },
+        },
+      },
+      orderBy: { sentAt: 'desc' },
+    });
+    return records.map((record) => ({
+      ...record,
+      destination: mapWhatsAppDestinationWithAssignments(
+        Object.fromEntries(Object.entries(record.destination)),
       ),
     })) as WhatsAppDispatchDetails[];
   }
@@ -8347,19 +8647,220 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
     });
   }
 
-  async markSent(
+  async markSubmitted(
     id: string,
-    data: { externalMessageId: string; sentAt: Date },
+    data: {
+      externalMessageId: string;
+      submittedAt: Date;
+      confirmationDeadlineAt: Date;
+    },
   ): Promise<WhatsAppDispatchRecord> {
-    return (await this.prisma.whatsAppDispatch.update({
-      where: { id },
+    const changed = await this.prisma.whatsAppDispatch.updateMany({
+      where: { id, status: 'PROCESSING', externalMessageId: null },
       data: {
-        status: 'SENT',
+        status: 'SUBMITTED',
         externalMessageId: data.externalMessageId,
-        sentAt: data.sentAt,
+        submittedAt: data.submittedAt,
+        confirmationDeadlineAt: data.confirmationDeadlineAt,
         errorMessage: null,
       },
+    });
+    if (changed.count !== 1) {
+      throw new AppError(
+        'Dispatch nao pode registrar submissao externa com seguranca',
+        'WHATSAPP_DISPATCH_SUBMISSION_PERSISTENCE_CONFLICT',
+      );
+    }
+    const submitted = (await this.prisma.whatsAppDispatch.findUniqueOrThrow({
+      where: { id },
     })) as WhatsAppDispatchRecord;
+    return this.drainPendingDeliveryEvents(submitted);
+  }
+
+  async applyDeliveryEvent(
+    input: WhatsAppDeliveryEventInput,
+  ): Promise<WhatsAppDeliveryEventApplyResult> {
+    const correlated = await this.prisma.whatsAppDispatch.findMany({
+      where: {
+        instanceName: input.instanceName,
+        externalMessageId: input.externalMessageId,
+      },
+      select: {
+        id: true,
+        status: true,
+        sentAt: true,
+        deliveredAt: true,
+        readAt: true,
+      },
+      take: 2,
+    });
+    if (correlated.length === 0) return { kind: 'NOT_FOUND' as const };
+    if (correlated.length !== 1) return { kind: 'NOOP' as const };
+
+    let current: DeliveryDispatchSnapshot = {
+      id: correlated[0].id,
+      status: correlated[0].status as WhatsAppDispatchStatus,
+      sentAt: correlated[0].sentAt ?? null,
+      deliveredAt: correlated[0].deliveredAt ?? null,
+      readAt: correlated[0].readAt ?? null,
+    };
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const readCurrent = async () => this.readDeliveryDispatch(current.id);
+      if (eventAlreadySatisfied(input.status, current)) {
+        return { kind: 'NOOP' as const, dispatch: (await readCurrent()).dispatch };
+      }
+
+      const transition =
+        input.status === 'SERVER_ACK' && current.status === 'SUBMITTED'
+          ? {
+              where: {
+                id: current.id,
+                status: 'SUBMITTED' as const,
+                sentAt: current.sentAt,
+              },
+              data: {
+                status: 'SENT' as const,
+                ...(current.sentAt === null
+                  ? { sentAt: input.occurredAt }
+                  : {}),
+                confirmationDeadlineAt: null,
+                errorMessage: null,
+              },
+            }
+          : input.status === 'DELIVERY_ACK' &&
+              (current.status === 'SUBMITTED' || current.status === 'SENT')
+            ? {
+                where: {
+                  id: current.id,
+                  status: { in: ['SUBMITTED', 'SENT'] as const },
+                  sentAt: current.sentAt,
+                },
+                data: {
+                  status: 'DELIVERED' as const,
+                  ...(current.sentAt === null
+                    ? { sentAt: input.occurredAt }
+                    : {}),
+                  ...(current.deliveredAt === null
+                    ? { deliveredAt: input.occurredAt }
+                    : {}),
+                  confirmationDeadlineAt: null,
+                  errorMessage: null,
+                },
+              }
+            : input.status === 'READ' &&
+                (current.status === 'SUBMITTED' ||
+                  current.status === 'SENT' ||
+                  current.status === 'DELIVERED')
+              ? {
+                  where: {
+                    id: current.id,
+                    status: {
+                      in: ['SUBMITTED', 'SENT', 'DELIVERED'] as const,
+                    },
+                    sentAt: current.sentAt,
+                  },
+                  data: {
+                    status: 'READ' as const,
+                    ...(current.sentAt === null
+                      ? { sentAt: input.occurredAt }
+                      : {}),
+                    ...(current.deliveredAt === null
+                      ? { deliveredAt: input.occurredAt }
+                      : {}),
+                    ...(current.readAt === null
+                      ? { readAt: input.occurredAt }
+                      : {}),
+                    confirmationDeadlineAt: null,
+                    errorMessage: null,
+                  },
+                }
+              : input.status === 'ERROR' &&
+                  current.status === 'SUBMITTED' &&
+                  current.sentAt === null
+                ? {
+                    where: {
+                      id: current.id,
+                      status: 'SUBMITTED' as const,
+                      sentAt: null,
+                    },
+                    data: {
+                      status: 'FAILED' as const,
+                      confirmationDeadlineAt: null,
+                      errorMessage:
+                        'Evolution confirmou falha antes do server ACK',
+                    },
+                  }
+                : null;
+
+      if (!transition) {
+        const read = await readCurrent();
+        if (eventAlreadySatisfied(input.status, read.snapshot)) {
+          return { kind: 'NOOP' as const, dispatch: read.dispatch };
+        }
+        return eventBlockedByTerminalState(input.status, read.snapshot)
+          ? { kind: 'AMBIGUOUS' as const, dispatch: read.dispatch }
+          : { kind: 'PENDING' as const, dispatch: read.dispatch };
+      }
+
+      const changed = await this.prisma.whatsAppDispatch.updateMany({
+        where: transition.where,
+        data: transition.data,
+      });
+      if (changed.count === 1) {
+        return {
+          kind: 'UPDATED' as const,
+          dispatch: (await readCurrent()).dispatch,
+        };
+      }
+
+      const read = await readCurrent();
+      current = read.snapshot;
+      if (eventAlreadySatisfied(input.status, current)) {
+        return { kind: 'NOOP' as const, dispatch: read.dispatch };
+      }
+      if (eventBlockedByTerminalState(input.status, current)) {
+        return { kind: 'AMBIGUOUS' as const, dispatch: read.dispatch };
+      }
+      if (attempt === 2) {
+        return { kind: 'PENDING' as const, dispatch: read.dispatch };
+      }
+    }
+
+    return { kind: 'PENDING' as const, dispatch: (await this.readDeliveryDispatch(current.id)).dispatch };
+  }
+
+  async expireSubmittedConfirmations(now: Date) {
+    const candidates = await this.prisma.whatsAppDispatch.findMany({
+      where: {
+        status: 'SUBMITTED',
+        confirmationDeadlineAt: { lte: now },
+      },
+      select: { id: true },
+    });
+    const expired: WhatsAppDispatchRecord[] = [];
+    for (const candidate of candidates) {
+      const changed = await this.prisma.whatsAppDispatch.updateMany({
+        where: {
+          id: candidate.id,
+          status: 'SUBMITTED',
+          confirmationDeadlineAt: { lte: now },
+        },
+        data: {
+          status: 'AMBIGUOUS',
+          confirmationDeadlineAt: null,
+          errorMessage: 'Confirmacao de entrega expirou; investigacao manual obrigatoria',
+        },
+      });
+      if (changed.count === 1) {
+        expired.push(
+          (await this.prisma.whatsAppDispatch.findUniqueOrThrow({
+            where: { id: candidate.id },
+          })) as WhatsAppDispatchRecord,
+        );
+      }
+    }
+    return expired;
   }
 
   async markFailed(

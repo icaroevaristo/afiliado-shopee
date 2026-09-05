@@ -102,6 +102,13 @@ import type {
 } from './commercial-promotion-copy-generation-service';
 import { CommercialAutomationCandidateFlowService } from './commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from './commercial-message-draft-service';
+import {
+  WhatsAppDeliveryConfirmationService,
+  parseEvolutionDeliveryOccurredAt,
+  parseEvolutionDeliveryStatus,
+  requireDeliveryEventString,
+} from './whatsapp-delivery-confirmation-service';
+import { ManualPublicationLifecycleFinalizer } from './manual-publication-lifecycle-finalizer';
 
 export type BuildAppOptions = {
   logger?: boolean;
@@ -238,6 +245,10 @@ export type BuildAppOptions = {
     timezone: string;
     mode: CommercialAutomationMode;
   };
+  deliveryConfirmationService?: Pick<
+    WhatsAppDeliveryConfirmationService,
+    'consume' | 'expireDue'
+  >;
 };
 
 type PipelineJobLike = {
@@ -780,6 +791,7 @@ const parseCommercialPipelineInput = (
 
 export const sanitizeDispatchDestination = (destination: {
   destination: string;
+  name?: string;
   type?: 'INDIVIDUAL' | 'GROUP';
   active?: boolean;
   available?: boolean;
@@ -789,6 +801,7 @@ export const sanitizeDispatchDestination = (destination: {
   destination.type === 'GROUP'
     ? {
         type: destination.type,
+        ...(destination.name ? { name: destination.name } : {}),
         active: destination.active ?? false,
         available: destination.available ?? false,
         fingerprint: destination.fingerprint,
@@ -798,6 +811,25 @@ export const sanitizeDispatchDestination = (destination: {
         ...destination,
         destination: maskEvolutionDestination(destination.destination),
       };
+
+export const sanitizeDispatchForCommonUi = <T extends {
+  externalMessageId?: string | null;
+  destination: {
+    destination: string;
+    type?: 'INDIVIDUAL' | 'GROUP';
+    active?: boolean;
+    available?: boolean;
+    name?: string;
+    fingerprint?: string | null;
+    sourceInstanceName?: string | null;
+  };
+}>(dispatch: T) => {
+  const { externalMessageId: _externalMessageId, ...safeDispatch } = dispatch;
+  return {
+    ...safeDispatch,
+    destination: sanitizeDispatchDestination(dispatch.destination),
+  };
+};
 
 export const buildApp = async (options: BuildAppOptions = {}) => {
   const app = Fastify({ logger: options.logger ?? true });
@@ -1168,6 +1200,27 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     });
     return operationalAdminService;
   };
+  let deliveryConfirmationService = options.deliveryConfirmationService;
+  const getDeliveryConfirmationService = () => {
+    if (!repositories.whatsappDeliveryEvents) {
+      throw new AppError(
+        'Inbox duravel de eventos de entrega indisponivel',
+        'WHATSAPP_DELIVERY_EVENT_INBOX_UNAVAILABLE',
+      );
+    }
+    deliveryConfirmationService ??= new WhatsAppDeliveryConfirmationService({
+      dispatches: repositories.whatsappDispatches,
+      deliveryEvents: repositories.whatsappDeliveryEvents,
+      runs: repositories.commercialRuns,
+      promotionCandidates: repositories.commercialPromotions,
+      manualLifecycleFinalizer: new ManualPublicationLifecycleFinalizer(
+        repositories.manualPublicationRequests,
+        { logger: app.log },
+      ),
+      logger: app.log,
+    });
+    return deliveryConfirmationService;
+  };
 
   const allowedDashboardOrigin = 'http://127.0.0.1:3000';
   await app.register(cors, {
@@ -1226,6 +1279,90 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
   });
 
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
+
+  app.post('/whatsapp/events/messages.update', async (request, reply) => {
+    const body = request.body;
+    const envelope =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : null;
+    const data =
+      envelope?.data &&
+      typeof envelope.data === 'object' &&
+      !Array.isArray(envelope.data)
+        ? (envelope.data as Record<string, unknown>)
+        : envelope;
+    if (!envelope || !data) {
+      return reply.status(400).send({
+        error: 'WHATSAPP_DELIVERY_EVENT_INVALID',
+        message: 'Evento de confirmacao de entrega invalido',
+      });
+    }
+    const key =
+      data.key && typeof data.key === 'object' && !Array.isArray(data.key)
+        ? (data.key as Record<string, unknown>)
+        : null;
+    let instanceName: string;
+    let externalMessageId: string;
+    try {
+      instanceName = requireDeliveryEventString(
+        envelope.instance ?? data.instanceName ?? data.instance,
+        'instance',
+      );
+      externalMessageId = requireDeliveryEventString(
+        key?.id ?? data.keyId ?? data.messageId,
+        'message_id',
+      );
+    } catch (error) {
+      const code =
+        error instanceof AppError ? error.code : 'WHATSAPP_DELIVERY_EVENT_INVALID';
+      return reply.status(400).send({
+        error: code,
+        message: 'Evento de confirmacao de entrega invalido',
+      });
+    }
+    const update =
+      data.update &&
+      typeof data.update === 'object' &&
+      !Array.isArray(data.update)
+        ? (data.update as Record<string, unknown>)
+        : null;
+    const status = parseEvolutionDeliveryStatus(data.status ?? update?.status);
+    if (!status) {
+      request.log.info(
+        {
+          event: 'whatsapp.delivery-confirmation.unknown-status',
+          instanceName,
+        },
+        'Unknown WhatsApp delivery status ignored',
+      );
+      return { accepted: true, changed: false, reason: 'UNKNOWN_STATUS' };
+    }
+    const receivedAt = new Date();
+    const result = await getDeliveryConfirmationService().consume({
+      instanceName,
+      externalMessageId,
+      status,
+      occurredAt: parseEvolutionDeliveryOccurredAt(
+        data.messageTimestamp ??
+          data.timestamp ??
+          envelope.timestamp ??
+          key?.messageTimestamp,
+        receivedAt,
+      ),
+      receivedAt,
+    });
+    return {
+      accepted: true,
+      changed: result.kind === 'UPDATED',
+      reason: result.kind,
+    };
+  });
+
+  app.post('/whatsapp/delivery-confirmations/expire', async () => {
+    const result = await getDeliveryConfirmationService().expireDue();
+    return { accepted: true, ...result };
+  });
 
   app.post('/commercial/niches', async (request, reply) => {
     try {
@@ -3023,10 +3160,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       destinationId: query.destinationId,
       productId: query.productId,
     });
-    return dispatches.map((dispatch) => ({
-      ...dispatch,
-      destination: sanitizeDispatchDestination(dispatch.destination),
-    }));
+    return dispatches.map(sanitizeDispatchForCommonUi);
   });
 
   app.get('/whatsapp/dispatches/:id', async (request, reply) => {
@@ -3038,10 +3172,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return reply
         .status(404)
         .send({ error: 'DISPATCH_NOT_FOUND', message: 'Envio não encontrado' });
-    return {
-      ...dispatch,
-      destination: sanitizeDispatchDestination(dispatch.destination),
-    };
+    return sanitizeDispatchForCommonUi(dispatch);
   });
 
   app.addHook('onClose', async () => {

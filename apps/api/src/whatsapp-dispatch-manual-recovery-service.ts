@@ -78,7 +78,7 @@ const assertRetryProgressIsProven = (
   }
   if (state === 'completed') {
     return (
-      inspection.dispatchStatus === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(inspection.dispatchStatus) &&
       inspection.attemptCount === 2 &&
       Boolean(inspection.externalMessageId) &&
       Boolean(inspection.sentAt) &&

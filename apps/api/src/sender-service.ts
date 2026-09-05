@@ -35,7 +35,11 @@ export type SenderServiceOptions = {
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   instanceName?: string;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
+  /** Bounded window for an Evolution MESSAGES_UPDATE confirmation. */
+  confirmationTimeoutMs?: number;
 };
+
+export const DEFAULT_WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15 * 60_000;
 
 const AMBIGUOUS_PROVIDER_ERROR_CODES = new Set([
   'EVOLUTION_TIMEOUT',
@@ -71,7 +75,20 @@ export const buildWhatsAppPublicMessage = (copy: {
     .join('\n\n');
 
 export class SenderService {
-  constructor(private readonly options: SenderServiceOptions) {}
+  private readonly confirmationTimeoutMs: number;
+
+  constructor(private readonly options: SenderServiceOptions) {
+    const timeout =
+      options.confirmationTimeoutMs ??
+      DEFAULT_WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeout) || timeout <= 0) {
+      throw new AppError(
+        'Janela de confirmacao de entrega invalida',
+        'WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_INVALID',
+      );
+    }
+    this.confirmationTimeoutMs = timeout;
+  }
 
   async sendDispatch(dispatchId: string): Promise<WhatsAppDispatchRecord> {
     this.options.logger.info(
@@ -89,7 +106,13 @@ export class SenderService {
       );
     }
 
-    if (dispatch.status === 'SENT') return dispatch;
+    if (
+      dispatch.status === 'SENT' ||
+      dispatch.status === 'DELIVERED' ||
+      dispatch.status === 'READ'
+    ) {
+      return dispatch;
+    }
 
     if (dispatch.status !== 'PENDING') {
       throw new AppError(
@@ -369,17 +392,21 @@ export class SenderService {
           : {}),
       });
 
-      const updated = await this.options.dispatches.markSent(dispatch.id, {
+      const submittedAt = result.sentAt;
+      const updated = await this.options.dispatches.markSubmitted(dispatch.id, {
         externalMessageId: result.externalMessageId,
-        sentAt: result.sentAt,
+        submittedAt,
+        confirmationDeadlineAt: new Date(
+          submittedAt.getTime() + this.confirmationTimeoutMs,
+        ),
       });
 
       this.options.logger.info(
         {
-          event: 'whatsapp.dispatch.sent',
+          event: 'whatsapp.dispatch.submitted',
           dispatchId,
         },
-        'WhatsApp dispatch sent',
+        'WhatsApp dispatch submitted; awaiting delivery confirmation',
       );
       return updated;
     } catch (error) {

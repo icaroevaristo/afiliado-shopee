@@ -683,7 +683,7 @@ export const executeConfirmedWhatsAppGroupTest = async ({
       );
     }
     const success =
-      dispatch.status === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(dispatch.status) &&
       dispatch.attemptCount === 1 &&
       Boolean(dispatch.externalMessageId) &&
       Boolean(dispatch.sentAt) &&

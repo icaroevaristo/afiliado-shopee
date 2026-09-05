@@ -17,13 +17,24 @@ describe('send history display contract', () => {
       tone: 'danger',
     });
     expect(presentSendHistoryStatus('PENDING')).toMatchObject({
-      label: 'Aguardando envio',
+      label: 'Aguardando confirmação',
       tone: 'warning',
     });
     expect(presentSendHistoryStatus('PROCESSING')).toMatchObject({
-      label: 'Resultado pendente',
-      description: expect.stringContaining('confirmar com segurança'),
+      label: 'Em processamento',
       tone: 'warning',
+    });
+    expect(presentSendHistoryStatus('SUBMITTED')).toMatchObject({
+      label: 'Aguardando confirmação',
+      tone: 'warning',
+    });
+    expect(presentSendHistoryStatus('DELIVERED')).toMatchObject({
+      label: 'Entregue',
+      tone: 'success',
+    });
+    expect(presentSendHistoryStatus('AMBIGUOUS')).toMatchObject({
+      label: 'Precisa de investigação',
+      tone: 'danger',
     });
     expect(presentSendHistoryStatus('UNRECOGNIZED')).toMatchObject({
       label: 'Estado não reconhecido',
@@ -34,10 +45,14 @@ describe('send history display contract', () => {
   it('keeps filters aligned with the backend status contract', () => {
     expect(SEND_HISTORY_FILTERS).toEqual([
       { value: '', label: 'Todos' },
-      { value: 'SENT', label: 'Enviados' },
+      { value: 'SUBMITTED', label: 'Aguardando confirmação' },
+      { value: 'SENT', label: 'Confirmados pelo servidor' },
+      { value: 'DELIVERED', label: 'Entregues' },
+      { value: 'READ', label: 'Lidos' },
       { value: 'PENDING', label: 'Aguardando' },
       { value: 'FAILED', label: 'Com problema' },
-      { value: 'PROCESSING', label: 'Confirmação pendente' },
+      { value: 'PROCESSING', label: 'Em processamento' },
+      { value: 'AMBIGUOUS', label: 'Precisa de investigação' },
     ]);
   });
 
@@ -56,7 +71,7 @@ describe('send history display contract', () => {
         format,
       ),
     ).toEqual({
-      label: 'Enviado em',
+      label: 'Confirmado em',
       value: '2026-08-20T12:00:00.000Z|Data não disponível',
     });
     expect(format).toHaveBeenCalledTimes(1);
@@ -82,13 +97,35 @@ describe('send history display contract', () => {
         { status: 'SENT', sentAt: null, createdAt: '2026-08-20T11:59:00.000Z' },
         (value) => value,
       ),
-    ).toEqual({ label: 'Registrado em', value: '2026-08-20T11:59:00.000Z' });
+    ).toEqual({ label: 'Criado em', value: '2026-08-20T11:59:00.000Z' });
     expect(
       presentSendHistoryTimestamp(
         { status: 'PENDING', sentAt: null, createdAt: undefined },
         (value) => value,
       ),
     ).toEqual({ label: 'Data não disponível', value: '—' });
+  });
+
+  it('prioritizes delivery and read timestamps over the first server acknowledgement', () => {
+    expect(
+      presentSendHistoryTimestamp(
+        {
+          status: 'DELIVERED',
+          sentAt: '2026-08-20T12:00:00.000Z',
+          deliveredAt: '2026-08-20T12:01:00.000Z',
+        },
+        (value) => value,
+      ),
+    ).toEqual({ label: 'Entregue em', value: '2026-08-20T12:01:00.000Z' });
+    expect(
+      presentSendHistoryTimestamp(
+        {
+          status: 'READ',
+          readAt: '2026-08-20T12:02:00.000Z',
+        },
+        (value) => value,
+      ),
+    ).toEqual({ label: 'Lido em', value: '2026-08-20T12:02:00.000Z' });
   });
 
   it('uses only persisted error text and a safe fallback for terminal failure', () => {

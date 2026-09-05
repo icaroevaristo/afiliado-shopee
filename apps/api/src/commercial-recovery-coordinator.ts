@@ -155,6 +155,8 @@ const hasExternalUncertainty = (
     dispatchEvidenceIsUnknown ||
     dispatchHasExternalEvidence ||
     dispatch?.status === 'PROCESSING' ||
+    dispatch?.status === 'SUBMITTED' ||
+    dispatch?.status === 'AMBIGUOUS' ||
     run?.outbox?.status === 'AMBIGUOUS',
   );
 };
@@ -180,12 +182,18 @@ const isSafeExecutionRecovery = (
   if (run.mode === 'CONFIRMED' && execution.mode !== 'SEND') return false;
   if (
     run.outbox?.status === 'PENDING' ||
-    (run.outbox?.status === 'PUBLISHED' && run.dispatch?.status !== 'SENT')
+    (run.outbox?.status === 'PUBLISHED' &&
+      !['SENT', 'DELIVERED', 'READ'].includes(run.dispatch?.status ?? ''))
   ) {
     return false;
   }
   if (run.dispatch && run.dispatch.attemptCount > 0) {
-    return run.dispatch.status === 'SENT' || run.dispatch.status === 'FAILED';
+    return (
+      run.dispatch.status === 'SENT' ||
+      run.dispatch.status === 'DELIVERED' ||
+      run.dispatch.status === 'READ' ||
+      run.dispatch.status === 'FAILED'
+    );
   }
   if (run.mode === 'DRY_RUN') {
     return (
@@ -230,7 +238,7 @@ const pendingContextIsSafe = (
 const hasValidSentEvidence = (
   context: CommercialDispatchOutboxPublicationContext,
 ) =>
-  context.dispatch.status === 'SENT' &&
+  ['SENT', 'DELIVERED', 'READ'].includes(context.dispatch.status) &&
   typeof context.dispatch.externalMessageId === 'string' &&
   context.dispatch.externalMessageId.trim().length > 0 &&
   context.dispatch.sentAt instanceof Date &&
@@ -354,7 +362,7 @@ export class CommercialRecoveryCoordinator {
         continue;
       }
       if (
-        context.dispatch.status === 'SENT' ||
+        ['SENT', 'DELIVERED', 'READ'].includes(context.dispatch.status) ||
         hasPublicationUncertainty(context)
       ) {
         this.markHuman(report, true);
@@ -393,7 +401,9 @@ export class CommercialRecoveryCoordinator {
     if (
       context.run?.outbox?.status === 'PENDING' ||
       (context.run?.outbox?.status === 'PUBLISHED' &&
-        context.run.dispatch?.status !== 'SENT')
+        !['SENT', 'DELIVERED', 'READ'].includes(
+          context.run.dispatch?.status ?? '',
+        ))
     ) {
       report.noAction += 1;
       return;

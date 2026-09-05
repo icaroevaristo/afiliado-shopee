@@ -168,10 +168,16 @@ export type CatalogDispatchHistory = {
     type: WhatsAppDestinationType;
   };
   instanceName: string | null;
+  submittedAt: Date | null;
   sentAt: Date | null;
+  deliveredAt: Date | null;
+  readAt: Date | null;
   attemptCount: number;
   run: {
     id: string;
+    groupName: string | null;
+    groupFingerprint: string | null;
+    instanceName: string | null;
     finalStatus: CommercialPipelineFinalStatus | null;
     investigationRequired: boolean;
   } | null;
@@ -790,7 +796,7 @@ export type CommercialAutomationHistorySnapshot = {
   lastSentAt: Date | null;
   globalLastSentAt?: Date | null;
   groupLastSentAt?: Date | null;
-  /** Only a persisted SENT dispatch advances ordered instance rotation. */
+  /** Only a persisted confirmed dispatch advances ordered instance rotation. */
   lastSentInstanceName?: string | null;
 };
 
@@ -1821,7 +1827,45 @@ export type WhatsAppGroupFilters = {
 };
 
 export type WhatsAppDispatchStatus =
-  'PENDING' | 'PROCESSING' | 'SENT' | 'FAILED';
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'SUBMITTED'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'READ'
+  | 'FAILED'
+  | 'AMBIGUOUS';
+
+export type WhatsAppDeliveryEventStatus =
+  | 'PENDING'
+  | 'SERVER_ACK'
+  | 'DELIVERY_ACK'
+  | 'READ'
+  | 'ERROR';
+
+export type WhatsAppDeliveryEventInboxState =
+  | 'PENDING'
+  | 'APPLIED'
+  | 'AMBIGUOUS';
+
+export type WhatsAppDeliveryEventInboxInput = {
+  instanceName: string;
+  externalMessageId: string;
+  status: WhatsAppDeliveryEventStatus;
+  occurredAt: Date;
+  receivedAt?: Date;
+};
+
+export type WhatsAppDeliveryEventInboxRecord =
+  WhatsAppDeliveryEventInboxInput & {
+    id: string;
+    fingerprint: string;
+    receivedAt: Date;
+    state: WhatsAppDeliveryEventInboxState;
+    appliedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+  };
 
 export type WhatsAppDispatchCreateData = {
   id?: string;
@@ -1843,7 +1887,11 @@ export type WhatsAppDispatchRecord = WhatsAppDispatchCreateData & {
   status: WhatsAppDispatchStatus;
   attemptCount: number;
   errorMessage?: string | null;
+  submittedAt?: Date | null;
+  confirmationDeadlineAt?: Date | null;
   sentAt?: Date | null;
+  deliveredAt?: Date | null;
+  readAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
 };
@@ -1870,6 +1918,11 @@ export type CommercialDispatchCandidateDetails = Omit<
 };
 
 export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
+  commercialPipelineRun?: {
+    groupName: string | null;
+    groupFingerprint: string | null;
+    instanceName: string | null;
+  } | null;
   generatedCopy: Pick<
     GeneratedCopyRecord,
     | 'id'
@@ -1889,6 +1942,7 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
   destination: Pick<
     WhatsAppDestinationRecord,
     | 'destination'
+    | 'name'
     | 'type'
     | 'active'
     | 'paused'
@@ -2139,6 +2193,7 @@ export interface WhatsAppDispatchRepository {
   findByIdForSending(id: string): Promise<WhatsAppDispatchDetails | null>;
   findByIdWithDetails(id: string): Promise<WhatsAppDispatchDetails | null>;
   list(filters: WhatsAppDispatchFilters): Promise<WhatsAppDispatchDetails[]>;
+  listConfirmed?(): Promise<WhatsAppDispatchDetails[]>;
   markAttemptPending(id: string): Promise<boolean>;
   claimPendingForSending?(
     id: string,
@@ -2148,11 +2203,50 @@ export interface WhatsAppDispatchRepository {
     | { kind: 'NOT_PENDING' }
     | { kind: 'STICKY_INSTANCE_MISMATCH' }
   >;
-  markSent(
+  markSubmitted(
     id: string,
-    data: { externalMessageId: string; sentAt: Date },
+    data: {
+      externalMessageId: string;
+      submittedAt: Date;
+      confirmationDeadlineAt: Date;
+    },
   ): Promise<WhatsAppDispatchRecord>;
+  applyDeliveryEvent(
+    input: WhatsAppDeliveryEventInput,
+  ): Promise<WhatsAppDeliveryEventApplyResult>;
+  replayPendingDeliveryEvents?(): Promise<WhatsAppDeliveryEventReplay[]>;
+  expireSubmittedConfirmations(now: Date): Promise<WhatsAppDispatchRecord[]>;
   markFailed(id: string, errorMessage: string): Promise<WhatsAppDispatchRecord>;
+}
+
+export type WhatsAppDeliveryEventInput = {
+  instanceName: string;
+  externalMessageId: string;
+  status: WhatsAppDeliveryEventStatus;
+  occurredAt: Date;
+};
+
+export type WhatsAppDeliveryEventApplyResult =
+  | { kind: 'UPDATED'; dispatch: WhatsAppDispatchRecord }
+  | { kind: 'NOOP'; dispatch?: WhatsAppDispatchRecord }
+  | { kind: 'NOT_FOUND' }
+  | { kind: 'PENDING'; dispatch: WhatsAppDispatchRecord }
+  | { kind: 'AMBIGUOUS'; dispatch?: WhatsAppDispatchRecord };
+
+export type WhatsAppDeliveryEventReplay = {
+  fingerprint: string;
+  result: WhatsAppDeliveryEventApplyResult;
+};
+
+export interface WhatsAppDeliveryEventInboxRepository {
+  record(
+    input: WhatsAppDeliveryEventInboxInput,
+  ): Promise<WhatsAppDeliveryEventInboxRecord>;
+  markProcessed(input: {
+    fingerprint: string;
+    state: Exclude<WhatsAppDeliveryEventInboxState, 'PENDING'>;
+    processedAt: Date;
+  }): Promise<boolean>;
 }
 
 export const toProductLeadData = (produto: Product): ProductLeadData => ({

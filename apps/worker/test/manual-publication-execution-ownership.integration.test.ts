@@ -871,19 +871,19 @@ describe('manual publication execution ownership integration', () => {
             dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
             return { kind: 'CLAIMED' as const };
           }),
-          markSent: vi.fn(
+          markSubmitted: vi.fn(
             async (
               _id: string,
               data: Parameters<
                 NonNullable<
-                  WhatsAppDispatchProcessorRepositories['whatsappDispatches']['markSent']
+                  WhatsAppDispatchProcessorRepositories['whatsappDispatches']['markSubmitted']
                 >
               >[1],
             ) => {
               dispatch = {
                 ...dispatch,
                 ...data,
-                status: 'SENT',
+                status: 'SUBMITTED',
                 attemptCount: 1,
               };
               return dispatch;
@@ -952,13 +952,13 @@ describe('manual publication execution ownership integration', () => {
 
     expect(provider.sentMessages).toHaveLength(1);
     expect(dispatch).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       attemptCount: 1,
       instanceName,
     });
     expect(run).toMatchObject({
-      status: 'COMPLETED',
-      finalStatus: 'SENT',
+      status: 'STARTED',
+      finalStatus: 'PENDING',
       executionId: realExecution.id,
       instanceName,
     });

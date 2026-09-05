@@ -215,7 +215,6 @@ const dispatch: WhatsAppDispatch = {
   productId: 'product-1',
   generatedCopyId: 'copy-1',
   destinationId: 'group-1',
-  externalMessageId: 'external-1',
   status: 'SENT',
   attemptCount: 1,
   deliveryMode: 'IMAGE',
@@ -357,7 +356,7 @@ describe('DiagnosticsPage — Lote 9', () => {
     await screen.unmount();
   });
 
-  it('destaca PROCESSING e AMBIGUOUS sem oferecer retry, requeue ou recuperação', async () => {
+  it('destaca AMBIGUOUS sem oferecer retry, requeue ou recuperação', async () => {
     listExecutionsMock.mockResolvedValueOnce({
       ...executionPage,
       items: [{ ...executionPage.items[0], status: 'PROCESSING' }],
@@ -367,15 +366,14 @@ describe('DiagnosticsPage — Lote 9', () => {
       items: [{ ...outboxPage.items[0], status: 'ambiguous' }],
     });
     listDispatchesMock.mockResolvedValueOnce([
-      { ...dispatch, status: 'PROCESSING' },
+      { ...dispatch, status: 'AMBIGUOUS' },
     ]);
 
     const screen = await renderLoaded();
     const text = screen.container.textContent ?? '';
 
-    expect(text).toContain('PROCESSING');
     expect(text).toContain('AMBIGUOUS');
-    expect(text).toContain('Resultado potencialmente incerto');
+    expect(text).toContain('A confirmação não chegou no prazo');
     expect(text).toContain('Exige investigação manual');
     for (const forbidden of [
       'Retry',

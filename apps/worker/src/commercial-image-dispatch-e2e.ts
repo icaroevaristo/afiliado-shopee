@@ -831,7 +831,7 @@ export const executeCommercialImageDispatchE2E = async ({
     }
 
     const success =
-      finalDispatch.status === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(finalDispatch.status) &&
       finalDispatch.attemptCount === 1 &&
       Boolean(finalDispatch.externalMessageId) &&
       Boolean(finalDispatch.sentAt) &&

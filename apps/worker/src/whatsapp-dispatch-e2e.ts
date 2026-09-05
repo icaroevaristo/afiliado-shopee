@@ -494,7 +494,9 @@ const previousDispatchError = (dispatch: WhatsAppDispatchDetails) =>
     {
       dispatchId: dispatch.id,
       status: String(dispatch.status),
-      investigationRequired: dispatch.status !== 'SENT',
+      investigationRequired: !['SENT', 'DELIVERED', 'READ'].includes(
+        dispatch.status,
+      ),
     },
   );
 
@@ -759,7 +761,7 @@ export const executeControlledWhatsAppDispatchE2E = async ({
     validateFinalDispatch(dispatch, apiDispatch, destination);
 
     const success =
-      dispatch.status === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(dispatch.status) &&
       dispatch.attemptCount === 1 &&
       Boolean(dispatch.externalMessageId) &&
       Boolean(dispatch.sentAt) &&

@@ -21,10 +21,14 @@ export const SEND_HISTORY_FILTERS: Array<{
   label: string;
 }> = [
   { value: '', label: 'Todos' },
-  { value: 'SENT', label: 'Enviados' },
+  { value: 'SUBMITTED', label: 'Aguardando confirmação' },
+  { value: 'SENT', label: 'Confirmados pelo servidor' },
+  { value: 'DELIVERED', label: 'Entregues' },
+  { value: 'READ', label: 'Lidos' },
   { value: 'PENDING', label: 'Aguardando' },
   { value: 'FAILED', label: 'Com problema' },
-  { value: 'PROCESSING', label: 'Confirmação pendente' },
+  { value: 'PROCESSING', label: 'Em processamento' },
+  { value: 'AMBIGUOUS', label: 'Precisa de investigação' },
 ];
 
 export function presentSendHistoryStatus(
@@ -34,8 +38,26 @@ export function presentSendHistoryStatus(
     case 'SENT':
       return {
         label: 'Enviado',
-        description: 'O envio foi registrado como concluído.',
+        description: 'O provedor confirmou que aceitou a mensagem.',
         tone: 'success',
+      };
+    case 'DELIVERED':
+      return {
+        label: 'Entregue',
+        description: 'O provedor confirmou a entrega no destino.',
+        tone: 'success',
+      };
+    case 'READ':
+      return {
+        label: 'Lido',
+        description: 'O provedor confirmou a leitura no destino.',
+        tone: 'success',
+      };
+    case 'SUBMITTED':
+      return {
+        label: 'Aguardando confirmação',
+        description: 'O pedido foi aceito localmente e aguarda confirmação do provedor.',
+        tone: 'warning',
       };
     case 'FAILED':
       return {
@@ -45,16 +67,23 @@ export function presentSendHistoryStatus(
       };
     case 'PENDING':
       return {
-        label: 'Aguardando envio',
-        description: 'O envio está aguardando processamento.',
+        label: 'Aguardando confirmação',
+        description: 'Ainda não há confirmação de publicação para este envio.',
         tone: 'warning',
       };
     case 'PROCESSING':
       return {
-        label: 'Resultado pendente',
+        label: 'Em processamento',
         description:
-          'Não foi possível confirmar com segurança o resultado deste envio.',
+          'O envio ainda está sendo preparado de forma controlada.',
         tone: 'warning',
+      };
+    case 'AMBIGUOUS':
+      return {
+        label: 'Precisa de investigação',
+        description:
+          'A confirmação não chegou no prazo. Nenhuma nova tentativa é automática.',
+        tone: 'danger',
       };
     default:
       return {
@@ -67,19 +96,43 @@ export function presentSendHistoryStatus(
 }
 
 export function presentSendHistoryTimestamp(
-  dispatch: Pick<WhatsAppDispatch, 'status' | 'sentAt' | 'createdAt'>,
+  dispatch: Pick<
+    WhatsAppDispatch,
+    'status' | 'submittedAt' | 'sentAt' | 'deliveredAt' | 'readAt' | 'createdAt'
+  >,
   format: (value: string, fallback: string) => string,
 ): SendHistoryTimestamp {
+  if (dispatch.status === 'READ' && dispatch.readAt) {
+    return {
+      label: 'Lido em',
+      value: format(dispatch.readAt, 'Data não disponível'),
+    };
+  }
+
+  if (dispatch.status === 'DELIVERED' && dispatch.deliveredAt) {
+    return {
+      label: 'Entregue em',
+      value: format(dispatch.deliveredAt, 'Data não disponível'),
+    };
+  }
+
   if (dispatch.status === 'SENT' && dispatch.sentAt) {
     return {
-      label: 'Enviado em',
+      label: 'Confirmado em',
       value: format(dispatch.sentAt, 'Data não disponível'),
+    };
+  }
+
+  if (dispatch.status === 'SUBMITTED' && dispatch.submittedAt) {
+    return {
+      label: 'Enviado para confirmação em',
+      value: format(dispatch.submittedAt, 'Data não disponível'),
     };
   }
 
   if (dispatch.createdAt) {
     return {
-      label: dispatch.status === 'SENT' ? 'Registrado em' : 'Criado em',
+      label: 'Criado em',
       value: format(dispatch.createdAt, 'Data não disponível'),
     };
   }
@@ -94,6 +147,9 @@ export function presentSendHistoryError(
   if (errorMessage?.trim()) return errorMessage;
   if (status?.toUpperCase() === 'FAILED') {
     return 'O envio não foi concluído.';
+  }
+  if (status?.toUpperCase() === 'AMBIGUOUS') {
+    return 'A confirmação não chegou no prazo e exige verificação técnica.';
   }
   return null;
 }

@@ -127,7 +127,7 @@ describe('SenderService com grupo', () => {
       findByIdForSending: vi.fn(async () => dispatch),
       markAttemptPending: vi.fn(async () => true),
       claimPendingForSending: vi.fn(async () => ({ kind: 'CLAIMED' as const })),
-      markSent: vi.fn(async () => ({ ...dispatch, status: 'SENT' })),
+      markSubmitted: vi.fn(async () => ({ ...dispatch, status: 'SUBMITTED' })),
       markFailed: vi.fn(),
     };
     const sender = new SenderService({

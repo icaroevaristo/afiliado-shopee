@@ -150,7 +150,7 @@ const createRuntime = ({
         },
       ),
       markAttemptPending: vi.fn(),
-      markSent: vi.fn(),
+      markSubmitted: vi.fn(),
       markFailed: vi.fn(),
     },
   };
