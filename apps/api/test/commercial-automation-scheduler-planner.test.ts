@@ -70,7 +70,7 @@ describe('commercial automation scheduler planner', () => {
       '2026-08-24T12:00:00.000Z',
     );
     expect(first.slots[1].scheduledFor.toISOString()).toBe(
-      '2026-08-24T12:10:00.000Z',
+      '2026-08-24T12:30:00.000Z',
     );
     expect(first.slots[0].target.scheduleRevision).toBe(3);
   });
@@ -180,6 +180,36 @@ describe('commercial automation scheduler planner', () => {
 
     expect(result.slots[0].scheduledFor.toISOString()).toBe(
       '2026-08-24T12:30:00.000Z',
+    );
+  });
+
+  it('arredonda nextEligibleAt para o proximo ponto da grade', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 15, staggerMinutes: 0 },
+      targets: [
+        target('next-eligible-grid', {
+          orderedInstanceNames: [
+            'afiliado-shopee-local',
+            'afiliado-shopee-secondary',
+          ],
+          instanceActiveByName: {
+            'afiliado-shopee-local': true,
+            'afiliado-shopee-secondary': true,
+          },
+          cadenceMinutes: 15,
+          nextEligibleAt: new Date('2026-08-24T12:05:00.000Z'),
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+
+    expect(result.slots[0]!.scheduledFor.toISOString()).toBe(
+      '2026-08-24T12:15:00.000Z',
+    );
+    expect(result.slots[0]!.target.instanceName).toBe(
+      'afiliado-shopee-secondary',
     );
   });
 
@@ -359,7 +389,7 @@ describe('commercial automation scheduler planner', () => {
       },
       targets: [target('three-slots', { cadenceMinutes: 30 })],
       globalSentToday: 0,
-      horizonMinutes: 360,
+      horizonMinutes: 540,
     });
 
     expect(result.slots).toHaveLength(3);
@@ -564,21 +594,21 @@ describe('commercial automation scheduler planner', () => {
       schedule: soakSchedule,
       targets: soakTargets,
       globalSentToday: 0,
-      horizonMinutes: 180,
+      horizonMinutes: 240,
     });
     const restartPlan = planCommercialTargetSlots({
       now,
       schedule: soakSchedule,
       targets: [...soakTargets].reverse(),
       globalSentToday: 0,
-      horizonMinutes: 180,
+      horizonMinutes: 240,
     });
     const changedRevisionPlan = planCommercialTargetSlots({
       now,
       schedule: { ...soakSchedule, scheduleRevision: 8 },
       targets: soakTargets,
       globalSentToday: 0,
-      horizonMinutes: 180,
+      horizonMinutes: 240,
     });
     const firstJobIds = firstPlan.slots.map((slot) => slot.jobId);
     const restartJobIds = restartPlan.slots.map((slot) => slot.jobId);
@@ -616,6 +646,60 @@ describe('commercial automation scheduler planner', () => {
     expect(
       firstPlan.slots.every((slot) => slot.target.instanceName !== undefined),
     ).toBe(true);
+  });
+
+  it('reinicia a grade na nova fronteira do dia local', () => {
+    const boundarySchedule = {
+      ...schedule,
+      allowedStartTime: '00:00',
+      allowedEndTime: '23:59',
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 1,
+      dailyGroupLimit: 1,
+    };
+    const boundaryTarget = target('day-boundary', {
+      orderedInstanceNames: [
+        'afiliado-shopee-local',
+        'afiliado-shopee-secondary',
+      ],
+      instanceActiveByName: {
+        'afiliado-shopee-local': true,
+        'afiliado-shopee-secondary': true,
+      },
+      assignmentRevision: 2,
+      dailyLimit: 1,
+      cadenceMinutes: 15,
+      allowedStartTime: '00:00',
+      allowedEndTime: '23:59',
+    });
+    const firstDay = planCommercialTargetSlots({
+      now: new Date('2026-08-24T03:00:00.000Z'),
+      schedule: boundarySchedule,
+      targets: [boundaryTarget],
+      globalSentToday: 0,
+      horizonMinutes: 15,
+    });
+    const nextDay = planCommercialTargetSlots({
+      now: new Date('2026-08-25T03:00:00.000Z'),
+      schedule: boundarySchedule,
+      targets: [boundaryTarget],
+      globalSentToday: 0,
+      horizonMinutes: 15,
+    });
+
+    expect(firstDay.slots[0]!.scheduledFor.toISOString()).toBe(
+      '2026-08-24T03:00:00.000Z',
+    );
+    expect(nextDay.slots[0]!.scheduledFor.toISOString()).toBe(
+      '2026-08-25T03:00:00.000Z',
+    );
+    expect(firstDay.slots[0]!.target.instanceName).toBe(
+      'afiliado-shopee-local',
+    );
+    expect(nextDay.slots[0]!.target.instanceName).toBe(
+      'afiliado-shopee-local',
+    );
   });
 
   it('preserva identidade e cooldown em tres ciclos logicos com restart', () => {
@@ -862,6 +946,122 @@ describe('commercial automation scheduler planner', () => {
     ]);
   });
 
+  it('mantem os mesmos jobs no plan entre replans com offset', async () => {
+    const settings = {
+      id: 'commercial-automation',
+      paused: false,
+      pausedAt: null,
+      resumedAt: now,
+      allowedStartTime: '08:00',
+      allowedEndTime: '23:00',
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 4,
+      dailyGroupLimit: 4,
+      scheduleRevision: 11,
+      updatedAt: now,
+    };
+    const planner = new CommercialAutomationSchedulerPlanner({
+      settings: { get: async () => settings },
+      campaigns: {
+        list: async () => ({
+          items: [
+            {
+              id: 'campaign-grid',
+              name: 'Campaign Grid',
+              logicalGroupFingerprint: 'fingerprint-grid',
+              anchorDestinationId: 'group-grid',
+              nicheId: 'niche-grid',
+              active: true,
+              cadenceMinutes: 15,
+              timezone: 'America/Sao_Paulo',
+              allowedStartTime: '08:00',
+              allowedEndTime: '23:00',
+              dailyLimit: 4,
+              failureCount: 0,
+              nextEligibleAt: null,
+              niche: { active: true },
+            },
+          ],
+          total: 1,
+        }),
+      },
+      groups: {
+        listAll: async () => [
+          {
+            id: 'group-grid',
+            name: 'Group Grid',
+            fingerprint: 'fingerprint-grid',
+            active: true,
+            available: true,
+            paused: false,
+            assignedInstanceName: 'instance-a',
+            assignedInstanceNames: ['instance-a', 'instance-b'],
+            assignmentRevision: 2,
+          },
+        ],
+      },
+      instances: {
+        list: async () => [
+          { name: 'instance-a', active: true, paused: false },
+          { name: 'instance-b', active: true, paused: false },
+        ],
+      },
+      history: {
+        getSnapshot: async () => ({
+          globalSentToday: 0,
+          groupSentToday: 0,
+          lastSentAt: null,
+          groupLastSentAt: null,
+        }),
+      },
+      policy: {
+        evaluateAutomationReadiness: async () => ({
+          allowed: true,
+          reasons: [],
+        }),
+      },
+      config: {
+        enabled: true,
+        timezone: 'America/Sao_Paulo',
+        allowedStartTime: '08:00',
+        allowedEndTime: '23:00',
+        dailyGlobalLimit: 4,
+        dailyGroupLimit: 4,
+        minimumIntervalMinutes: 15,
+      },
+      clock: () => now,
+    } as never);
+    const run = async (runNow: Date) => {
+      const enqueued: Array<{ at: string; jobId: string }> = [];
+      await planner.plan({
+        now: runNow,
+        mode: 'send',
+        enqueue: async (data, jobId) => {
+          enqueued.push({ at: data.target.scheduledFor, jobId });
+        },
+      });
+      return enqueued;
+    };
+
+    const first = await run(now);
+    const offset = await run(new Date(now.getTime() + 5 * MINUTE_MS));
+    const firstByTime = new Map(first.map((slot) => [slot.at, slot.jobId]));
+    const overlapping = offset.filter((slot) => firstByTime.has(slot.at));
+
+    expect(first.map((slot) => slot.at)).toEqual([
+      '2026-08-24T12:00:00.000Z',
+      '2026-08-24T12:15:00.000Z',
+      '2026-08-24T12:30:00.000Z',
+      '2026-08-24T12:45:00.000Z',
+    ]);
+    expect(overlapping.map((slot) => slot.jobId)).toEqual([
+      first[1]!.jobId,
+      first[2]!.jobId,
+      first[3]!.jobId,
+    ]);
+  });
+
   it('preserva a fase round-robin entre ticks sobrepostos e após envio', () => {
     const rotatingTarget = target('replan-rotation', {
       orderedInstanceNames: [
@@ -925,6 +1125,83 @@ describe('commercial automation scheduler planner', () => {
       'afiliado-shopee-secondary',
     );
     expect(afterFirstIsSent.slots[0]!.jobId).toBe(first.slots[1]!.jobId);
+  });
+
+  it('converge replans em offsets arbitrarios para a mesma grade temporal', () => {
+    const rotatingTarget = target('arbitrary-offset-grid', {
+      orderedInstanceNames: [
+        'afiliado-shopee-local',
+        'afiliado-shopee-secondary',
+      ],
+      instanceActiveByName: {
+        'afiliado-shopee-local': true,
+        'afiliado-shopee-secondary': true,
+      },
+      cadenceMinutes: 15,
+      assignmentRevision: 2,
+    });
+    const planningSchedule = {
+      ...schedule,
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 4,
+      dailyGroupLimit: 4,
+      scheduleRevision: 12,
+    };
+    const first = planCommercialTargetSlots({
+      now,
+      schedule: planningSchedule,
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+      horizonMinutes: 60,
+    });
+    const firstByTime = new Map(
+      first.slots.map((slot) => [slot.scheduledFor.getTime(), slot]),
+    );
+    const gridOrigin = first.slots[0]!.scheduledFor.getTime();
+
+    expect(first.slots.map((slot) => slot.scheduledFor.toISOString())).toEqual([
+      '2026-08-24T12:00:00.000Z',
+      '2026-08-24T12:15:00.000Z',
+      '2026-08-24T12:30:00.000Z',
+      '2026-08-24T12:45:00.000Z',
+    ]);
+
+    for (const offsetMinutes of [1, 5, 14, 15, 16]) {
+      const replanNow = new Date(now.getTime() + offsetMinutes * MINUTE_MS);
+      const replan = planCommercialTargetSlots({
+        now: replanNow,
+        schedule: planningSchedule,
+        targets: [rotatingTarget],
+        globalSentToday: 0,
+        horizonMinutes: 60,
+      });
+      const overlappingSlots = replan.slots.filter((slot) =>
+        firstByTime.has(slot.scheduledFor.getTime()),
+      );
+      const expectedOverlaps = first.slots.filter(
+        (slot) => slot.scheduledFor.getTime() >= replanNow.getTime(),
+      );
+
+      expect(overlappingSlots.map((slot) => slot.scheduledFor.getTime())).toEqual(
+        expectedOverlaps.map((slot) => slot.scheduledFor.getTime()),
+      );
+      expect(overlappingSlots.map((slot) => slot.target.instanceName)).toEqual(
+        expectedOverlaps.map((slot) => slot.target.instanceName),
+      );
+      expect(overlappingSlots.map((slot) => slot.slotKey)).toEqual(
+        expectedOverlaps.map((slot) => firstByTime.get(slot.scheduledFor.getTime())!.slotKey),
+      );
+      expect(overlappingSlots.map((slot) => slot.jobId)).toEqual(
+        expectedOverlaps.map((slot) => firstByTime.get(slot.scheduledFor.getTime())!.jobId),
+      );
+      expect(
+        replan.slots.every(
+          (slot) =>
+            (slot.scheduledFor.getTime() - gridOrigin) % (15 * MINUTE_MS) === 0,
+        ),
+      ).toBe(true);
+    }
   });
 
   it('bloqueia o slot da instancia indisponivel sem fallback silencioso', () => {
