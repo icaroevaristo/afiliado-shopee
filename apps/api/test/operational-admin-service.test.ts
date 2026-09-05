@@ -379,7 +379,7 @@ describe('OperationalAdminService', () => {
 
     expect(result.automation.dailyGlobalLimit).toBe(20);
     expect(result.automation.dailyGroupLimit).toBe(5);
-    expect(result.automation.hardCaps.dailyGlobalLimit).toBe(100);
+    expect(result.automation.hardCaps).toEqual({ maxMessagesPerRun: 1 });
     expect(result.groups[0]?.lastSendAt).toBe(null);
     expect(result.groups[0]?.blockers.map((blocker) => blocker.code)).toContain(
       'AUTOMATION_PAUSED',

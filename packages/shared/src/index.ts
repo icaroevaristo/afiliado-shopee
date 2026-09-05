@@ -38,4 +38,10 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * Upper bound for persisted daily message/provider budgets. The actual
+ * campaign capacity is still constrained by its theoretical schedule slots.
+ */
+export const COMMERCIAL_DAILY_LIMIT_MAX = 1_000_000;
+
 export const nowIso = () => new Date().toISOString();

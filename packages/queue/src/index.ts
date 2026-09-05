@@ -20,6 +20,7 @@ export type {
   PipelineSchedulerStatus,
   SchedulerConfig,
 } from './scheduler';
+export { COMMERCIAL_AUTOMATION_HEARTBEAT_CRON } from './commercial-scheduler';
 export type {
   CommercialAutomationMode,
   CommercialAutomationScheduler,

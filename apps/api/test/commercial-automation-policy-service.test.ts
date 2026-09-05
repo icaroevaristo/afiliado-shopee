@@ -67,6 +67,7 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
       resumedAt: paused ? null : NOW,
       allowedStartTime: null,
       allowedEndTime: null,
+      timezone: null,
       minimumIntervalMinutes: null,
       staggerMinutes: null,
       scheduleRevision: 0,
@@ -120,6 +121,8 @@ class MemorySettings implements CommercialAutomationSettingsRepository {
         input.allowedEndTime === undefined
           ? this.record.allowedEndTime
           : input.allowedEndTime,
+      timezone:
+        input.timezone === undefined ? this.record.timezone : input.timezone,
       minimumIntervalMinutes:
         input.minimumIntervalMinutes === undefined
           ? this.record.minimumIntervalMinutes
@@ -331,6 +334,35 @@ describe('CommercialAutomationPolicyService', () => {
       reasons: ['OUTSIDE_ALLOWED_WINDOW'],
       allowedStartTime: '13:00',
       minimumIntervalMinutes: 14,
+    });
+  });
+
+  it('usa o timezone e os limites persistidos como autoridade operacional', async () => {
+    const { service, settings, history } = createSubject({
+      config: {
+        timezone: 'America/Sao_Paulo',
+        dailyGlobalLimit: 5,
+        dailyGroupLimit: 3,
+      },
+    });
+    settings.record = {
+      ...settings.record,
+      timezone: 'UTC',
+      dailyGlobalLimit: 20,
+      dailyGroupLimit: 12,
+    };
+
+    await expect(service.getScheduleSettings()).resolves.toMatchObject({
+      timezone: 'UTC',
+    });
+    await expect(service.evaluateAutomationReadiness()).resolves.toMatchObject({
+      timezone: 'UTC',
+      dailyGlobalLimit: 20,
+      dailyGroupLimit: 12,
+    });
+    expect(history.lastRange).toMatchObject({
+      dayStartsAt: new Date('2026-07-25T00:00:00.000Z'),
+      dayEndsAt: new Date('2026-07-26T00:00:00.000Z'),
     });
   });
 

@@ -5,6 +5,7 @@ import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   COMMERCIAL_AUTOMATION_JOB_OPTIONS,
+  COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
   createBullMqCommercialAutomationScheduler,
   createCommercialAutomationQueue,
   createRedisConnection,
@@ -373,7 +374,7 @@ export const startCommercialAutomationWorker = async (
     if (config.COMMERCIAL_SCHEDULER_ENABLED) {
       await infrastructure.scheduler.register({
         enabled: true,
-        cronExpression: config.COMMERCIAL_SCHEDULER_CRON,
+        cronExpression: COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
         timezone: config.COMMERCIAL_SCHEDULER_TIMEZONE,
         mode: config.COMMERCIAL_AUTOMATION_MODE,
         jobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,

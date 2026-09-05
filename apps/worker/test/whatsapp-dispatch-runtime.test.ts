@@ -35,6 +35,12 @@ const sendConfig = loadConfig({
   WHATSAPP_GROUP_SEND_ENABLED: 'true',
 });
 
+const evolutionResponse = () =>
+  new Response(JSON.stringify({ key: { id: 'evolution-test-message' } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+
 const recoveryReport = (
   overrides: Partial<CommercialRecoveryReport> = {},
 ): CommercialRecoveryReport => ({
@@ -324,5 +330,51 @@ describe('isolated WhatsApp dispatch worker', () => {
     expect(events).toEqual(['recovery', 'provider', 'worker']);
     expect(recoveryCoordinator.run).toHaveBeenCalledOnce();
     await runtime.close();
+  });
+
+  it('mantem o cap individual no escopo do provider resolvido por dispatch', async () => {
+    const destination = '5511999999999';
+    const httpClient = vi
+      .fn()
+      .mockImplementation(async () => evolutionResponse());
+    const close = vi.fn(async () => undefined);
+    let providerResolver:
+      | ((instanceName: string) => WhatsAppProvider | Promise<WhatsAppProvider>)
+      | undefined;
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(
+      (config, options) =>
+        createWhatsAppProvider(
+          {
+            ...config,
+            EVOLUTION_ALLOWED_DESTINATIONS: [destination],
+            EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
+          },
+          { ...options, httpClient },
+        ),
+    );
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(
+      (_redisUrl, options) => {
+        providerResolver = options.whatsAppProviderResolver;
+        return { close };
+      },
+    );
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory,
+      workerFactory,
+      logger: { info: vi.fn(), error: vi.fn() },
+    });
+
+    expect(providerResolver).toBeDefined();
+    const firstProvider = await providerResolver!('test-instance');
+    await firstProvider.sendMessage({ destination, message: 'Oferta A' });
+    const secondProvider = await providerResolver!('test-instance');
+    await secondProvider.sendMessage({ destination, message: 'Oferta B' });
+
+    expect(firstProvider).not.toBe(secondProvider);
+    expect(providerFactory).toHaveBeenCalledTimes(3);
+    expect(httpClient).toHaveBeenCalledTimes(2);
+    await runtime.close();
+    expect(close).toHaveBeenCalledOnce();
   });
 });

@@ -1,4 +1,7 @@
-import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import {
+  AppError,
+  COMMERCIAL_DAILY_LIMIT_MAX,
+} from '@shopee-auto-affiliate-ai/shared';
 
 import type {
   CommercialGroupCampaignCreateData,
@@ -140,7 +143,12 @@ const normalizeConfiguration = (input: Record<string, unknown>) => {
   if (start.minutes >= end.minutes) {
     invalid('allowedStartTime deve ser anterior a allowedEndTime');
   }
-  const dailyLimit = integerInRange(input.dailyLimit, 'dailyLimit', 1, 96);
+  const dailyLimit = integerInRange(
+    input.dailyLimit,
+    'dailyLimit',
+    1,
+    COMMERCIAL_DAILY_LIMIT_MAX,
+  );
   const slotCount = Math.floor((end.minutes - start.minutes) / cadenceMinutes);
   if (dailyLimit > slotCount) {
     invalid(

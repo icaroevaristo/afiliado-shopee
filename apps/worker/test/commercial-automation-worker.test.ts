@@ -234,6 +234,7 @@ describe('commercial automation worker bootstrap', () => {
     const config = loadConfig({
       ...baseEnv,
       COMMERCIAL_SCHEDULER_ENABLED: 'true',
+      COMMERCIAL_SCHEDULER_CRON: '*/15 8-22 * * *',
     });
 
     const runtime = await startCommercialAutomationWorker(config, {
@@ -245,7 +246,7 @@ describe('commercial automation worker bootstrap', () => {
     expect(scheduler.register).toHaveBeenCalledOnce();
     expect(scheduler.register).toHaveBeenCalledWith({
       enabled: true,
-      cronExpression: '0 9 * * *',
+      cronExpression: '* * * * *',
       timezone: 'America/Sao_Paulo',
       mode: 'preview',
       jobId: 'scheduled-commercial-automation',

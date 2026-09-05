@@ -31,6 +31,7 @@ import {
   createProductPipelineQueue,
   createRedisConnection,
   createWhatsAppDispatchQueue,
+  COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
   enqueueControlledWhatsAppDispatch,
   JOB_NAMES,
   type JobsOptions,
@@ -872,7 +873,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       );
   const commercialSchedulerConfig = options.commercialSchedulerConfig ?? {
     enabled: COMMERCIAL_SCHEDULER_DEFAULTS.enabled,
-    cron: COMMERCIAL_SCHEDULER_DEFAULTS.cronExpression,
+    cron: COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
     timezone: COMMERCIAL_SCHEDULER_DEFAULTS.timezone,
     mode: COMMERCIAL_SCHEDULER_DEFAULTS.mode,
   };
@@ -1601,6 +1602,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     const allowed = new Set([
       'allowedStartTime',
       'allowedEndTime',
+      'timezone',
       'minimumIntervalMinutes',
       'staggerMinutes',
       'dailyGlobalLimit',
@@ -1620,7 +1622,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         message: 'Atualizacao de configuracao invalida',
       });
     }
-    for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
+    for (const key of ['allowedStartTime', 'allowedEndTime', 'timezone'] as const) {
       if (
         body[key] !== undefined &&
         body[key] !== null &&
@@ -1655,6 +1657,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return await getOperationalAdminService().updateAutomationSettings({
         allowedStartTime: body.allowedStartTime as string | null | undefined,
         allowedEndTime: body.allowedEndTime as string | null | undefined,
+        timezone: body.timezone as string | null | undefined,
         minimumIntervalMinutes: body.minimumIntervalMinutes as
           number | null | undefined,
         staggerMinutes: body.staggerMinutes as number | null | undefined,
@@ -1789,6 +1792,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       const allowedKeys = new Set([
         'allowedStartTime',
         'allowedEndTime',
+        'timezone',
         'minimumIntervalMinutes',
         'staggerMinutes',
         'expectedRevision',
@@ -1803,7 +1807,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
         });
       }
       const update: CommercialAutomationScheduleUpdate = {};
-      for (const key of ['allowedStartTime', 'allowedEndTime'] as const) {
+      for (const key of ['allowedStartTime', 'allowedEndTime', 'timezone'] as const) {
         const value = record[key];
         if (value !== undefined) {
           if (value !== null && typeof value !== 'string') {

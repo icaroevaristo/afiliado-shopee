@@ -140,7 +140,7 @@ describe('envSchema Scheduler comercial', () => {
   it('usa Scheduler desligado e preview por padrao', () => {
     const config = envSchema.parse(baseEnv);
     expect(config.COMMERCIAL_SCHEDULER_ENABLED).toBe(false);
-    expect(config.COMMERCIAL_SCHEDULER_CRON).toBe('0 9 * * *');
+    expect(config.COMMERCIAL_SCHEDULER_CRON).toBe('* * * * *');
     expect(config.COMMERCIAL_SCHEDULER_TIMEZONE).toBe('America/Sao_Paulo');
     expect(config.COMMERCIAL_AUTOMATION_MODE).toBe('preview');
     expect(config.COMMERCIAL_EXECUTION_LEASE_SECONDS).toBe(120);

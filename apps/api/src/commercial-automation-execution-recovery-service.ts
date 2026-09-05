@@ -63,12 +63,19 @@ export class CommercialAutomationExecutionRecoveryService {
       instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
       clock?: () => Date;
       minimumIntervalMinutes?: number;
+      resolveMinimumIntervalMinutes?: () => number | Promise<number>;
     },
   ) {
     this.clock = dependencies.clock ?? (() => new Date());
     this.minimumIntervalMinutes =
       dependencies.minimumIntervalMinutes ??
       loadConfig().COMMERCIAL_MIN_INTERVAL_MINUTES;
+  }
+
+  private async resolveMinimumIntervalMinutes() {
+    return this.dependencies.resolveMinimumIntervalMinutes
+      ? this.dependencies.resolveMinimumIntervalMinutes()
+      : this.minimumIntervalMinutes;
   }
 
   async recover(executionId: string) {
@@ -113,7 +120,7 @@ export class CommercialAutomationExecutionRecoveryService {
           executionId,
           {
             completedAt: now,
-            minimumIntervalMinutes: this.minimumIntervalMinutes,
+            minimumIntervalMinutes: await this.resolveMinimumIntervalMinutes(),
             failureCode:
               COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
           },

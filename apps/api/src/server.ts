@@ -7,6 +7,7 @@ import {
 } from '@shopee-auto-affiliate-ai/providers';
 import { buildApp } from './app';
 import { OpenAiCommercialAiCopyProvider } from './commercial-ai-copy-provider';
+import { COMMERCIAL_AUTOMATION_HEARTBEAT_CRON } from '@shopee-auto-affiliate-ai/queue';
 
 const start = async () => {
   const config = loadConfig();
@@ -82,7 +83,7 @@ const start = async () => {
     },
     commercialSchedulerConfig: {
       enabled: config.COMMERCIAL_SCHEDULER_ENABLED,
-      cron: config.COMMERCIAL_SCHEDULER_CRON,
+      cron: COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
       timezone: config.COMMERCIAL_SCHEDULER_TIMEZONE,
       mode: config.COMMERCIAL_AUTOMATION_MODE,
     },

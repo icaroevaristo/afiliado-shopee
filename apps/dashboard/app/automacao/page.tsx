@@ -1,6 +1,7 @@
 'use client';
 
 import { Pause, Play, Save, X } from 'lucide-react';
+import { COMMERCIAL_DAILY_LIMIT_MAX } from '@shopee-auto-affiliate-ai/shared';
 import {
   useCallback,
   useEffect,
@@ -39,11 +40,12 @@ const RESUME_CONFIRMATION = 'RETOMAR_AUTOMACAO_COMERCIAL';
 const SAVE_CONFIRMATION = 'CONFIRMAR_ALTERACAO_OPERACIONAL';
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const MAX_MINUTES = 1_440;
-const MAX_LIMIT = 1_000_000;
+const MAX_LIMIT = COMMERCIAL_DAILY_LIMIT_MAX;
 
 type AutomationAction = 'pause' | 'resume' | 'save';
 
 type ScheduleDraft = {
+  timezone: string;
   start: string;
   end: string;
   minimum: string;
@@ -55,6 +57,7 @@ type ScheduleDraft = {
 };
 
 type SaveIntent = {
+  timezone: string;
   allowedStartTime: string;
   allowedEndTime: string;
   minimumIntervalMinutes: number;
@@ -89,6 +92,7 @@ const EMPTY_READ_ERRORS: ReadErrors = {
 };
 
 const emptyDraft = (): ScheduleDraft => ({
+  timezone: '',
   start: '',
   end: '',
   minimum: '',
@@ -168,6 +172,7 @@ const buildDraft = (
   schedule: CommercialAutomationScheduleSettings,
   operational: OperationalAdmin | null,
 ): ScheduleDraft => ({
+  timezone: schedule.timezone,
   start: schedule.allowedStartTime,
   end: schedule.allowedEndTime,
   minimum: String(schedule.minimumIntervalMinutes),
@@ -205,6 +210,9 @@ const parseDraftInteger = (value: string) => {
 };
 
 const validateDraft = (draft: ScheduleDraft) => {
+  if (draft.timezone.trim() === '') {
+    return 'Informe um fuso horário IANA válido, como America/Sao_Paulo.';
+  }
   if (!TIME_PATTERN.test(draft.start) || !TIME_PATTERN.test(draft.end)) {
     return 'Informe horários válidos para o início e o fim da janela.';
   }
@@ -760,6 +768,7 @@ export default function AutomationPage() {
     setPageError(null);
     setSuccess(null);
     saveIntentRef.current = {
+      timezone: scheduleDraft.timezone.trim(),
       allowedStartTime: scheduleDraft.start,
       allowedEndTime: scheduleDraft.end,
       minimumIntervalMinutes: Number(scheduleDraft.minimum),
@@ -792,6 +801,7 @@ export default function AutomationPage() {
               ...operationalRef.current.automation,
               allowedStartTime: intent.allowedStartTime,
               allowedEndTime: intent.allowedEndTime,
+              timezone: intent.timezone,
               minimumIntervalMinutes: intent.minimumIntervalMinutes,
               staggerMinutes: intent.staggerMinutes,
               dailyGlobalLimit: intent.dailyGlobalLimit,
@@ -1149,6 +1159,24 @@ export default function AutomationPage() {
               </legend>
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="ops-control">
+                  <span className="ops-control-label">Fuso horário</span>
+                  <input
+                    id="automation-timezone"
+                    className="ops-input mt-2 w-full"
+                    type="text"
+                    value={scheduleDraft.timezone}
+                    onChange={(event) =>
+                      updateDraft('timezone', event.target.value)
+                    }
+                    disabled={!canSave}
+                    aria-describedby="automation-timezone-help"
+                    placeholder="America/Sao_Paulo"
+                  />
+                  <FieldHelp id="automation-timezone-help">
+                    Use um identificador IANA, por exemplo America/Sao_Paulo.
+                  </FieldHelp>
+                </label>
+                <label className="ops-control">
                   <span className="ops-control-label">Começa às</span>
                   <input
                     id="automation-start-time"
@@ -1502,7 +1530,7 @@ export default function AutomationPage() {
               <div className="ops-detail-label">Hard caps</div>
               <div className="ops-detail-value ops-mono">
                 {operational?.automation.hardCaps
-                  ? `global=${operational.automation.hardCaps.dailyGlobalLimit} · grupo=${operational.automation.hardCaps.dailyGroupLimit} · run=${operational.automation.hardCaps.maxMessagesPerRun}`
+                  ? `run=${operational.automation.hardCaps.maxMessagesPerRun} (teto técnico)`
                   : 'Não disponível'}
               </div>
             </div>

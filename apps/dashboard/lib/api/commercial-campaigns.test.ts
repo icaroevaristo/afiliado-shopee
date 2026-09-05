@@ -1,10 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listCommercialCampaignQueue, listCommercialCampaigns, updateCommercialCampaign } from './commercial-campaigns';
+import {
+  activateCommercialCampaign,
+  deactivateCommercialCampaign,
+  listCommercialCampaignQueue,
+  listCommercialCampaigns,
+  updateCommercialCampaign,
+} from './commercial-campaigns';
 
 const response = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [] })));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(() => Promise.resolve(response({ items: [] }))),
+  );
 });
 
 describe('commercial campaigns API', () => {
@@ -33,6 +42,24 @@ describe('commercial campaigns API', () => {
     expect(fetch).toHaveBeenCalledWith(
       '/api/commercial/campaigns/campaign%2F1',
       expect.objectContaining({ method: 'PATCH' }),
+    );
+  });
+
+  it('usa os endpoints protegidos existentes para ativar e desativar campanha', async () => {
+    await activateCommercialCampaign('campaign/1');
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/commercial/campaigns/campaign%2F1/activate',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ confirm: 'ATIVAR_CAMPANHA' }),
+      }),
+    );
+
+    vi.mocked(fetch).mockClear();
+    await deactivateCommercialCampaign('campaign/1');
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/commercial/campaigns/campaign%2F1/deactivate',
+      expect.objectContaining({ method: 'POST', body: '{}' }),
     );
   });
 });

@@ -42,10 +42,8 @@ export class CommercialExternalProviderBudgetService {
   private async limits() {
     const now = this.dependencies.clock?.() ?? new Date();
     const settings = await this.dependencies.settings.getOrCreate(now);
-    const messageLimit = Math.min(
-      this.dependencies.fallbackDailyGlobalLimit,
-      settings.dailyGlobalLimit ?? this.dependencies.fallbackDailyGlobalLimit,
-    );
+    const messageLimit =
+      settings.dailyGlobalLimit ?? this.dependencies.fallbackDailyGlobalLimit;
     const shopee = settings.dailyShopeeHttpLimit ?? messageLimit;
     const openAi = settings.dailyOpenAiGenerationLimit ?? messageLimit;
     for (const [name, value] of [
@@ -61,7 +59,10 @@ export class CommercialExternalProviderBudgetService {
     }
     return {
       now,
-      dayKey: getCommercialDayKey(now, this.dependencies.timezone),
+      dayKey: getCommercialDayKey(
+        now,
+        settings.timezone ?? this.dependencies.timezone,
+      ),
       shopee,
       openAi,
     };

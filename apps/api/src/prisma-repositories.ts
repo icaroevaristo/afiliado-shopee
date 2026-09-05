@@ -1864,10 +1864,12 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
   async update(id: string, data: CommercialGroupCampaignUpdateData) {
     try {
       const scheduleChanged = [
+        'active',
         'cadenceMinutes',
         'timezone',
         'allowedStartTime',
         'allowedEndTime',
+        'dailyLimit',
       ].some((field) => field in data);
       const updateCampaign = async (
         client: Pick<
@@ -1966,6 +1968,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
             {
               where: { id },
               select: {
+                active: true,
                 logicalGroupFingerprint: true,
                 niche: { select: { active: true } },
               },
@@ -1995,11 +1998,25 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
               'COMMERCIAL_GROUP_CAMPAIGN_GROUP_UNAVAILABLE',
             );
           }
-          return transaction.commercialGroupCampaign.update({
+          const updated = await transaction.commercialGroupCampaign.update({
             where: { id },
             data: { active: true },
             include: commercialCampaignInclude,
           });
+          if (!campaign.active) {
+            await transaction.commercialAutomationSettings.upsert({
+              where: { id: COMMERCIAL_AUTOMATION_SETTINGS_ID },
+              create: {
+                id: COMMERCIAL_AUTOMATION_SETTINGS_ID,
+                scheduleRevision: 1,
+              },
+              update: {
+                scheduleRevision: { increment: 1 },
+                updatedAt: new Date(),
+              },
+            });
+          }
+          return updated;
         },
         { isolationLevel: 'Serializable' },
       );

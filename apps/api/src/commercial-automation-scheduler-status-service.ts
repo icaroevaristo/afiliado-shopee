@@ -1,5 +1,6 @@
 import {
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+  COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
   JOB_NAMES,
   QUEUE_NAMES,
   type CommercialAutomationMode,
@@ -42,9 +43,7 @@ export class CommercialAutomationSchedulerStatusService {
       jobId: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
       queue: QUEUE_NAMES.commercialAutomation,
       jobName: JOB_NAMES.commercialAutomationTick,
-      cron: registered
-        ? (state.cronExpression ?? this.config.cron)
-        : this.config.cron,
+      cron: COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
       timezone: registered
         ? (state.timezone ?? this.config.timezone)
         : this.config.timezone,

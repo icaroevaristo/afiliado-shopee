@@ -35,8 +35,6 @@ const overview = {
     dailyGlobalLimitOverride: null,
     dailyGroupLimitOverride: null,
     hardCaps: {
-      dailyGlobalLimit: 10,
-      dailyGroupLimit: 5,
       maxMessagesPerRun: 1,
     },
     scheduleRevision: 2,

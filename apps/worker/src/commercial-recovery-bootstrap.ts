@@ -85,6 +85,13 @@ export const createCommercialRecoveryCoordinator = (input: {
     },
     instances: repositories.whatsappInstances,
     minimumIntervalMinutes: input.config.COMMERCIAL_MIN_INTERVAL_MINUTES,
+    resolveMinimumIntervalMinutes: async () => {
+      const settings = await repositories.commercialAutomationSettings.get();
+      return (
+        settings?.minimumIntervalMinutes ??
+        input.config.COMMERCIAL_MIN_INTERVAL_MINUTES
+      );
+    },
   });
   const manualFinalizerMethod =
     repositories.manualPublicationRequests.finalizeAfterCommercialDispatch;

@@ -1,4 +1,7 @@
-import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import {
+  AppError,
+  COMMERCIAL_DAILY_LIMIT_MAX,
+} from '@shopee-auto-affiliate-ai/shared';
 
 import {
   duplicateLogicalGroupFingerprints,
@@ -97,29 +100,18 @@ export const resolveCommercialAutomationSchedule = (
   config: CommercialAutomationPolicyConfig,
   settings: CommercialAutomationSettingsRecord,
 ): CommercialAutomationEffectiveSchedule => ({
-  timezone: config.timezone,
+  timezone: settings.timezone ?? config.timezone,
   allowedStartTime: settings.allowedStartTime ?? config.allowedStartTime,
   allowedEndTime: settings.allowedEndTime ?? config.allowedEndTime,
-  dailyGlobalLimit: Math.min(
-    config.dailyGlobalLimit,
+  dailyGlobalLimit:
     settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
-  ),
-  dailyGroupLimit: Math.min(
-    config.dailyGroupLimit,
-    settings.dailyGroupLimit ?? config.dailyGroupLimit,
-  ),
+  dailyGroupLimit: settings.dailyGroupLimit ?? config.dailyGroupLimit,
   dailyShopeeHttpLimit:
     settings.dailyShopeeHttpLimit ??
-    Math.min(
-      config.dailyGlobalLimit,
-      settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
-    ),
+    (settings.dailyGlobalLimit ?? config.dailyGlobalLimit),
   dailyOpenAiGenerationLimit:
     settings.dailyOpenAiGenerationLimit ??
-    Math.min(
-      config.dailyGlobalLimit,
-      settings.dailyGlobalLimit ?? config.dailyGlobalLimit,
-    ),
+    (settings.dailyGlobalLimit ?? config.dailyGlobalLimit),
   minimumIntervalMinutes:
     settings.minimumIntervalMinutes ?? config.minimumIntervalMinutes,
   staggerMinutes: settings.staggerMinutes ?? 0,
@@ -213,6 +205,18 @@ const assertTime = (value: string | null | undefined, field: string) => {
   }
 };
 
+const assertTimezone = (value: string | null | undefined, field: string) => {
+  if (value === null || value === undefined) return;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+  } catch {
+    throw new AppError(
+      `${field} invalido`,
+      'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
+    );
+  }
+};
+
 const assertScheduleUpdate = (
   input: CommercialAutomationScheduleUpdate,
   effective: CommercialAutomationEffectiveSchedule,
@@ -220,6 +224,7 @@ const assertScheduleUpdate = (
   const hasScheduleField = [
     'allowedStartTime',
     'allowedEndTime',
+    'timezone',
     'minimumIntervalMinutes',
     'staggerMinutes',
     'dailyGlobalLimit',
@@ -235,8 +240,10 @@ const assertScheduleUpdate = (
   }
   const start = input.allowedStartTime ?? effective.allowedStartTime;
   const end = input.allowedEndTime ?? effective.allowedEndTime;
+  const timezone = input.timezone ?? effective.timezone;
   assertTime(start, 'allowedStartTime');
   assertTime(end, 'allowedEndTime');
+  assertTimezone(timezone, 'timezone');
   if (start === end) {
     throw new AppError(
       'A janela comercial nao pode ter inicio e fim iguais',
@@ -262,7 +269,11 @@ const assertScheduleUpdate = (
     ['dailyOpenAiGenerationLimit', input.dailyOpenAiGenerationLimit],
   ] as const) {
     if (value === undefined || value === null) continue;
-    if (!Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 1 ||
+      value > COMMERCIAL_DAILY_LIMIT_MAX
+    ) {
       throw new AppError(
         `${field} invalido`,
         'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',
@@ -373,6 +384,7 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   resumedAt: null,
   allowedStartTime: null,
   allowedEndTime: null,
+  timezone: null,
   minimumIntervalMinutes: null,
   staggerMinutes: null,
   dailyGlobalLimit: null,
@@ -425,15 +437,18 @@ export class CommercialAutomationPolicyService {
     target?: CommercialAutomationTarget;
   }): Promise<CommercialAutomationStatus> {
     const now = (this.dependencies.clock ?? (() => new Date()))();
-    const [settings, context] = await Promise.all([
-      this.readSettings(now),
-      this.loadOperationalContext(
-        now,
-        input?.excludedExecutionId,
-        input?.excludedAmbiguousRunId,
-        input?.target,
-      ),
-    ]);
+    const settings = await this.readSettings(now);
+    const effective = resolveCommercialAutomationSchedule(
+      this.dependencies.config,
+      settings,
+    );
+    const context = await this.loadOperationalContext(
+      now,
+      effective.timezone,
+      input?.excludedExecutionId,
+      input?.excludedAmbiguousRunId,
+      input?.target,
+    );
 
     return this.buildStatus({ now, settings, ...context });
   }
@@ -481,11 +496,12 @@ export class CommercialAutomationPolicyService {
 
   private async loadOperationalContext(
     now: Date,
+    timezone: string,
     excludedExecutionId?: string,
     excludedAmbiguousRunId?: string,
     target?: CommercialAutomationTarget,
   ) {
-    const dayRange = getLocalDayRange(now, this.dependencies.config.timezone);
+    const dayRange = getLocalDayRange(now, timezone);
     const [groups, ambiguousExecution, activeExecution, staleExecution] =
       await Promise.all([
         this.dependencies.groups.listAll
@@ -573,12 +589,16 @@ export class CommercialAutomationPolicyService {
       }
     }
     const now = (this.dependencies.clock ?? (() => new Date()))();
-    const context = await this.loadOperationalContext(now);
     const settings = await this.dependencies.settings.setPaused(
       input.paused,
       now,
       expectedUpdatedAt,
     );
+    const effective = resolveCommercialAutomationSchedule(
+      this.dependencies.config,
+      settings,
+    );
+    const context = await this.loadOperationalContext(now, effective.timezone);
     return this.buildStatus({ now, settings, ...context });
   }
 

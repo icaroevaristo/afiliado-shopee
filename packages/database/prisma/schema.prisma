@@ -520,6 +520,7 @@ model CommercialAutomationSettings {
   resumedAt                DateTime?
   allowedStartTime         String?
   allowedEndTime           String?
+  timezone                 String?
   minimumIntervalMinutes   Int?
   staggerMinutes            Int?
   dailyGlobalLimit         Int?

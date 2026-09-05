@@ -1,5 +1,11 @@
 export type CommercialAutomationMode = 'preview' | 'send';
 
+/**
+ * The BullMQ scheduler is only a technical wake-up mechanism. Business
+ * windows, cadence and quotas belong to the persisted planner settings.
+ */
+export const COMMERCIAL_AUTOMATION_HEARTBEAT_CRON = '* * * * *';
+
 export type CommercialAutomationSchedulerConfig = {
   enabled: boolean;
   cronExpression: string;

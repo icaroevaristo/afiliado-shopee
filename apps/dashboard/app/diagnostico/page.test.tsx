@@ -102,8 +102,6 @@ const operational: OperationalAdmin = {
       openAi: { used: 2, limit: 8, reached: false },
     },
     hardCaps: {
-      dailyGlobalLimit: 60,
-      dailyGroupLimit: 60,
       maxMessagesPerRun: 1,
     },
     scheduleRevision: 7,
