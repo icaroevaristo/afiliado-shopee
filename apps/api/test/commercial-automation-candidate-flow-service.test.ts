@@ -1513,13 +1513,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
         rejectionSummary: { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED: 1 },
       },
     });
-    expect(subject.candidates.blockCandidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        candidateId: 'candidate-1',
-        expectedStatus: 'QUEUED',
-        reason: 'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED',
-      }),
-    );
+    expect(subject.candidates.blockCandidate).not.toHaveBeenCalled();
   });
 
   it('substitui output invalido por proximo candidate uma unica vez sem repetir o contrato rejeitado', async () => {

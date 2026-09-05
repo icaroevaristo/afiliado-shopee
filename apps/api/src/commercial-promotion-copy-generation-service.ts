@@ -33,6 +33,7 @@ import {
   sanitizeCommercialPromotionCopy,
   type AssembledCommercialPromotionCopy,
 } from './commercial-promotion-copy-assembler';
+import { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED } from './commercial-promotion-candidate-terminal';
 import type {
   CommercialPromotionCopyContext,
   CommercialPromotionCopyRepository,
@@ -42,8 +43,7 @@ import type {
 } from './repositories';
 
 export const COMMERCIAL_AI_COPY_CONFIRMATION = 'GERAR_COPY_COM_IA';
-export const COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED =
-  'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED';
+export { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED } from './commercial-promotion-candidate-terminal';
 export const COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED =
   'COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED';
 

@@ -15,6 +15,7 @@ import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   type CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
+import { isCommercialPromotionTerminalCandidateBlockReason } from './commercial-promotion-candidate-terminal';
 import {
   CommercialMessageDraftService,
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED as COMMERCIAL_IMAGE_REQUIRED,
@@ -256,9 +257,6 @@ const isBenignNoCandidateCode = (
 
 const isExpectedNoCandidate = (error: unknown) =>
   error instanceof AppError && isBenignNoCandidateCode(error.code);
-
-const isTerminalCandidateFailure = (code: string) =>
-  code === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID' || isBenignNoCandidateCode(code);
 
 const incrementReason = (summary: Record<string, number>, code: string) => {
   summary[code] = (summary[code] ?? 0) + 1;
@@ -901,32 +899,10 @@ export class CommercialAutomationCandidateFlowService {
     const rejectionSummary: Record<string, number> = {};
     const excluded = new Set(options.excludeCandidateIds ?? []);
     const onRejected = async (
-      item: CommercialPromotionQueueItem,
+      _item: CommercialPromotionQueueItem,
       code: string,
     ) => {
       incrementReason(rejectionSummary, code);
-      if (
-        !isTerminalCandidateFailure(code) ||
-        !this.options.candidates.blockCandidate
-      ) {
-        return;
-      }
-      const expectedStatus = item.status;
-      if (expectedStatus !== 'QUEUED' && expectedStatus !== 'COPY_READY') {
-        return;
-      }
-      const blocked = await this.options.candidates.blockCandidate({
-        candidateId: item.id,
-        expectedStatus,
-        reason: code,
-        now: this.clock(),
-      });
-      if (blocked.kind === 'CONFLICT') {
-        throw appError(
-          'Candidato mudou durante o descarte terminal',
-          'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
-        );
-      }
     };
     const orderedCandidates = queue.items
       .filter(
@@ -1019,10 +995,7 @@ export class CommercialAutomationCandidateFlowService {
         break;
       } catch (error) {
         const code = safeMessageCode(error);
-        if (
-          code !== 'COMMERCIAL_AI_COPY_OUTPUT_INVALID' &&
-          code !== COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
-        ) {
+        if (!isCommercialPromotionTerminalCandidateBlockReason(code)) {
           throw error;
         }
         if (!this.options.candidates.blockCandidate) {

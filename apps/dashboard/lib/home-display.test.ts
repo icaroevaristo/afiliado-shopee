@@ -58,6 +58,15 @@ describe('home-display', () => {
     expect(translateHomeExecutionStatus('UNKNOWN')).toBe('Atividade da automação atualizada');
   });
 
+  it('distingue limite seguro de paginas de catalogo esgotado', () => {
+    expect(
+      translateHomeReason('COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED'),
+    ).toBe('A busca atingiu o limite seguro de páginas antes de encontrar produto útil.');
+    expect(translateHomeReason('COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED')).toBe(
+      'O catálogo disponível terminou sem produto útil para o próximo slot.',
+    );
+  });
+
   it('representa pausa como estado desligado', () => {
     expect(homeAutomationPresentation({ ...status, paused: true }, scheduler)).toMatchObject({
       label: 'Automação desligada',

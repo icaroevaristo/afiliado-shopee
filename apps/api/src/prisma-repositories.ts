@@ -116,6 +116,10 @@ import {
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import { APPROVED_PRODUCT_MIN_SCORE } from './repositories';
 import {
+  canReactivateCommercialPromotionCandidate,
+  isCommercialPromotionTerminalCandidateForSnapshot,
+} from './commercial-promotion-candidate-terminal';
+import {
   COMMERCIAL_EXECUTION_OWNERSHIP_LOST,
   COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_STALE,
   isCommercialAutomationExecutionStale,
@@ -2898,13 +2902,24 @@ export class PrismaCommercialPromotionRepository
             campaign.queueTargetSize - protectedCount,
             0,
           );
-          const selected = input.rankedCandidates.slice(0, queueCapacity);
           const currentByProduct = new Map(
             currentCandidates.map((candidate) => [
               candidate.productId,
               candidate,
             ]),
           );
+          const selected = input.rankedCandidates
+            .filter((candidate) => {
+              const current = currentByProduct.get(candidate.productId);
+              return !current ||
+                !isCommercialPromotionTerminalCandidateForSnapshot({
+                  status: current.status,
+                  blockedReason: current.blockedReason,
+                  currentSnapshotId: current.snapshotId,
+                  nextSnapshotId: candidate.snapshotId,
+                });
+            })
+            .slice(0, queueCapacity);
 
           for (const candidate of selected) {
             const current = currentByProduct.get(candidate.productId);
@@ -3023,10 +3038,12 @@ export class PrismaCommercialPromotionRepository
               queuedCreated += 1;
               continue;
             }
-            const reactivated =
-              current.status === 'BLOCKED' ||
-              current.status === 'EXPIRED' ||
-              current.status === 'DISPATCHED';
+            const reactivated = canReactivateCommercialPromotionCandidate({
+              status: current.status,
+              blockedReason: current.blockedReason,
+              currentSnapshotId: current.snapshotId,
+              nextSnapshotId: candidate.snapshotId,
+            });
             const updated =
               await transaction.commercialPromotionCandidate.updateMany({
                 where: {

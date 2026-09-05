@@ -462,6 +462,11 @@ ou link elegível, expirado/stale, ou com output de IA terminalmente rejeitado
 também é descartado da capacidade útil com motivo preservado. A preparação pode
 substituí-lo pelo próximo candidate do mesmo alvo, em número limitado; ela nunca
 repete o mesmo contrato rejeitado.
+Um blocker terminal de copy permanece `BLOCKED` para o mesmo snapshot/contrato e
+não é reativado genericamente por nova materialização. Somente um snapshot novo
+e legítimo permite reativação. Candidatos terminais são filtrados antes do corte
+por `queueTargetSize`, então quatro ranks terminais não monopolizam uma fila de
+capacidade 4 e um rank 5 válido pode ocupar a capacidade útil.
 `evaluationTruncated=true` pode ser visto no preview, mas nunca materializado.
 Uma campanha com cadência de 15 minutos ainda não possui Scheduler nesta etapa.
 O uso de múltiplos remetentes continua fora desta etapa; candidatos `QUEUED`
@@ -503,7 +508,8 @@ passa a `COPY_READY`. Fingerprint canônico, cache e claim único impedem chamad
 duplicada. `FAILED` preserva falha confirmada; `AMBIGUOUS` preserva incerteza;
 nenhum deles recebe retry automático para o mesmo input.
 
-Preflight e preview são read-only. A geração não consulta a Shopee, não altera
+Preflight e preview são read-only: não bloqueiam candidate, não reativam estado
+terminal e não alteram persistência. A geração não consulta a Shopee, não altera
 signer, query, matcher ou score, e não cria pipeline run, automation execution,
 dispatch, outbox, job ou mensagem.
 
@@ -513,6 +519,18 @@ Cada página respeita `hasNextPage`, cursor/página e os budgets do provider; n�
 há página adicional quando a capacidade local já resolve a slot. Falha de
 provider, orçamento ou resultado ambíguo encerra o fluxo fail-closed e não é
 convertida em fallback de candidate.
+
+Cada fulfillment usa no máximo 3 páginas Shopee. Se a última página permitida
+ainda tiver `hasNextPage=true`, o resultado explícito é
+`COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED`; quando a fonte termina sem
+candidate útil, o resultado é `COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED`. Uma
+falha terminal específica do candidate pode continuar o fulfillment na mesma
+slot, preservando target, campanha, grupo e instância e mantendo/renovando a
+mesma reservation. O fluxo tenta novamente o catálogo persistido antes de
+continuar da próxima página Shopee, sem reiniciar paginação ou budget. A rotação
+round-robin de instâncias continua avançando somente após `SENT` confirmado;
+assim, se B bloqueia depois de A ter sido `SENT`, B permanece o próximo alvo do
+planner.
 
 
 ## Sync Operacional Paginado

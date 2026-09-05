@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import {
+  COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED,
   COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED,
   COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED,
+  COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED,
   CommercialAutomationOrchestrator,
 } from '../src/commercial-automation-orchestrator';
 import {
@@ -304,6 +306,7 @@ const createSubject = ({
         selection: CommercialAutomationCandidateSelection,
         options: {
           executionId: string;
+          beforeExternalCopyGeneration?: () => Promise<void>;
           miningReport?: Pick<
             CommercialPromotionMiningReport,
             'rejectionSummary'
@@ -318,15 +321,20 @@ const createSubject = ({
         logicalGroupFingerprint: string;
         nicheId: string;
       }>
-    >(async ({ target, candidateId }) => ({
-      runId: 'run-1',
-      generatedCopyId: 'ai-copy-1',
-      candidateId,
-      campaignId: target.campaignId,
-      groupId: target.groupId,
-      logicalGroupFingerprint: target.logicalGroupFingerprint,
-      nicheId: target.nicheId,
-    })),
+    >(async ({ target, candidateId, candidateStatus }, options) => {
+      if (candidateStatus === 'QUEUED') {
+        await options.beforeExternalCopyGeneration?.();
+      }
+      return {
+        runId: 'run-1',
+        generatedCopyId: 'ai-copy-1',
+        candidateId,
+        campaignId: target.campaignId,
+        groupId: target.groupId,
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        nicheId: target.nicheId,
+      };
+    }),
     revalidate: vi.fn(async () => undefined),
     reserveAttempt: vi.fn<
       (
@@ -1834,10 +1842,11 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
-      {
+      expect.objectContaining({
         executionId: 'execution-1',
         miningReport: { rejectionSummary: {} },
-      },
+        beforeExternalCopyGeneration: expect.any(Function),
+      }),
     );
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
@@ -2088,7 +2097,7 @@ describe('CommercialAutomationOrchestrator', () => {
       }),
     ).resolves.toMatchObject({
       status: 'blocked',
-      reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
+      reasons: ['COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED'],
     });
 
     expect(subject.syncOffers.run).toHaveBeenCalledTimes(2);
@@ -2123,7 +2132,7 @@ describe('CommercialAutomationOrchestrator', () => {
       }),
     ).resolves.toMatchObject({
       status: 'blocked',
-      reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
+      reasons: ['COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED'],
     });
 
     expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
@@ -2696,6 +2705,238 @@ describe('CommercialAutomationOrchestrator', () => {
       expect.objectContaining({ candidateId: 'candidate-page-2' }),
       expect.anything(),
     );
+  });
+
+  it('renova a reservation antes da IA e bloqueia sem gerar quando a ownership mudou', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'READY',
+      candidateId: 'candidate-queued',
+      candidateStatus: 'QUEUED',
+    });
+    subject.candidateFlow.renewAttempt.mockResolvedValue({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+
+    const localReplacementResult = await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+    expect(localReplacementResult).toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT'],
+    });
+
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.renewAttempt).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.releaseAttempt).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+  });
+
+  it('substitui candidate terminal pelo catalogo persistido no mesmo target e mesma instancia', async () => {
+    const target: CommercialAutomationTarget = {
+      groupId: 'group-a',
+      groupName: 'Grupo A',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      campaignId: 'campaign-a',
+      nicheId: 'niche-a',
+      dailyLimit: 60,
+      instanceName: 'instance-a',
+    };
+    const subject = createSubject({ targets: [target] });
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-terminal',
+        candidateStatus: 'QUEUED',
+      })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-local',
+        candidateStatus: 'QUEUED',
+      });
+    let prepareCalls = 0;
+    subject.candidateFlow.prepare.mockImplementation(async (selection, options) => {
+      prepareCalls += 1;
+      await options.beforeExternalCopyGeneration?.();
+      if (prepareCalls === 1) {
+        throw new AppError(
+          'candidate terminal esgotado',
+          'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+        );
+      }
+      return {
+        runId: 'run-local-replacement',
+        generatedCopyId: 'copy-local-replacement',
+        candidateId: selection.candidateId,
+        campaignId: selection.target.campaignId,
+        groupId: selection.target.groupId,
+        logicalGroupFingerprint: selection.target.logicalGroupFingerprint,
+        nicheId: selection.target.nicheId,
+      };
+    });
+
+    const localReplacementResult = await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+    expect(localReplacementResult).toMatchObject({
+      status: 'queued',
+      commercialRunId: 'run-local-replacement',
+    });
+
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare.mock.calls.map(([selection]) => ({
+      candidateId: selection.candidateId,
+      campaignId: selection.target.campaignId,
+      groupId: selection.target.groupId,
+      instanceName: selection.target.instanceName,
+    }))).toEqual([
+      {
+        candidateId: 'candidate-terminal',
+        campaignId: 'campaign-a',
+        groupId: 'group-a',
+        instanceName: 'instance-a',
+      },
+      {
+        candidateId: 'candidate-local',
+        campaignId: 'campaign-a',
+        groupId: 'group-a',
+        instanceName: 'instance-a',
+      },
+    ]);
+    expect(subject.candidateFlow.renewAttempt).toHaveBeenCalledTimes(4);
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('continua da proxima pagina Shopee apos terminal sem reiniciar o fulfillment', async () => {
+    const target: CommercialAutomationTarget = {
+      groupId: 'group-a',
+      groupName: 'Grupo A',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      campaignId: 'campaign-a',
+      nicheId: 'niche-a',
+      dailyLimit: 60,
+      instanceName: 'instance-a',
+    };
+    const subject = createSubject({ targets: [target] });
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-page-1-terminal',
+        candidateStatus: 'QUEUED',
+      })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-page-2',
+        candidateStatus: 'QUEUED',
+      });
+    subject.syncOffers.run
+      .mockResolvedValueOnce({
+        hasNextPage: true,
+        page: 1,
+        nextCursor: 'cursor-page-2',
+      })
+      .mockResolvedValueOnce({ hasNextPage: false, page: 2 });
+    let prepareCalls = 0;
+    subject.candidateFlow.prepare.mockImplementation(async (selection, options) => {
+      prepareCalls += 1;
+      await options.beforeExternalCopyGeneration?.();
+      if (prepareCalls === 1) {
+        throw new AppError(
+          'candidate terminal esgotado',
+          'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+        );
+      }
+      return {
+        runId: 'run-page-2',
+        generatedCopyId: 'copy-page-2',
+        candidateId: selection.candidateId,
+        campaignId: selection.target.campaignId,
+        groupId: selection.target.groupId,
+        logicalGroupFingerprint: selection.target.logicalGroupFingerprint,
+        nicheId: selection.target.nicheId,
+      };
+    });
+
+    const nextPageResult = await subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    });
+    expect(nextPageResult).toMatchObject({ status: 'queued', commercialRunId: 'run-page-2' });
+
+    expect(subject.syncOffers.run).toHaveBeenCalledTimes(2);
+    expect(subject.syncOffers.run).toHaveBeenNthCalledWith(1, { page: 1 });
+    expect(subject.syncOffers.run).toHaveBeenNthCalledWith(2, {
+      page: 2,
+      cursor: 'cursor-page-2',
+    });
+    expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.prepare.mock.calls.map(([selection]) => ({
+      candidateId: selection.candidateId,
+      campaignId: selection.target.campaignId,
+      instanceName: selection.target.instanceName,
+    }))).toEqual([
+      {
+        candidateId: 'candidate-page-1-terminal',
+        campaignId: 'campaign-a',
+        instanceName: 'instance-a',
+      },
+      {
+        candidateId: 'candidate-page-2',
+        campaignId: 'campaign-a',
+        instanceName: 'instance-a',
+      },
+    ]);
+    expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
+  });
+
+  it('distingue limite de paginas de esgotamento real do catalogo', async () => {
+    const limitSubject = createSubject();
+    limitSubject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'NO_CANDIDATE',
+    });
+    limitSubject.syncOffers.run
+      .mockResolvedValueOnce({ hasNextPage: true, page: 1, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ hasNextPage: true, page: 2, nextCursor: 'cursor-3' })
+      .mockResolvedValueOnce({ hasNextPage: true, page: 3, nextCursor: 'cursor-4' });
+
+    await expect(
+      limitSubject.orchestrator.executeTick({ ...tick, mode: 'send', provider: 'official' }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: [COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED],
+    });
+    expect(limitSubject.syncOffers.run).toHaveBeenCalledTimes(3);
+
+    const exhaustedSubject = createSubject();
+    exhaustedSubject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'NO_CANDIDATE',
+    });
+    exhaustedSubject.syncOffers.run.mockResolvedValueOnce({
+      hasNextPage: false,
+      page: 1,
+    });
+
+    await expect(
+      exhaustedSubject.orchestrator.executeTick({ ...tick, mode: 'send', provider: 'official' }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: [COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED],
+    });
+    expect(exhaustedSubject.syncOffers.run).toHaveBeenCalledOnce();
   });
 
   it('passa um unico target deterministico ao preview sem confirmar', async () => {
