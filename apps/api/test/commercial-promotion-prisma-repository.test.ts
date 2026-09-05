@@ -553,6 +553,108 @@ describe('PrismaCommercialPromotionRepository', () => {
     });
   });
 
+  it('mantem blocker terminal BLOCKED no mesmo snapshot sem recolocar na fila', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 1;
+    addProducts(state, 'a');
+    const blocked = candidate('campaign-1', 'a', {
+      status: 'BLOCKED',
+      blockedReason: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+    });
+    state.candidates.push(blocked);
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+    const result = await repository.materialize(
+      materializationInput([
+        ranked('a', blocked as CommercialPromotionCandidateRecord),
+      ]),
+    );
+
+    expect(result.queuedReactivated).toBe(0);
+    expect(fake.state.candidates[0]).toMatchObject({
+      status: 'BLOCKED',
+      snapshotId: 'snapshot-a',
+      blockedReason: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+    });
+  });
+
+  it('ignora terminais na capacidade util e permite que o rank 5 preencha a fila', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 4;
+    addProducts(state, 'a', 'b', 'c', 'd', 'e');
+    for (const productId of ['a', 'b', 'c', 'd']) {
+      state.candidates.push(
+        candidate('campaign-1', productId, {
+          status: 'BLOCKED',
+          blockedReason: 'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED',
+        }),
+      );
+    }
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+    const result = await repository.materialize(
+      materializationInput([
+        ...['a', 'b', 'c', 'd'].map((productId) => {
+          const current = fake.state.candidates.find(
+            (entry) => entry.productId === productId,
+          ) as CommercialPromotionCandidateRecord;
+          return ranked(productId, current);
+        }),
+        ranked('e'),
+      ]),
+    );
+
+    expect(result).toMatchObject({ queuedCreated: 1, queuedReactivated: 0 });
+    expect(fake.state.candidates.find(({ productId }) => productId === 'e')).toMatchObject({
+      status: 'QUEUED',
+      rankPosition: 1,
+    });
+    for (const productId of ['a', 'b', 'c', 'd']) {
+      expect(
+        fake.state.candidates.find((entry) => entry.productId === productId),
+      ).toMatchObject({
+        status: 'BLOCKED',
+        blockedReason: 'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED',
+      });
+    }
+  });
+
+  it('reativa blocker terminal somente quando existe snapshot novo legitimo', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 1;
+    addProducts(state, 'a');
+    const current = candidate('campaign-1', 'a', {
+      status: 'BLOCKED',
+      blockedReason: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+    });
+    state.candidates.push(current);
+    state.products[0].commercialSnapshotRevision = 2;
+    state.products[0].commercialSnapshotFingerprint = 'fingerprint-a-2';
+    state.snapshots.push({
+      ...snapshot('a'),
+      id: 'snapshot-a-2',
+      revision: 2,
+      fingerprint: 'fingerprint-a-2',
+    });
+    const next = {
+      ...ranked('a', current as CommercialPromotionCandidateRecord),
+      snapshotId: 'snapshot-a-2',
+      snapshotRevision: 2,
+      snapshotFingerprint: 'fingerprint-a-2',
+    };
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+    const result = await repository.materialize(materializationInput([next]));
+
+    expect(result.queuedReactivated).toBe(1);
+    expect(fake.state.candidates[0]).toMatchObject({
+      status: 'QUEUED',
+      snapshotId: 'snapshot-a-2',
+      queuedAt: NOW,
+      blockedReason: null,
+    });
+  });
+
   it('e idempotente e preserva queuedAt na segunda materializacao', async () => {
     const state = initialState();
     state.campaigns[0].queueTargetSize = 1;

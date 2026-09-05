@@ -790,6 +790,8 @@ export type CommercialAutomationHistorySnapshot = {
   lastSentAt: Date | null;
   globalLastSentAt?: Date | null;
   groupLastSentAt?: Date | null;
+  /** Only a persisted SENT dispatch advances ordered instance rotation. */
+  lastSentInstanceName?: string | null;
 };
 
 export type CommercialAutomationTarget = {
@@ -1442,6 +1444,10 @@ export type CommercialPromotionQueueItem = Omit<
   snapshotRevision: number;
 };
 
+export type CommercialPromotionCandidateBlockResult =
+  | { kind: 'BLOCKED'; candidateId: string; transitioned: boolean }
+  | { kind: 'CONFLICT'; candidateId: string };
+
 export interface CommercialPromotionCandidateRepository {
   listCampaignCandidates(
     campaignId: string,
@@ -1467,6 +1473,13 @@ export interface CommercialPromotionCandidateRepository {
   ensureManualCandidate?(
     input: CommercialManualCandidateMaterializationInput,
   ): Promise<CommercialPromotionCandidateRecord>;
+  /** Retires a terminal candidate while preserving its history. */
+  blockCandidate?(input: {
+    candidateId: string;
+    expectedStatus: 'QUEUED' | 'COPY_READY';
+    reason: string;
+    now: Date;
+  }): Promise<CommercialPromotionCandidateBlockResult>;
   markDispatchedByGeneratedCopyId(
     generatedCopyId: string,
   ): Promise<CommercialPromotionDispatchFinalization>;

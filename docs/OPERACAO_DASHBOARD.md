@@ -27,6 +27,49 @@ O painel mostra a janela, timezone, intervalo mínimo, stagger, limites, próxim
 envio, uso do dia e blockers. Uma configuração que mudou em outra aba exige
 atualizar a tela e confirmar novamente; não repita a ação automaticamente.
 
+## Slots, candidatos e rotação de instâncias
+
+Cada slot trabalha com um produto substituível, nunca com uma promessa de envio
+de um item específico. Antes de consultar a Shopee, a automação procura a fila
+local e tenta reabastecer a campanha com o catálogo `OFFICIAL` já persistido.
+Somente se ambos não produzirem capacidade útil ela pode consultar páginas
+limitadas da Shopee; a paginação para assim que encontra um candidate útil, não
+tem próxima página ou chega ao teto seguro.
+
+O fulfillment de uma slot consulta no máximo 3 páginas da Shopee. Se a terceira
+página ainda indicar que há continuação, o blocker é
+`COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED`; se a fonte realmente
+terminar sem candidate útil, o blocker é
+`COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED`. Esses estados têm significados
+diferentes no Dashboard.
+
+Candidate expirado, sem imagem/link válido ou com output de IA terminalmente
+rejeitado deixa de ocupar capacidade útil. Ele fica `BLOCKED` com o motivo
+registrado para auditoria, e a automação pode preparar o próximo candidate do
+mesmo grupo. Falha de provider, orçamento, ambiguidade, mudança de agenda ou
+qualquer boundary externo não ativa substituição automática: o slot fica
+bloqueado para investigação.
+
+Um bloqueio terminal de copy permanece terminal enquanto o candidate referencia
+o mesmo snapshot/contrato; preflight e preview apenas leem esse estado e não o
+reativam nem gravam um novo bloqueio. Um snapshot comercial novo e legítimo pode
+reativar o candidate. Candidatos terminais também não consomem a capacidade útil
+da fila: por exemplo, com alvo 4, quatro ranks terminais não impedem o rank 5 de
+preencher uma vaga útil.
+
+Quando uma falha terminal de copy permite substituição, o reabastecimento
+continua dentro da mesma slot, mantendo o mesmo target, campanha, grupo e
+instância. A reserva da tentativa permanece retida e é renovada durante o fluxo,
+inclusive imediatamente antes de uma nova geração externa de copy. O catálogo
+persistido é tentado antes de avançar a paginação Shopee já iniciada; a busca não
+reinicia o orçamento nem volta para a primeira página.
+
+A ordem das instâncias só avança depois de um dispatch `SENT` confirmado. Um
+bloqueio, falha antes do provider, estado ambíguo ou slot stale não muda a
+próxima instância. A operação agenda apenas a próxima slot pendente por grupo;
+portanto, se a instância B falhar depois de A ter sido enviada, o replanejamento
+continua tentando B — não volta silenciosamente para A.
+
 ## Agenda global
 
 Em **Automação**, configure horário inicial e final, timezone, intervalo mínimo,

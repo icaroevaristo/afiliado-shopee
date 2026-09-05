@@ -149,6 +149,7 @@ describe('commercial automation Prisma repositories', () => {
     ]);
     const dispatchFindFirst = vi.fn().mockResolvedValue({
       sentAt: new Date('2026-07-25T14:30:00.000Z'),
+      instanceName: 'instance-b',
     });
     const runFindFirst = vi.fn().mockResolvedValue(null);
     const repository = new PrismaCommercialAutomationHistoryRepository({
@@ -168,6 +169,7 @@ describe('commercial automation Prisma repositories', () => {
       lastSentAt: new Date('2026-07-25T14:30:00.000Z'),
       globalLastSentAt: new Date('2026-07-25T14:30:00.000Z'),
       groupLastSentAt: new Date('2026-07-25T14:30:00.000Z'),
+      lastSentInstanceName: 'instance-b',
     });
     expect(groupBy).toHaveBeenCalledWith({
       by: ['destinationId'],

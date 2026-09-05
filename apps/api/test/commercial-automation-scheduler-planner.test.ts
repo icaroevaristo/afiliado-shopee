@@ -1051,15 +1051,8 @@ describe('commercial automation scheduler planner', () => {
 
     expect(first.map((slot) => slot.at)).toEqual([
       '2026-08-24T12:00:00.000Z',
-      '2026-08-24T12:15:00.000Z',
-      '2026-08-24T12:30:00.000Z',
-      '2026-08-24T12:45:00.000Z',
     ]);
-    expect(overlapping.map((slot) => slot.jobId)).toEqual([
-      first[1]!.jobId,
-      first[2]!.jobId,
-      first[3]!.jobId,
-    ]);
+    expect(overlapping.map((slot) => slot.jobId)).toEqual([]);
   });
 
   it('preserva a fase round-robin entre ticks sobrepostos e após envio', () => {
@@ -1277,5 +1270,59 @@ describe('commercial automation scheduler planner', () => {
     });
 
     expect(revised.slots[0]!.jobId).not.toBe(first.slots[0]!.jobId);
+  });
+
+  it('avanca a rotacao somente depois de um SENT confirmado e mantem B apos falha de B', () => {
+    const base = target('sent-rotation', {
+      orderedInstanceNames: ['instance-a', 'instance-b'],
+      instanceActiveByName: { 'instance-a': true, 'instance-b': true },
+      lastSentInstanceName: 'instance-a',
+      dailyLimit: 3,
+      cadenceMinutes: 1,
+    });
+    const input = {
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      globalSentToday: 0,
+      horizonMinutes: 10,
+      enforceConfirmedSentRotation: true,
+    } as const;
+
+    const first = planCommercialTargetSlots({ ...input, targets: [base] });
+    const afterBlockedAttempt = planCommercialTargetSlots({
+      ...input,
+      targets: [base],
+    });
+    const afterSent = planCommercialTargetSlots({
+      ...input,
+      targets: [{ ...base, lastSentInstanceName: 'instance-b' }],
+    });
+
+    expect(first.slots).toHaveLength(1);
+    expect(first.slots[0]?.target.instanceName).toBe('instance-b');
+    expect(afterBlockedAttempt.slots[0]?.target.instanceName).toBe('instance-b');
+    expect(afterBlockedAttempt.slots[0]?.jobId).toBe(first.slots[0]?.jobId);
+    expect(afterSent.slots[0]?.target.instanceName).toBe('instance-a');
+  });
+
+  it('planeja somente a proxima slot pendente por target no modo operacional', () => {
+    const result = planCommercialTargetSlots({
+      now,
+      schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
+      targets: [
+        target('single-pending-slot', {
+          orderedInstanceNames: ['instance-a', 'instance-b'],
+          instanceActiveByName: { 'instance-a': true, 'instance-b': true },
+          dailyLimit: 4,
+          cadenceMinutes: 1,
+        }),
+      ],
+      globalSentToday: 0,
+      horizonMinutes: 10,
+      enforceConfirmedSentRotation: true,
+    });
+
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0]?.target.instanceName).toBe('instance-a');
   });
 });

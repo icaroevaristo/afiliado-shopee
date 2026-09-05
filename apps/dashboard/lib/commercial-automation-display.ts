@@ -27,6 +27,14 @@ export const commercialAutomationReasonLabels: Record<
     'Existem destinos físicos duplicando a mesma identidade lógica.',
   COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE:
     'O grupo selecionado deixou de ser elegível para este tick.',
+  COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE:
+    'Nenhum candidate útil permaneceu para esta slot.',
+  COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED:
+    'O limite seguro de páginas da Shopee foi atingido antes de preencher a slot.',
+  COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED:
+    'O catálogo disponível foi esgotado sem encontrar candidate útil para esta slot.',
+  COMMERCIAL_AUTOMATION_CANDIDATE_FALLBACK_EXHAUSTED:
+    'O limite seguro de substituições de candidate foi atingido.',
 };
 
 export const formatCommercialAutomationDate = (

@@ -4,6 +4,7 @@ import type {
   CommercialAutomationStatus,
 } from './api';
 import {
+  commercialAutomationReasonLabels,
   getCommercialOperationalState,
   getCommercialReadinessState,
 } from './commercial-automation-display';
@@ -127,5 +128,18 @@ describe('commercial automation display state', () => {
       label: 'ATENÇÃO',
       detail: 'SCHEDULER INATIVO',
     });
+  });
+
+  it('distingue limite seguro de reposicao de catalogo esgotado', () => {
+    expect(
+      commercialAutomationReasonLabels.COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED,
+    ).toBe(
+      'O limite seguro de páginas da Shopee foi atingido antes de preencher a slot.',
+    );
+    expect(
+      commercialAutomationReasonLabels.COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED,
+    ).toBe(
+      'O catálogo disponível foi esgotado sem encontrar candidate útil para esta slot.',
+    );
   });
 });

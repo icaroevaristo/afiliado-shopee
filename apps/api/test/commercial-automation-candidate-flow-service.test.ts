@@ -12,6 +12,7 @@ import type { CommercialPipelineDryRunResult } from '../src/commercial-pipeline-
 import type {
   CommercialGroupCampaignRecord,
   CommercialPromotionCopyContext,
+  CommercialPromotionCopyRepository,
   CommercialPromotionCandidateRecord,
   CommercialPromotionQueueItem,
   GeneratedCopyRecord,
@@ -339,12 +340,49 @@ const createSubject = (input: {
       (input: { campaignId: string; page?: number; limit?: number }) =>
         Promise<{ items: CommercialPromotionQueueItem[]; total: number }>
     >(async () => ({ items: [queue], total: 1 })),
+    blockCandidate: vi.fn(async (input: {
+      candidateId: string;
+      expectedStatus: 'QUEUED' | 'COPY_READY';
+      reason: string;
+      now: Date;
+    }) => {
+      if (currentCandidate.id !== input.candidateId) {
+        return { kind: 'CONFLICT' as const, candidateId: input.candidateId };
+      }
+      if (
+        currentCandidate.status === 'BLOCKED' &&
+        currentCandidate.blockedReason === input.reason
+      ) {
+        return {
+          kind: 'BLOCKED' as const,
+          candidateId: input.candidateId,
+          transitioned: false,
+        };
+      }
+      if (currentCandidate.status !== input.expectedStatus) {
+        return { kind: 'CONFLICT' as const, candidateId: input.candidateId };
+      }
+      currentCandidate = candidateRecord({
+        ...currentCandidate,
+        status: 'BLOCKED',
+        rankPosition: null,
+        blockedReason: input.reason,
+        lastEvaluatedAt: input.now,
+      });
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: input.candidateId,
+        transitioned: true,
+      };
+    }),
   };
   const copies = {
     loadContext: vi.fn<
       (candidateId: string) => Promise<CommercialPromotionCopyContext | null>
     >(async () => currentContext()),
-    findCopyForCandidate: vi.fn(async () => ({
+    findCopyForCandidate: vi.fn<
+      CommercialPromotionCopyRepository['findCopyForCandidate']
+    >(async () => ({
       candidate: candidateRecord({ status: 'COPY_READY' }),
       copy: copyRecord,
       snapshotRevision: 1,
@@ -810,7 +848,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
     const subject = createSubject();
     subject.candidates.listQueue.mockResolvedValue({ items: [], total: 0 });
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
 
@@ -836,7 +874,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
   it('classifica imagem ausente em COPY_READY como ausencia de candidato', async () => {
     const subject = createSubject({ product: { urlImagem: '' } });
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
@@ -1205,7 +1243,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
     const targetB = targets.find(({ groupId }) => groupId === groupB.id);
     expect(targetA).toBeDefined();
     expect(targetB).toBeDefined();
-    await expect(subject.service.preflight(targetA!)).resolves.toEqual({
+    await expect(subject.service.preflight(targetA!)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     await expect(subject.service.preflight(targetB!)).resolves.toMatchObject({
@@ -1408,7 +1446,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       product: { affiliateLink: '' },
     });
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
@@ -1425,7 +1463,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       blockers: ['COMMERCIAL_AI_COPY_OFFER_EXPIRED'],
     });
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
@@ -1449,6 +1487,139 @@ describe('CommercialAutomationCandidateFlowService', () => {
     await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
     await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({ outcome: 'READY', candidateId: 'candidate-2', candidateStatus: 'QUEUED' });
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+  });
+
+  it('retira rejeicao terminal da capacidade util e preserva o motivo agregado', async () => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    const first = queueItem({ status: 'QUEUED', generatedCopyId: null, rankPosition: 1 });
+    const second = queueItem({ id: 'candidate-2', status: 'QUEUED', generatedCopyId: null, rankPosition: 2 });
+    subject.candidates.listQueue.mockResolvedValue({ items: [first, second], total: 2 });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({ id: candidateId, status: 'QUEUED', generatedCopyId: null, rankPosition: candidateId === 'candidate-1' ? 1 : 2 }),
+    );
+    subject.copyGeneration.preview.mockImplementation(async (candidateId: string) =>
+      candidateId === 'candidate-1'
+        ? { eligible: false, blockers: ['COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED'] }
+        : { eligible: true, blockers: [] },
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-2',
+      queue: {
+        candidateCount: 2,
+        eligibleCount: 1,
+        rejectedCount: 1,
+        rejectionSummary: { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED: 1 },
+      },
+    });
+    expect(subject.candidates.blockCandidate).not.toHaveBeenCalled();
+  });
+
+  it('substitui output invalido por proximo candidate uma unica vez sem repetir o contrato rejeitado', async () => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    const states = new Map<string, 'QUEUED' | 'COPY_READY' | 'BLOCKED'>([
+      ['candidate-1', 'QUEUED'],
+      ['candidate-2', 'QUEUED'],
+    ]);
+    const currentStatus = (candidateId: string): 'QUEUED' | 'COPY_READY' => {
+      const status = states.get(candidateId);
+      if (status === 'QUEUED' || status === 'COPY_READY') return status;
+      throw new Error(`Unexpected candidate state for ${candidateId}`);
+    };
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [
+        queueItem({ id: 'candidate-1', status: 'QUEUED', generatedCopyId: null, rankPosition: 1 }),
+        queueItem({ id: 'candidate-2', status: 'QUEUED', generatedCopyId: null, rankPosition: 2 }),
+      ],
+      total: 2,
+    });
+    subject.candidates.blockCandidate.mockImplementation(async (input) => {
+      states.set(input.candidateId, 'BLOCKED');
+      return { kind: 'BLOCKED' as const, candidateId: input.candidateId, transitioned: true };
+    });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({
+        id: candidateId,
+        status: currentStatus(candidateId),
+        generatedCopyId: states.get(candidateId) === 'COPY_READY' ? `copy-${candidateId}` : null,
+        rankPosition: candidateId === 'candidate-1' ? 1 : 2,
+      }),
+    );
+    subject.copies.findCopyForCandidate.mockImplementation(async (candidateId: string) => ({
+      candidate: candidateRecord({
+        id: candidateId,
+        status: currentStatus(candidateId),
+        generatedCopyId: `copy-${candidateId}`,
+      }),
+      copy: { ...copy(), id: `copy-${candidateId}`, createdFromCandidateId: candidateId },
+      snapshotRevision: 1,
+    }));
+    subject.copyGeneration.generate.mockImplementation(async (candidateId: string) => {
+      if (candidateId === 'candidate-1') {
+        throw new AppError('Output invalido', 'COMMERCIAL_AI_COPY_OUTPUT_INVALID');
+      }
+      states.set(candidateId, 'COPY_READY');
+    });
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED', 'candidate-1'), preparationOptions),
+    ).resolves.toMatchObject({ candidateId: 'candidate-2', generatedCopyId: 'copy-candidate-2' });
+    expect(subject.copyGeneration.generate).toHaveBeenCalledTimes(2);
+    expect(subject.copyGeneration.generate).toHaveBeenNthCalledWith(1, 'candidate-1', 'GERAR_COPY_COM_IA');
+    expect(subject.copyGeneration.generate).toHaveBeenNthCalledWith(2, 'candidate-2', 'GERAR_COPY_COM_IA');
+    expect(subject.candidates.blockCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({ candidateId: 'candidate-1', reason: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID' }),
+    );
+  });
+
+  it('encerra com motivo quando a substituicao terminal esgota a fila', async () => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    subject.copyGeneration.generate.mockRejectedValue(
+      new AppError('Output invalido', 'COMMERCIAL_AI_COPY_OUTPUT_INVALID'),
+    );
+    subject.candidates.listQueue.mockResolvedValue({ items: [], total: 1 });
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED'), preparationOptions),
+    ).rejects.toMatchObject({ code: 'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE' });
+    expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
+    expect(subject.candidates.blockCandidate).toHaveBeenCalledOnce();
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('limita substituicoes terminais para nunca girar a fila indefinidamente', async () => {
+    const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
+    const items = Array.from({ length: 5 }, (_, index) =>
+      queueItem({
+        id: `candidate-${index + 1}`,
+        status: 'QUEUED',
+        generatedCopyId: null,
+        rankPosition: index + 1,
+      }),
+    );
+    subject.candidates.listQueue.mockResolvedValue({ items, total: items.length });
+    subject.candidates.blockCandidate.mockImplementation(async (input) => ({
+      kind: 'BLOCKED' as const,
+      candidateId: input.candidateId,
+      transitioned: true,
+    }));
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({ id: candidateId, status: 'QUEUED', generatedCopyId: null }),
+    );
+    subject.copyGeneration.preview.mockResolvedValue({ eligible: true, blockers: [] });
+    subject.copyGeneration.generate.mockRejectedValue(
+      new AppError('Output invalido', 'COMMERCIAL_AI_COPY_OUTPUT_INVALID'),
+    );
+
+    await expect(
+      subject.service.prepare(selection(subject.target, 'QUEUED'), preparationOptions),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_CANDIDATE_FALLBACK_EXHAUSTED',
+    });
+    expect(subject.copyGeneration.generate).toHaveBeenCalledTimes(4);
+    expect(subject.candidates.blockCandidate).toHaveBeenCalledTimes(4);
+    expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 
   it('pula candidato QUEUED stale apos avancar o snapshot e seleciona o proximo', async () => {
@@ -1513,7 +1684,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       ),
     );
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledWith('candidate-1');
@@ -1584,6 +1755,11 @@ describe('CommercialAutomationCandidateFlowService', () => {
       }),
     ];
     subject.candidates.listQueue.mockResolvedValue({ items, total: items.length });
+    subject.candidates.blockCandidate.mockImplementation(async (input) => ({
+      kind: 'BLOCKED' as const,
+      candidateId: input.candidateId,
+      transitioned: true,
+    }));
     subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
       context(
         {
@@ -1599,7 +1775,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       ),
     );
 
-    await expect(subject.service.preflight(subject.target)).resolves.toEqual({
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'NO_CANDIDATE',
     });
     expect(subject.copyGeneration.preview).not.toHaveBeenCalled();
@@ -1817,6 +1993,27 @@ describe('CommercialAutomationCandidateFlowService', () => {
       ],
       total: 2,
     });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      context({
+        id: candidateId,
+        status: candidateId === 'candidate-1' ? 'QUEUED' : 'COPY_READY',
+        generatedCopyId:
+          candidateId === 'candidate-1' ? null : 'copy-ready-rank-2',
+      }),
+    );
+    subject.copies.findCopyForCandidate.mockImplementation(async (candidateId: string) => ({
+      candidate: candidateRecord({
+        id: candidateId,
+        status: 'COPY_READY',
+        generatedCopyId: 'copy-ready-rank-2',
+      }),
+      copy: {
+        ...copy(),
+        id: 'copy-ready-rank-2',
+        createdFromCandidateId: candidateId,
+      },
+      snapshotRevision: 1,
+    }));
 
     await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
       outcome: 'READY',
@@ -1824,10 +2021,12 @@ describe('CommercialAutomationCandidateFlowService', () => {
       candidateStatus: 'QUEUED',
     });
     expect(subject.copies.loadContext).toHaveBeenCalledWith('candidate-1');
-    expect(subject.copies.loadContext).not.toHaveBeenCalledWith(
+    expect(subject.copies.loadContext).toHaveBeenCalledWith(
       'candidate-ready-rank-2',
     );
-    expect(subject.copyGeneration.findCopy).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.findCopy).toHaveBeenCalledWith(
+      'candidate-ready-rank-2',
+    );
   });
 
 });
