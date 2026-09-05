@@ -1,6 +1,7 @@
 'use client';
 
 import { Pause, Play, Save, X } from 'lucide-react';
+import { COMMERCIAL_DAILY_LIMIT_MAX } from '@shopee-auto-affiliate-ai/shared';
 import {
   useCallback,
   useEffect,
@@ -39,7 +40,7 @@ const RESUME_CONFIRMATION = 'RETOMAR_AUTOMACAO_COMERCIAL';
 const SAVE_CONFIRMATION = 'CONFIRMAR_ALTERACAO_OPERACIONAL';
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const MAX_MINUTES = 1_440;
-const MAX_LIMIT = 1_000_000;
+const MAX_LIMIT = COMMERCIAL_DAILY_LIMIT_MAX;
 
 type AutomationAction = 'pause' | 'resume' | 'save';
 

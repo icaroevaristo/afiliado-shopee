@@ -1,4 +1,7 @@
-import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import {
+  AppError,
+  COMMERCIAL_DAILY_LIMIT_MAX,
+} from '@shopee-auto-affiliate-ai/shared';
 
 import {
   duplicateLogicalGroupFingerprints,
@@ -266,7 +269,11 @@ const assertScheduleUpdate = (
     ['dailyOpenAiGenerationLimit', input.dailyOpenAiGenerationLimit],
   ] as const) {
     if (value === undefined || value === null) continue;
-    if (!Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 1 ||
+      value > COMMERCIAL_DAILY_LIMIT_MAX
+    ) {
       throw new AppError(
         `${field} invalido`,
         'COMMERCIAL_AUTOMATION_SCHEDULE_INVALID',

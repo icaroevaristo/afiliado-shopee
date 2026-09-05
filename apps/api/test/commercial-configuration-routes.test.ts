@@ -66,6 +66,8 @@ const setup = async () => {
     totalPages: 1,
   }));
   const updateCampaign = vi.fn(async () => campaign);
+  const activateCampaign = vi.fn(async () => ({ ...campaign, active: true }));
+  const deactivateCampaign = vi.fn(async () => campaign);
   const dispatchAdd = vi.fn();
   const app = await buildAuthenticatedTestApp({
     logger: false,
@@ -81,13 +83,21 @@ const setup = async () => {
       list: listCampaigns,
       find: vi.fn(async () => campaign),
       update: updateCampaign,
-      activate: vi.fn(async () => ({ ...campaign, active: true })),
-      deactivate: vi.fn(async () => campaign),
+      activate: activateCampaign,
+      deactivate: deactivateCampaign,
     },
     whatsappDispatchQueue: { add: dispatchAdd, getJob: vi.fn() },
   });
   apps.push(app);
-  return { app, listNiches, listCampaigns, updateCampaign, dispatchAdd };
+  return {
+    app,
+    listNiches,
+    listCampaigns,
+    updateCampaign,
+    activateCampaign,
+    deactivateCampaign,
+    dispatchAdd,
+  };
 };
 
 afterEach(async () => Promise.all(apps.splice(0).map((app) => app.close())));
@@ -160,6 +170,29 @@ describe('commercial configuration routes', () => {
       allowedStartTime: '08:00',
       allowedEndTime: '21:00',
     });
+    expect(subject.dispatchAdd).not.toHaveBeenCalled();
+  });
+
+  it('liga e desliga campanha pelos endpoints protegidos sem tocar na fila', async () => {
+    const subject = await setup();
+    const activated = await subject.app.inject({
+      method: 'POST',
+      url: '/commercial/campaigns/campaign-1/activate',
+      payload: { confirm: 'ATIVAR_CAMPANHA' },
+    });
+    const deactivated = await subject.app.inject({
+      method: 'POST',
+      url: '/commercial/campaigns/campaign-1/deactivate',
+      payload: {},
+    });
+
+    expect(activated.statusCode).toBe(200);
+    expect(deactivated.statusCode).toBe(200);
+    expect(subject.activateCampaign).toHaveBeenCalledWith(
+      'campaign-1',
+      { confirm: 'ATIVAR_CAMPANHA' },
+    );
+    expect(subject.deactivateCampaign).toHaveBeenCalledWith('campaign-1', {});
     expect(subject.dispatchAdd).not.toHaveBeenCalled();
   });
 });

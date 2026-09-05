@@ -22,6 +22,21 @@ export const updateCommercialCampaign = (
     { method: 'PATCH', body: input },
   );
 
+export const activateCommercialCampaign = (campaignId: string) =>
+  apiRequest<CommercialCampaign>(
+    `/commercial/campaigns/${encodeURIComponent(campaignId)}/activate`,
+    {
+      method: 'POST',
+      body: { confirm: 'ATIVAR_CAMPANHA' },
+    },
+  );
+
+export const deactivateCommercialCampaign = (campaignId: string) =>
+  apiRequest<CommercialCampaign>(
+    `/commercial/campaigns/${encodeURIComponent(campaignId)}/deactivate`,
+    { method: 'POST', body: {} },
+  );
+
 export const listCommercialCampaignQueue = (
   campaignId: string,
   input: { page?: number; limit?: number; status?: CommercialCandidateStatus } = {},

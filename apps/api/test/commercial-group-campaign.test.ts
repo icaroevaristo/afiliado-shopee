@@ -235,6 +235,30 @@ describe('commercial group campaign', () => {
     ).toThrow();
   });
 
+  it('aceita limites acima do antigo teto 96 quando a janela comporta os slots', () => {
+    const base = {
+      name: 'Xx',
+      groupDestinationId: 'g',
+      nicheId: 'n',
+      allowedStartTime: '00:00',
+      allowedEndTime: '23:59',
+      timezone: 'America/Sao_Paulo',
+      queueTargetSize: 40,
+      dedupeDays: 30,
+    };
+
+    expect(parseCommercialGroupCampaignCreate({ ...base, dailyLimit: 60 }).dailyLimit).toBe(60);
+    expect(parseCommercialGroupCampaignCreate({ ...base, cadenceMinutes: 10, dailyLimit: 96 }).dailyLimit).toBe(96);
+    expect(parseCommercialGroupCampaignCreate({ ...base, cadenceMinutes: 5, dailyLimit: 100 }).dailyLimit).toBe(100);
+    expect(() =>
+      parseCommercialGroupCampaignCreate({ ...base, cadenceMinutes: 5, dailyLimit: 500 }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'COMMERCIAL_GROUP_CAMPAIGN_DAILY_LIMIT_EXCEEDS_SLOTS',
+      }),
+    );
+  });
+
   it('remove reservas internas de todos os DTOs publicos sem alterar o record', async () => {
     const internal = campaign();
     const { service, campaigns } = setup();

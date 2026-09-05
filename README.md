@@ -605,6 +605,14 @@ a vida do processo. A allowlist vazia bloqueia todos os envios Evolution e o
 limite padrao e 1. Requests que chegaram ao cliente HTTP contam mesmo quando
 terminam em timeout ou erro HTTP; bloqueios anteriores ao HTTP nao contam.
 
+No fluxo comercial com routing sticky, o worker usa o `providerResolver` para
+criar um provider com a instancia selecionada para cada dispatch. Portanto,
+`EVOLUTION_MAX_MESSAGES_PER_BOOT` continua sendo uma protecao do tempo de vida
+de cada provider (e do worker no caminho nao comercial), nao uma quota diaria
+ou global da automacao comercial. As quotas comerciais persistidas e atomicas
+no painel sao a autoridade para limite diario; esse cap de provider nao e
+exibido como limite comercial.
+
 O provider `mock` ignora essas configuracoes e continua sem HTTP. Desativar o
 safe mode exige `EVOLUTION_SAFE_MODE=false` explicito e preserva o comportamento
 anterior do provider Evolution; credenciais presentes nunca desativam a
@@ -748,7 +756,7 @@ O Sender distingue os dois tipos. Telefones continuam protegidos pela allowlist
 existente. Um grupo so pode chegar ao HTTP quando esta descoberto na instancia
 atual, disponivel, ativo, com identidade exata, safe mode ativo e o master switch
 `WHATSAPP_GROUP_SEND_ENABLED=true`. O padrao permanece `false`, e
-`WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN=1` limita o processo. O dashboard altera
+`WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN=1` limita cada execucao de grupo. O dashboard altera
 somente `active` no banco e nunca edita variaveis de ambiente.
 
 O comando abaixo e dry-run por padrao:

@@ -6,11 +6,15 @@ import CampaignsPage from './page';
 const listCampaignsMock = vi.fn();
 const listGroupsMock = vi.fn();
 const updateCampaignMock = vi.fn();
+const activateCampaignMock = vi.fn();
+const deactivateCampaignMock = vi.fn();
 
 vi.mock('../../lib/api', () => ({
   listCommercialCampaigns: (...args: unknown[]) => listCampaignsMock(...args),
   listWhatsAppGroups: (...args: unknown[]) => listGroupsMock(...args),
   updateCommercialCampaign: (...args: unknown[]) => updateCampaignMock(...args),
+  activateCommercialCampaign: (...args: unknown[]) => activateCampaignMock(...args),
+  deactivateCommercialCampaign: (...args: unknown[]) => deactivateCampaignMock(...args),
 }));
 
 const campaign = {
@@ -59,6 +63,9 @@ beforeEach(() => {
     cadenceMinutes: 30,
     allowedEndTime: '21:00',
   });
+  activateCampaignMock.mockReset().mockResolvedValue({ ...campaign, active: true });
+  deactivateCampaignMock.mockReset().mockResolvedValue({ ...campaign, active: false });
+  vi.stubGlobal('confirm', vi.fn(() => true));
 });
 
 describe('CampaignsPage', () => {
@@ -82,6 +89,59 @@ describe('CampaignsPage', () => {
       dailyLimit: 10,
     });
     expect(screen.container.textContent).toContain('Grupo A');
+    await screen.unmount();
+  });
+
+  it('confirma e alterna uma campanha ativa sem reiniciar a página', async () => {
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    const deactivate = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Desativar campanha'),
+    );
+    expect(deactivate).toBeDefined();
+    await click(deactivate as HTMLButtonElement);
+
+    expect(deactivateCampaignMock).toHaveBeenCalledWith('campaign-1');
+    expect(screen.container.textContent).toContain('INATIVA');
+    expect(screen.container.textContent).toContain('Ativar campanha');
+
+    const activate = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Ativar campanha'),
+    );
+    await click(activate as HTMLButtonElement);
+
+    expect(activateCampaignMock).toHaveBeenCalledWith('campaign-1');
+    expect(screen.container.textContent).toContain('ATIVA');
+    await screen.unmount();
+  });
+
+  it('não chama a API quando a confirmação humana é cancelada', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false));
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    const deactivate = Array.from(screen.container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Desativar campanha'),
+    );
+    await click(deactivate as HTMLButtonElement);
+
+    expect(deactivateCampaignMock).not.toHaveBeenCalled();
+    expect(screen.container.textContent).toContain('ATIVA');
+    await screen.unmount();
+  });
+
+  it('expõe o teto técnico da janela sem esconder o limite efetivo', async () => {
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    expect(screen.container.textContent).toContain('Limite configurado10');
+    expect(screen.container.textContent).toContain('Teto teórico da janela48');
+    expect(screen.container.textContent).toContain('Limite efetivo10');
+    const dailyLimitInput = Array.from(screen.container.querySelectorAll('input')).find(
+      (input) => input.getAttribute('type') === 'number' && input.getAttribute('max') === '1000000',
+    );
+    expect(dailyLimitInput).toBeDefined();
     await screen.unmount();
   });
 });
