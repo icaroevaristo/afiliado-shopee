@@ -47,6 +47,7 @@ const manualCatalogSync = {
       updated: 0,
       skipped: 0,
       expired: 0,
+      hasNextPage: false,
     };
   },
 };
@@ -60,6 +61,7 @@ const previewCatalogSync = {
       updated: 0,
       skipped: 0,
       expired: 0,
+      hasNextPage: false,
     };
   },
 };

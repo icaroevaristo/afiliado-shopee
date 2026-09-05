@@ -20,6 +20,8 @@ const reasonLabels: Record<CommercialAutomationReason, string> = {
   STALE_COMMERCIAL_EXECUTION_EXISTS: 'Há uma operação que precisa ser recuperada.',
   COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP: 'Há grupos com configuração repetida.',
   COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE: 'O próximo grupo não está pronto.',
+  COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE: 'Não há produto útil para o próximo slot.',
+  COMMERCIAL_AUTOMATION_CANDIDATE_FALLBACK_EXHAUSTED: 'A substituição segura de produtos atingiu o limite.',
 };
 
 export function translateHomeReason(reason: string): string {

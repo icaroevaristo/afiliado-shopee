@@ -103,9 +103,18 @@ export type CommercialAutomationCandidatePreflight =
         candidateCount: number;
         eligibleCount: number;
         rejectedCount: number;
+        rejectionSummary?: Record<string, number>;
       };
     }
-  | { outcome: 'NO_CANDIDATE' };
+  | {
+      outcome: 'NO_CANDIDATE';
+      queue?: {
+        candidateCount: number;
+        eligibleCount: number;
+        rejectedCount: number;
+        rejectionSummary?: Record<string, number>;
+      };
+    };
 
 export type CommercialAutomationCandidateSelection = {
   target: CommercialAutomationTarget;
@@ -115,6 +124,7 @@ export type CommercialAutomationCandidateSelection = {
     candidateCount: number;
     eligibleCount: number;
     rejectedCount: number;
+    rejectionSummary?: Record<string, number>;
   };
 };
 
@@ -162,7 +172,8 @@ type CandidateFlowOptions = {
         'reserveAttempt' | 'releaseAttempt' | 'renewAttempt'
       >
     >;
-  candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'>;
+  candidates: Pick<CommercialPromotionCandidateRepository, 'listQueue'> &
+    Partial<Pick<CommercialPromotionCandidateRepository, 'blockCandidate'>>;
   deliveryHistory: Pick<
     CommercialDeliveryHistoryRepository,
     'wasProductSentToGroup' | 'findLastSentAtByGroup'
@@ -245,6 +256,15 @@ const isBenignNoCandidateCode = (
 
 const isExpectedNoCandidate = (error: unknown) =>
   error instanceof AppError && isBenignNoCandidateCode(error.code);
+
+const isTerminalCandidateFailure = (code: string) =>
+  code === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID' || isBenignNoCandidateCode(code);
+
+const incrementReason = (summary: Record<string, number>, code: string) => {
+  summary[code] = (summary[code] ?? 0) + 1;
+};
+
+const MAX_PREPARE_CANDIDATE_ATTEMPTS = 4;
 
 export class CommercialAutomationCandidateFlowService {
   private readonly clock: () => Date;
@@ -602,6 +622,7 @@ export class CommercialAutomationCandidateFlowService {
     items: CommercialPromotionQueueItem[],
     campaign: CommercialGroupCampaignRecord,
     groupId: string,
+    onRejected: (item: CommercialPromotionQueueItem, code: string) => Promise<void>,
   ) {
     for (const item of items
       .filter(({ status }) => status === 'COPY_READY')
@@ -612,6 +633,7 @@ export class CommercialAutomationCandidateFlowService {
           groupId,
         )
       ) {
+        await onRejected(item, 'ALREADY_SENT_TO_GROUP');
         continue;
       }
       try {
@@ -648,7 +670,10 @@ export class CommercialAutomationCandidateFlowService {
         this.draft(loaded);
         return loaded;
       } catch (error) {
-        if (isExpectedNoCandidate(error)) continue;
+        if (isExpectedNoCandidate(error)) {
+          await onRejected(item, safeMessageCode(error));
+          continue;
+        }
         throw error;
       }
     }
@@ -659,6 +684,7 @@ export class CommercialAutomationCandidateFlowService {
     items: CommercialPromotionQueueItem[],
     campaign: CommercialGroupCampaignRecord,
     groupId: string,
+    onRejected: (item: CommercialPromotionQueueItem, code: string) => Promise<void>,
   ) {
     for (const item of items
       .filter(({ status }) => status === 'QUEUED')
@@ -669,6 +695,7 @@ export class CommercialAutomationCandidateFlowService {
           groupId,
         )
       ) {
+        await onRejected(item, 'ALREADY_SENT_TO_GROUP');
         continue;
       }
       try {
@@ -714,11 +741,15 @@ export class CommercialAutomationCandidateFlowService {
               'COMMERCIAL_AI_COPY_PREVIEW_INVALID',
             );
           }
+          await onRejected(item, preview.blockers[0] ?? 'COMMERCIAL_AI_COPY_PREVIEW_INVALID');
           continue;
         }
         return context;
       } catch (error) {
-        if (isExpectedNoCandidate(error)) continue;
+        if (isExpectedNoCandidate(error)) {
+          await onRejected(item, safeMessageCode(error));
+          continue;
+        }
         throw error;
       }
     }
@@ -859,6 +890,7 @@ export class CommercialAutomationCandidateFlowService {
 
   async preflight(
     target: CommercialAutomationTarget,
+    options: { excludeCandidateIds?: readonly string[] } = {},
   ): Promise<CommercialAutomationCandidatePreflight> {
     const { group, campaign } = await this.resolveTarget(target);
     const queue = await this.options.candidates.listQueue({
@@ -866,43 +898,86 @@ export class CommercialAutomationCandidateFlowService {
       page: 1,
       limit: campaign.queueTargetSize,
     });
-    const eligibleCount = queue.items.filter(
-      ({ status }) => status === 'QUEUED' || status === 'COPY_READY',
-    ).length;
-    const queueSummary = {
-      candidateCount: queue.total,
-      eligibleCount,
-      rejectedCount: Math.max(queue.total - eligibleCount, 0),
+    const rejectionSummary: Record<string, number> = {};
+    const excluded = new Set(options.excludeCandidateIds ?? []);
+    const onRejected = async (
+      item: CommercialPromotionQueueItem,
+      code: string,
+    ) => {
+      incrementReason(rejectionSummary, code);
+      if (
+        !isTerminalCandidateFailure(code) ||
+        !this.options.candidates.blockCandidate
+      ) {
+        return;
+      }
+      const expectedStatus = item.status;
+      if (expectedStatus !== 'QUEUED' && expectedStatus !== 'COPY_READY') {
+        return;
+      }
+      const blocked = await this.options.candidates.blockCandidate({
+        candidateId: item.id,
+        expectedStatus,
+        reason: code,
+        now: this.clock(),
+      });
+      if (blocked.kind === 'CONFLICT') {
+        throw appError(
+          'Candidato mudou durante o descarte terminal',
+          'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
+        );
+      }
     };
     const orderedCandidates = queue.items
       .filter(
-        ({ status }) => status === 'COPY_READY' || status === 'QUEUED',
+        ({ id, status }) =>
+          !excluded.has(id) &&
+          (status === 'COPY_READY' || status === 'QUEUED'),
       )
       .sort(queueOrder);
+    let selected:
+      | { candidateId: string; candidateStatus: 'COPY_READY' | 'QUEUED' }
+      | undefined;
+    let usefulCount = 0;
     for (const item of orderedCandidates) {
       if (item.status === 'COPY_READY') {
-        const ready = await this.findReadyCandidate([item], campaign, group.id);
+        const ready = await this.findReadyCandidate(
+          [item],
+          campaign,
+          group.id,
+          onRejected,
+        );
         if (ready) {
-          return {
-            outcome: 'READY',
+          usefulCount += 1;
+          selected ??= {
             candidateId: ready.context.candidate.id,
             candidateStatus: 'COPY_READY',
-            queue: queueSummary,
           };
         }
         continue;
       }
-      const queued = await this.findQueuedCandidate([item], campaign, group.id);
+      const queued = await this.findQueuedCandidate(
+        [item],
+        campaign,
+        group.id,
+        onRejected,
+      );
       if (queued) {
-        return {
-          outcome: 'READY',
+        usefulCount += 1;
+        selected ??= {
           candidateId: queued.candidate.id,
           candidateStatus: 'QUEUED',
-          queue: queueSummary,
         };
       }
     }
-    return { outcome: 'NO_CANDIDATE' };
+    const queueSummary = {
+      candidateCount: queue.total,
+      eligibleCount: usefulCount,
+      rejectedCount: Math.max(queue.total - usefulCount, 0),
+      rejectionSummary,
+    };
+    if (selected) return { outcome: 'READY', ...selected, queue: queueSummary };
+    return { outcome: 'NO_CANDIDATE', queue: queueSummary };
   }
 
   async replenish(
@@ -919,23 +994,79 @@ export class CommercialAutomationCandidateFlowService {
     options: CommercialAutomationCandidatePreparationOptions,
   ): Promise<CommercialAutomationCandidateFlowResult> {
     const { group, campaign } = await this.resolveTarget(selection.target);
-    if (selection.candidateStatus === 'QUEUED') {
-      await this.loadSelectedQueuedCandidate(selection, campaign, group);
-      await options.beforeExternalCopyGeneration?.();
-      await this.options.copyGeneration.generate(
-        selection.candidateId,
-        COMMERCIAL_AI_COPY_CONFIRMATION,
-      );
+    let currentSelection = selection;
+    const terminalCandidateIds = new Set<string>();
+    let loaded: CandidateWithContext | null = null;
+    for (
+      let attempt = 0;
+      attempt < MAX_PREPARE_CANDIDATE_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        if (currentSelection.candidateStatus === 'QUEUED') {
+          await this.loadSelectedQueuedCandidate(currentSelection, campaign, group);
+          await options.beforeExternalCopyGeneration?.();
+          await this.options.copyGeneration.generate(
+            currentSelection.candidateId,
+            COMMERCIAL_AI_COPY_CONFIRMATION,
+          );
+        }
+        loaded = await this.loadSelectedReadyCandidate(
+          currentSelection,
+          campaign,
+          group,
+        );
+        break;
+      } catch (error) {
+        const code = safeMessageCode(error);
+        if (
+          code !== 'COMMERCIAL_AI_COPY_OUTPUT_INVALID' &&
+          code !== COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
+        ) {
+          throw error;
+        }
+        if (!this.options.candidates.blockCandidate) {
+          throw appError(
+            'Descarte terminal de candidate indisponivel',
+            'COMMERCIAL_AUTOMATION_CANDIDATE_BLOCK_UNAVAILABLE',
+          );
+        }
+        const blocked = await this.options.candidates.blockCandidate({
+          candidateId: currentSelection.candidateId,
+          expectedStatus:
+            currentSelection.candidateStatus === 'QUEUED'
+              ? 'QUEUED'
+              : 'COPY_READY',
+          reason: code,
+          now: this.clock(),
+        });
+        if (blocked.kind === 'CONFLICT') throw error;
+        terminalCandidateIds.add(currentSelection.candidateId);
+        const next = await this.preflight(selection.target, {
+          excludeCandidateIds: [...terminalCandidateIds],
+        });
+        if (next.outcome === 'NO_CANDIDATE') {
+          throw appError(
+            'Nenhum candidate util restou para o slot',
+            'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
+          );
+        }
+        currentSelection = {
+          target: selection.target,
+          candidateId: next.candidateId,
+          candidateStatus: next.candidateStatus,
+          queue: next.queue ?? {
+            candidateCount: 0,
+            eligibleCount: 0,
+            rejectedCount: 0,
+          },
+        };
+      }
     }
-    const loaded = await this.loadSelectedReadyCandidate(
-      selection,
-      campaign,
-      group,
-    );
     if (!loaded) {
       throw appError(
-        'Copy preparada nao corresponde ao candidato',
-        'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+        'Limite de substituicoes de candidate atingido',
+        'COMMERCIAL_AUTOMATION_CANDIDATE_FALLBACK_EXHAUSTED',
       );
     }
     if (
@@ -965,15 +1096,18 @@ export class CommercialAutomationCandidateFlowService {
       executionId: options.executionId,
       existingRunId: options.existingRunId,
       instanceName:
-        selection.target.instanceName ?? requireAssignedInstanceName(group),
+        currentSelection.target.instanceName ?? requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
       manualSelection: options.manualSelection ?? false,
       copyPreview: draft.caption,
-      candidateCount: selection.queue.candidateCount,
-      eligibleCount: selection.queue.eligibleCount,
-      rejectedCount: selection.queue.rejectedCount,
+      candidateCount: currentSelection.queue.candidateCount,
+      eligibleCount: currentSelection.queue.eligibleCount,
+      rejectedCount: currentSelection.queue.rejectedCount,
       rejectionSummary: toPipelineRejectionSummary(
-        options.miningReport?.rejectionSummary ?? {},
+        {
+          ...(currentSelection.queue.rejectionSummary ?? {}),
+          ...(options.miningReport?.rejectionSummary ?? {}),
+        },
       ),
     });
     this.options.logger?.info(

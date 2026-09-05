@@ -3153,6 +3153,42 @@ export class PrismaCommercialPromotionRepository
     };
   }
 
+  async blockCandidate(input: {
+    candidateId: string;
+    expectedStatus: 'QUEUED' | 'COPY_READY';
+    reason: string;
+    now: Date;
+  }) {
+    const updated = await this.prisma.commercialPromotionCandidate.updateMany({
+      where: { id: input.candidateId, status: input.expectedStatus },
+      data: {
+        status: 'BLOCKED',
+        rankPosition: null,
+        blockedReason: input.reason,
+        lastEvaluatedAt: input.now,
+      },
+    });
+    if (updated.count === 1) {
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: input.candidateId,
+        transitioned: true,
+      };
+    }
+    const current = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { id: input.candidateId },
+      select: { status: true, blockedReason: true },
+    });
+    if (current?.status === 'BLOCKED' && current.blockedReason === input.reason) {
+      return {
+        kind: 'BLOCKED' as const,
+        candidateId: input.candidateId,
+        transitioned: false,
+      };
+    }
+    return { kind: 'CONFLICT' as const, candidateId: input.candidateId };
+  }
+
   async markDispatchedByGeneratedCopyId(generatedCopyId: string) {
     const candidates = await this.prisma.commercialPromotionCandidate.findMany({
       where: { generatedCopyId },
@@ -6309,7 +6345,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
               destinationId: groupId,
             },
             orderBy: { sentAt: 'desc' },
-            select: { sentAt: true },
+            select: { sentAt: true, instanceName: true },
           })
         : Promise.resolve(null),
     ]);
@@ -6327,6 +6363,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       lastSentAt: lastSent?.sentAt ?? null,
       globalLastSentAt: lastSent?.sentAt ?? null,
       groupLastSentAt: groupLastSent?.sentAt ?? null,
+      lastSentInstanceName: groupLastSent?.instanceName ?? null,
     };
   }
 

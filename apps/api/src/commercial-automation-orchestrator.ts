@@ -40,6 +40,12 @@ import type {
   CommercialPipelineRunRepository,
 } from './repositories';
 
+type CommercialAutomationOfferSyncReport = {
+  hasNextPage?: boolean;
+  page?: number;
+  nextCursor?: string;
+};
+
 export const COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED =
   'COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED';
 export const COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED =
@@ -155,7 +161,11 @@ export class CommercialAutomationOrchestrator {
         CommercialAutomationPolicyService,
         'evaluateAutomationReadiness'
       >;
-      syncOffers: { run(): Promise<unknown> };
+      syncOffers: {
+        run(
+          input?: { page?: number; cursor?: string },
+        ): Promise<CommercialAutomationOfferSyncReport>;
+      };
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
       candidateFlow?: {
         listTargets(): Promise<CommercialAutomationTarget[]>;
@@ -463,16 +473,76 @@ export class CommercialAutomationOrchestrator {
           }
           targets = matchingTargets;
         }
-        let synced = false;
-        const syncOffers = async () => {
-          if (synced) return;
-          await this.dependencies.executions.markExternalMayHaveStarted(
-            ownership,
-            { markedAt: this.clock() },
-          );
-          await this.dependencies.syncOffers.run();
-          synced = true;
+        let externalSyncStarted = false;
+        const syncOffers = async (syncInput: { page?: number; cursor?: string }) => {
+          if (!externalSyncStarted) {
+            await this.dependencies.executions.markExternalMayHaveStarted(
+              ownership,
+              { markedAt: this.clock() },
+            );
+            externalSyncStarted = true;
+          }
+          const report = await this.dependencies.syncOffers.run(syncInput);
           await heartbeat.checkpoint();
+          return report;
+        };
+        const reserveSelection = async (
+          target: CommercialAutomationTarget,
+          preflight: Extract<CommercialAutomationCandidatePreflight, { outcome: 'READY' }>,
+          miningReport?: Pick<CommercialPromotionMiningReport, 'rejectionSummary'>,
+        ) => {
+          selectedMiningReport = miningReport;
+          selectedCandidateSelection = {
+            target,
+            candidateId: preflight.candidateId,
+            candidateStatus: preflight.candidateStatus,
+            queue: preflight.queue ?? {
+              candidateCount: 1,
+              eligibleCount: 1,
+              rejectedCount: 0,
+            },
+          };
+          const reservedAt = this.clock();
+          const reservation = await this.dependencies.candidateFlow!.reserveAttempt(
+            target,
+            {
+              executionId: execution.id,
+              reservedAt,
+              leaseExpiresAt: addMilliseconds(
+                reservedAt,
+                this.dependencies.leaseSeconds * 1000,
+              ),
+            },
+          );
+          if (reservation.kind === 'INELIGIBLE') {
+            selectedCandidateSelection = undefined;
+            selectedMiningReport = undefined;
+            targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_BACKOFF);
+            return false;
+          }
+          if (reservation.kind === 'CONFLICT') {
+            selectedCandidateSelection = undefined;
+            selectedMiningReport = undefined;
+            targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED);
+            return false;
+          }
+          acquiredReservation = {
+            campaignId: reservation.campaignId,
+            executionId: execution.id,
+          };
+          reservationAcquired = true;
+          selectedTarget = target;
+          return true;
+        };
+        const targetsNeedingSync: CommercialAutomationTarget[] = [];
+        const recordPreflightReasons = (
+          preflight: CommercialAutomationCandidatePreflight,
+        ) => {
+          for (const reason of Object.keys(
+            preflight.queue?.rejectionSummary ?? {},
+          )) {
+            targetReasons.add(reason);
+          }
         };
         for (const target of targets) {
           const targetReadiness =
@@ -482,61 +552,57 @@ export class CommercialAutomationOrchestrator {
             });
           if (targetReadiness.allowed) {
             if (input.mode === 'send') {
-              await syncOffers();
-              const replenishmentReport =
-                await this.dependencies.candidateFlow.replenish(target);
+              // Local queue and persisted catalog mining are both provider-free.
+              // They must be exhausted before this slot may consume Shopee budget.
+              const localPreflight = await this.dependencies.candidateFlow.preflight(target);
+              if (localPreflight.outcome === 'READY') {
+                if (await reserveSelection(target, localPreflight)) break;
+                continue;
+              }
+              const replenishmentReport = await this.dependencies.candidateFlow.replenish(target);
               await heartbeat.checkpoint();
-              const postSyncPreflight =
-                await this.dependencies.candidateFlow.preflight(target);
-              if (postSyncPreflight.outcome === 'NO_CANDIDATE') {
-                targetReasons.add(COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE);
+              const replenishedPreflight = await this.dependencies.candidateFlow.preflight(target);
+              if (replenishedPreflight.outcome === 'READY') {
+                if (await reserveSelection(target, replenishedPreflight, replenishmentReport)) break;
                 continue;
               }
-              selectedMiningReport = replenishmentReport;
-              selectedCandidateSelection = {
-                target,
-                candidateId: postSyncPreflight.candidateId,
-                candidateStatus: postSyncPreflight.candidateStatus,
-                queue: postSyncPreflight.queue ?? {
-                  candidateCount: 1,
-                  eligibleCount: 1,
-                  rejectedCount: 0,
-                },
-              };
-              const reservedAt = this.clock();
-              const leaseExpiresAt = addMilliseconds(
-                reservedAt,
-                this.dependencies.leaseSeconds * 1000,
-              );
-              const reservation =
-                await this.dependencies.candidateFlow.reserveAttempt(target, {
-                  executionId: execution.id,
-                  reservedAt,
-                  leaseExpiresAt,
-                });
-              if (reservation.kind === 'INELIGIBLE') {
-                selectedCandidateSelection = undefined;
-                selectedMiningReport = undefined;
-                targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_BACKOFF);
-                continue;
-              }
-              if (reservation.kind === 'CONFLICT') {
-                selectedCandidateSelection = undefined;
-                selectedMiningReport = undefined;
-                targetReasons.add(COMMERCIAL_AUTOMATION_TARGET_ATTEMPT_RESERVED);
-                continue;
-              }
-              acquiredReservation = {
-                campaignId: reservation.campaignId,
-                executionId: execution.id,
-              };
-              reservationAcquired = true;
+              recordPreflightReasons(replenishedPreflight);
+              targetsNeedingSync.push(target);
+              continue;
             }
             selectedTarget = target;
             break;
           }
           for (const reason of targetReadiness.reasons) {
             targetReasons.add(reason);
+          }
+        }
+        if (input.mode === 'send' && !selectedTarget) {
+          syncTargets: for (const target of targetsNeedingSync) {
+            let page = 1;
+            let cursor: string | undefined;
+            for (let syncCall = 0; syncCall < 3; syncCall += 1) {
+              const report = await syncOffers({ page, ...(cursor ? { cursor } : {}) });
+              const replenishmentReport = await this.dependencies.candidateFlow.replenish(target);
+              await heartbeat.checkpoint();
+              const preflight = await this.dependencies.candidateFlow.preflight(target);
+              if (preflight.outcome === 'READY') {
+                if (await reserveSelection(target, preflight, replenishmentReport)) {
+                  break syncTargets;
+                }
+                break;
+              }
+              targetReasons.add(COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE);
+              recordPreflightReasons(preflight);
+              if (report.hasNextPage !== true) break;
+              cursor = typeof report.nextCursor === 'string' && report.nextCursor.length > 0
+                ? report.nextCursor
+                : undefined;
+              page =
+                typeof report.page === 'number' && Number.isSafeInteger(report.page)
+                  ? report.page + 1
+                : page + 1;
+            }
           }
         }
         if (!selectedTarget) {
@@ -547,9 +613,6 @@ export class CommercialAutomationOrchestrator {
               completedAt: this.clock(),
             }),
           );
-        }
-        if (input.mode === 'send') {
-          await syncOffers();
         }
       }
       if (input.mode === 'send') {

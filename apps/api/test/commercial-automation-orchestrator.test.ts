@@ -273,7 +273,15 @@ const createSubject = ({
       reasons: [] as string[],
     })),
   };
-  const syncOffers = { run: vi.fn(async () => ({ synced: 1 })) };
+  const syncOffers = {
+    run: vi.fn<
+      (input?: { page?: number; cursor?: string }) => Promise<{
+        hasNextPage?: boolean;
+        page?: number;
+        nextCursor?: string;
+      }>
+    >(async () => ({})),
+  };
   const pipeline = {
     dryRun: vi.fn(async () => ({ runId: 'run-1' })),
   };
@@ -1032,11 +1040,19 @@ describe('CommercialAutomationOrchestrator', () => {
   });
   it('persiste EXTERNAL_MAY_HAVE_STARTED antes de syncOffers em SEND', async () => {
     const subject = createSubject();
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-after-sync',
+        candidateStatus: 'COPY_READY',
+      });
     subject.syncOffers.run.mockImplementation(async () => {
       expect(subject.executions.records[0].externalStage).toBe(
         'EXTERNAL_MAY_HAVE_STARTED',
       );
-      return { synced: 1 };
+      return { hasNextPage: false };
     });
 
     await subject.orchestrator.executeTick({
@@ -1067,7 +1083,7 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'failed' });
 
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
-    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
     expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
@@ -1225,6 +1241,13 @@ describe('CommercialAutomationOrchestrator', () => {
   it('usa uma lease fresca no reserve mesmo quando a lease inicial ficou stale', async () => {
     let now = NOW;
     const subject = createSubject({ clock: () => now });
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-1',
+        candidateStatus: 'COPY_READY',
+      });
     subject.candidateFlow.replenish.mockImplementation(async () => {
       now = new Date(NOW.getTime() + 60_000);
       return { rejectionSummary: {} };
@@ -1354,7 +1377,7 @@ describe('CommercialAutomationOrchestrator', () => {
         provider: 'official',
       }),
     ).rejects.toMatchObject({ code: COMMERCIAL_EXECUTION_OWNERSHIP_LOST });
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
     expect(subject.executions.records[0].status).toBe('STARTED');
   });
@@ -1376,13 +1399,14 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.executions.records[0].externalStage).toBe(
       'EXTERNAL_MAY_HAVE_STARTED',
     );
-    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
   });
   it('finaliza FAILED quando a sincronizacao falha antes do dry-run', async () => {
     const subject = createSubject();
+    subject.candidateFlow.preflight.mockResolvedValue({ outcome: 'NO_CANDIDATE' });
     subject.syncOffers.run.mockRejectedValue(new Error('offline'));
 
     await expect(
@@ -1495,7 +1519,7 @@ describe('CommercialAutomationOrchestrator', () => {
       }),
     ).resolves.toMatchObject({ status: 'queued' });
 
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
@@ -1622,6 +1646,7 @@ describe('CommercialAutomationOrchestrator', () => {
     const subject = createSubject({ targets });
     subject.candidateFlow.preflight
       .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
       .mockResolvedValue({
         outcome: 'READY',
         candidateId: 'candidate-b',
@@ -1637,16 +1662,16 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(1, targets[0]);
-    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[1]);
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(3, targets[1]);
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(1, targets[0]);
-    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
       expect.objectContaining({ executionId: 'execution-1' }),
     );
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).toHaveBeenCalledOnce();
   });
 
@@ -1678,7 +1703,7 @@ describe('CommercialAutomationOrchestrator', () => {
       commercialRunId: 'run-candidate-b',
     });
 
-    const miningCallsForEvaluatedTargets = 2;
+    const miningCallsForEvaluatedTargets = 1;
     const writesForSkippedTargets = {
       copies: realFlow.copyGeneration.generate.mock.calls.filter(
         ([candidateId]) => candidateId === 'candidate-a',
@@ -1696,10 +1721,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(realFlow.mining.mine).toHaveBeenNthCalledWith(1, 'campaign-a', {
       confirm: 'MINERAR_PROMOCOES',
     });
-    expect(realFlow.mining.mine).toHaveBeenNthCalledWith(2, 'campaign-b', {
-      confirm: 'MINERAR_PROMOCOES',
-    });
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(realFlow.copyGeneration.generate).not.toHaveBeenCalled();
     expect(realFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1739,6 +1761,7 @@ describe('CommercialAutomationOrchestrator', () => {
     const subject = createSubject({ targets });
     const generateAiCopy = vi.fn();
     subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
       .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
       .mockResolvedValue({
         outcome: 'READY',
@@ -1848,14 +1871,15 @@ describe('CommercialAutomationOrchestrator', () => {
       provider: 'official',
     });
 
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(3);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(5);
     expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(1, targets[0]);
-    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[1]);
-    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(3, targets[2]);
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(3);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[0]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(3, targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(4, targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(5, targets[2]);
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
     expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(1, targets[0]);
     expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(2, targets[1]);
-    expect(subject.candidateFlow.replenish).toHaveBeenNthCalledWith(3, targets[2]);
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[2] }),
@@ -1863,7 +1887,7 @@ describe('CommercialAutomationOrchestrator', () => {
     );
   });
 
-  it('faz NO_CANDIDATE -> marcador -> syncOffers -> reserva -> prepare', async () => {
+  it('esgota capacidade local antes de marcar e sincronizar', async () => {
     const subject = createSubject();
     const events: string[] = [];
     const mark = subject.executions.markExternalMayHaveStarted.bind(
@@ -1875,8 +1899,11 @@ describe('CommercialAutomationOrchestrator', () => {
         return mark(ownership, input);
       },
     );
+    let preflightCalls = 0;
     subject.candidateFlow.preflight.mockImplementation(async () => {
       events.push('preflight');
+      preflightCalls += 1;
+      if (preflightCalls < 3) return { outcome: 'NO_CANDIDATE' };
       return {
         outcome: 'READY',
         candidateId: 'candidate-after-sync',
@@ -1888,7 +1915,7 @@ describe('CommercialAutomationOrchestrator', () => {
       expect(subject.executions.records[0].externalStage).toBe(
         'EXTERNAL_MAY_HAVE_STARTED',
       );
-      return { synced: 1 };
+      return { hasNextPage: false };
     });
     subject.candidateFlow.replenish.mockImplementation(async () => {
       events.push('replenish');
@@ -1930,6 +1957,9 @@ describe('CommercialAutomationOrchestrator', () => {
     });
 
     expect(events).toEqual([
+      'preflight',
+      'replenish',
+      'preflight',
       'marker',
       'sync',
       'replenish',
@@ -1964,15 +1994,17 @@ describe('CommercialAutomationOrchestrator', () => {
     subject.syncOffers.run.mockImplementation(async () => {
       events.push('sync');
       queueState.rank1 = 'candidate-new';
-      return { synced: 1 };
+      return { hasNextPage: false };
     });
     subject.candidateFlow.replenish.mockImplementation(async () => {
       events.push('replenish');
-      expect(queueState.rank1).toBe('candidate-new');
       return { rejectionSummary: {} };
     });
+    let preflightCalls = 0;
     subject.candidateFlow.preflight.mockImplementation(async () => {
       events.push('preflight');
+      preflightCalls += 1;
+      if (preflightCalls < 3) return { outcome: 'NO_CANDIDATE' };
       return currentPreflight();
     });
     subject.candidateFlow.reserveAttempt.mockImplementation(async (selectedTarget, input) => {
@@ -2010,6 +2042,9 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued', commercialRunId: 'run-candidate-new' });
 
     expect(events).toEqual([
+      'preflight',
+      'replenish',
+      'preflight',
       'marker',
       'sync',
       'replenish',
@@ -2018,8 +2053,8 @@ describe('CommercialAutomationOrchestrator', () => {
       'prepare',
     ]);
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(3);
     expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
@@ -2056,8 +2091,8 @@ describe('CommercialAutomationOrchestrator', () => {
       reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
     });
 
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.syncOffers.run).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(4);
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
@@ -2091,7 +2126,7 @@ describe('CommercialAutomationOrchestrator', () => {
       reasons: ['COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE'],
     });
 
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRun).not.toHaveBeenCalled();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
@@ -2175,9 +2210,8 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledWith(targets[0]);
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
   });
@@ -2210,9 +2244,8 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledWith(targets[0]);
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
   });
@@ -2238,9 +2271,8 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledWith(targets[0]);
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[0] }),
       expect.objectContaining({ executionId: 'execution-1' }),
@@ -2337,8 +2369,8 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.syncOffers.run).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
   });
@@ -2418,11 +2450,8 @@ describe('CommercialAutomationOrchestrator', () => {
       commercialRunId: 'run-candidate-c',
     });
 
-    expect(statefulFlow.mining.mine).toHaveBeenCalledTimes(4);
+    expect(statefulFlow.mining.mine).toHaveBeenCalledTimes(3);
     expect(statefulFlow.mining.mine).toHaveBeenNthCalledWith(3, 'campaign-a', {
-      confirm: 'MINERAR_PROMOCOES',
-    });
-    expect(statefulFlow.mining.mine).toHaveBeenNthCalledWith(4, 'campaign-c', {
       confirm: 'MINERAR_PROMOCOES',
     });
     expect(statefulFlow.flowPipeline.dryRunFromPromotionCandidate).toHaveBeenNthCalledWith(
@@ -2626,6 +2655,49 @@ describe('CommercialAutomationOrchestrator', () => {
     );
   });
 
+  it('nao sincroniza Shopee quando a fila local ja resolve o slot', async () => {
+    const subject = createSubject();
+
+    await expect(
+      subject.orchestrator.executeTick({ ...tick, mode: 'send', provider: 'official' }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+  });
+
+  it('pagina sync de forma limitada somente apos fila e catalogo local esgotados', async () => {
+    const subject = createSubject();
+    subject.candidateFlow.preflight
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
+      .mockResolvedValueOnce({
+        outcome: 'READY',
+        candidateId: 'candidate-page-2',
+        candidateStatus: 'COPY_READY',
+      });
+    subject.syncOffers.run
+      .mockResolvedValueOnce({ hasNextPage: true, page: 1, nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ hasNextPage: false, page: 2 });
+
+    await expect(
+      subject.orchestrator.executeTick({ ...tick, mode: 'send', provider: 'official' }),
+    ).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(3);
+    expect(subject.syncOffers.run).toHaveBeenNthCalledWith(1, { page: 1 });
+    expect(subject.syncOffers.run).toHaveBeenNthCalledWith(2, {
+      page: 2,
+      cursor: 'cursor-2',
+    });
+    expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ candidateId: 'candidate-page-2' }),
+      expect.anything(),
+    );
+  });
+
   it('passa um unico target deterministico ao preview sem confirmar', async () => {
     const targets: CommercialAutomationTarget[] = [
       {
@@ -2760,7 +2832,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.preflight).toHaveBeenCalledTimes(2);
     expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(1, targets[0]);
     expect(subject.candidateFlow.preflight).toHaveBeenNthCalledWith(2, targets[1]);
-    expect(subject.candidateFlow.replenish).toHaveBeenCalledTimes(2);
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledTimes(2);
     expect(subject.candidateFlow.prepare).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(

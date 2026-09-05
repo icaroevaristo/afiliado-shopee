@@ -27,6 +27,28 @@ O painel mostra a janela, timezone, intervalo mínimo, stagger, limites, próxim
 envio, uso do dia e blockers. Uma configuração que mudou em outra aba exige
 atualizar a tela e confirmar novamente; não repita a ação automaticamente.
 
+## Slots, candidatos e rotação de instâncias
+
+Cada slot trabalha com um produto substituível, nunca com uma promessa de envio
+de um item específico. Antes de consultar a Shopee, a automação procura a fila
+local e tenta reabastecer a campanha com o catálogo `OFFICIAL` já persistido.
+Somente se ambos não produzirem capacidade útil ela pode consultar páginas
+limitadas da Shopee; a paginação para assim que encontra um candidate útil, não
+tem próxima página ou chega ao teto seguro.
+
+Candidate expirado, sem imagem/link válido ou com output de IA terminalmente
+rejeitado deixa de ocupar capacidade útil. Ele fica `BLOCKED` com o motivo
+registrado para auditoria, e a automação pode preparar o próximo candidate do
+mesmo grupo. Falha de provider, orçamento, ambiguidade, mudança de agenda ou
+qualquer boundary externo não ativa substituição automática: o slot fica
+bloqueado para investigação.
+
+A ordem das instâncias só avança depois de um dispatch `SENT` confirmado. Um
+bloqueio, falha antes do provider, estado ambíguo ou slot stale não muda a
+próxima instância. A operação agenda apenas a próxima slot pendente por grupo;
+portanto, se a instância B falhar depois de A ter sido enviada, o replanejamento
+continua tentando B — não volta silenciosamente para A.
+
 ## Agenda global
 
 Em **Automação**, configure horário inicial e final, timezone, intervalo mínimo,

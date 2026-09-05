@@ -23,6 +23,8 @@ export type ShopeeOfferSyncReport = {
   skipped: number;
   expired: number;
   hasNextPage: boolean;
+  page?: number;
+  nextCursor?: string;
   affiliateLinkPresentCount: number;
   snapshotsCreated: number;
   snapshotsUnchanged: number;
@@ -127,6 +129,8 @@ export class ShopeeOfferSyncService {
         incrementSanitizedRejection(report.rejectionSummary, rejection.code);
       }
       report.hasNextPage = page.hasNextPage;
+      report.page = page.page;
+      report.nextCursor = page.nextCursor;
       const seen = new Map<string, ShopeeProductIdentityInput>();
       const now = this.options.now?.() ?? new Date();
 
