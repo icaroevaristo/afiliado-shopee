@@ -76,7 +76,7 @@ const operationalAdmin = {
       shopee: { used: 2, limit: 60, reached: false },
       openAi: { used: 1, limit: 60, reached: false },
     },
-    hardCaps: { dailyGlobalLimit: 60, dailyGroupLimit: 60, maxMessagesPerRun: 1 },
+    hardCaps: { maxMessagesPerRun: 1 },
     scheduleRevision: 4,
     updatedAt: '2026-08-09T18:30:00.000Z',
   },

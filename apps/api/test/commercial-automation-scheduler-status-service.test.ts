@@ -24,7 +24,7 @@ describe('CommercialAutomationSchedulerStatusService', () => {
 
     await expect(service.getStatus()).resolves.toMatchObject({
       status: 'registered',
-      cron: '30 10 * * *',
+      cron: '* * * * *',
       timezone: 'UTC',
       mode: 'send',
     });

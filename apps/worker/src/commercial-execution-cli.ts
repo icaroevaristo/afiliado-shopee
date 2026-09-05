@@ -124,6 +124,13 @@ export const createCommercialExecutionCliRuntime = (
   const recoveryService = new CommercialAutomationExecutionRecoveryService({
     executions: repositories.commercialAutomationExecutions,
     instances: repositories.whatsappInstances,
+    resolveMinimumIntervalMinutes: async () => {
+      const settings = await repositories.commercialAutomationSettings.get();
+      return (
+        settings?.minimumIntervalMinutes ??
+        config.COMMERCIAL_MIN_INTERVAL_MINUTES
+      );
+    },
     jobs: {
       async findJob(jobId) {
         redis ??= createRedisConnection(config.REDIS_URL);

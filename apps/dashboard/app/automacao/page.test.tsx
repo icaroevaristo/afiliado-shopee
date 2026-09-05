@@ -126,8 +126,6 @@ const makeOperational = (overrides: Record<string, unknown> = {}) => ({
       openAi: { used: 2, limit: 6, reached: false },
     },
     hardCaps: {
-      dailyGlobalLimit: 60,
-      dailyGroupLimit: 60,
       maxMessagesPerRun: 1,
     },
     scheduleRevision: 3,
@@ -749,6 +747,7 @@ describe('AutomationPage — Lote 6', () => {
 
     expect(updateOperationalAutomationMock).toHaveBeenCalledTimes(1);
     expect(updateOperationalAutomationMock).toHaveBeenCalledWith({
+      timezone: 'America/Sao_Paulo',
       allowedStartTime: '08:00',
       allowedEndTime: '23:00',
       minimumIntervalMinutes: 14,

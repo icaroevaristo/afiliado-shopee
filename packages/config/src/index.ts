@@ -152,7 +152,7 @@ export const COMMERCIAL_AUTOMATION_DEFAULTS = {
 
 export const COMMERCIAL_SCHEDULER_DEFAULTS = {
   enabled: false,
-  cronExpression: '0 9 * * *',
+  cronExpression: '* * * * *',
   timezone: 'America/Sao_Paulo',
   mode: 'preview',
 } as const;

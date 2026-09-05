@@ -13,7 +13,7 @@ export default function CampaignsPage() {
   const [groups, setGroups] = useState<WhatsAppGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, { cadence: string; start: string; end: string }>>({});
+  const [drafts, setDrafts] = useState<Record<string, { cadence: string; start: string; end: string; dailyLimit: string }>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -22,7 +22,7 @@ export default function CampaignsPage() {
       if (!active) return;
       setCampaigns(campaignResponse.items);
       setGroups(groupResponse);
-      setDrafts(Object.fromEntries(campaignResponse.items.map((campaign) => [campaign.id, { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime }])));
+      setDrafts(Object.fromEntries(campaignResponse.items.map((campaign) => [campaign.id, { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime, dailyLimit: String(campaign.dailyLimit) }])));
     }).catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'Não foi possível carregar campanhas e grupos.'); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
@@ -39,9 +39,10 @@ export default function CampaignsPage() {
         cadenceMinutes: Number(draft.cadence),
         allowedStartTime: draft.start,
         allowedEndTime: draft.end,
+        dailyLimit: Number(draft.dailyLimit),
       });
       setCampaigns((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setDrafts((current) => ({ ...current, [campaign.id]: { cadence: String(updated.cadenceMinutes), start: updated.allowedStartTime, end: updated.allowedEndTime } }));
+      setDrafts((current) => ({ ...current, [campaign.id]: { cadence: String(updated.cadenceMinutes), start: updated.allowedStartTime, end: updated.allowedEndTime, dailyLimit: String(updated.dailyLimit) } }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'A campanha não foi atualizada.');
     } finally {
@@ -60,9 +61,10 @@ export default function CampaignsPage() {
           <div className="grid gap-4 md:grid-cols-4">
             <div className="ops-control"><div className="ops-control-label">Grupo</div><div className="ops-control-value text-sm">{group?.name ?? campaign.anchorDestination?.name ?? 'Não associado'}</div><div className="ops-control-sub">{group?.active && group.available ? 'autorizado e disponível' : 'estado não confirmado'}</div></div>
             <div className="ops-control"><div className="ops-control-label">Fingerprint</div><div className="ops-control-value ops-mono">{maskFingerprint(group?.fingerprint ?? campaign.logicalGroupFingerprint)}</div><div className="ops-control-sub">identidade lógica</div></div>
-            <label className="ops-control"><span className="ops-control-label">Cadência (min)</span><input className="ops-input" type="number" min="5" max="180" value={drafts[campaign.id]?.cadence ?? campaign.cadenceMinutes} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime }), cadence: event.target.value } }))} /><span className="ops-control-sub">intervalo da campanha</span></label>
-            <label className="ops-control"><span className="ops-control-label">Janela</span><span className="flex gap-2"><input className="ops-input min-w-0" type="time" value={drafts[campaign.id]?.start ?? campaign.allowedStartTime} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime }), start: event.target.value } }))} /><input className="ops-input min-w-0" type="time" value={drafts[campaign.id]?.end ?? campaign.allowedEndTime} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime }), end: event.target.value } }))} /></span><span className="ops-control-sub">fuso horário {campaign.timezone}</span></label>
-            <div className="ops-control"><div className="ops-control-label">Fila alvo</div><div className="ops-control-value">{campaign.queueTargetSize}</div><div className="ops-control-sub">limite diário {campaign.dailyLimit}</div></div>
+            <label className="ops-control"><span className="ops-control-label">Cadência (min)</span><input className="ops-input" type="number" min="5" max="180" value={drafts[campaign.id]?.cadence ?? campaign.cadenceMinutes} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime, dailyLimit: String(campaign.dailyLimit) }), cadence: event.target.value } }))} /><span className="ops-control-sub">intervalo da campanha</span></label>
+            <label className="ops-control"><span className="ops-control-label">Janela</span><span className="flex gap-2"><input className="ops-input min-w-0" type="time" value={drafts[campaign.id]?.start ?? campaign.allowedStartTime} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime, dailyLimit: String(campaign.dailyLimit) }), start: event.target.value } }))} /><input className="ops-input min-w-0" type="time" value={drafts[campaign.id]?.end ?? campaign.allowedEndTime} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime, dailyLimit: String(campaign.dailyLimit) }), end: event.target.value } }))} /></span><span className="ops-control-sub">fuso horário {campaign.timezone}</span></label>
+            <label className="ops-control"><span className="ops-control-label">Limite diário</span><input className="ops-input" type="number" min="1" max="96" value={drafts[campaign.id]?.dailyLimit ?? campaign.dailyLimit} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...(current[campaign.id] ?? { cadence: String(campaign.cadenceMinutes), start: campaign.allowedStartTime, end: campaign.allowedEndTime, dailyLimit: String(campaign.dailyLimit) }), dailyLimit: event.target.value } }))} /><span className="ops-control-sub">mensagens desta campanha</span></label>
+            <div className="ops-control"><div className="ops-control-label">Fila alvo</div><div className="ops-control-value">{campaign.queueTargetSize}</div><div className="ops-control-sub">candidatos preparados</div></div>
           </div>
           <div className="mt-4 flex justify-end"><button type="button" className="ops-button" data-variant="primary" onClick={() => void saveCampaign(campaign)} disabled={savingId === campaign.id}><Save size={14} aria-hidden="true" /> {savingId === campaign.id ? 'Salvando...' : 'Salvar agenda da campanha'}</button></div>
         </OpsSection>;

@@ -106,6 +106,11 @@ export type OperationalAdminCampaign = {
   groupId: string | null;
   groupName: string | null;
   instanceName: string | null;
+  cadenceMinutes: number;
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  dailyLimit: number;
   niche: {
     id: string;
     name: string;
@@ -142,8 +147,6 @@ export type OperationalAdminResponse = {
     dailyOpenAiGenerationLimitOverride: number | null;
     providerUsage: CommercialExternalProviderBudgetSnapshot;
     hardCaps: {
-      dailyGlobalLimit: number;
-      dailyGroupLimit: number;
       maxMessagesPerRun: number;
     };
     scheduleRevision: number;
@@ -233,6 +236,7 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   resumedAt: null,
   allowedStartTime: null,
   allowedEndTime: null,
+  timezone: null,
   minimumIntervalMinutes: null,
   staggerMinutes: null,
   dailyGlobalLimit: null,
@@ -822,6 +826,11 @@ export class OperationalAdminService {
         groupName:
           linkedGroup?.name ?? campaign.anchorDestination?.name ?? null,
         instanceName: linkedGroup?.assignedInstanceName ?? null,
+        cadenceMinutes: campaign.cadenceMinutes,
+        timezone: campaign.timezone,
+        allowedStartTime: campaign.allowedStartTime,
+        allowedEndTime: campaign.allowedEndTime,
+        dailyLimit: campaign.dailyLimit,
         niche: {
           id: campaign.niche.id,
           name: campaign.niche.name,
@@ -853,8 +862,6 @@ export class OperationalAdminService {
           context.settings.dailyOpenAiGenerationLimit ?? null,
         providerUsage,
         hardCaps: {
-          dailyGlobalLimit: this.dependencies.config.dailyGlobalLimit,
-          dailyGroupLimit: this.dependencies.config.dailyGroupLimit,
           maxMessagesPerRun: this.dependencies.maxMessagesPerRun,
         },
         scheduleRevision: schedule.scheduleRevision,
@@ -1189,6 +1196,7 @@ export class OperationalAdminService {
   async updateAutomationSettings(input: {
     allowedStartTime?: string | null;
     allowedEndTime?: string | null;
+    timezone?: string | null;
     minimumIntervalMinutes?: number | null;
     staggerMinutes?: number | null;
     dailyGlobalLimit?: number | null;

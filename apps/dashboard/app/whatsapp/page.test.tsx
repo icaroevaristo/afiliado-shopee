@@ -41,8 +41,6 @@ const overview = {
       openAi: { used: 0, limit: 10, reached: false },
     },
     hardCaps: {
-      dailyGlobalLimit: 10,
-      dailyGroupLimit: 5,
       maxMessagesPerRun: 1,
     },
     scheduleRevision: 0,

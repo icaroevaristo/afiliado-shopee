@@ -746,6 +746,7 @@ export type CommercialAutomationSettingsRecord = {
   resumedAt: Date | null;
   allowedStartTime: string | null;
   allowedEndTime: string | null;
+  timezone?: string | null;
   minimumIntervalMinutes: number | null;
   staggerMinutes: number | null;
   dailyGlobalLimit?: number | null;
@@ -759,6 +760,7 @@ export type CommercialAutomationSettingsRecord = {
 export type CommercialAutomationScheduleUpdate = {
   allowedStartTime?: string | null;
   allowedEndTime?: string | null;
+  timezone?: string | null;
   minimumIntervalMinutes?: number | null;
   staggerMinutes?: number | null;
   dailyGlobalLimit?: number | null;

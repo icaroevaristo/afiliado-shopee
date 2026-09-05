@@ -996,7 +996,7 @@ seguros sao:
 
 ```env
 COMMERCIAL_SCHEDULER_ENABLED=false
-COMMERCIAL_SCHEDULER_CRON=0 9 * * *
+COMMERCIAL_SCHEDULER_CRON=* * * * *
 COMMERCIAL_SCHEDULER_TIMEZONE=America/Sao_Paulo
 COMMERCIAL_AUTOMATION_MODE=preview
 COMMERCIAL_EXECUTION_LEASE_SECONDS=120
@@ -1004,7 +1004,11 @@ COMMERCIAL_EXECUTION_HEARTBEAT_SECONDS=30
 ```
 
 Ele usa exclusivamente a fila `commercial-automation`, o job
-`commercial-automation-tick` e o ID `scheduled-commercial-automation`. A fila
+`commercial-automation-tick` e o ID `scheduled-commercial-automation`. O cron
+acima e um heartbeat tecnico fixo de um minuto: ele apenas acorda o planner.
+Janela, cadencia, limites e timezone da operacao vem das configuracoes
+persistidas do dashboard; `COMMERCIAL_SCHEDULER_CRON` permanece validado por
+compatibilidade, mas nao limita o horario comercial. A fila
 `product-pipeline`, o job `pipeline-product` e seu agendamento permanecem
 inalterados. O worker comercial tem concorrencia 1; cada job tem uma tentativa,
 sem backoff, retry ou remocao automatica. O bootstrap nao dispara um tick.

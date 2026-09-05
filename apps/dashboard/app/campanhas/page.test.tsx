@@ -79,6 +79,7 @@ describe('CampaignsPage', () => {
       cadenceMinutes: 30,
       allowedStartTime: '08:00',
       allowedEndTime: '21:00',
+      dailyLimit: 10,
     });
     expect(screen.container.textContent).toContain('Grupo A');
     await screen.unmount();

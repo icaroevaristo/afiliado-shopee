@@ -139,6 +139,11 @@ export type OperationalAdminCampaign = {
   groupId: string | null;
   groupName: string | null;
   instanceName: string | null;
+  cadenceMinutes: number;
+  timezone: string;
+  allowedStartTime: string;
+  allowedEndTime: string;
+  dailyLimit: number;
   niche: {
     id: string;
     name: string;
@@ -172,9 +177,8 @@ export type OperationalAdmin = {
       openAi: { used: number; limit: number; reached: boolean };
     };
     hardCaps: {
-      dailyGlobalLimit: number;
-      dailyGroupLimit: number;
       maxMessagesPerRun: number;
+      maxMessagesPerBoot?: number;
     };
     scheduleRevision: number;
     updatedAt: string;
@@ -849,6 +853,7 @@ export type CommercialCampaignScheduleUpdate = {
   timezone?: string;
   allowedStartTime?: string;
   allowedEndTime?: string;
+  dailyLimit?: number;
 };
 
 export type CommercialCampaignPage = {

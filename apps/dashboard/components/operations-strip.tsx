@@ -11,18 +11,20 @@ export function OperationsStrip({
   scheduler,
   health,
   lastDispatch,
+  nextSendAt,
 }: {
   status: CommercialAutomationStatus | null;
   scheduler: CommercialAutomationSchedulerStatus | null;
   health?: HealthResponse | null;
   lastDispatch: WhatsAppDispatch | null;
+  nextSendAt?: string | null;
 }) {
   const operationalState = getCommercialOperationalState(status, scheduler);
   const readinessState = getCommercialReadinessState(status);
-  const timezone = scheduler?.timezone ?? status?.timezone ?? 'America/Sao_Paulo';
+  const timezone = status?.timezone ?? scheduler?.timezone ?? 'America/Sao_Paulo';
   const sent = status ? `${status.globalSentToday} / ${status.dailyGlobalLimit}` : '—';
-  const nextRun = scheduler?.nextRunAt
-    ? formatDateTimeInTimezone(scheduler.nextRunAt, timezone, '—', 'medium')
+  const nextSend = nextSendAt
+    ? formatDateTimeInTimezone(nextSendAt, timezone, '—', 'medium')
     : 'Nao disponivel';
   const lastSent = lastDispatch?.sentAt
     ? formatDateTimeInTimezone(lastDispatch.sentAt, timezone, '—', 'medium')
@@ -30,11 +32,11 @@ export function OperationsStrip({
 
   const items = [
     {
-      label: 'NEXT DROP',
-      value: nextRun,
+      label: 'NEXT SEND',
+      value: nextSend,
       icon: CalendarClock,
       tone: 'accent',
-      subtext: scheduler?.nextRunAt ? <Countdown target={scheduler.nextRunAt} /> : 'sem endpoint',
+      subtext: nextSendAt ? <Countdown target={nextSendAt} /> : 'sem agenda elegível',
       priority: 'primary',
     },
     {
@@ -61,7 +63,7 @@ export function OperationsStrip({
       value: scheduler?.status === 'registered' ? 'REGISTRADO' : 'N/D',
       icon: Radio,
       tone: scheduler?.status === 'registered' ? 'success' : 'warning',
-      subtext: scheduler?.cron ?? 'sem endpoint',
+      subtext: scheduler?.status === 'registered' ? 'verificação técnica · a cada 1 minuto' : 'scheduler técnico indisponível',
       priority: undefined,
     },
     {

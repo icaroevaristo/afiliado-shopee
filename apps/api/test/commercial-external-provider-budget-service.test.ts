@@ -231,4 +231,17 @@ describe('CommercialExternalProviderBudgetService', () => {
     expect(snapshot.shopee.limit).toBe(3);
     expect(snapshot.openAi.limit).toBe(3);
   });
+
+  it('não limita uma configuração persistida pelo fallback ambiental', async () => {
+    const { budget } = setup({
+      dailyGlobalLimit: 8,
+      dailyShopeeHttpLimit: null,
+      dailyOpenAiGenerationLimit: null,
+    });
+
+    const snapshot = await budget.snapshot();
+
+    expect(snapshot.shopee.limit).toBe(8);
+    expect(snapshot.openAi.limit).toBe(8);
+  });
 });

@@ -30,6 +30,7 @@ export const getCommercialAutomationScheduleSettings = () =>
 export const updateCommercialAutomationScheduleSettings = (input: {
   allowedStartTime?: string | null;
   allowedEndTime?: string | null;
+  timezone?: string | null;
   minimumIntervalMinutes?: number | null;
   staggerMinutes?: number | null;
   expectedRevision?: number;

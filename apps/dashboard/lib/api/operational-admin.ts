@@ -53,6 +53,7 @@ export const updateOperationalGroup = (
 export const updateOperationalAutomation = (input: {
   allowedStartTime?: string | null;
   allowedEndTime?: string | null;
+  timezone?: string | null;
   minimumIntervalMinutes?: number | null;
   staggerMinutes?: number | null;
   dailyGlobalLimit?: number | null;

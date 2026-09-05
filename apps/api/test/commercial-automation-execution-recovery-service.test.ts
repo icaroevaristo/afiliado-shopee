@@ -78,6 +78,7 @@ const createSubject = (
       | 'CAS_CONFLICT'
       | 'LOOKUP_FAILED';
     preConfirmationRecovery?: 'RECOVERED' | 'BLOCKED' | 'ALREADY_RECOVERED';
+    resolvedMinimumIntervalMinutes?: number;
   } = {},
 ) => {
   let record = { ...initial.execution };
@@ -169,6 +170,10 @@ const createSubject = (
         }
       : null;
   });
+  const resolveMinimumIntervalMinutes =
+    options.resolvedMinimumIntervalMinutes === undefined
+      ? undefined
+      : vi.fn(async () => options.resolvedMinimumIntervalMinutes!);
   const service = new CommercialAutomationExecutionRecoveryService({
     executions: {
       findRecoveryContext,
@@ -179,6 +184,9 @@ const createSubject = (
     jobs: { findJob },
     clock: () => NOW,
     minimumIntervalMinutes: 60,
+    ...(resolveMinimumIntervalMinutes
+      ? { resolveMinimumIntervalMinutes }
+      : {}),
   });
   return {
     service,
@@ -186,6 +194,7 @@ const createSubject = (
     recoverStalePreMarkerReservation,
     recoverStalePreConfirmationReservation,
     findJob,
+    resolveMinimumIntervalMinutes,
     getMutations: () => mutations,
   };
 };
@@ -264,6 +273,26 @@ describe('CommercialAutomationExecutionRecoveryService', () => {
 
     expect(subject.getMutations()).toBe(1);
     expect(subject.recoverStalePreMarkerReservation).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolve o intervalo persistido no momento do recovery pre-marker', async () => {
+    const subject = createSubject(
+      { execution: execution(), run: null },
+      { resolvedMinimumIntervalMinutes: 15 },
+    );
+
+    await expect(subject.service.recover('execution-1')).resolves.toMatchObject({
+      outcome: 'recovered',
+    });
+    expect(subject.resolveMinimumIntervalMinutes).toHaveBeenCalledOnce();
+    expect(subject.recoverStalePreMarkerReservation).toHaveBeenCalledWith(
+      'execution-1',
+      {
+        completedAt: NOW,
+        minimumIntervalMinutes: 15,
+        failureCode: COMMERCIAL_EXECUTION_PREMARKER_RESERVATION_ABANDONED,
+      },
+    );
   });
 
   it('recupera execution marcada sem run como AMBIGUOUS', async () => {
