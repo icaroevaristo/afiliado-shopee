@@ -1048,13 +1048,17 @@ describe('CommercialAutomationOrchestrator', () => {
   });
   it('persiste EXTERNAL_MAY_HAVE_STARTED antes de syncOffers em SEND', async () => {
     const subject = createSubject();
+    const markExternalMayHaveStarted = vi.spyOn(
+      subject.executions,
+      'markExternalMayHaveStarted',
+    );
     subject.candidateFlow.preflight
       .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
       .mockResolvedValueOnce({ outcome: 'NO_CANDIDATE' })
       .mockResolvedValueOnce({
         outcome: 'READY',
         candidateId: 'candidate-after-sync',
-        candidateStatus: 'COPY_READY',
+        candidateStatus: 'QUEUED',
       });
     subject.syncOffers.run.mockImplementation(async () => {
       expect(subject.executions.records[0].externalStage).toBe(
@@ -1073,6 +1077,108 @@ describe('CommercialAutomationOrchestrator', () => {
       'EXTERNAL_MAY_HAVE_STARTED',
     );
     expect(subject.syncOffers.run).toHaveBeenCalledOnce();
+    expect(markExternalMayHaveStarted).toHaveBeenCalledOnce();
+  });
+
+  it('renova a reserva e marca a fronteira externa antes da geracao de copy local', async () => {
+    const subject = createSubject();
+    const events: string[] = [];
+    const mark = subject.executions.markExternalMayHaveStarted.bind(
+      subject.executions,
+    );
+    const marker = vi.spyOn(
+      subject.executions,
+      'markExternalMayHaveStarted',
+    ).mockImplementation(async (ownership, input) => {
+      events.push('marker');
+      return mark(ownership, input);
+    });
+    subject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'READY',
+      candidateId: 'candidate-local-queued',
+      candidateStatus: 'QUEUED',
+    });
+    subject.candidateFlow.renewAttempt.mockImplementation(async (input) => {
+      events.push('renew');
+      return {
+        kind: 'RENEWED',
+        campaignId: input.campaignId,
+        executionId: input.executionId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        renewed: true,
+      };
+    });
+    subject.candidateFlow.prepare.mockImplementation(async (selection, options) => {
+      await options.beforeExternalCopyGeneration?.();
+      events.push('openai');
+      expect(subject.executions.records[0].externalStage).toBe(
+        'EXTERNAL_MAY_HAVE_STARTED',
+      );
+      return {
+        runId: 'run-local-queued',
+        generatedCopyId: 'copy-local-queued',
+        candidateId: selection.candidateId,
+        campaignId: selection.target.campaignId,
+        groupId: selection.target.groupId,
+        logicalGroupFingerprint: selection.target.logicalGroupFingerprint,
+        nicheId: selection.target.nicheId,
+      };
+    });
+
+    await expect(subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    })).resolves.toMatchObject({ status: 'queued' });
+
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(marker).toHaveBeenCalledOnce();
+    expect(events.indexOf('renew')).toBeLessThan(events.indexOf('marker'));
+    expect(events.indexOf('marker')).toBeLessThan(events.indexOf('openai'));
+  });
+
+  it('conflito ao renovar a reserva bloqueia copy externa antes do marcador', async () => {
+    const subject = createSubject();
+    const marker = vi.spyOn(subject.executions, 'markExternalMayHaveStarted');
+    const externalCopyGeneration = vi.fn();
+    subject.candidateFlow.preflight.mockResolvedValue({
+      outcome: 'READY',
+      candidateId: 'candidate-local-conflict',
+      candidateStatus: 'QUEUED',
+    });
+    subject.candidateFlow.renewAttempt.mockResolvedValue({
+      kind: 'CONFLICT',
+      campaignId: 'campaign-1',
+      executionId: 'execution-1',
+    });
+    subject.candidateFlow.prepare.mockImplementation(async (selection, options) => {
+      await options.beforeExternalCopyGeneration?.();
+      await externalCopyGeneration();
+      return {
+        runId: 'unreachable-run',
+        generatedCopyId: 'unreachable-copy',
+        candidateId: selection.candidateId,
+        campaignId: selection.target.campaignId,
+        groupId: selection.target.groupId,
+        logicalGroupFingerprint: selection.target.logicalGroupFingerprint,
+        nicheId: selection.target.nicheId,
+      };
+    });
+
+    await expect(subject.orchestrator.executeTick({
+      ...tick,
+      mode: 'send',
+      provider: 'official',
+    })).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT'],
+    });
+
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(externalCopyGeneration).not.toHaveBeenCalled();
+    expect(marker).not.toHaveBeenCalled();
+    expect(subject.executions.records[0].externalStage).toBe('NOT_REACHED');
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
   });
 
   it('falha fechado antes de syncOffers quando a persistencia do marcador falha', async () => {
@@ -2750,6 +2856,10 @@ describe('CommercialAutomationOrchestrator', () => {
       instanceName: 'instance-a',
     };
     const subject = createSubject({ targets: [target] });
+    const markExternalMayHaveStarted = vi.spyOn(
+      subject.executions,
+      'markExternalMayHaveStarted',
+    );
     subject.candidateFlow.preflight
       .mockResolvedValueOnce({
         outcome: 'READY',
@@ -2793,6 +2903,10 @@ describe('CommercialAutomationOrchestrator', () => {
     });
 
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(markExternalMayHaveStarted).toHaveBeenCalledOnce();
+    expect(subject.executions.records[0].externalStage).toBe(
+      'EXTERNAL_MAY_HAVE_STARTED',
+    );
     expect(subject.candidateFlow.reserveAttempt).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare.mock.calls.map(([selection]) => ({
       candidateId: selection.candidateId,

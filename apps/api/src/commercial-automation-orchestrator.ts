@@ -444,15 +444,17 @@ export class CommercialAutomationOrchestrator {
       }
 
       const targetReasons = new Set<string>();
-      let externalSyncStarted = false;
+      let externalBoundaryMarked = false;
+      const markExternalMayHaveStartedOnce = async () => {
+        if (externalBoundaryMarked) return;
+        await this.dependencies.executions.markExternalMayHaveStarted(
+          ownership,
+          { markedAt: this.clock() },
+        );
+        externalBoundaryMarked = true;
+      };
       const syncOffers = async (syncInput: { page?: number; cursor?: string }) => {
-        if (!externalSyncStarted) {
-          await this.dependencies.executions.markExternalMayHaveStarted(
-            ownership,
-            { markedAt: this.clock() },
-          );
-          externalSyncStarted = true;
-        }
+        await markExternalMayHaveStartedOnce();
         const report = await this.dependencies.syncOffers.run(syncInput);
         await heartbeat.checkpoint();
         return report;
@@ -712,6 +714,7 @@ export class CommercialAutomationOrchestrator {
                     'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT',
                   );
                 }
+                await markExternalMayHaveStartedOnce();
               },
             });
           } catch (error) {
