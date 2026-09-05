@@ -16,6 +16,8 @@ const READ_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'outbox'],
   ['commercial', 'campaigns'],
   ['commercial', 'campaigns', '*', 'queue'],
+  ['commercial', 'niches'],
+  ['commercial', 'niches', '*'],
   ['commercial-pipeline', 'runs'],
   ['coupons'],
   ['pipeline', 'jobs', '*'],
@@ -36,6 +38,7 @@ const PATCH_PATHS: readonly PathPattern[] = [
   ['commercial-automation', 'settings'],
   ['commercial-automation', 'settings', 'schedule'],
   ['commercial', 'campaigns', '*'],
+  ['commercial', 'niches', '*'],
   ['whatsapp', 'groups', '*', 'admin'],
   ['whatsapp', 'instances', '*'],
   ['commercial-automation', 'settings', 'admin'],
@@ -45,6 +48,11 @@ const POST_PATHS: readonly PathPattern[] = [
   ['commercial-publications', 'manual'],
   ['shopee', 'offers', '*', 'copy-preview'],
   ['whatsapp', 'instances'],
+  ['commercial', 'campaigns'],
+  ['commercial', 'campaigns', '*', 'activate'],
+  ['commercial', 'campaigns', '*', 'deactivate'],
+  ['commercial', 'niches'],
+  ['commercial', 'niches', 'preview'],
 ];
 
 const matchesPath = (path: readonly string[], pattern: PathPattern) =>

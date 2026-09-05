@@ -1865,6 +1865,7 @@ export class PrismaCommercialGroupCampaignRepository implements CommercialGroupC
     try {
       const scheduleChanged = [
         'active',
+        'nicheId',
         'cadenceMinutes',
         'timezone',
         'allowedStartTime',

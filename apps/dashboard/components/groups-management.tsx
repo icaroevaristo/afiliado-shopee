@@ -279,7 +279,19 @@ function GroupCard({
       <div className="ops-group-card-summary">
         <div>
           <span className="ops-detail-label">Campanha</span>
-          <strong>{group.campaign?.name ?? 'Sem campanha'}</strong>
+          {group.campaign ? (
+            <strong>{group.campaign.name}</strong>
+          ) : (
+            <div className="grid gap-1">
+              <strong>Sem campanha</strong>
+              <Link
+                className="text-sm font-semibold text-orange-800 underline-offset-2 hover:underline"
+                href={`/campanhas?groupId=${encodeURIComponent(group.id)}`}
+              >
+                Configurar campanha
+              </Link>
+            </div>
+          )}
         </div>
         <div>
           <span className="ops-detail-label">Envios hoje</span>

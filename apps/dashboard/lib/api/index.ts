@@ -2,6 +2,7 @@ export * from './analytics';
 export * from './client';
 export * from './commercial-automation';
 export * from './commercial-campaigns';
+export * from './commercial-niches';
 export * from './commercial-pipeline';
 export * from './manual-publication';
 export * from './operational-admin';

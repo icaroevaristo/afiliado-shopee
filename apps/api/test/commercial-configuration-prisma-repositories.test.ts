@@ -178,4 +178,71 @@ describe('PrismaCommercialGroupCampaignRepository', () => {
       },
     });
   });
+
+  it('invalida a revision quando o nicho da campanha muda', async () => {
+    const update = vi.fn(async () => ({
+      id: 'campaign-1',
+      name: 'Campanha',
+      logicalGroupFingerprint: 'fingerprint-1',
+      anchorDestinationId: 'destination-1',
+      nicheId: 'niche-2',
+      active: false,
+      cadenceMinutes: 15,
+      timezone: 'America/Sao_Paulo',
+      allowedStartTime: '07:00',
+      allowedEndTime: '22:00',
+      dailyLimit: 60,
+      failureCount: 0,
+      nextEligibleAt: null,
+      attemptExecutionId: null,
+      attemptReservedAt: null,
+      attemptLeaseExpiresAt: null,
+      queueTargetSize: 40,
+      dedupeDays: 30,
+      niche: { id: 'niche-2', name: 'Novo', slug: 'novo', active: true },
+      anchorDestination: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+    const upsert = vi.fn(async () => undefined);
+    const transaction = {
+      commercialGroupCampaign: {
+        findUnique: vi.fn(async () => ({ active: false })),
+        update,
+      },
+      commercialNiche: {
+        findUnique: vi.fn(async () => ({ active: true })),
+      },
+      commercialAutomationSettings: { upsert },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (callback, options) => {
+        expect(options).toEqual({ isolationLevel: 'Serializable' });
+        return callback(transaction);
+      }),
+    };
+
+    const repository = new PrismaCommercialGroupCampaignRepository(
+      prisma as never,
+    );
+    await repository.update('campaign-1', { nicheId: 'niche-2' });
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'campaign-1' },
+        data: { nicheId: 'niche-2' },
+      }),
+    );
+    expect(upsert).toHaveBeenCalledWith({
+      where: { id: 'commercial-automation' },
+      create: {
+        id: 'commercial-automation',
+        scheduleRevision: 1,
+      },
+      update: {
+        scheduleRevision: { increment: 1 },
+        updatedAt: expect.any(Date),
+      },
+    });
+  });
 });

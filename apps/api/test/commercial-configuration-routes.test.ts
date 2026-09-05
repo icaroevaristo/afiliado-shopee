@@ -59,6 +59,8 @@ const setup = async () => {
     total: 1,
     totalPages: 1,
   }));
+  const createNiche = vi.fn(async () => niche);
+  const updateNiche = vi.fn(async () => niche);
   const listCampaigns = vi.fn(async (input) => ({
     items: [campaign],
     ...input,
@@ -73,10 +75,23 @@ const setup = async () => {
     logger: false,
     prisma: {} as never,
     commercialNicheService: {
-      create: vi.fn(async () => niche),
+      create: createNiche,
       list: listNiches,
       find: vi.fn(async () => niche),
-      update: vi.fn(async () => niche),
+      update: updateNiche,
+    },
+    commercialNichePreviewService: {
+      preview: vi.fn(async () => ({
+        preview: true as const,
+        evaluatedCount: 2,
+        matchedCount: 1,
+        rejectedCount: 1,
+        evaluationTruncated: false,
+        matchSummary: { matched: 1, rejected: 1 },
+        rejectionSummary: { PRICE_ABOVE_MAXIMUM: 1 },
+        matches: [],
+        rejections: [],
+      })),
     },
     commercialGroupCampaignService: {
       create: vi.fn(async () => campaign),
@@ -92,6 +107,8 @@ const setup = async () => {
   return {
     app,
     listNiches,
+    createNiche,
+    updateNiche,
     listCampaigns,
     updateCampaign,
     activateCampaign,
@@ -149,6 +166,66 @@ describe('commercial configuration routes', () => {
         })
       ).statusCode,
     ).toBe(400);
+    expect(subject.dispatchAdd).not.toHaveBeenCalled();
+  });
+
+  it('expõe preview de nicho draft como operação read-only', async () => {
+    const subject = await setup();
+    const response = await subject.app.inject({
+      method: 'POST',
+      url: '/commercial/niches/preview',
+      payload: {
+        name: 'Achadinhos',
+        categoryIds: [],
+        includeKeywords: [],
+        excludeKeywords: [],
+        maxPrice: '50',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      preview: true,
+      evaluatedCount: 2,
+      matchedCount: 1,
+    });
+    expect(subject.dispatchAdd).not.toHaveBeenCalled();
+  });
+
+  it('encaminha criação e edição de nicho pelos endpoints protegidos', async () => {
+    const subject = await setup();
+    const input = {
+      name: 'Maternidade',
+      active: true,
+      categoryIds: ['baby'],
+      includeKeywords: ['fralda'],
+      excludeKeywords: [],
+      minPrice: null,
+      maxPrice: '50',
+      minDiscountRate: 5,
+      minRating: 4,
+      minSales: 10,
+      minCommissionRate: 2,
+      minimumScore: 70,
+    };
+    const created = await subject.app.inject({
+      method: 'POST',
+      url: '/commercial/niches',
+      payload: input,
+    });
+    const updated = await subject.app.inject({
+      method: 'PATCH',
+      url: '/commercial/niches/niche-1',
+      payload: { active: false, maxPrice: '40' },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(updated.statusCode).toBe(200);
+    expect(subject.createNiche).toHaveBeenCalledWith(input);
+    expect(subject.updateNiche).toHaveBeenCalledWith('niche-1', {
+      active: false,
+      maxPrice: '40',
+    });
     expect(subject.dispatchAdd).not.toHaveBeenCalled();
   });
 
