@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { JOB_NAMES } from '@shopee-auto-affiliate-ai/queue';
 
 import {
   OperationalAdminService,
@@ -25,6 +26,7 @@ import type {
   CommercialAutomationPolicyService,
   CommercialAutomationStatus,
 } from '../src/commercial-automation-policy-service';
+import type { PlannedCommercialTargetSlot } from '../src/commercial-automation-scheduler-planner';
 
 const NOW = new Date('2026-08-28T15:00:00.000Z');
 
@@ -85,6 +87,22 @@ const campaign = (): CommercialGroupCampaignRecord => ({
   },
   createdAt: NOW,
   updatedAt: NOW,
+});
+
+const plannedSlot = (scheduledFor: Date): PlannedCommercialTargetSlot => ({
+  slotKey: `slot-${scheduledFor.getTime()}`,
+  jobId: `commercial-target-slot-${scheduledFor.getTime()}`,
+  scheduledFor,
+  delayMs: Math.max(0, scheduledFor.getTime() - NOW.getTime()),
+  target: {
+    campaignId: 'campaign-a',
+    groupId: 'group-a',
+    logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+    instanceName: 'instance-a',
+    scheduledFor: scheduledFor.toISOString(),
+    slotKey: `slot-${scheduledFor.getTime()}`,
+    scheduleRevision: 2,
+  },
 });
 
 class MemoryInstances implements WhatsAppInstanceRepository {
@@ -269,9 +287,11 @@ const dispatches: WhatsAppDispatchRepository = {
   findByIdWithDetails: async () => null,
   list: async () => [],
   markAttemptPending: async () => false,
-  markSent: async () => {
+  markSubmitted: async () => {
     throw new Error('not used');
   },
+  applyDeliveryEvent: async () => ({ kind: 'NOOP' }),
+  expireSubmittedConfirmations: async () => [],
   markFailed: async () => {
     throw new Error('not used');
   },
@@ -348,13 +368,38 @@ const policy = {
   'evaluateAutomationReadiness' | 'updateScheduleSettings'
 >;
 
-const createService = () => {
+const createService = (options?: {
+  commercialTargetJobs?: Array<{
+    id?: string | number;
+    name?: string;
+    data?: unknown;
+  }>;
+  commercialTargetJobPages?: Array<
+    Array<{ id?: string | number; name?: string; data?: unknown }>
+  >;
+  plannerSlots?: PlannedCommercialTargetSlot[];
+}) => {
   status.hasActiveGroupLifecycle = async () => false;
   const instances = new MemoryInstances();
   const groups = new MemoryGroups();
+  const getCommercialJobs = vi.fn(
+    async (
+      _types: Array<'waiting' | 'active' | 'delayed'>,
+      start = 0,
+    ) => {
+      const jobs = options?.commercialTargetJobPages
+        ? options.commercialTargetJobPages[Math.floor(start / 200)] ?? []
+        : options?.commercialTargetJobs ?? [];
+      return jobs.map((job) => ({
+        ...job,
+        name: job.name ?? JOB_NAMES.commercialAutomationTarget,
+      }));
+    },
+  );
   return {
     instances,
     groups,
+    getCommercialJobs,
     service: new OperationalAdminService({
       instances,
       groups,
@@ -364,10 +409,24 @@ const createService = () => {
       settings: settingsRepository,
       status,
       policy,
-      planner: { preview: async () => ({ slots: [], skippedTargets: [] }) },
+      planner: {
+        preview: async () => ({
+          slots: options?.plannerSlots ?? [],
+          skippedTargets: [],
+        }),
+      },
       config,
       maxMessagesPerRun: 1,
       clock: () => NOW,
+      ...(options?.commercialTargetJobs || options?.commercialTargetJobPages
+        ? {
+            queues: {
+              commercialAutomation: {
+                getJobs: getCommercialJobs,
+              },
+            },
+          }
+        : {}),
     }),
   };
 };
@@ -388,6 +447,254 @@ describe('OperationalAdminService', () => {
       result.campaigns[0]?.blockers.map((blocker) => blocker.code),
     ).toContain('AUTOMATION_PAUSED');
     expect(result.activeReservations).toBe(0);
+  });
+
+  it('T17 usa target pendente às 16:37 antes do slot hipotético do planner às 16:52', async () => {
+    const queuedAt = new Date('2026-08-28T19:37:00.000Z');
+    const plannerAt = new Date('2026-08-28T19:52:00.000Z');
+    const { service } = createService({
+      plannerSlots: [plannedSlot(plannerAt)],
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-queued',
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: queuedAt.toISOString(),
+              slotKey: 'slot-queued',
+              scheduleRevision: 2,
+            },
+          },
+        },
+      ],
+    });
+    const result = await service.getOverview();
+
+    expect(result.nextSendAt).toBe(queuedAt.toISOString());
+    expect(result.groups[0]?.nextSendAt).toBe(queuedAt.toISOString());
+    expect(result.groups[0]?.upcomingAssignments).toEqual([
+      { scheduledFor: queuedAt.toISOString(), instanceName: 'instance-a' },
+    ]);
+  });
+
+  it('T18 usa o fallback do planner quando não há target job pendente válido', async () => {
+    const plannerAt = new Date('2026-08-28T19:52:00.000Z');
+    const { service } = createService({ plannerSlots: [plannedSlot(plannerAt)] });
+
+    const result = await service.getOverview();
+
+    expect(result.nextSendAt).toBe(plannerAt.toISOString());
+    expect(result.groups[0]?.nextSendAt).toBe(plannerAt.toISOString());
+  });
+
+  it('T19 ignora target job com scheduleRevision stale em vez de apresentá-lo como próximo envio', async () => {
+    const { service } = createService({
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-stale',
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-28T19:37:00.000Z',
+              slotKey: 'slot-stale',
+              scheduleRevision: 1,
+            },
+          },
+        },
+      ],
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.nextSendAt).toBeNull();
+    expect(result.groups[0]?.nextSendAt).toBeNull();
+  });
+
+  it('não consulta jobs active nem apresenta target vencido como próximo envio', async () => {
+    const { service, getCommercialJobs } = createService({
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-expired',
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-28T14:59:00.000Z',
+              slotKey: 'slot-expired',
+              scheduleRevision: 2,
+            },
+          },
+        },
+      ],
+    });
+
+    const result = await service.getOverview();
+
+    expect(getCommercialJobs).toHaveBeenCalledWith(['waiting', 'delayed'], 0, 199);
+    expect(result.nextSendAt).toBeNull();
+  });
+
+  it('ignora target preview mesmo quando sua identidade e horário parecem válidos', async () => {
+    const { service } = createService({
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-preview',
+          data: {
+            mode: 'preview',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-28T19:37:00.000Z',
+              slotKey: 'slot-preview',
+              scheduleRevision: 2,
+            },
+          },
+        },
+      ],
+    });
+
+    await expect(service.getOverview()).resolves.toMatchObject({
+      nextSendAt: null,
+    });
+  });
+
+  it('ignora job com nome BullMQ divergente do target validado pelo worker', async () => {
+    const { service } = createService({
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-wrong-name',
+          name: JOB_NAMES.commercialAutomationTick,
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-28T19:37:00.000Z',
+              slotKey: 'slot-wrong-name',
+              scheduleRevision: 2,
+            },
+          },
+        },
+      ],
+    });
+
+    await expect(service.getOverview()).resolves.toMatchObject({
+      nextSendAt: null,
+    });
+  });
+
+  it('T20 ignora target job com assignmentRevision stale', async () => {
+    const { service, groups } = createService({
+      commercialTargetJobs: [
+        {
+          id: 'commercial-target-slot-assignment-stale',
+          data: {
+            mode: 'send',
+            kind: 'target',
+            target: {
+              campaignId: 'campaign-a',
+              groupId: 'group-a',
+              logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+              instanceName: 'instance-a',
+              scheduledFor: '2026-08-28T19:37:00.000Z',
+              slotKey: 'slot-assignment-stale',
+              scheduleRevision: 2,
+              assignmentRevision: 1,
+            },
+          },
+        },
+      ],
+    });
+    groups.record = { ...groups.record, assignmentRevision: 2 };
+
+    const result = await service.getOverview();
+
+    expect(result.nextSendAt).toBeNull();
+    expect(result.groups[0]?.nextSendAt).toBeNull();
+  });
+
+  it('varre páginas completas e escolhe o menor scheduledFor depois do primeiro bloco', async () => {
+    const filler = Array.from({ length: 200 }, (_, index) => ({
+      id: `commercial-target-filler-${index}`,
+      data: { mode: 'preview', kind: 'planner' },
+    }));
+    const earliest = '2026-08-28T19:37:00.000Z';
+    const later = '2026-08-28T19:52:00.000Z';
+    const { service, getCommercialJobs } = createService({
+      commercialTargetJobPages: [
+        filler,
+        [
+          {
+            id: 'commercial-target-slot-later',
+            data: {
+              mode: 'send',
+              kind: 'target',
+              target: {
+                campaignId: 'campaign-a',
+                groupId: 'group-a',
+                logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+                instanceName: 'instance-a',
+                scheduledFor: later,
+                slotKey: 'slot-later',
+                scheduleRevision: 2,
+              },
+            },
+          },
+          {
+            id: 'commercial-target-slot-earliest',
+            data: {
+              mode: 'send',
+              kind: 'target',
+              target: {
+                campaignId: 'campaign-a',
+                groupId: 'group-a',
+                logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+                instanceName: 'instance-a',
+                scheduledFor: earliest,
+                slotKey: 'slot-earliest',
+                scheduleRevision: 2,
+              },
+            },
+          },
+        ],
+      ],
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.nextSendAt).toBe(earliest);
+    expect(getCommercialJobs).toHaveBeenNthCalledWith(
+      1,
+      ['waiting', 'delayed'],
+      0,
+      199,
+    );
+    expect(getCommercialJobs).toHaveBeenNthCalledWith(
+      2,
+      ['waiting', 'delayed'],
+      200,
+      399,
+    );
   });
 
   it('usa CAS para atualizar pausa de instância', async () => {

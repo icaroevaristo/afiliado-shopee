@@ -70,15 +70,29 @@ export function translateHomeDispatchStatus(status: string | null | undefined): 
   switch (status) {
     case 'SENT':
       return 'Enviado';
-    case 'PROCESSING':
+    case 'DELIVERED':
+      return 'Entregue';
+    case 'READ':
+      return 'Lido';
+    case 'SUBMITTED':
       return 'Aguardando confirmação';
+    case 'PROCESSING':
+      return 'Em processamento';
     case 'PENDING':
-      return 'Aguardando';
+      return 'Enfileirado';
     case 'FAILED':
       return 'Não realizado';
+    case 'AMBIGUOUS':
+      return 'Precisa de investigação';
     default:
       return 'Estado não reconhecido';
   }
+}
+
+export function isConfirmedDispatchStatus(
+  status: string | null | undefined,
+): boolean {
+  return status === 'SENT' || status === 'DELIVERED' || status === 'READ';
 }
 
 export function translateHomeExecutionStatus(status: string | null | undefined): string {

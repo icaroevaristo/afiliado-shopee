@@ -24,6 +24,18 @@ const createLogger = (): ProviderLogger => ({
   error: vi.fn(),
 });
 
+const createReadyWebhookHttpClient = (): HttpClient =>
+  vi.fn().mockImplementation(async () =>
+    response({
+      enabled: true,
+      url: 'http://host.docker.internal:3001/whatsapp/events/messages.update',
+      events: ['MESSAGES_UPDATE'],
+      headers: { authorization: 'Bearer dedicated-webhook-test-token' },
+      byEvents: false,
+      base64: false,
+    }),
+  );
+
 const createProvider = (
   httpClient: HttpClient = vi
     .fn()
@@ -37,6 +49,10 @@ const createProvider = (
     apiKey: API_KEY,
     instanceName: 'affiliate bot',
     httpClient,
+    deliveryWebhookUrl:
+      'http://host.docker.internal:3001/whatsapp/events/messages.update',
+    deliveryWebhookToken: 'dedicated-webhook-test-token',
+    deliveryWebhookHttpClient: createReadyWebhookHttpClient(),
     ...overrides,
   });
 
@@ -384,8 +400,11 @@ describe('EvolutionApiWhatsAppProvider', () => {
           EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
           EVOLUTION_ALLOWED_DESTINATIONS: '5511999999999',
           EVOLUTION_SEND_TIMEOUT_MS: 1000,
+          WHATSAPP_DELIVERY_WEBHOOK_URL:
+            'http://host.docker.internal:3001/whatsapp/events/messages.update',
+          WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'dedicated-webhook-test-token',
         },
-        { httpClient, logger },
+        { httpClient, logger, deliveryWebhookHttpClient: createReadyWebhookHttpClient() },
       );
 
       const send = provider.sendMessage({
@@ -746,6 +765,40 @@ describe('createWhatsAppProvider', () => {
     });
 
     expect(provider).toBeInstanceOf(EvolutionApiWhatsAppProvider);
+  });
+
+  it('bloqueia SEND antes de qualquer request quando a integração de entrega não foi configurada', async () => {
+    const httpClient = vi.fn();
+    const provider = createWhatsAppProvider(
+      {
+        WHATSAPP_PROVIDER: 'evolution',
+        EVOLUTION_API_URL: 'http://localhost:8080',
+        EVOLUTION_API_KEY: API_KEY,
+        EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+      },
+      { httpClient },
+    );
+
+    await expect(
+      provider.sendMessage({ destination: '5511999999999', message: 'Oferta' }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+      deliveryMayHaveStarted: false,
+    });
+    expect(httpClient).not.toHaveBeenCalled();
+  });
+
+  it('bloqueia readiness antes de criar consumidores quando a integração de entrega não foi configurada', async () => {
+    const provider = createWhatsAppProvider({
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080',
+      EVOLUTION_API_KEY: API_KEY,
+      EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+    });
+
+    await expect(provider.assertReady?.()).rejects.toMatchObject({
+      code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+    });
   });
 
   it.each([

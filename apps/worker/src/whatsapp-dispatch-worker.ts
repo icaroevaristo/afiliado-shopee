@@ -24,6 +24,8 @@ import {
 } from '../../api/src/manual-publication-lifecycle-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import type { ApplicationRepositories } from '../../api/src/application-services';
+import { WhatsAppDeliveryConfirmationService } from '../../api/src/whatsapp-delivery-confirmation-service';
+import { createWhatsAppDeliveryExpirationInvoker } from './whatsapp-delivery-expiration-invoker';
 import {
   assertCommercialStickyIdentity,
   isCommercialInstanceAssigned,
@@ -68,6 +70,33 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
   >;
 };
 
+export const createManualPublicationLifecycleFinalizer = (input: {
+  repositories: Pick<
+    WhatsAppDispatchProcessorRepositories,
+    'manualPublicationRequests'
+  >;
+  logger: WhatsAppDispatchWorkerLogger;
+  clock?: () => Date;
+  provided?: ManualPublicationLifecycleFinalizerPort;
+  transactionsSupported?: boolean;
+}): ManualPublicationLifecycleFinalizerPort | undefined => {
+  if (input.provided) return input.provided;
+  if (input.transactionsSupported === false) return undefined;
+  const manualPublicationRequests = input.repositories.manualPublicationRequests;
+  const finalizeAfterCommercialDispatch =
+    manualPublicationRequests?.finalizeAfterCommercialDispatch;
+  if (!manualPublicationRequests || !finalizeAfterCommercialDispatch) {
+    return undefined;
+  }
+  return new ManualPublicationLifecycleFinalizer(
+    {
+      finalizeAfterCommercialDispatch:
+        finalizeAfterCommercialDispatch.bind(manualPublicationRequests),
+    },
+    { clock: input.clock, logger: input.logger },
+  );
+};
+
 type WhatsAppDispatchProcessorBaseOptions = {
   logger: WhatsAppDispatchWorkerLogger;
   whatsAppProvider: WhatsAppProvider;
@@ -88,6 +117,8 @@ type WhatsAppDispatchProcessorBaseOptions = {
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   clock?: () => Date;
   reservationLeaseMilliseconds?: number;
+  deliveryConfirmationTimeoutMs?: number;
+  deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
 };
 
@@ -121,6 +152,8 @@ type CreateWhatsAppDispatchWorkerOptions = {
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
   reservationLeaseMilliseconds?: number;
+  deliveryConfirmationTimeoutMs?: number;
+  deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
 };
 
@@ -426,22 +459,13 @@ export const processWhatsAppDispatchJob = async (
   const clock = options.clock ?? (() => new Date());
   const supportsLifecycleTransactions =
     !options.prisma || typeof options.prisma.$transaction === 'function';
-  const finalizeAfterCommercialDispatch = supportsLifecycleTransactions
-    ? repositories.manualPublicationRequests?.finalizeAfterCommercialDispatch
-    : undefined;
-  const manualLifecycleFinalizer =
-    options.manualLifecycleFinalizer ??
-    (finalizeAfterCommercialDispatch
-      ? new ManualPublicationLifecycleFinalizer(
-          {
-            finalizeAfterCommercialDispatch:
-              finalizeAfterCommercialDispatch.bind(
-                repositories.manualPublicationRequests,
-              ),
-          },
-          { clock, logger: options.logger },
-        )
-      : undefined);
+  const manualLifecycleFinalizer = createManualPublicationLifecycleFinalizer({
+    repositories,
+    logger: options.logger,
+    clock,
+    provided: options.manualLifecycleFinalizer,
+    transactionsSupported: supportsLifecycleTransactions,
+  });
   const finalizeManualLifecycle = async (
     dispatchId: string,
     providerAlreadyCalled: boolean,
@@ -489,6 +513,7 @@ export const processWhatsAppDispatchJob = async (
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService ?? new CommercialMessageDraftService(),
+    confirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
   });
   await revalidateCommercialDispatchBeforeSend({
     job,
@@ -553,14 +578,23 @@ export const processWhatsAppDispatchJob = async (
     }
     throw error;
   }
-  await finalizeCommercialPipelineRun({
-    runs: repositories.commercialRuns,
-    promotionCandidates: repositories.commercialPromotions,
-    dispatch,
-    failed: false,
-    logger: options.logger,
-  });
-  await finalizeManualLifecycle(dispatch.id, true);
+  // A provider HTTP response only creates a SUBMITTED dispatch. The commercial
+  // lifecycle is finalized by the durable delivery-event consumer after its
+  // minimum SERVER_ACK, never by the submission response itself.
+  if (
+    dispatch.status === 'SENT' ||
+    dispatch.status === 'DELIVERED' ||
+    dispatch.status === 'READ'
+  ) {
+    await finalizeCommercialPipelineRun({
+      runs: repositories.commercialRuns,
+      promotionCandidates: repositories.commercialPromotions,
+      dispatch,
+      failed: false,
+      logger: options.logger,
+    });
+    await finalizeManualLifecycle(dispatch.id, true);
+  }
   return dispatch;
 };
 
@@ -578,9 +612,48 @@ export const createWhatsAppDispatchWorker = (
   const ownsPrisma = !options.prisma;
   const connection = options.connection ?? createRedisConnection(redisUrl);
   const prisma = options.prisma ?? createPrismaClient();
+  const workerLogger = options.logger ?? consoleLogger;
+  const repositories = createPrismaRepositories(prisma);
+  const manualLifecycleFinalizer = createManualPublicationLifecycleFinalizer({
+    repositories,
+    logger: workerLogger,
+    provided: options.manualLifecycleFinalizer,
+    transactionsSupported: typeof prisma.$transaction === 'function',
+  });
+  const expirationService =
+    options.deliveryConfirmationExpiryIntervalMs === undefined
+      ? undefined
+      : repositories.whatsappDeliveryEvents
+        ? new WhatsAppDeliveryConfirmationService({
+            dispatches: repositories.whatsappDispatches,
+            deliveryEvents: repositories.whatsappDeliveryEvents,
+            runs: repositories.commercialRuns,
+            promotionCandidates: repositories.commercialPromotions,
+            manualLifecycleFinalizer,
+            logger: {
+              info: (obj: unknown, message?: string) =>
+                workerLogger.info(obj, message),
+              error: (obj: unknown, message?: string) =>
+                workerLogger.error(obj, message),
+            },
+          })
+        : (() => {
+            throw new AppError(
+              'Inbox duravel de eventos de entrega indisponivel',
+              'WHATSAPP_DELIVERY_EVENT_INBOX_UNAVAILABLE',
+            );
+          })();
+  const expirationInvoker =
+    expirationService && options.deliveryConfirmationExpiryIntervalMs !== undefined
+      ? createWhatsAppDeliveryExpirationInvoker({
+          expireDue: () => expirationService.expireDue(),
+          intervalMs: options.deliveryConfirmationExpiryIntervalMs,
+          logger: workerLogger,
+        })
+      : undefined;
   const processorOptions: WhatsAppDispatchProcessorOptions = {
     prisma,
-    logger: options.logger ?? consoleLogger,
+    logger: workerLogger,
     commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProvider: options.whatsAppProvider,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
@@ -588,7 +661,8 @@ export const createWhatsAppDispatchWorker = (
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService,
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
-    manualLifecycleFinalizer: options.manualLifecycleFinalizer,
+    deliveryConfirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
+    manualLifecycleFinalizer,
   };
   const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,
@@ -603,6 +677,7 @@ export const createWhatsAppDispatchWorker = (
       closePromise ??= (async () => {
         let firstError: unknown;
         for (const cleanup of [
+          () => expirationInvoker?.close() ?? Promise.resolve(),
           () => worker.close(force),
           ...(ownsPrisma ? [() => prisma.$disconnect()] : []),
           ...(ownsConnection

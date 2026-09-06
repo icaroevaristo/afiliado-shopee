@@ -174,7 +174,7 @@ describe('commercial automation Prisma repositories', () => {
     expect(groupBy).toHaveBeenCalledWith({
       by: ['destinationId'],
       where: {
-        status: 'SENT',
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
         sentAt: {
           gte: new Date('2026-07-25T03:00:00.000Z'),
           lt: new Date('2026-07-26T03:00:00.000Z'),
@@ -186,7 +186,7 @@ describe('commercial automation Prisma repositories', () => {
     expect(dispatchFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          status: 'SENT',
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
           destination: { type: 'GROUP' },
         }),
       }),
@@ -222,7 +222,7 @@ describe('commercial automation Prisma repositories', () => {
     expect(result.groupSentToday).toBe(0);
     expect(groupBy).toHaveBeenCalledOnce();
     expect(groupBy.mock.calls[0]?.[0]).toMatchObject({
-      where: { status: 'SENT' },
+      where: { status: { in: ['SENT', 'DELIVERED', 'READ'] } },
     });
   });
 
@@ -269,7 +269,11 @@ describe('commercial automation Prisma repositories', () => {
         OR: [
           { mode: 'CONFIRMED', status: 'STARTED' },
           { finalStatus: 'PENDING' },
-          { dispatch: { status: { in: ['PENDING', 'PROCESSING'] } } },
+          {
+            dispatch: {
+              status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+            },
+          },
         ],
       },
       select: { id: true },

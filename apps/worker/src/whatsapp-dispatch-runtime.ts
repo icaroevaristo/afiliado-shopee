@@ -92,6 +92,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     ...options.providerFactoryOptions,
     logger,
   });
+  await provider.assertReady?.();
   const providerResolver = (instanceName: string) =>
     (options.providerFactory ?? createWhatsAppProvider)(
       { ...config, EVOLUTION_INSTANCE_NAME: instanceName },
@@ -116,6 +117,10 @@ export const startIsolatedWhatsAppDispatchWorker = async (
       groupSendPolicy,
       reservationLeaseMilliseconds:
         config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
+      deliveryConfirmationTimeoutMs:
+        config.WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS * 1000,
+      deliveryConfirmationExpiryIntervalMs:
+        config.WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS * 1000,
     },
   );
 

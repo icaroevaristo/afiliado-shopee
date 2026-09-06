@@ -250,17 +250,125 @@ describe('OverviewPage', () => {
     await screen.unmount();
   });
 
-  it('trata envio em processamento como aguardando confirmação', async () => {
-    listDispatchesMock.mockResolvedValueOnce([{ ...dispatch, status: 'PROCESSING' as const }]);
+  it('trata submissão como aguardando confirmação', async () => {
+    listDispatchesMock.mockResolvedValueOnce([{ ...dispatch, status: 'SUBMITTED' as const }]);
     const screen = await render(<OverviewPage />);
     await flush();
 
     expect(screen.container.textContent).toContain('Aguardando confirmação');
-    expect(screen.container.textContent).toContain('Há um envio aguardando confirmação.');
+    expect(screen.container.textContent).toContain(
+      'Há um envio aguardando confirmação do provedor.',
+    );
     const sendStage = Array.from(screen.container.querySelectorAll('.ops-home-journey-stage')).find(
       (stage) => stage.querySelector('.ops-home-journey-label')?.textContent === 'Envio',
     );
     expect(sendStage?.getAttribute('data-state')).toBe('current');
+    await screen.unmount();
+  });
+
+  it.each(['DELIVERED', 'READ'] as const)(
+    'trata %s como confirmação concluída na jornada',
+    async (status) => {
+      listDispatchesMock.mockResolvedValueOnce([
+        {
+          ...dispatch,
+          status,
+          sentAt: '2026-08-09T18:30:00.000Z',
+          deliveredAt:
+            status === 'READ' ? '2026-08-09T18:31:00.000Z' : null,
+          readAt: status === 'READ' ? '2026-08-09T18:32:00.000Z' : null,
+        },
+      ]);
+      const screen = await render(<OverviewPage />);
+      await flush();
+
+      expect(screen.container.textContent).toContain(
+        status === 'READ' ? 'Lido' : 'Entregue',
+      );
+      const stages = Array.from(
+        screen.container.querySelectorAll('.ops-home-journey-stage'),
+      );
+      expect(
+        stages
+          .filter((stage) =>
+            ['Envio', 'Enviado'].includes(
+              stage.querySelector('.ops-home-journey-label')?.textContent ?? '',
+            ),
+          )
+          .every((stage) => stage.getAttribute('data-state') === 'complete'),
+      ).toBe(true);
+      await screen.unmount();
+    },
+  );
+
+  it.each([
+    ['READ', '2026-08-09T18:32:04.000Z'],
+    ['DELIVERED', '2026-08-09T18:31:03.000Z'],
+    ['SENT', '2026-08-09T18:30:02.000Z'],
+    ['SUBMITTED', '2026-08-09T18:29:01.000Z'],
+    ['FAILED', '2026-08-09T18:20:00.000Z'],
+  ] as const)('escolhe o timestamp coerente com %s no último envio', async (status, expectedTimestamp) => {
+    listDispatchesMock.mockResolvedValueOnce([
+      {
+        ...dispatch,
+        status,
+        createdAt: '2026-08-09T18:20:00.000Z',
+        submittedAt: '2026-08-09T18:29:01.000Z',
+        sentAt: '2026-08-09T18:30:02.000Z',
+        deliveredAt: '2026-08-09T18:31:03.000Z',
+        readAt: '2026-08-09T18:32:04.000Z',
+      },
+    ]);
+    const screen = await render(<OverviewPage />);
+    await flush();
+
+    expect(screen.container.querySelector('.ops-home-latest-meta time')?.getAttribute('dateTime')).toBe(
+      expectedTimestamp,
+    );
+    await screen.unmount();
+  });
+
+  it('usa o snapshot do run para grupo e instância no card e na atividade', async () => {
+    listDispatchesMock.mockResolvedValueOnce([
+      {
+        ...dispatch,
+        status: 'SUBMITTED' as const,
+        externalMessageId: 'provider-message-id',
+        instanceName: null,
+        destination: {
+          ...dispatch.destination,
+          name: '',
+          fingerprint: null,
+        },
+        commercialPipelineRun: {
+          groupName: 'Grupo do run',
+          groupFingerprint: 'fingerprint-from-run',
+          instanceName: 'instance-from-run',
+        },
+      },
+    ]);
+
+    const screen = await render(<OverviewPage />);
+    await flush();
+
+    expect(screen.container.textContent).toContain('Grupo do run');
+    expect(screen.container.textContent).toContain('fingerprint-from-run');
+    expect(screen.container.textContent).toContain('Instância: instance-from-run');
+    const groupStage = Array.from(
+      screen.container.querySelectorAll('.ops-home-journey-stage'),
+    ).find(
+      (stage) =>
+        stage.querySelector('.ops-home-journey-label')?.textContent === 'Grupo',
+    );
+    const groupStageValue =
+      groupStage?.querySelector('.ops-home-journey-value')?.textContent ?? '';
+    expect(groupStageValue).toContain('Grupo do run');
+    expect(groupStageValue).toContain('fingerprint-from-run');
+    expect(groupStageValue).toContain('Instância: instance-from-run');
+    expect(groupStageValue).not.toContain('Não disponível');
+    expect(screen.container.textContent).toContain('Aguardando confirmação');
+    expect(screen.container.textContent).not.toContain('provider-message-id');
+    expect(screen.container.textContent).not.toContain('masked');
     await screen.unmount();
   });
 

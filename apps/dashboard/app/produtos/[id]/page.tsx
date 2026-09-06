@@ -34,8 +34,10 @@ import {
   type ManualPublicationRequest,
   type ShopeeCategory,
   type ShopeeOfferDetail,
+  type ShopeeOfferDispatchHistory,
   type ShopeeOfferStatus,
 } from '../../../lib/api';
+import { isConfirmedDispatchStatus } from '../../../lib/home-display';
 import {
   formatCurrency,
   formatDateTime,
@@ -64,6 +66,10 @@ const safeNumber = (value: string | number | null | undefined) =>
 
 const safePercent = (value: string | number | null | undefined) =>
   formatPercent(toFiniteNumber(value));
+
+const firstPresent = (...values: Array<string | null | undefined>) =>
+  values.find((value) => typeof value === 'string' && value.trim().length > 0) ??
+  null;
 
 const priceRangeLabel = (
   min: string | number | null | undefined,
@@ -350,20 +356,38 @@ export default function ProductDetailPage() {
           <li key={dispatch.dispatchId} className="offer-history-item">
             <div className="offer-history-main">
               <div>
-                <strong>{dispatch.destination.name}</strong>
+                <strong>
+                  {firstPresent(
+                    dispatch.destination.name,
+                    dispatch.run?.groupName,
+                  ) ?? 'Grupo não informado'}
+                </strong>
                 <p>
                   {destinationTypeLabel(dispatch.destination.type)} ·{' '}
-                  {dispatch.instanceName ?? 'instância não registrada'}
+                  {firstPresent(
+                    dispatch.instanceName,
+                    dispatch.run?.instanceName,
+                  ) ?? 'instância não registrada'}
                 </p>
+                {firstPresent(
+                  dispatch.destination.fingerprint,
+                  dispatch.run?.groupFingerprint,
+                ) ? (
+                  <small className="ops-mono">
+                    Fingerprint:{' '}
+                    {firstPresent(
+                      dispatch.destination.fingerprint,
+                      dispatch.run?.groupFingerprint,
+                    )}
+                  </small>
+                ) : null}
               </div>
               <OpsBadge tone={dispatchTone(dispatch.status)}>
                 {dispatchStatusLabel(dispatch.status)}
               </OpsBadge>
             </div>
             <p className="offer-history-meta">
-              {dispatch.sentAt
-                ? `Enviado em ${formatDateTime(dispatch.sentAt)}`
-                : 'Sem confirmação de envio'}{' '}
+              {dispatchTimestampLabel(dispatch)}{' '}
               · {dispatch.attemptCount} tentativa
               {dispatch.attemptCount === 1 ? '' : 's'}
             </p>
@@ -890,8 +914,8 @@ function destinationTypeLabel(type: 'INDIVIDUAL' | 'GROUP') {
 }
 
 function dispatchTone(status: string): OpsTone {
-  if (status === 'SENT') return 'success';
-  if (status === 'FAILED') return 'danger';
+  if (isConfirmedDispatchStatus(status)) return 'success';
+  if (status === 'FAILED' || status === 'AMBIGUOUS') return 'danger';
   if (status === 'PROCESSING') return 'info';
   return 'warning';
 }
@@ -901,10 +925,30 @@ function dispatchStatusLabel(status: string) {
     {
       PENDING: 'Aguardando',
       PROCESSING: 'Em andamento',
+      SUBMITTED: 'Aguardando confirmação',
       SENT: 'Enviado',
+      DELIVERED: 'Entregue',
+      READ: 'Lido',
       FAILED: 'Falhou',
+      AMBIGUOUS: 'Precisa de investigação',
     }[status] ?? 'Sem resultado'
   );
+}
+
+function dispatchTimestampLabel(dispatch: ShopeeOfferDispatchHistory) {
+  if (dispatch.status === 'READ' && dispatch.readAt) {
+    return `Lido em ${formatDateTime(dispatch.readAt)}`;
+  }
+  if (dispatch.status === 'DELIVERED' && dispatch.deliveredAt) {
+    return `Entregue em ${formatDateTime(dispatch.deliveredAt)}`;
+  }
+  if (dispatch.status === 'SENT' && dispatch.sentAt) {
+    return `Confirmado em ${formatDateTime(dispatch.sentAt)}`;
+  }
+  if (dispatch.status === 'SUBMITTED' && dispatch.submittedAt) {
+    return `Enviado para confirmação em ${formatDateTime(dispatch.submittedAt)}`;
+  }
+  return 'Sem confirmação de envio';
 }
 
 function runStatusLabel(status: string | null | undefined) {
@@ -912,6 +956,8 @@ function runStatusLabel(status: string | null | undefined) {
     {
       PENDING: 'Aguardando',
       SENT: 'Enviado',
+      DELIVERED: 'Entregue',
+      READ: 'Lido',
       FAILED: 'Falhou',
       AMBIGUOUS: 'Resultado incerto',
     }[status ?? ''] ?? 'Não registrado'

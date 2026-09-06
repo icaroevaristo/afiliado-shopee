@@ -321,6 +321,7 @@ export type WhatsAppDestination = {
   id: string;
   name: string;
   destination: string;
+  fingerprint?: string | null;
   active: boolean;
   paused?: boolean;
   createdAt?: string;
@@ -361,7 +362,14 @@ export type WhatsAppGroupSyncReport = {
 };
 
 export type WhatsAppDispatchStatus =
-  'PENDING' | 'PROCESSING' | 'SENT' | 'FAILED';
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'SUBMITTED'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'READ'
+  | 'FAILED'
+  | 'AMBIGUOUS';
 
 export type DashboardProduct = Product & {
   providerProductId?: string;
@@ -429,7 +437,7 @@ export type ShopeeOfferSnapshot = {
 
 export type ShopeeOfferDispatchHistory = {
   dispatchId: string;
-  status: 'PENDING' | 'PROCESSING' | 'SENT' | 'FAILED';
+  status: WhatsAppDispatchStatus;
   destination: {
     id: string;
     name: string;
@@ -437,10 +445,16 @@ export type ShopeeOfferDispatchHistory = {
     type: 'INDIVIDUAL' | 'GROUP';
   };
   instanceName: string | null;
+  submittedAt: string | null;
   sentAt: string | null;
+  deliveredAt: string | null;
+  readAt: string | null;
   attemptCount: number;
   run: {
     id: string;
+    groupName: string | null;
+    groupFingerprint: string | null;
+    instanceName: string | null;
     finalStatus: 'PENDING' | 'SENT' | 'FAILED' | 'AMBIGUOUS' | null;
     investigationRequired: boolean;
   } | null;
@@ -997,17 +1011,29 @@ export type WhatsAppDispatch = {
   productId: string;
   generatedCopyId: string;
   destinationId: string;
-  externalMessageId?: string | null;
   status: WhatsAppDispatchStatus;
   attemptCount: number;
   deliveryMode?: 'TEXT' | 'IMAGE' | null;
   provider?: string | null;
   errorMessage?: string | null;
   sentAt?: string | null;
+  submittedAt?: string | null;
+  confirmationDeadlineAt?: string | null;
+  deliveredAt?: string | null;
+  readAt?: string | null;
+  instanceName?: string | null;
   createdAt?: string;
   updatedAt?: string;
   generatedCopy?: CopyResponse;
-  destination?: Pick<WhatsAppDestination, 'id' | 'name' | 'destination'>;
+  destination?: Pick<
+    WhatsAppDestination,
+    'id' | 'name' | 'destination' | 'fingerprint'
+  >;
+  commercialPipelineRun?: {
+    groupName: string | null;
+    groupFingerprint?: string | null;
+    instanceName: string | null;
+  } | null;
   product?: DashboardProduct | null;
 };
 

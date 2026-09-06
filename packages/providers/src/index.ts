@@ -15,6 +15,12 @@ export {
   type ProviderLogger,
 } from './evolution-api-whatsapp-provider';
 export {
+  EvolutionDeliveryWebhookReadiness,
+  type EvolutionWebhookHttpClient,
+  EVOLUTION_DELIVERY_WEBHOOK_EVENT,
+  EVOLUTION_DELIVERY_WEBHOOK_PATH,
+} from './evolution-delivery-webhook';
+export {
   EvolutionApiGroupDirectoryProvider,
   type EvolutionApiGroupDirectoryProviderOptions,
 } from './evolution-api-group-directory-provider';
@@ -72,6 +78,7 @@ export type WhatsAppSendResult = {
 
 export interface WhatsAppProvider {
   beginRun?(runId: string): void;
+  assertReady?(): Promise<void>;
   sendMessage(input: WhatsAppSendInput): Promise<WhatsAppSendResult>;
 }
 

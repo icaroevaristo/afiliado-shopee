@@ -49,6 +49,8 @@ export const deriveManualPublicationTargetState = (
     investigationRequired = true;
   } else if (
     observation.dispatchStatus === 'SENT' ||
+    observation.dispatchStatus === 'DELIVERED' ||
+    observation.dispatchStatus === 'READ' ||
     observation.runFinalStatus === 'SENT'
   ) {
     status = 'SENT';
@@ -90,7 +92,8 @@ export const resolveManualPublicationTerminalStatus = (
     observation.hasRun &&
     observation.runStatus === 'COMPLETED' &&
     observation.hasDispatch &&
-    observation.dispatchStatus === 'SENT' &&
+    observation.dispatchStatus !== null &&
+    ['SENT', 'DELIVERED', 'READ'].includes(observation.dispatchStatus) &&
     observation.runFinalStatus === 'SENT'
   ) {
     return 'SENT';
@@ -140,10 +143,7 @@ export type ManualPublicationLifecycleFinalizerLogger = {
   error: (obj: unknown, msg?: string) => void;
 };
 
-type ManualPublicationLifecycleFinalizerRepository = Pick<
-  ManualPublicationRequestRepository,
-  'finalizeAfterCommercialDispatch'
-> & {
+type ManualPublicationLifecycleFinalizerRepository = {
   finalizeAfterCommercialDispatch: NonNullable<
     ManualPublicationRequestRepository['finalizeAfterCommercialDispatch']
   >;

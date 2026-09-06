@@ -434,7 +434,7 @@ function OutboxCard({ outbox }: { outbox: CommercialDispatchOutbox }) {
 }
 
 function DispatchCard({ dispatch }: { dispatch: WhatsAppDispatch }) {
-  const uncertain = dispatch.status === 'PROCESSING';
+  const uncertain = dispatch.status === 'AMBIGUOUS';
   return (
     <article className="min-w-0 rounded-md border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -460,7 +460,6 @@ function DispatchCard({ dispatch }: { dispatch: WhatsAppDispatch }) {
           label="Candidate"
           value={dispatch.generatedCopy?.createdFromCandidateId}
         />
-        <TechnicalId label="ID externo" value={dispatch.externalMessageId} />
         <TechnicalField
           label="Nome do grupo"
           value={dispatch.destination?.name}
@@ -485,8 +484,7 @@ function DispatchCard({ dispatch }: { dispatch: WhatsAppDispatch }) {
             aria-hidden="true"
           />
           <span>
-            PROCESSING permanece potencialmente incerto e exige investigação
-            manual.
+            A confirmação não chegou no prazo e exige investigação manual.
           </span>
         </p>
       ) : null}

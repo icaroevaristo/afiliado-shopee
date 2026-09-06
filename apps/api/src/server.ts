@@ -32,6 +32,7 @@ const start = async () => {
         : new MockShopeeAffiliateOfferProvider();
   const app = await buildApp({
     localApiAuthToken: config.LOCAL_API_AUTH_TOKEN,
+    deliveryWebhookAuthToken: config.WHATSAPP_DELIVERY_WEBHOOK_TOKEN,
     redisUrl: config.REDIS_URL,
     schedulerEnabled: config.SCHEDULER_ENABLED,
     groupDirectoryProvider,

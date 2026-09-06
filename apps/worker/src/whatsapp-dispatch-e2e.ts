@@ -494,7 +494,9 @@ const previousDispatchError = (dispatch: WhatsAppDispatchDetails) =>
     {
       dispatchId: dispatch.id,
       status: String(dispatch.status),
-      investigationRequired: dispatch.status !== 'SENT',
+      investigationRequired: !['SENT', 'DELIVERED', 'READ'].includes(
+        dispatch.status,
+      ),
     },
   );
 
@@ -616,6 +618,7 @@ export const createRealWhatsAppDispatchE2ERuntime = async (
           'WHATSAPP_E2E_WORKER_ALREADY_STARTED',
         );
       }
+      await provider.assertReady?.();
       worker = createWhatsAppDispatchWorker(config.REDIS_URL, {
         connection: redis,
         prisma,
@@ -759,7 +762,7 @@ export const executeControlledWhatsAppDispatchE2E = async ({
     validateFinalDispatch(dispatch, apiDispatch, destination);
 
     const success =
-      dispatch.status === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(dispatch.status) &&
       dispatch.attemptCount === 1 &&
       Boolean(dispatch.externalMessageId) &&
       Boolean(dispatch.sentAt) &&

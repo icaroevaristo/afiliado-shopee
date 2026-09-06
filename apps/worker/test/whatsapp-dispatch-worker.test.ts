@@ -120,6 +120,7 @@ const commercialDispatch: WhatsAppDispatchDetails = {
   instanceName: 'instance',
   destination: {
     id: 'dest-commercial',
+    name: 'Commercial group',
     destination: commercialGroupId,
     type: 'GROUP',
     active: true,
@@ -313,12 +314,14 @@ const createHandoffRepositories = (input: {
           ? { kind: 'CLAIMED' as const }
           : { kind: 'NOT_PENDING' as const },
       ),
-      markSent: vi.fn().mockResolvedValue({
+      markSubmitted: vi.fn().mockResolvedValue({
         ...input.dispatch,
-        status: 'SENT',
+        status: 'SUBMITTED',
         attemptCount: 1,
       }),
       markFailed: vi.fn(),
+      applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+      expireSubmittedConfirmations: vi.fn(async () => []),
       createPending: vi.fn(),
       list: vi.fn(),
     },
@@ -487,16 +490,21 @@ describe('processWhatsAppDispatchJob', () => {
       };
       return true;
     });
-    const markSent = vi.fn(
+    const markSubmitted = vi.fn(
       async (
         _dispatchId: string,
-        input: { externalMessageId: string; sentAt: Date },
+        input: {
+          externalMessageId: string;
+          submittedAt: Date;
+          confirmationDeadlineAt: Date;
+        },
       ) => {
         currentDispatch = {
           ...currentDispatch,
-          status: 'SENT',
+          status: 'SUBMITTED',
           externalMessageId: input.externalMessageId,
-          sentAt: input.sentAt,
+          submittedAt: input.submittedAt,
+          confirmationDeadlineAt: input.confirmationDeadlineAt,
         };
         return currentDispatch;
       },
@@ -515,7 +523,7 @@ describe('processWhatsAppDispatchJob', () => {
           ? { kind: 'CLAIMED' as const }
           : { kind: 'NOT_PENDING' as const },
     );
-    fixture.repositories.whatsappDispatches.markSent = markSent;
+    fixture.repositories.whatsappDispatches.markSubmitted = markSubmitted;
     const provider: WhatsAppProvider = {
       beginRun: vi.fn(),
       sendMessage: vi.fn(async () => ({
@@ -572,9 +580,9 @@ describe('processWhatsAppDispatchJob', () => {
     ).toHaveLength(1);
     expect(provider.sendMessage).toHaveBeenCalledOnce();
     expect(markAttemptPending).toHaveBeenCalledTimes(2);
-    expect(markSent).toHaveBeenCalledOnce();
+    expect(markSubmitted).toHaveBeenCalledOnce();
     expect(currentDispatch).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       attemptCount: 1,
       externalMessageId: 'external-single-processing',
     });
@@ -602,11 +610,13 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdWithDetails: vi.fn().mockResolvedValue(dispatch),
         markAttemptPending: vi.fn().mockResolvedValue(true),
         claimPendingForSending: vi.fn().mockResolvedValue({ kind: 'CLAIMED' }),
-        markSent: vi.fn().mockResolvedValue({ ...dispatch, status: 'SENT' }),
+        markSubmitted: vi.fn().mockResolvedValue({ ...dispatch, status: 'SUBMITTED' }),
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(dispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -839,10 +849,10 @@ describe('processWhatsAppDispatchJob', () => {
       }),
     );
     expect(
-      lifecycleA.repositories.whatsappDispatches.markSent,
+      lifecycleA.repositories.whatsappDispatches.markSubmitted,
     ).toHaveBeenCalledOnce();
     expect(
-      lifecycleB.repositories.whatsappDispatches.markSent,
+      lifecycleB.repositories.whatsappDispatches.markSubmitted,
     ).toHaveBeenCalledOnce();
   });
 
@@ -860,11 +870,13 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdWithDetails: vi.fn().mockResolvedValue(fakeDispatch),
         markAttemptPending: vi.fn().mockResolvedValue(true),
         claimPendingForSending: vi.fn().mockResolvedValue({ kind: 'CLAIMED' }),
-        markSent: vi.fn().mockResolvedValue(fakeDispatch),
+        markSubmitted: vi.fn().mockResolvedValue({ ...fakeDispatch, status: 'SUBMITTED' }),
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -907,7 +919,10 @@ describe('processWhatsAppDispatchJob', () => {
 
   it('dispatch comercial recebe draftService sem COMMERCIAL_MESSAGE_DRAFT_SERVICE_UNAVAILABLE e chama provider uma vez para draft IMAGE', async () => {
     const markAttemptPending = vi.fn().mockResolvedValue(true);
-    const markSent = vi.fn().mockResolvedValue(commercialDispatch);
+    const markSubmitted = vi.fn().mockResolvedValue({
+      ...commercialDispatch,
+      status: 'SUBMITTED',
+    });
     const findByIdWithDetails = vi.fn().mockResolvedValue(commercialDispatch);
 
     const repositories: WhatsAppDispatchProcessorRepositories = {
@@ -919,11 +934,13 @@ describe('processWhatsAppDispatchJob', () => {
             ? { kind: 'CLAIMED' as const }
             : { kind: 'NOT_PENDING' as const },
         ),
-        markSent,
+        markSubmitted,
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -992,10 +1009,12 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdWithDetails,
         markAttemptPending,
         markFailed,
-        markSent: vi.fn(),
+        markSubmitted: vi.fn(),
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -1062,11 +1081,13 @@ describe('processWhatsAppDispatchJob', () => {
       whatsappDispatches: {
         findByIdWithDetails,
         markAttemptPending,
-        markSent: vi.fn(),
+        markSubmitted: vi.fn(),
         createPending: vi.fn(),
         findByIdForSending,
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -1719,21 +1740,10 @@ describe('processWhatsAppDispatchJob', () => {
       },
     );
 
-    expect(events).toEqual([
-      'renew',
-      'begin',
-      'mark',
-      'send',
-      'manual-finalize',
-    ]);
-    expect(
-      manualLifecycleFinalizer.finalizeAfterDispatch,
-    ).toHaveBeenCalledOnce();
-    expect(manualLifecycleFinalizer.finalizeAfterDispatch).toHaveBeenCalledWith(
-      dispatch.id,
-    );
+    expect(events).toEqual(['renew', 'begin', 'mark', 'send']);
+    expect(manualLifecycleFinalizer.finalizeAfterDispatch).not.toHaveBeenCalled();
     expect(provider.sendMessage).toHaveBeenCalledOnce();
-    expect(repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markSubmitted).toHaveBeenCalledOnce();
   });
 
   it('finaliza lifecycle manual apos falha segura sem repetir o provider', async () => {
@@ -1859,26 +1869,13 @@ describe('processWhatsAppDispatchJob', () => {
           manualLifecycleFinalizer,
         },
       ),
-    ).rejects.toBe(finalizerError);
+    ).resolves.toMatchObject({ status: 'SUBMITTED' });
 
     expect(provider.sendMessage).toHaveBeenCalledOnce();
-    expect(repositories.whatsappDispatches.markSent).toHaveBeenCalledOnce();
+    expect(repositories.whatsappDispatches.markSubmitted).toHaveBeenCalledOnce();
     expect(repositories.whatsappDispatches.markFailed).not.toHaveBeenCalled();
-    expect(
-      repositories.commercialRuns.finalizeByDispatchId,
-    ).toHaveBeenCalledOnce();
-    expect(
-      manualLifecycleFinalizer.finalizeAfterDispatch,
-    ).toHaveBeenCalledOnce();
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'manual-publication.lifecycle.finalization.failed-after-send',
-        dispatchId: dispatch.id,
-        providerAlreadyCalled: true,
-        providerRetryAllowed: false,
-        requeueAllowed: false,
-      }),
-      expect.any(String),
-    );
+    expect(repositories.commercialRuns.finalizeByDispatchId).not.toHaveBeenCalled();
+    expect(manualLifecycleFinalizer.finalizeAfterDispatch).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

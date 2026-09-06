@@ -210,6 +210,7 @@ const successfulDispatch = (): WhatsAppDispatchDetails => ({
     hashtags: '',
   },
   destination: {
+    name: 'Grupo controlado',
     destination: GROUP_ID,
     type: 'GROUP',
     active: true,

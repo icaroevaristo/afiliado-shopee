@@ -28,7 +28,13 @@ import {
   createApplicationServices,
   createPrismaRepositories,
 } from '../../api/src/application-services';
-import { processWhatsAppDispatchJob } from './whatsapp-dispatch-worker';
+import {
+  createManualPublicationLifecycleFinalizer,
+  processWhatsAppDispatchJob,
+} from './whatsapp-dispatch-worker';
+import type { ManualPublicationLifecycleFinalizerPort } from '../../api/src/manual-publication-lifecycle-finalizer';
+import { WhatsAppDeliveryConfirmationService } from '../../api/src/whatsapp-delivery-confirmation-service';
+import { createWhatsAppDeliveryExpirationInvoker } from './whatsapp-delivery-expiration-invoker';
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
 import {
   createCommercialRecoveryCoordinator,
@@ -58,6 +64,9 @@ type CreatePipelineProductWorkerOptions = {
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   reservationLeaseMilliseconds?: number;
+  deliveryConfirmationTimeoutMs?: number;
+  deliveryConfirmationExpiryIntervalMs?: number;
+  manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
 };
 
 type WorkerProcessorOptions = Required<
@@ -66,6 +75,9 @@ type WorkerProcessorOptions = Required<
     | 'connection'
     | 'groupSendPolicy'
     | 'reservationLeaseMilliseconds'
+    | 'deliveryConfirmationTimeoutMs'
+    | 'deliveryConfirmationExpiryIntervalMs'
+    | 'manualLifecycleFinalizer'
     | 'whatsAppProviderResolver'
     | 'commercialAutomationMode'
   >
@@ -75,6 +87,9 @@ type WorkerProcessorOptions = Required<
     | 'whatsAppProviderResolver'
     | 'groupSendPolicy'
     | 'reservationLeaseMilliseconds'
+    | 'deliveryConfirmationTimeoutMs'
+    | 'deliveryConfirmationExpiryIntervalMs'
+    | 'manualLifecycleFinalizer'
   >;
 
 type WorkerFactory = typeof createPipelineProductWorker;
@@ -155,14 +170,28 @@ export const createPipelineProductWorker = (
   const ownsConnection = !options.connection;
   const connection = options.connection ?? createRedisConnection(redisUrl);
   const prisma = options.prisma ?? createPrismaClient();
+  const workerLogger = options.logger ?? consoleLogger;
+  const repositories = createPrismaRepositories(prisma);
+  const manualLifecycleFinalizer =
+    createManualPublicationLifecycleFinalizer({
+      repositories,
+      logger: workerLogger,
+      provided: options.manualLifecycleFinalizer,
+      transactionsSupported: typeof prisma.$transaction === 'function',
+    });
   const workerOptions = {
     prisma,
     hunterProvider: options.hunterProvider ?? new MockShopeeProvider(),
-    logger: options.logger ?? consoleLogger,
+    logger: workerLogger,
     whatsAppProvider: options.whatsAppProvider,
     commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
     groupSendPolicy: options.groupSendPolicy,
+    reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
+    deliveryConfirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
+    deliveryConfirmationExpiryIntervalMs:
+      options.deliveryConfirmationExpiryIntervalMs,
+    manualLifecycleFinalizer,
   };
 
   const worker = new Worker<PipelineProductJob>(
@@ -177,6 +206,37 @@ export const createPipelineProductWorker = (
     { connection },
   );
 
+  const expirationService = repositories.whatsappDeliveryEvents
+    ? new WhatsAppDeliveryConfirmationService({
+        dispatches: repositories.whatsappDispatches,
+        deliveryEvents: repositories.whatsappDeliveryEvents,
+        runs: repositories.commercialRuns,
+        promotionCandidates: repositories.commercialPromotions,
+        logger: {
+          info: (obj: unknown, message?: string) =>
+            workerLogger.info(obj, message),
+          error: (obj: unknown, message?: string) =>
+            workerLogger.error(obj, message),
+        },
+        manualLifecycleFinalizer,
+      })
+    : undefined;
+  if (options.deliveryConfirmationExpiryIntervalMs !== undefined && !expirationService) {
+    throw new AppError(
+      'Inbox duravel de eventos de entrega indisponivel',
+      'WHATSAPP_DELIVERY_EVENT_INBOX_UNAVAILABLE',
+    );
+  }
+  const expirationInvoker =
+    options.deliveryConfirmationExpiryIntervalMs !== undefined &&
+    expirationService
+      ? createWhatsAppDeliveryExpirationInvoker({
+          expireDue: () => expirationService.expireDue(),
+          intervalMs: options.deliveryConfirmationExpiryIntervalMs,
+          logger: workerLogger,
+        })
+      : undefined;
+
   let closePromise: Promise<void> | undefined;
 
   return {
@@ -184,6 +244,7 @@ export const createPipelineProductWorker = (
     whatsappDispatchWorker: whatsappWorker,
     close: () => {
       closePromise ??= closeResources([
+        () => expirationInvoker?.close() ?? Promise.resolve(),
         () => worker.close(),
         () => whatsappWorker.close(),
         ...(!options.prisma ? [() => prisma.$disconnect()] : []),
@@ -379,6 +440,7 @@ export const startWorker = async (
       ...options.providerFactoryOptions,
       logger,
     });
+    await whatsAppProvider.assertReady?.();
     const groupSendPolicy = new WhatsAppGroupSendPolicy({
       enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
       safeMode: config.EVOLUTION_SAFE_MODE,
@@ -419,6 +481,10 @@ export const startWorker = async (
       groupSendPolicy,
       reservationLeaseMilliseconds:
         config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000,
+      deliveryConfirmationTimeoutMs:
+        config.WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS * 1000,
+      deliveryConfirmationExpiryIntervalMs:
+        config.WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS * 1000,
     });
   } catch (error) {
     await infrastructure.close().catch(() => undefined);

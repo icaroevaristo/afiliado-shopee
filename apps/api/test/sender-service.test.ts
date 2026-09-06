@@ -107,6 +107,7 @@ const dispatch: WhatsAppDispatchDetails = {
   },
   destination: {
     id: 'dest-1',
+    name: 'Destino de teste',
     destination: 'mock-group-01',
     type: 'INDIVIDUAL',
     active: true,
@@ -173,6 +174,13 @@ const prismaMock = (dispatchData = dispatch) => {
   const client = {
     whatsAppDispatch: {
       findUnique: vi.fn(async () => rawDispatchData),
+      findUniqueOrThrow: vi.fn(async () => ({
+        ...rawDispatchData,
+        status: 'SUBMITTED',
+        externalMessageId: 'mock-whatsapp-1',
+        submittedAt: new Date('2026-08-20T12:00:00.000Z'),
+        confirmationDeadlineAt: new Date('2026-08-20T12:15:00.000Z'),
+      })),
       updateMany: vi.fn(async () => ({ count: 1 })),
       update: vi.fn(async ({ data }) => ({ ...dispatch, ...data })),
     },
@@ -209,7 +217,7 @@ const createService = (
   });
 
 describe('SenderService', () => {
-  it('altera PENDING para SENT e incrementa attemptCount', async () => {
+  it('altera PENDING para SUBMITTED e incrementa attemptCount', async () => {
     const prisma = prismaMock();
     const result = await createService(prisma).sendDispatch('dispatch-1');
 
@@ -219,15 +227,21 @@ describe('SenderService', () => {
         data: expect.objectContaining({ attemptCount: { increment: 1 } }),
       }),
     );
-    expect(prisma.whatsAppDispatch.update).toHaveBeenCalledWith(
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: 'SENT' }),
+        where: {
+          id: 'dispatch-1',
+          status: 'PROCESSING',
+          externalMessageId: null,
+        },
+        data: expect.objectContaining({ status: 'SUBMITTED' }),
       }),
     );
     expect(result).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       externalMessageId: 'mock-whatsapp-1',
-      sentAt: expect.any(Date),
+      submittedAt: expect.any(Date),
+      confirmationDeadlineAt: expect.any(Date),
     });
   });
 
@@ -399,13 +413,13 @@ describe('SenderService', () => {
     ]);
 
     expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
-      1,
+      0,
     );
     expect(provider.sentMessages).toHaveLength(1);
-    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(3);
   });
 
-  it('nao reenvia quando o provider respondeu mas persistir SENT falhou', async () => {
+  it('nao reenvia quando o provider respondeu mas persistir SUBMITTED falhou', async () => {
     let current = { ...dispatch };
     const prisma = {
       whatsAppDispatch: {
@@ -429,7 +443,7 @@ describe('SenderService', () => {
       code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
     });
     expect(provider.sentMessages).toHaveLength(1);
-    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
   });
 
   it('não reenvia dispatch SENT', async () => {
@@ -452,6 +466,7 @@ describe('SenderService', () => {
       instanceName: 'instance-a',
       destination: {
         id: 'dest-1',
+        name: 'Grupo de teste',
         destination: groupDestination,
         type: 'GROUP',
         active: true,
@@ -482,7 +497,12 @@ describe('SenderService', () => {
           persistedAssignment = 'instance-b';
           return { kind: 'STICKY_INSTANCE_MISMATCH' };
         },
-        markSent: async () => ({ ...dispatchSnapshot, status: 'SENT' }),
+        markSubmitted: async () => ({
+          ...dispatchSnapshot,
+          status: 'SUBMITTED',
+        }),
+        applyDeliveryEvent: async () => ({ kind: 'NOOP' }),
+        expireSubmittedConfirmations: async () => [],
         markFailed: async () => ({ ...dispatchSnapshot, status: 'FAILED' }),
       };
     const service = new SenderService({
@@ -512,6 +532,7 @@ describe('SenderService', () => {
       ...dispatch,
       destination: {
         id: 'dest-1',
+        name: 'Grupo comercial',
         destination: groupDestination,
         type: 'GROUP',
         active: true,
@@ -601,7 +622,7 @@ describe('SenderService', () => {
         message: 'Draft caption',
         imageUrl: 'https://shopee.com/image.jpg',
       });
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('envia IMAGE para grupo com candidato RESERVED', async () => {
@@ -609,6 +630,7 @@ describe('SenderService', () => {
         ...commercialDispatch,
         destination: {
           id: 'dest-1',
+          name: 'Grupo comercial',
           destination: groupDestination,
           type: 'GROUP',
           active: true,
@@ -656,7 +678,7 @@ describe('SenderService', () => {
         destinationType: 'GROUP',
       });
       expect(assertAuthorized).toHaveBeenCalledOnce();
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('lança erro se zero candidato correspondente e interrompe fluxo', async () => {
@@ -760,7 +782,7 @@ describe('SenderService', () => {
         message: expect.stringContaining(dispatchLegado.generatedCopy.titulo),
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('fluxo classico com imagem valida permanece TEXT-only', async () => {
@@ -787,7 +809,7 @@ describe('SenderService', () => {
         message: buildWhatsAppPublicMessage(dispatchWithImage.generatedCopy),
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('fluxo classico com URL de imagem invalida permanece TEXT-only', async () => {
@@ -835,7 +857,7 @@ describe('SenderService', () => {
         message: 'Draft caption text',
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('candidate-scoped faz fallback texto quando a URL de imagem e invalida', async () => {
@@ -861,7 +883,7 @@ describe('SenderService', () => {
         message: 'Draft caption',
       });
       expect(provider.sentMessages[0]).not.toHaveProperty('imageUrl');
-      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledOnce();
+      expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
     });
 
     it('bloqueia candidate-scoped quando imageUrl esta ausente', async () => {
@@ -1085,6 +1107,7 @@ describe('SenderService', () => {
           attemptCount: 0,
           destination: {
             id: 'dest-1',
+            name: 'Grupo comercial',
             type: 'GROUP',
             destination: groupDestination,
             active: true,
@@ -1199,7 +1222,7 @@ describe('SenderService', () => {
         data: expect.objectContaining({ attemptCount: { increment: 1 } }),
       }),
     );
-    expect(result).toMatchObject({ status: 'SENT', attemptCount: 2 });
+    expect(result).toMatchObject({ status: 'SUBMITTED', attemptCount: 1 });
   });
 
   it('segunda tentativa ambigua preserva PROCESSING e consome attemptCount 2', async () => {

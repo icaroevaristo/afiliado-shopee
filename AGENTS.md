@@ -227,9 +227,13 @@ Responsabilidade:
 - Processar um `WhatsAppDispatch`.
 - Adquirir atomicamente somente dispatch `PENDING`, incrementar tentativas,
   chamar provider de WhatsApp e atualizar status.
-- Marcar `SENT` apenas depois da persistencia do resultado, `FAILED` somente
-  quando o provider prova que nenhum request externo iniciou e conservar
-  `PROCESSING` quando a entrega pode ter ocorrido.
+- Persistir a resposta HTTP do provider somente como `SUBMITTED`, com prazo de
+  confirmação; ela nunca é evidência de `SENT`.
+- Promover monotonicamente por `MESSAGES_UPDATE`: `SERVER_ACK` para `SENT`,
+  `DELIVERY_ACK` para `DELIVERED` e leitura para `READ`. Um prazo vencido vira
+  `AMBIGUOUS`, sem retry; `FAILED` só ocorre quando o provider prova que nenhum
+  request externo iniciou.
+- Registros `SENT` históricos permanecem históricos e não são reinterpretados.
 
 Entradas:
 
@@ -240,8 +244,12 @@ Entradas:
 Saidas:
 
 - `WhatsAppDispatch` atualizado.
-- `externalMessageId` mockado quando enviado.
-- `sentAt` quando enviado.
+- Identificador externo armazenado apenas para correlação do consumer.
+- A correlação usa o índice não único `[instanceName, externalMessageId]`.
+  Legados podem conter colisões; nesse caso o consumer não escolhe um dispatch e
+  permanece fail-closed, em vez de aplicar confirmação a um registro incerto.
+- `submittedAt`, prazo de confirmação e timestamps de confirmação quando
+  houver evidência correspondente.
 - `errorMessage` quando houver falha.
 
 Dependencias:
@@ -261,6 +269,21 @@ Dependencias:
 - Fila `whatsapp-dispatch` em `packages/queue`.
 - Worker em `apps/worker`.
 - Modelos `WhatsAppDestination` e `WhatsAppDispatch`.
+- Consumer autenticado `POST /whatsapp/events/messages.update` e endpoint
+  operacional autenticado de expiração de confirmações; ambos são idempotentes
+  e não iniciam envio.
+- Evolution 2.3.7 usa webhook por instância com `MESSAGES_UPDATE`, URL
+  host-only `http://host.docker.internal:<porta>/whatsapp/events/messages.update`
+  e `Authorization: Bearer` dedicado. Antes de qualquer request de envio, o
+  provider lê/configura/rele a integração; URL, evento, formato e token
+  divergentes falham fechados sem iniciar SEND. A rota não aceita
+  `LOCAL_API_AUTH_TOKEN` como substituto do token dedicado.
+  A porta da callback deve ser exatamente `PORT` da API (`3333` por padrão)
+  quando o provider é criado pelo runtime.
+  O `MockWhatsAppProvider` somente devolve o ACK HTTP com `externalMessageId`,
+  mantendo o dispatch em `SUBMITTED`; nunca inventa `MESSAGES_UPDATE`. A prova
+  de reachability usa o `WebhookController.emit` compilado da imagem oficial,
+  configurado apenas por monitor e Prisma falsos em memória, sem SEND.
 
 Proximos passos previstos:
 
@@ -536,7 +559,8 @@ Saidas:
 - `GET /analytics` com HTTP 200 e um `AnalyticsSnapshot`.
 - Total de produtos e produtos aprovados com `score >= 70`.
 - Total de copies geradas.
-- Totais de dispatches `PENDING`, `SENT` e `FAILED`.
+- Totais de dispatches pendentes, confirmados (`SENT`, `DELIVERED` e `READ`) e
+  falhos; `SUBMITTED` aguarda confirmação e `AMBIGUOUS` exige investigação.
 - Total de destinos ativos.
 
 Dependencias:
@@ -603,6 +627,24 @@ Regras de autoridade:
 - O dashboard nao acessa Prisma, Redis ou BullMQ diretamente, nao exibe URLs de
   infraestrutura e nao cria acoes sem endpoint oficial, como retry ou
   reprocessamento de dispatch.
+- O histórico comum mostra produto, grupo, instância, horário e status real de
+  entrega, mas nunca JID ou `externalMessageId`. `SUBMITTED` é exibido como
+  aguardando confirmação; `AMBIGUOUS` exige verificação e não oferece retry.
+- Quando o diretório não resolver mais o destino, a atividade usa o snapshot
+  sanitizado de grupo e instância do `CommercialPipelineRun`, sem recuperar ou
+  expor o JID.
+- O próximo envio prefere um target job BullMQ ainda pendente e válido para a
+  revision e assignment atuais; somente targets `send` em `waiting` ou
+  `delayed`, com `scheduledFor` futuro, são mostrados. Jobs `active` ou
+  vencidos já cruzaram o compromisso e não são exibidos como futuro. O preview
+  do planner é somente fallback.
+- O worker/supervisor inicia um invocador periódico bounded que chama somente
+  `expireSubmittedConfirmations` e a finalização persistente. O timer serializa
+  ciclos, falha fechado, e é parado com shutdown limpo antes de fechar worker,
+  Prisma ou Redis. A rota autenticada
+  `POST /whatsapp/delivery-confirmations/expire` é a invocação manual
+  idempotente do mesmo caminho; nenhuma das duas superfícies inicia provider,
+  retry, requeue ou Scheduler.
 
 ## Commercial Pipeline Dry Run
 
@@ -729,9 +771,10 @@ Persistencia e historico:
   `paused`, `pausedAt`, `resumedAt` e `updatedAt`.
 - `CommercialAutomationSettingsRepository` e
   `CommercialAutomationHistoryRepository` isolam o servico do Prisma.
-- Contagens usam somente `WhatsAppDispatch` `SENT`, com destino `GROUP` e
-  `sentAt` dentro do dia no timezone configurado. Dry-runs e falhas nao criam
-  contadores paralelos.
+- Contagens usam um único dispatch confirmado (`SENT`, `DELIVERED` ou `READ`),
+  com destino `GROUP` e `sentAt` dentro do dia no timezone configurado. Uma
+  transição posterior não soma de novo; `SUBMITTED`, dry-runs e falhas não
+  criam contadores paralelos.
 - `CommercialPipelineRun` com `finalStatus=AMBIGUOUS` ou
   `investigationRequired=true` bloqueia novas decisoes ate investigacao manual.
 
@@ -781,6 +824,10 @@ Isolamento e idempotencia:
 - `STARTED` sem ownership/lease ou com lease vencida e stale e bloqueia a
   politica com `STALE_COMMERCIAL_EXECUTION_EXISTS`, separadamente de uma
   execucao ativa.
+- Cada target futuro usa `jobId=commercial-target-<slotKey>`. O `slotKey`
+  deriva deterministicamente de campaign, grupo/fingerprint, instância
+  selecionada, horário, `scheduleRevision` e `assignmentRevision`; um job
+  pendente com a mesma identidade é reutilizado antes de qualquer `add`.
 
 Configuracao e seguranca:
 

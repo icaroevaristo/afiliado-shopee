@@ -159,7 +159,9 @@ const createRepositories = (prisma: ReturnType<typeof createPrismaMock>) =>
       findByIdWithDetails: vi.fn(),
       list: vi.fn(),
       markAttemptPending: vi.fn(),
-      markSent: vi.fn(),
+      markSubmitted: vi.fn(),
+      applyDeliveryEvent: vi.fn(),
+      expireSubmittedConfirmations: vi.fn(),
       markFailed: vi.fn(),
     },
   }) as unknown as ApplicationRepositories;

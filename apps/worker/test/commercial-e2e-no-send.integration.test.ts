@@ -1223,17 +1223,17 @@ describe('Phase 9 E2E local sem SEND', () => {
         dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
         return true;
       });
-      const markSent = vi.fn(
+      const markSubmitted = vi.fn(
         async (
           _id: string,
-          data: Parameters<WhatsAppDispatchRepository['markSent']>[1],
+          data: Parameters<WhatsAppDispatchRepository['markSubmitted']>[1],
         ): Promise<WhatsAppDispatchRecord> => {
           const currentDispatch = dispatch;
           if (!currentDispatch) throw new Error('dispatch missing');
           const updatedDispatch: WhatsAppDispatchRecord = {
             ...currentDispatch,
             ...data,
-            status: 'SENT',
+            status: 'SUBMITTED',
             attemptCount: 1,
           };
           dispatch = updatedDispatch;
@@ -1269,8 +1269,10 @@ describe('Phase 9 E2E local sem SEND', () => {
             ? { kind: 'CLAIMED' as const }
             : { kind: 'NOT_PENDING' as const },
         ),
-        markSent,
+        markSubmitted,
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
         createPending: vi.fn(),
         list: vi.fn(),
       };
@@ -1321,11 +1323,11 @@ describe('Phase 9 E2E local sem SEND', () => {
         logger: { info: vi.fn(), error: vi.fn() },
       });
 
-      expect(candidateStatus).toBe('DISPATCHED');
-      expect(dispatch).toMatchObject({ status: 'SENT', attemptCount: 1 });
+      expect(candidateStatus).toBe('RESERVED');
+      expect(dispatch).toMatchObject({ status: 'SUBMITTED', attemptCount: 1 });
       expect(run).toMatchObject({
-        status: 'COMPLETED',
-        finalStatus: 'SENT',
+        status: 'STARTED',
+        finalStatus: 'PENDING',
         investigationRequired: false,
       });
       expect(provider.sentMessages).toHaveLength(1);
@@ -1338,9 +1340,7 @@ describe('Phase 9 E2E local sem SEND', () => {
         expect(provider.sentMessages[0]?.imageUrl).toBeUndefined();
       }
       expect(markAttemptPending).toHaveBeenCalledOnce();
-      expect(markDispatchedByGeneratedCopyId).toHaveBeenCalledWith(
-        generatedCopyId,
-      );
+      expect(markDispatchedByGeneratedCopyId).not.toHaveBeenCalled();
       expect(COMMERCIAL_AUTOMATION_JOB_OPTIONS.attempts).toBe(1);
     },
   );

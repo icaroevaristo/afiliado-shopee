@@ -24,10 +24,14 @@ export type WhatsAppProviderFactoryConfig = {
   EVOLUTION_MAX_MESSAGES_PER_BOOT?: number;
   WHATSAPP_GROUP_SEND_ENABLED?: boolean;
   WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN?: number;
+  WHATSAPP_DELIVERY_WEBHOOK_URL?: string;
+  WHATSAPP_DELIVERY_WEBHOOK_TOKEN?: string;
+  PORT?: number;
 };
 
 export type WhatsAppProviderFactoryOptions = {
   httpClient?: HttpClient;
+  deliveryWebhookHttpClient?: HttpClient;
   logger?: ProviderLogger;
   timeoutMs?: number;
 };
@@ -99,5 +103,9 @@ export const createWhatsAppProvider = (
     timeoutMs: options.timeoutMs ?? config.EVOLUTION_SEND_TIMEOUT_MS,
     sendGuard,
     groupSendGuard,
+    deliveryWebhookUrl: config.WHATSAPP_DELIVERY_WEBHOOK_URL,
+    deliveryWebhookToken: config.WHATSAPP_DELIVERY_WEBHOOK_TOKEN,
+    deliveryWebhookHttpClient: options.deliveryWebhookHttpClient,
+    deliveryWebhookPort: config.PORT,
   });
 };

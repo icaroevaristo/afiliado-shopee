@@ -19,6 +19,26 @@ const response = (body: unknown, status = 200) =>
     headers: { 'Content-Type': 'application/json' },
   });
 
+const deliveryWebhookConfig = {
+  WHATSAPP_DELIVERY_WEBHOOK_URL:
+    'http://host.docker.internal:3333/whatsapp/events/messages.update',
+  WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'dedicated-webhook-test-token',
+};
+
+const readyDeliveryWebhookClient = () =>
+  vi.fn(async () =>
+    response({
+      enabled: true,
+      url: deliveryWebhookConfig.WHATSAPP_DELIVERY_WEBHOOK_URL,
+      events: ['MESSAGES_UPDATE'],
+      headers: {
+        authorization: `Bearer ${deliveryWebhookConfig.WHATSAPP_DELIVERY_WEBHOOK_TOKEN}`,
+      },
+      byEvents: false,
+      base64: false,
+    }),
+  );
+
 const createProvider = (
   httpClient: (
     input: string | URL | Request,
@@ -208,8 +228,9 @@ describe('EvolutionGroupSendGuard', () => {
         EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
         WHATSAPP_GROUP_SEND_ENABLED: true,
         WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+        ...deliveryWebhookConfig,
       },
-      { httpClient },
+      { httpClient, deliveryWebhookHttpClient: readyDeliveryWebhookClient() },
     );
 
     await expect(
@@ -283,8 +304,9 @@ describe('EvolutionGroupSendGuard', () => {
         EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
         WHATSAPP_GROUP_SEND_ENABLED: true,
         WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+        ...deliveryWebhookConfig,
       },
-      { httpClient },
+      { httpClient, deliveryWebhookHttpClient: readyDeliveryWebhookClient() },
     );
 
     await expect(
@@ -315,8 +337,9 @@ describe('EvolutionGroupSendGuard', () => {
         EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
         WHATSAPP_GROUP_SEND_ENABLED: true,
         WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: 1,
+        ...deliveryWebhookConfig,
       },
-      { httpClient },
+      { httpClient, deliveryWebhookHttpClient: readyDeliveryWebhookClient() },
     );
 
     await expect(
@@ -419,6 +442,10 @@ describe('EvolutionGroupSendGuard', () => {
       httpClient,
       logger: { info, error: vi.fn() },
       groupSendGuard,
+      deliveryWebhookUrl: deliveryWebhookConfig.WHATSAPP_DELIVERY_WEBHOOK_URL,
+      deliveryWebhookToken:
+        deliveryWebhookConfig.WHATSAPP_DELIVERY_WEBHOOK_TOKEN,
+      deliveryWebhookHttpClient: readyDeliveryWebhookClient(),
     });
     await provider.sendMessage({
       destination: GROUP_ID,

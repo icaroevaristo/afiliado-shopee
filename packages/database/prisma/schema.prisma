@@ -177,7 +177,7 @@ model WhatsAppGroupInstanceAssignment {
   instance      WhatsAppInstance   @relation(fields: [instanceName], references: [name], onDelete: Restrict)
   position      Int
   createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  updatedAt     DateTime           @default(now()) @updatedAt
 
   @@unique([destinationId, position])
   @@unique([destinationId, instanceName])
@@ -323,7 +323,11 @@ model WhatsAppDispatch {
   status                WhatsAppDispatchStatus    @default(PENDING)
   attemptCount          Int                       @default(0)
   errorMessage          String?
+  submittedAt           DateTime?
+  confirmationDeadlineAt DateTime?
   sentAt                DateTime?
+  deliveredAt           DateTime?
+  readAt                DateTime?
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   commercialPipelineRun CommercialPipelineRun?
@@ -338,6 +342,25 @@ model WhatsAppDispatch {
   @@index([status, sentAt])
   @@index([destinationId, status, sentAt])
   @@index([instanceName])
+  @@index([status, confirmationDeadlineAt])
+  @@index([instanceName, externalMessageId])
+}
+
+model WhatsAppDeliveryEventInbox {
+  id                String                           @id @default(cuid())
+  fingerprint       String                           @unique
+  instanceName      String
+  externalMessageId String
+  status            WhatsAppDeliveryEventStatus
+  occurredAt        DateTime
+  receivedAt        DateTime                         @default(now())
+  state             WhatsAppDeliveryEventInboxState @default(PENDING)
+  appliedAt         DateTime?
+  createdAt         DateTime                         @default(now())
+  updatedAt         DateTime                         @default(now()) @updatedAt
+
+  @@index([instanceName, externalMessageId, state, occurredAt], map: "WhatsAppDeliveryEventInbox_instanceName_externalMessageId_state")
+  @@index([state, occurredAt])
 }
 
 model WhatsAppDispatchManualRecovery {
@@ -567,8 +590,26 @@ model CommercialAutomationExecution {
 enum WhatsAppDispatchStatus {
   PENDING
   PROCESSING
+  SUBMITTED
   SENT
+  DELIVERED
+  READ
   FAILED
+  AMBIGUOUS
+}
+
+enum WhatsAppDeliveryEventStatus {
+  PENDING
+  SERVER_ACK
+  DELIVERY_ACK
+  READ
+  ERROR
+}
+
+enum WhatsAppDeliveryEventInboxState {
+  PENDING
+  APPLIED
+  AMBIGUOUS
 }
 
 enum WhatsAppDispatchManualRecoveryDecision {

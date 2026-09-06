@@ -254,7 +254,7 @@ describe('Commercial Image Dispatch E2E CLI', () => {
       errorMessage: null,
       createdAt: new Date(),
       updatedAt: new Date(),
-      destination: { type: 'INDIVIDUAL', destination: maskEvolutionDestination(DESTINATION), active: true, available: true, sourceInstanceName: EXPECTED_EVOLUTION_INSTANCE },
+      destination: { name: 'Destino controlado', type: 'INDIVIDUAL', destination: maskEvolutionDestination(DESTINATION), active: true, available: true, sourceInstanceName: EXPECTED_EVOLUTION_INSTANCE },
       generatedCopy: copy
     };
 

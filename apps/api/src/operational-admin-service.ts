@@ -1,4 +1,8 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import {
+  isCommercialAutomationTargetConstraint,
+  JOB_NAMES,
+} from '@shopee-auto-affiliate-ai/queue';
 
 import { COMMERCIAL_GROUP_FINGERPRINT } from './commercial-group-selection';
 import {
@@ -37,6 +41,25 @@ type QueueCountsReader = {
   getJobCounts?: (
     ...types: Array<'waiting' | 'active' | 'delayed' | 'prioritized'>
   ) => Promise<Record<string, number>>;
+};
+
+type QueueTargetJobReader = QueueCountsReader & {
+  getJobs?: (
+    types: Array<'waiting' | 'active' | 'delayed'>,
+    start?: number,
+    end?: number,
+  ) => Promise<Array<{ id?: string | number; name?: string; data?: unknown }>>;
+};
+
+type QueuedCommercialTarget = {
+  groupId: string;
+  campaignId: string;
+  logicalGroupFingerprint: string;
+  instanceName: string;
+  scheduledFor: Date;
+  slotKey: string;
+  scheduleRevision: number;
+  assignmentRevision?: number;
 };
 
 type SchedulerStatusReader = {
@@ -189,7 +212,7 @@ export type OperationalAdminDependencies = {
   queues?: {
     productPipeline?: QueueCountsReader;
     whatsappDispatch?: QueueCountsReader;
-    commercialAutomation?: QueueCountsReader;
+    commercialAutomation?: QueueTargetJobReader;
   };
   scheduler?: SchedulerStatusReader;
   maxMessagesPerRun: number;
@@ -228,6 +251,108 @@ const readQueueCounts = async (
     delayed: counts.delayed ?? 0,
     prioritized: counts.prioritized ?? 0,
   };
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const parseQueuedCommercialTarget = (
+  job: { id?: string | number; name?: string; data?: unknown },
+): QueuedCommercialTarget | null => {
+  if (
+    job.name !== JOB_NAMES.commercialAutomationTarget ||
+    !isRecord(job.data) ||
+    job.data.kind !== 'target' ||
+    job.data.mode !== 'send'
+  ) {
+    return null;
+  }
+  const target = job.data.target;
+  if (!isCommercialAutomationTargetConstraint(target)) return null;
+  const scheduledFor = new Date(target.scheduledFor);
+  if (Number.isNaN(scheduledFor.getTime())) return null;
+  if (String(job.id) !== `commercial-target-${target.slotKey}`) return null;
+  return {
+    groupId: target.groupId,
+    campaignId: target.campaignId,
+    logicalGroupFingerprint: target.logicalGroupFingerprint,
+    instanceName: target.instanceName,
+    scheduledFor,
+    slotKey: target.slotKey,
+    scheduleRevision: target.scheduleRevision,
+    ...(target.assignmentRevision === undefined
+      ? {}
+      : { assignmentRevision: target.assignmentRevision }),
+  };
+};
+
+const readAllQueuedTargetJobs = async (queue: QueueTargetJobReader) => {
+  const pageSize = 200;
+  const jobs: Array<{ id?: string | number; name?: string; data?: unknown }> = [];
+  let start = 0;
+  while (true) {
+    const page = await queue.getJobs?.(
+      ['waiting', 'delayed'],
+      start,
+      start + pageSize - 1,
+    );
+    if (!page || page.length === 0) break;
+    jobs.push(...page);
+    if (page.length < pageSize) break;
+    start += pageSize;
+  }
+  return jobs;
+};
+
+const readValidQueuedTargets = async ({
+  queue,
+  now,
+  scheduleRevision,
+  groups,
+  campaigns,
+}: {
+  queue: QueueTargetJobReader | undefined;
+  now: Date;
+  scheduleRevision: number;
+  groups: WhatsAppGroupRecord[];
+  campaigns: CommercialGroupCampaignRecord[];
+}): Promise<QueuedCommercialTarget[]> => {
+  if (!queue?.getJobs) return [];
+  // An active job has already crossed its scheduled instant and must not be
+  // advertised as a future commitment. Waiting and delayed send targets are
+  // the only queue states that can truthfully populate "Próximo envio". Read
+  // every page so an arbitrary BullMQ page boundary cannot hide the earliest
+  // valid commitment.
+  const jobs = await readAllQueuedTargetJobs(queue);
+  const validTargets = jobs
+    .map(parseQueuedCommercialTarget)
+    .filter((target): target is QueuedCommercialTarget => target !== null)
+    .filter((target) => {
+      if (target.scheduledFor.getTime() <= now.getTime()) return false;
+      if (target.scheduleRevision !== scheduleRevision) return false;
+      const group = groups.find((candidate) => candidate.id === target.groupId);
+      const campaign = group ? campaignForGroup(group, campaigns) : null;
+      if (!group || !campaign || campaign.id !== target.campaignId) return false;
+      if (
+        group.fingerprint !== target.logicalGroupFingerprint ||
+        campaign.logicalGroupFingerprint !== target.logicalGroupFingerprint ||
+        (group.assignmentRevision ?? undefined) !== target.assignmentRevision
+      ) {
+        return false;
+      }
+      try {
+        return getOrderedAssignedInstanceNames(group).includes(
+          target.instanceName,
+        );
+      } catch {
+        return false;
+      }
+    });
+  return validTargets.sort(
+    (left, right) =>
+      left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
+      left.slotKey.localeCompare(right.slotKey),
+  );
 };
 
 const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
@@ -406,7 +531,7 @@ export class OperationalAdminService {
 
   private async readContext() {
     const now = this.now();
-    const [settings, instances, groups, campaigns, dispatches, counts, plan] =
+    const [settings, instances, groups, campaigns, dispatches, counts] =
       await Promise.all([
         this.dependencies.settings.get(),
         this.dependencies.instances.list(),
@@ -414,9 +539,21 @@ export class OperationalAdminService {
           ? this.dependencies.groups.listAll()
           : Promise.resolve([]),
         listCampaigns(this.dependencies.campaigns),
-        this.dependencies.dispatches.list({ status: 'SENT' }),
+        this.dependencies.dispatches.listConfirmed
+          ? this.dependencies.dispatches.listConfirmed()
+          : Promise.all(
+              (['SENT', 'DELIVERED', 'READ'] as const).map((status) =>
+                this.dependencies.dispatches.list({ status }),
+              ),
+            ).then((pages) => {
+              const seen = new Set<string>();
+              return pages.flat().filter((dispatch) => {
+                if (seen.has(dispatch.id)) return false;
+                seen.add(dispatch.id);
+                return true;
+              });
+            }),
         this.dependencies.status.getCounts(now),
-        this.dependencies.planner.preview(now),
       ]);
     return {
       now,
@@ -426,7 +563,6 @@ export class OperationalAdminService {
       campaigns,
       dispatches,
       counts,
-      plan,
     };
   }
 
@@ -624,6 +760,14 @@ export class OperationalAdminService {
         campaignForGroup(group, context.campaigns),
       ]),
     );
+    const queuedTargets = await readValidQueuedTargets({
+      queue: this.dependencies.queues?.commercialAutomation,
+      now: context.now,
+      scheduleRevision: schedule.scheduleRevision,
+      groups: context.groups,
+      campaigns: context.campaigns,
+    });
+    const plan = await this.dependencies.planner.preview(context.now);
     const lastByGroup = new Map<string, Date>();
     const lastByCampaign = new Map<string, Date>();
     const lastByInstance = new Map<string, Date>();
@@ -659,33 +803,60 @@ export class OperationalAdminService {
       string,
       Array<{ scheduledFor: string; instanceName: string }>
     >();
-    const plannedSlots = [...context.plan.slots].sort(
+    const registerUpcomingTarget = (target: {
+      groupId: string;
+      campaignId: string;
+      instanceName: string;
+      scheduledFor: Date;
+    }, fallbackOnly = false) => {
+      const currentGroup = nextByGroup.get(target.groupId);
+      if (!currentGroup || (!fallbackOnly && target.scheduledFor < currentGroup)) {
+        nextByGroup.set(target.groupId, target.scheduledFor);
+      }
+      const currentCampaign = nextByCampaign.get(target.campaignId);
+      if (
+        !currentCampaign ||
+        (!fallbackOnly && target.scheduledFor < currentCampaign)
+      ) {
+        nextByCampaign.set(target.campaignId, target.scheduledFor);
+      }
+      const currentInstance = nextByInstance.get(target.instanceName);
+      if (
+        !currentInstance ||
+        (!fallbackOnly && target.scheduledFor < currentInstance)
+      ) {
+        nextByInstance.set(target.instanceName, target.scheduledFor);
+      }
+      const upcoming = upcomingByGroup.get(target.groupId) ?? [];
+      if (
+        upcoming.length < 4 &&
+        (!fallbackOnly || upcoming.length === 0) &&
+        !upcoming.some(
+          (entry) =>
+            entry.scheduledFor === target.scheduledFor.toISOString() &&
+            entry.instanceName === target.instanceName,
+        )
+      ) {
+        upcoming.push({
+          scheduledFor: target.scheduledFor.toISOString(),
+          instanceName: target.instanceName,
+        });
+        upcomingByGroup.set(target.groupId, upcoming);
+      }
+    };
+    for (const target of queuedTargets) registerUpcomingTarget(target);
+    const plannedSlots = [...plan.slots].sort(
       (left, right) =>
         left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
         left.slotKey.localeCompare(right.slotKey),
     );
     for (const slot of plannedSlots) {
-      const groupId = slot.target.groupId;
-      const currentGroup = nextByGroup.get(groupId);
-      if (!currentGroup || slot.scheduledFor < currentGroup) {
-        nextByGroup.set(groupId, slot.scheduledFor);
-      }
-      const currentCampaign = nextByCampaign.get(slot.target.campaignId);
-      if (!currentCampaign || slot.scheduledFor < currentCampaign) {
-        nextByCampaign.set(slot.target.campaignId, slot.scheduledFor);
-      }
-      const currentInstance = nextByInstance.get(slot.target.instanceName);
-      if (!currentInstance || slot.scheduledFor < currentInstance) {
-        nextByInstance.set(slot.target.instanceName, slot.scheduledFor);
-      }
-      const upcoming = upcomingByGroup.get(groupId) ?? [];
-      if (upcoming.length < 4) {
-        upcoming.push({
-          scheduledFor: slot.scheduledFor.toISOString(),
-          instanceName: slot.target.instanceName,
-        });
-        upcomingByGroup.set(groupId, upcoming);
-      }
+      registerUpcomingTarget({
+        groupId: slot.target.groupId,
+        campaignId: slot.target.campaignId,
+        instanceName: slot.target.instanceName,
+        scheduledFor: slot.scheduledFor,
+      }, true);
     }
     const groupOutputs: OperationalAdminGroup[] = [];
     for (const group of context.groups) {
@@ -867,7 +1038,9 @@ export class OperationalAdminService {
         scheduleRevision: schedule.scheduleRevision,
         updatedAt: context.settings.updatedAt.toISOString(),
       },
-      nextSendAt: iso(context.plan.slots[0]?.scheduledFor),
+      nextSendAt: iso(
+        queuedTargets[0]?.scheduledFor ?? plan.slots[0]?.scheduledFor,
+      ),
       lastSendAt: iso(lastGlobal),
       blockers: uniqueBlockers([
         ...globalBlockers,

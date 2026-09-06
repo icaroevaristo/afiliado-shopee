@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   homeAutomationPresentation,
+  isConfirmedDispatchStatus,
   translateHomeDispatchStatus,
   translateHomeExecutionStatus,
   translateHomeReason,
@@ -53,9 +54,18 @@ describe('home-display', () => {
 
   it('traduz desconhecidos para linguagem segura e não técnica', () => {
     expect(translateHomeReason('NEW_INTERNAL_REASON')).toBe('Há uma pendência operacional que precisa de atenção.');
-    expect(translateHomeDispatchStatus('PROCESSING')).toBe('Aguardando confirmação');
+    expect(translateHomeDispatchStatus('PROCESSING')).toBe('Em processamento');
     expect(translateHomeDispatchStatus('UNKNOWN')).toBe('Estado não reconhecido');
     expect(translateHomeExecutionStatus('UNKNOWN')).toBe('Atividade da automação atualizada');
+  });
+
+  it('trata todos os estados confirmados como concluídos e SUBMITTED como pendente', () => {
+    expect(['SENT', 'DELIVERED', 'READ'].every(isConfirmedDispatchStatus)).toBe(
+      true,
+    );
+    expect(isConfirmedDispatchStatus('SUBMITTED')).toBe(false);
+    expect(translateHomeDispatchStatus('DELIVERED')).toBe('Entregue');
+    expect(translateHomeDispatchStatus('READ')).toBe('Lido');
   });
 
   it('distingue limite seguro de paginas de catalogo esgotado', () => {

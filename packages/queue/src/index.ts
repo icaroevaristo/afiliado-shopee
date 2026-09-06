@@ -1,6 +1,7 @@
 import { Queue, type JobSchedulerJson, type JobsOptions } from 'bullmq';
 import IORedis from 'ioredis';
 import type { ProductFilters } from '@shopee-auto-affiliate-ai/shared';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type {
   PipelineScheduler,
   PipelineSchedulerState,
@@ -102,6 +103,56 @@ export type CommercialAutomationJob =
       target: CommercialAutomationTargetConstraint;
     };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+export const isCommercialAutomationTargetConstraint = (
+  value: unknown,
+): value is CommercialAutomationTargetConstraint => {
+  if (!isRecord(value)) return false;
+  const scheduleRevision = value.scheduleRevision;
+  const assignmentRevision = value.assignmentRevision;
+  const scheduleRevisionValid =
+    typeof scheduleRevision === 'number' &&
+    Number.isSafeInteger(scheduleRevision) &&
+    scheduleRevision >= 1;
+  const assignmentRevisionValid =
+    assignmentRevision === undefined ||
+    (typeof assignmentRevision === 'number' &&
+      Number.isSafeInteger(assignmentRevision) &&
+      assignmentRevision >= 1);
+  return (
+    typeof value.campaignId === 'string' &&
+    value.campaignId.trim().length > 0 &&
+    typeof value.groupId === 'string' &&
+    value.groupId.trim().length > 0 &&
+    typeof value.logicalGroupFingerprint === 'string' &&
+    value.logicalGroupFingerprint.trim().length > 0 &&
+    typeof value.instanceName === 'string' &&
+    value.instanceName.trim().length > 0 &&
+    typeof value.scheduledFor === 'string' &&
+    value.scheduledFor.trim().length > 0 &&
+    Number.isFinite(Date.parse(value.scheduledFor)) &&
+    typeof value.slotKey === 'string' &&
+    value.slotKey.trim().length > 0 &&
+    scheduleRevisionValid &&
+    assignmentRevisionValid
+  );
+};
+
+const stableJson = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+};
+
 export const enqueuePipelineProduct = (
   queue: Queue<PipelineProductJob>,
   data: PipelineProductJob,
@@ -128,17 +179,47 @@ export const enqueueControlledWhatsAppDispatch = (
     jobId,
   });
 
-export const enqueueCommercialAutomationTarget = (
+export const enqueueCommercialAutomationTarget = async (
   queue: Queue<CommercialAutomationJob>,
   data: Extract<CommercialAutomationJob, { kind: 'target' }>,
   jobId: string,
   delay: number,
-) =>
-  queue.add(JOB_NAMES.commercialAutomationTarget, data, {
+) => {
+  if (
+    data.mode !== 'send' ||
+    !isCommercialAutomationTargetConstraint(data.target) ||
+    jobId !== `commercial-target-${data.target.slotKey}`
+  ) {
+    throw new AppError(
+      'Job target da automacao comercial com identidade ou payload invalido',
+      'COMMERCIAL_AUTOMATION_TARGET_CONSTRAINT_INVALID',
+    );
+  }
+  await queue.add(JOB_NAMES.commercialAutomationTarget, data, {
     ...COMMERCIAL_AUTOMATION_JOB_OPTIONS,
     jobId,
     delay,
   });
+  const persistedJob = await queue.getJob(jobId);
+  if (!persistedJob) {
+    throw new AppError(
+      'Job target deterministico persistido nao foi encontrado apos o enqueue',
+      'COMMERCIAL_AUTOMATION_TARGET_JOB_ID_PAYLOAD_CONFLICT',
+    );
+  }
+  const existingId = persistedJob.id === undefined ? null : String(persistedJob.id);
+  if (
+    existingId !== jobId ||
+    persistedJob.name !== JOB_NAMES.commercialAutomationTarget ||
+    stableJson(persistedJob.data) !== stableJson(data)
+  ) {
+    throw new AppError(
+      'Job target deterministico existente possui payload divergente',
+      'COMMERCIAL_AUTOMATION_TARGET_JOB_ID_PAYLOAD_CONFLICT',
+    );
+  }
+  return persistedJob;
+};
 
 export const enqueueControlledE2EWhatsAppDispatch =
   enqueueControlledWhatsAppDispatch;

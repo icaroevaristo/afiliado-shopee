@@ -620,6 +620,7 @@ export const createRealCommercialImageDispatchE2ERuntime = async (
           'COMMERCIAL_E2E_WORKER_ALREADY_STARTED',
         );
       }
+      await provider.assertReady?.();
       worker = createWhatsAppDispatchWorker(config.REDIS_URL, {
         connection: redis,
         prisma,
@@ -831,7 +832,7 @@ export const executeCommercialImageDispatchE2E = async ({
     }
 
     const success =
-      finalDispatch.status === 'SENT' &&
+      ['SENT', 'DELIVERED', 'READ'].includes(finalDispatch.status) &&
       finalDispatch.attemptCount === 1 &&
       Boolean(finalDispatch.externalMessageId) &&
       Boolean(finalDispatch.sentAt) &&

@@ -275,7 +275,11 @@ export const sanitizeCommercialPipelineRun = (
   completedAt: run.completedAt?.toISOString() ?? null,
   dispatchWasCreated: Boolean(run.dispatchId),
   jobWasCreated: Boolean(run.jobId),
-  messageWasSent: run.finalStatus === 'SENT' || dispatch?.status === 'SENT',
+  messageWasSent:
+    run.finalStatus === 'SENT' ||
+    dispatch?.status === 'SENT' ||
+    dispatch?.status === 'DELIVERED' ||
+    dispatch?.status === 'READ',
   confirmationAvailable:
     run.mode === 'DRY_RUN' &&
     run.status === 'COMPLETED' &&

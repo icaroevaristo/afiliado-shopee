@@ -245,6 +245,7 @@ describe('commercial reservation lease handoff integration', () => {
       },
       destination: {
         id: dispatch.destinationId,
+        name: 'Grupo controlado',
         destination: groupDestination,
         type: 'GROUP',
         active: true,
@@ -318,11 +319,11 @@ describe('commercial reservation lease handoff integration', () => {
         dispatch = { ...dispatch, status: 'PROCESSING', attemptCount: 1 };
         return { kind: 'CLAIMED' as const };
       }),
-      markSent: vi.fn(async (_id, data) => {
+      markSubmitted: vi.fn(async (_id, data) => {
         dispatch = {
           ...dispatch,
           ...data,
-          status: 'SENT',
+          status: 'SUBMITTED',
           attemptCount: 1,
         };
         jobState = 'completed';
@@ -330,6 +331,8 @@ describe('commercial reservation lease handoff integration', () => {
         return dispatch;
       }),
       markFailed: vi.fn(),
+      applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+      expireSubmittedConfirmations: vi.fn(async () => []),
     };
     const promotions = {
       findAttemptContextByGeneratedCopyId: vi.fn(async () => ({
@@ -438,22 +441,22 @@ describe('commercial reservation lease handoff integration', () => {
 
     expect(provider.sendMessage).toHaveBeenCalledOnce();
     expect(dispatch).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       attemptCount: 1,
       externalMessageId: 'external-handoff-integration',
     });
     expect(run).toMatchObject({
-      status: 'COMPLETED',
-      finalStatus: 'SENT',
+      status: 'STARTED',
+      finalStatus: 'PENDING',
       investigationRequired: false,
     });
-    expect(candidateStatus).toBe('DISPATCHED');
+    expect(candidateStatus).toBe('RESERVED');
     expect(jobState).toBe('completed');
     expect(attemptsMade).toBe(1);
-    expect(attempt.read()).toEqual({
-      attemptExecutionId: null,
-      attemptReservedAt: null,
-      attemptLeaseExpiresAt: null,
+    expect(attempt.read()).toMatchObject({
+      attemptExecutionId: executionId,
+      attemptReservedAt: expect.any(Date),
+      attemptLeaseExpiresAt: renewedLease,
     });
   });
 });

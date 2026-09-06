@@ -57,9 +57,18 @@ const resolveGroupName = (
   dispatch: WhatsAppDispatch,
   groupNames: Readonly<Record<string, string>>,
 ) =>
-  groupNames[dispatch.destinationId] ??
-  dispatch.destination?.name ??
+  groupNames[dispatch.destinationId] ||
+  dispatch.destination?.name ||
+  dispatch.commercialPipelineRun?.groupName ||
   'Grupo não disponível';
+
+const resolveGroupFingerprint = (dispatch: WhatsAppDispatch) =>
+  dispatch.destination?.fingerprint ??
+  dispatch.commercialPipelineRun?.groupFingerprint ??
+  null;
+
+const resolveInstanceName = (dispatch: WhatsAppDispatch) =>
+  dispatch.instanceName ?? dispatch.commercialPipelineRun?.instanceName ?? null;
 
 const readErrorMessage = (cause: unknown) => {
   if (cause instanceof DashboardApiError) return cause.message;
@@ -105,6 +114,8 @@ function HistoryRecord({
 }) {
   const productName = dispatch.product?.nome ?? 'Produto não informado';
   const groupName = resolveGroupName(dispatch, groupNames);
+  const groupFingerprint = resolveGroupFingerprint(dispatch);
+  const instanceName = resolveInstanceName(dispatch);
   const price = formatHistoryPrice(dispatch.product?.preco);
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLTableRowElement>) => {
@@ -140,7 +151,19 @@ function HistoryRecord({
           </div>
         </div>
       </td>
-      <td className="align-top">{groupName}</td>
+      <td className="align-top">
+        <div>{groupName}</div>
+        {groupFingerprint ? (
+          <div className="ops-mono text-xs text-[var(--ops-muted)]">
+            {groupFingerprint}
+          </div>
+        ) : null}
+        {instanceName ? (
+          <div className="text-xs text-[var(--ops-muted)]">
+            Instância: {instanceName}
+          </div>
+        ) : null}
+      </td>
       <td className="align-top">{price}</td>
       <td className="align-top">
         <SendStatus status={dispatch.status} />
@@ -160,6 +183,8 @@ function HistoryCard({
 }) {
   const productName = dispatch.product?.nome ?? 'Produto não informado';
   const groupName = resolveGroupName(dispatch, groupNames);
+  const groupFingerprint = resolveGroupFingerprint(dispatch);
+  const instanceName = resolveInstanceName(dispatch);
   const price = formatHistoryPrice(dispatch.product?.preco);
 
   return (
@@ -190,6 +215,16 @@ function HistoryCard({
           <span className="truncate text-sm text-[var(--ops-ink)]">
             {groupName}
           </span>
+          {groupFingerprint ? (
+            <span className="truncate text-xs text-[var(--ops-muted)]">
+              {groupFingerprint}
+            </span>
+          ) : null}
+          {instanceName ? (
+            <span className="truncate text-xs text-[var(--ops-muted)]">
+              Instância: {instanceName}
+            </span>
+          ) : null}
         </span>
         <span className="grid gap-0.5 text-right">
           <span className="ops-detail-label">Preço</span>
@@ -247,10 +282,6 @@ function AdvancedDispatchDetails({ dispatch }: { dispatch: WhatsAppDispatch }) {
           <CopyIdButton value={dispatch.id} />
         </div>
         <div className="grid gap-1">
-          <span className="ops-detail-label">externalMessageId</span>
-          <CopyIdButton value={dispatch.externalMessageId} />
-        </div>
-        <div className="grid gap-1">
           <span className="ops-detail-label">Criado em</span>
           <span className="ops-detail-value">
             {dispatch.createdAt
@@ -277,9 +308,11 @@ function SendHistoryDrawer({
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const productName = dispatch.product?.nome ?? 'Envio comercial';
   const groupName = resolveGroupName(dispatch, groupNames);
+  const groupFingerprint = resolveGroupFingerprint(dispatch);
+  const instanceName = resolveInstanceName(dispatch);
   const price = formatHistoryPrice(dispatch.product?.preco);
   const error = presentSendHistoryError(dispatch.errorMessage, dispatch.status);
-  const isUncertain = dispatch.status === 'PROCESSING';
+  const requiresVerification = dispatch.status === 'AMBIGUOUS';
 
   useEffect(() => {
     restoreFocusRef.current =
@@ -384,18 +417,78 @@ function SendHistoryDrawer({
             <div>
               <HistoryTimestamp dispatch={dispatch} />
             </div>
+            <div>
+              <div className="ops-detail-label">Instância</div>
+              <div className="ops-detail-value">
+                {instanceName ?? 'Não informada'}
+              </div>
+            </div>
+            {groupFingerprint ? (
+              <div>
+                <div className="ops-detail-label">Fingerprint do grupo</div>
+                <div className="ops-detail-value ops-mono">
+                  {groupFingerprint}
+                </div>
+              </div>
+            ) : null}
           </div>
+
+          {dispatch.submittedAt ||
+          dispatch.sentAt ||
+          dispatch.deliveredAt ||
+          dispatch.readAt ? (
+            <div className="ops-detail-grid mt-5">
+              {dispatch.submittedAt ? (
+                <div>
+                  <div className="ops-detail-label">Submetido em</div>
+                  <div className="ops-detail-value">
+                    {formatHistoryDate(
+                      dispatch.submittedAt,
+                      'Data não disponível',
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              {dispatch.sentAt ? (
+                <div>
+                  <div className="ops-detail-label">Confirmado em</div>
+                  <div className="ops-detail-value">
+                    {formatHistoryDate(dispatch.sentAt, 'Data não disponível')}
+                  </div>
+                </div>
+              ) : null}
+              {dispatch.deliveredAt ? (
+                <div>
+                  <div className="ops-detail-label">Entregue em</div>
+                  <div className="ops-detail-value">
+                    {formatHistoryDate(
+                      dispatch.deliveredAt,
+                      'Data não disponível',
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              {dispatch.readAt ? (
+                <div>
+                  <div className="ops-detail-label">Lido em</div>
+                  <div className="ops-detail-value">
+                    {formatHistoryDate(dispatch.readAt, 'Data não disponível')}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {error ? (
             <div className="mt-6">
               <OpsState title="O que aconteceu" message={error} tone="danger" />
             </div>
           ) : null}
-          {isUncertain ? (
+          {requiresVerification ? (
             <div className="mt-6">
               <OpsState
-                title="Resultado pendente"
-                message="Não foi possível confirmar com segurança se este envio chegou ao destino. Nenhuma nova tentativa é oferecida aqui."
+                title="Confirmação pendente de verificação"
+                message="A confirmação do provedor não chegou no prazo. Nenhuma nova tentativa é oferecida aqui."
                 tone="warning"
               />
             </div>

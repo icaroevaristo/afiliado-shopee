@@ -32,6 +32,9 @@ const sendConfig = loadConfig({
   EVOLUTION_API_URL: 'http://localhost:8080',
   EVOLUTION_API_KEY: 'test-key',
   EVOLUTION_INSTANCE_NAME: 'test-instance',
+  WHATSAPP_DELIVERY_WEBHOOK_URL:
+    'http://host.docker.internal:3333/whatsapp/events/messages.update',
+  WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'test-delivery-webhook-token',
   WHATSAPP_GROUP_SEND_ENABLED: 'true',
 });
 
@@ -133,6 +136,31 @@ describe('isolated WhatsApp dispatch worker', () => {
     );
     await runtime.close();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('does not start the dispatch consumer when Evolution readiness fails', async () => {
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => ({
+      assertReady: vi.fn(async () => {
+        throw Object.assign(new Error('webhook unavailable'), {
+          code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+        });
+      }),
+      sendMessage: vi.fn(),
+    }));
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>();
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory,
+        workerFactory,
+        logger: { info: vi.fn(), error: vi.fn() },
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+    });
+
+    expect(providerFactory).toHaveBeenCalledOnce();
+    expect(workerFactory).not.toHaveBeenCalled();
   });
 
   it('bloqueia o startup quando recovery exige intervencao humana', async () => {
@@ -349,7 +377,24 @@ describe('isolated WhatsApp dispatch worker', () => {
             EVOLUTION_ALLOWED_DESTINATIONS: [destination],
             EVOLUTION_MAX_MESSAGES_PER_BOOT: 1,
           },
-          { ...options, httpClient },
+          {
+            ...options,
+            httpClient,
+            deliveryWebhookHttpClient: async () =>
+              new Response(
+                JSON.stringify({
+                  enabled: true,
+                  url: 'http://host.docker.internal:3333/whatsapp/events/messages.update',
+                  events: ['MESSAGES_UPDATE'],
+                  headers: {
+                    authorization: 'Bearer test-delivery-webhook-token',
+                  },
+                  byEvents: false,
+                  base64: false,
+                }),
+                { status: 200 },
+              ),
+          },
         ),
     );
     const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(
