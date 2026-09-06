@@ -611,6 +611,7 @@ describe('manual publication execution ownership integration', () => {
       deliveryHistory: {
         wasProductSentToGroup: vi.fn(async () => false),
         findLastSentAtByGroup: vi.fn(async () => null),
+        countSentCampaignProductsToGroup: vi.fn(async () => 0),
       },
       copy: { generate: vi.fn(() => run.copyPreview ?? '') },
       publisher: new CommercialDispatchOutboxPublisher({

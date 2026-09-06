@@ -22,6 +22,7 @@ import {
 import { sanitizeCommercialAiCopyProductNameForModel } from './commercial-ai-copy-policy';
 import {
   CommercialAiCopyValidator,
+  sanitizeCommercialAiCopyValidationAuditEvidence,
   sanitizeCommercialAiCopyValidationFailureCodes,
 } from './commercial-ai-copy-validator';
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
@@ -33,9 +34,21 @@ import {
   sanitizeCommercialPromotionCopy,
   type AssembledCommercialPromotionCopy,
 } from './commercial-promotion-copy-assembler';
-import { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED } from './commercial-promotion-candidate-terminal';
+import {
+  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+  COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+  isCommercialPromotionTerminalCandidateBlockReason,
+} from './commercial-promotion-candidate-terminal';
+import {
+  buildCommercialPromotionFallbackOutput,
+  COMMERCIAL_COPY_FALLBACK_MODEL,
+  COMMERCIAL_COPY_FALLBACK_PROVIDER,
+  isCommercialPromotionFallbackCopy,
+  validateCommercialPromotionFallbackOutput,
+} from './commercial-promotion-copy-fallback';
 import type {
   CommercialPromotionCopyContext,
+  CommercialCopyGenerationAttemptStatusRecord,
   CommercialPromotionCopyRepository,
   CommercialAiCopyCompletionResult,
   CommercialCopyGenerationAttemptRecord,
@@ -43,6 +56,35 @@ import type {
 } from './repositories';
 
 export const COMMERCIAL_AI_COPY_CONFIRMATION = 'GERAR_COPY_COM_IA';
+export {
+  COMMERCIAL_COPY_FALLBACK_MODEL,
+  COMMERCIAL_COPY_FALLBACK_PROVIDER,
+} from './commercial-promotion-copy-fallback';
+
+const supportedPromotionCopySource = (copy: GeneratedCopyRecord) =>
+  copy.source === 'AI' || isCommercialPromotionFallbackCopy(copy);
+
+const matchesConfiguredAiContract = (
+  copy: GeneratedCopyRecord,
+  config: CommercialAiCopyConfig,
+) =>
+  copy.source === 'AI'
+    ? copy.provider === config.provider && copy.model === config.model
+    : isCommercialPromotionFallbackCopy(copy);
+
+const terminalCandidateBlockReasonForAttempt = (
+  attempt: Pick<CommercialCopyGenerationAttemptRecord, 'status' | 'failureCode'> | null,
+) => {
+  if (
+    !attempt ||
+    !['FAILED', 'AMBIGUOUS'].includes(attempt.status)
+  ) {
+    return null;
+  }
+  return attempt.failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID'
+    ? COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
+    : COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED;
+};
 export { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED } from './commercial-promotion-candidate-terminal';
 export const COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED =
   'COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED';
@@ -90,6 +132,11 @@ const candidateBlockers = (
   const { candidate, campaign, niche, product, snapshot } = context;
   if (candidate.status === 'COPY_READY' || candidate.generatedCopyId) {
     blockers.push('COMMERCIAL_AI_COPY_ALREADY_READY');
+  } else if (
+    candidate.status === 'BLOCKED' &&
+    isCommercialPromotionTerminalCandidateBlockReason(candidate.blockedReason)
+  ) {
+    blockers.push(candidate.blockedReason);
   } else if (candidate.status !== 'QUEUED') {
     blockers.push('COMMERCIAL_AI_COPY_CANDIDATE_NOT_QUEUED');
   }
@@ -151,9 +198,11 @@ export class CommercialPromotionCopyGenerationService {
   preflight() {
     const providerConfigured = this.providerConfigured();
     return {
-      approved: this.options.config.enabled && providerConfigured,
+      approved: true,
       enabled: this.options.config.enabled,
+      fallbackAvailable: true,
       provider: this.options.config.provider,
+      providerConfigured,
       modelConfigured: Boolean(this.options.config.model),
       apiKeyConfigured: this.options.config.apiKeyConfigured,
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
@@ -192,7 +241,9 @@ export class CommercialPromotionCopyGenerationService {
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       inputSanitizationVersion: COMMERCIAL_AI_COPY_INPUT_SANITIZATION_VERSION,
-      modelProductName: this.modelProductName(context),
+      modelProductName: configuration.provider === COMMERCIAL_COPY_FALLBACK_PROVIDER
+        ? this.sourceProductName(context)
+        : this.modelProductName(context),
       provider: configuration.provider,
       model,
       campaignId: context.campaign.id,
@@ -205,6 +256,13 @@ export class CommercialPromotionCopyGenerationService {
     });
   }
 
+  private fallbackFingerprint(context: CommercialPromotionCopyContext) {
+    return this.fingerprint(context, {
+      provider: COMMERCIAL_COPY_FALLBACK_PROVIDER,
+      model: COMMERCIAL_COPY_FALLBACK_MODEL,
+    });
+  }
+
   private assembleCachedCopy(
     copy: GeneratedCopyRecord,
     context: CommercialPromotionCopyContext,
@@ -213,17 +271,19 @@ export class CommercialPromotionCopyGenerationService {
     const output = extractCachedCommercialAiCopyOutput(copy);
     if (!output) return null;
     const facts = this.validationFacts(context);
-    const validation = this.validator.validate(
-      output,
-      facts.productName,
-      [facts.shopName],
-    );
+    const assemblyIdentity = isCommercialPromotionFallbackCopy(copy)
+      ? { productName: output.body, shopName: '' }
+      : { productName: context.product.productName, shopName: context.product.shopName };
+    const validation = isCommercialPromotionFallbackCopy(copy)
+      ? validateCommercialPromotionFallbackOutput(
+          this.validator, output, facts.productName, [facts.shopName],
+        )
+      : this.validator.validate(output, facts.productName, [facts.shopName]);
     if (!validation.valid || !validation.sanitizedOutput) return null;
     try {
       const assembled = this.assembler.assemble({
         output: validation.sanitizedOutput,
-        productName: context.product.productName,
-        shopName: context.product.shopName,
+        ...assemblyIdentity,
         price: context.product.price,
         discountRate: context.product.discountRate,
         promotionSignals: context.candidate.promotionSignals,
@@ -235,8 +295,7 @@ export class CommercialPromotionCopyGenerationService {
         assembled,
         context.product.affiliateLink,
         {
-          productName: context.product.productName,
-          shopName: context.product.shopName,
+          ...assemblyIdentity,
           price: context.product.price,
           discountRate: context.product.discountRate,
           promotionSignals: context.candidate.promotionSignals,
@@ -258,9 +317,8 @@ export class CommercialPromotionCopyGenerationService {
   ): AssembledCommercialPromotionCopy | null {
     if (
       !copy ||
-      copy.source !== 'AI' ||
-      copy.provider !== this.options.config.provider ||
-      copy.model !== this.options.config.model ||
+      !supportedPromotionCopySource(copy) ||
+      !matchesConfiguredAiContract(copy, this.options.config) ||
       copy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
       copy.validationVersion !== COMMERCIAL_AI_COPY_VALIDATION_VERSION ||
       copy.inputFingerprint !== fingerprint ||
@@ -276,22 +334,24 @@ export class CommercialPromotionCopyGenerationService {
     copy: GeneratedCopyRecord,
     context: CommercialPromotionCopyContext,
   ): AssembledCommercialPromotionCopy | null {
-    const model = this.options.config.model ?? copy.model ?? null;
-    const provider = this.options.config.provider ?? copy.provider ?? '';
-    const fingerprint = model
+    const fallback = isCommercialPromotionFallbackCopy(copy);
+    const model = this.options.config.model;
+    const provider = this.options.config.provider;
+    const fingerprint = !fallback && model
       ? this.fingerprint(context, { provider, model })
       : null;
     if (
-      !model ||
+      (!fallback && !model) ||
       copy.id !== context.candidate.generatedCopyId ||
-      copy.source !== 'AI' ||
-      copy.provider !== provider ||
-      copy.model !== model ||
+      !supportedPromotionCopySource(copy) ||
+      !matchesConfiguredAiContract(copy, this.options.config) ||
       copy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
       copy.validationVersion !== COMMERCIAL_AI_COPY_VALIDATION_VERSION ||
-      (fingerprint
-        ? copy.inputFingerprint !== fingerprint
-        : !copy.inputFingerprint) ||
+      (fallback
+        ? !copy.inputFingerprint
+        : fingerprint
+          ? copy.inputFingerprint !== fingerprint
+          : true) ||
       copy.snapshotId !== context.snapshot.id ||
       copy.productId !== context.product.id ||
       copy.createdFromCandidateId !== context.candidate.id
@@ -308,13 +368,11 @@ export class CommercialPromotionCopyGenerationService {
     >,
   ) {
     if (!context.product.affiliateLink) return null;
+    const output = buildCommercialPromotionFallbackOutput(this.validator, facts.productName, [facts.shopName]);
     const copy = this.assembler.assemble({
-      output: {
-        headline: 'Oferta selecionada',
-        body: 'Uma escolha com informações comerciais verificadas.',
-      },
-      productName: facts.productName,
-      shopName: facts.shopName,
+      output,
+      productName: output.body,
+      shopName: '',
       price: context.product.price,
       discountRate: context.product.discountRate,
       promotionSignals: context.candidate.promotionSignals,
@@ -338,19 +396,13 @@ export class CommercialPromotionCopyGenerationService {
     if (attempt.status === 'STARTED') {
       return 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS';
     }
+    const terminalCandidateBlockReason =
+      terminalCandidateBlockReasonForAttempt(attempt);
+    if (terminalCandidateBlockReason) {
+      return terminalCandidateBlockReason;
+    }
     if (attempt.status === 'AMBIGUOUS') {
       return 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS';
-    }
-    if (
-      attempt.failureCode === 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED' &&
-      !attempt.requestMayHaveStarted
-    ) {
-      return null;
-    }
-    if (attempt.failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID') {
-      return scope === 'current'
-        ? COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
-        : null;
     }
     return 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED';
   }
@@ -372,17 +424,71 @@ export class CommercialPromotionCopyGenerationService {
     });
   }
 
+  private async snapshotTerminalAttempt(context: CommercialPromotionCopyContext) {
+    const attempts = await this.options.repository.listAttemptsByCandidateId(context.candidate.id);
+    return attempts.find((attempt) => attempt.snapshotId === context.snapshot.id &&
+      terminalCandidateBlockReasonForAttempt(attempt)) ?? null;
+  }
+
+  private async repairTerminalCandidate(
+    context: CommercialPromotionCopyContext,
+    attempt: CommercialCopyGenerationAttemptStatusRecord,
+  ) {
+    const candidateBlockReason = terminalCandidateBlockReasonForAttempt(attempt);
+    if (
+      !candidateBlockReason ||
+      (attempt.status !== 'FAILED' && attempt.status !== 'AMBIGUOUS')
+    ) {
+      return;
+    }
+    const result = await this.options.repository.markAttemptTerminal({
+      candidateId: context.candidate.id,
+      snapshotId: context.snapshot.id,
+      inputFingerprint: attempt.inputFingerprint,
+      status: attempt.status,
+      failureCode:
+        attempt.failureCode ?? COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+      requestMayHaveStarted: attempt.requestMayHaveStarted,
+      providerHttpStatus: attempt.providerHttpStatus,
+      providerErrorCode: attempt.providerErrorCode,
+      providerErrorType: attempt.providerErrorType,
+      providerErrorParam: attempt.providerErrorParam,
+      inputTokens: attempt.inputTokens,
+      outputTokens: attempt.outputTokens,
+      totalTokens: attempt.totalTokens,
+      validationFailureCodes: attempt.validationFailureCodes,
+      candidateBlockReason,
+      completedAt: attempt.completedAt ?? this.clock(),
+    });
+    if (result.kind === 'CONFLICT') {
+      throw new AppError(
+        'Reparo terminal da copy ficou inconclusivo',
+        'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+      );
+    }
+  }
+
   async preview(candidateId: string) {
     const context = await this.context(candidateId);
+    const snapshotTerminal = await this.snapshotTerminalAttempt(context);
     const validationFacts = this.validationFacts(context);
-    const fingerprint = this.fingerprint(context);
-    const cache = fingerprint
+    let fingerprint = this.fallbackFingerprint(context);
+    if (this.options.config.enabled && this.providerConfigured()) {
+      try { fingerprint = this.fingerprint(context) ?? fingerprint; } catch {
+        // A title unsuitable for creative generation still permits factual preview.
+      }
+    }
+    const linked = context.candidate.generatedCopyId
+      ? await this.options.repository.findCopyForCandidate(candidateId) : null;
+    const cache = linked?.copy ?? (fingerprint
       ? await this.options.repository.findCopyByInputFingerprint(fingerprint)
-      : null;
+      : null);
     const cacheAvailable = Boolean(
-      fingerprint && this.validCache(cache, context, fingerprint),
+      linked ? this.validLinkedCopy(linked.copy, context)
+        : fingerprint && this.validCache(cache, context, fingerprint),
     );
     const blockers = [...candidateBlockers(context, this.clock())];
+    if (snapshotTerminal) blockers.push(terminalCandidateBlockReasonForAttempt(snapshotTerminal)!);
     if (!cacheAvailable && fingerprint) {
       const [attempt, historicalAttempt] = await Promise.all([
         this.options.repository.findAttemptByInputFingerprint(fingerprint),
@@ -393,7 +499,9 @@ export class CommercialPromotionCopyGenerationService {
         historicalAttempt,
         'historical',
       );
-      if (attemptBlocker) blockers.push(attemptBlocker);
+      if (attemptBlocker) {
+        blockers.push(attemptBlocker);
+      }
       if (historicalAttemptBlocker) blockers.push(historicalAttemptBlocker);
     }
     return {
@@ -407,7 +515,7 @@ export class CommercialPromotionCopyGenerationService {
       promotionSignals: context.candidate.promotionSignals,
       commercialScore: context.candidate.commercialScore,
       snapshotRevision: context.snapshot.revision,
-      blockers,
+      blockers: [...new Set(blockers)],
       sanitizedPreview: validAffiliateLink(context.product.affiliateLink)
         ? this.assemblePreview(context, validationFacts)
         : null,
@@ -516,8 +624,8 @@ export class CommercialPromotionCopyGenerationService {
       inputFingerprint: fingerprint,
       affiliateLinkHash: sha256(context.product.affiliateLink as string),
       validatedAt: this.clock(),
-      provider: this.options.config.provider,
-      model: this.options.config.model as string,
+      provider: copy.provider as string,
+      model: copy.model as string,
       promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
       validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
       maximumLength: this.options.config.maximumCopyLength,
@@ -552,6 +660,9 @@ export class CommercialPromotionCopyGenerationService {
     }
     const blocker = this.attemptBlocker(attempt, 'current');
     if (blocker) {
+      if (terminalCandidateBlockReasonForAttempt(attempt)) {
+        await this.repairTerminalCandidate(context, attempt);
+      }
       fail(
         blocker === COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
           ? 'Output anterior da IA foi rejeitado'
@@ -581,11 +692,15 @@ export class CommercialPromotionCopyGenerationService {
     );
   }
 
-  private classifyHistoricalAttempt(
+  private async classifyHistoricalAttempt(
+    context: CommercialPromotionCopyContext,
     attempt: CommercialCopyGenerationAttemptRecord,
-  ): void {
+  ): Promise<void> {
     const blocker = this.attemptBlocker(attempt, 'historical');
     if (blocker) {
+      if (terminalCandidateBlockReasonForAttempt(attempt)) {
+        await this.repairTerminalCandidate(context, attempt);
+      }
       fail(
         blocker === 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'
           ? 'Copy historica nao pode ser reutilizada com fingerprint diferente'
@@ -600,6 +715,7 @@ export class CommercialPromotionCopyGenerationService {
   }
 
   private async terminalFailure(
+    context: CommercialPromotionCopyContext,
     fingerprint: string,
     status: 'FAILED' | 'AMBIGUOUS',
     failureCode: string,
@@ -612,7 +728,9 @@ export class CommercialPromotionCopyGenerationService {
     },
     validationFailureCodes: string[] = [],
   ) {
-    await this.options.repository.markAttemptTerminal({
+    const result = await this.options.repository.markAttemptTerminal({
+      candidateId: context.candidate.id,
+      snapshotId: context.snapshot.id,
       inputFingerprint: fingerprint,
       status,
       failureCode,
@@ -625,8 +743,135 @@ export class CommercialPromotionCopyGenerationService {
       outputTokens: usage?.outputTokens ?? null,
       totalTokens: usage?.totalTokens ?? null,
       validationFailureCodes,
+      candidateBlockReason:
+        failureCode === 'COMMERCIAL_AI_COPY_OUTPUT_INVALID'
+          ? COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED
+          : COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
       completedAt: this.clock(),
     });
+    if (result.kind === 'CONFLICT') {
+      throw new AppError(
+        'Estado mudou durante a terminalizacao da copy',
+        'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+      );
+    }
+  }
+
+  private async deterministicFallback(
+    context: CommercialPromotionCopyContext,
+    fingerprint: string,
+    status: 'FAILED' | 'AMBIGUOUS',
+    failureCode: string,
+    requestMayHaveStarted: boolean,
+    usage: {
+      inputTokens: number | null;
+      outputTokens: number | null;
+      totalTokens: number | null;
+    },
+    providerMetadata: CommercialAiCopyProviderErrorMetadata = {},
+    validationFailureCodes: string[] = [],
+  ) {
+    const fallbackFacts = this.validationFacts(context);
+    const fallbackOutput = buildCommercialPromotionFallbackOutput(
+      this.validator, fallbackFacts.productName, [fallbackFacts.shopName],
+    );
+    const fallbackValidation = validateCommercialPromotionFallbackOutput(
+      this.validator,
+      fallbackOutput,
+      fallbackFacts.productName,
+      [fallbackFacts.shopName],
+    );
+    if (!fallbackValidation.valid || !fallbackValidation.sanitizedOutput) {
+      await this.terminalFailure(
+        context,
+        fingerprint,
+        status,
+        failureCode,
+        requestMayHaveStarted,
+        providerMetadata,
+        usage,
+        validationFailureCodes,
+      );
+      throw new AppError(
+        'Fallback deterministico invalido',
+        'COMMERCIAL_AI_COPY_FALLBACK_INVALID',
+      );
+    }
+    let assembled: AssembledCommercialPromotionCopy;
+    try {
+      assembled = this.assembler.assemble({
+        output: fallbackValidation.sanitizedOutput,
+        productName: fallbackOutput.body,
+        shopName: '',
+        price: context.product.price,
+        discountRate: context.product.discountRate,
+        promotionSignals: context.candidate.promotionSignals,
+        priceDropPercent: context.candidate.priceDropPercent,
+        affiliateLink: context.product.affiliateLink as string,
+        maximumLength: this.options.config.maximumCopyLength,
+      });
+    } catch (error) {
+      await this.terminalFailure(
+        context,
+        fingerprint,
+        status,
+        failureCode,
+        requestMayHaveStarted,
+        providerMetadata,
+        usage,
+        validationFailureCodes,
+      );
+      throw error;
+    }
+    let completed: CommercialAiCopyCompletionResult;
+    try {
+      completed = await this.options.repository.completeFallback({
+        expected: context,
+        inputFingerprint: fingerprint,
+        provider: COMMERCIAL_COPY_FALLBACK_PROVIDER,
+        model: COMMERCIAL_COPY_FALLBACK_MODEL,
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        affiliateLinkHash: sha256(context.product.affiliateLink as string),
+        copy: {
+          productId: context.product.id,
+          ...assembled,
+          source: 'LEGACY_TEMPLATE',
+          provider: COMMERCIAL_COPY_FALLBACK_PROVIDER,
+          model: COMMERCIAL_COPY_FALLBACK_MODEL,
+          promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+          validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+          inputFingerprint: fingerprint,
+          snapshotId: context.snapshot.id,
+          createdFromCandidateId: context.candidate.id,
+          usageInputTokens: usage.inputTokens,
+          usageOutputTokens: usage.outputTokens,
+          usageTotalTokens: usage.totalTokens,
+        },
+        usage,
+        status,
+        failureCode,
+        requestMayHaveStarted,
+        providerHttpStatus: providerMetadata.httpStatus,
+        providerErrorCode: providerMetadata.providerErrorCode,
+        providerErrorType: providerMetadata.providerErrorType,
+        providerErrorParam: providerMetadata.providerErrorParam,
+        validationFailureCodes,
+        completedAt: this.clock(),
+      });
+    } catch {
+      throw new AppError(
+        'Persistencia do fallback ficou ambigua',
+        'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+      );
+    }
+    if (!completed.completed) {
+      throw new AppError(
+        'Estado mudou durante o fallback',
+        completed.failureCode,
+      );
+    }
+    return this.result(context, completed.copy, false);
   }
 
   async generate(candidateId: string, confirmation: string) {
@@ -637,6 +882,11 @@ export class CommercialPromotionCopyGenerationService {
       );
     }
     const context = await this.context(candidateId);
+    const snapshotTerminal = await this.snapshotTerminalAttempt(context);
+    if (snapshotTerminal) {
+      await this.repairTerminalCandidate(context, snapshotTerminal);
+      fail('Snapshot possui falha terminal de copy', terminalCandidateBlockReasonForAttempt(snapshotTerminal)!);
+    }
     if (
       context.candidate.status === 'COPY_READY' &&
       context.candidate.generatedCopyId
@@ -678,14 +928,26 @@ export class CommercialPromotionCopyGenerationService {
       );
     }
     assertNoBlockers(candidateBlockers(context, this.clock()));
-    const providerFacts = this.providerFacts(context);
     const validationFacts = this.validationFacts(context);
-    const fingerprint = this.fingerprint(context);
+    let providerReady = this.options.config.enabled &&
+      this.providerConfigured() && Boolean(this.options.provider);
+    if (providerReady) {
+      try {
+        this.modelProductName(context);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'COMMERCIAL_AI_COPY_MODEL_PRODUCT_NAME_INVALID') throw error;
+        // A numeric catalog identity may be valid for deterministic assembly
+        // even when it cannot supply the lexical identity required by OpenAI.
+        providerReady = false;
+      }
+    }
+    const fingerprint = providerReady
+      ? this.fingerprint(context)
+      : this.fallbackFingerprint(context);
     if (!fingerprint) {
-      this.assertProvider();
       throw new AppError(
-        'Configuracao de copy por IA incompleta',
-        'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+        'Fatos comerciais incompletos para copy segura',
+        'COMMERCIAL_AI_COPY_FACTS_INVALID',
       );
     }
     const cached =
@@ -699,13 +961,40 @@ export class CommercialPromotionCopyGenerationService {
         cachedAssembly,
       );
     }
-    if (!cached) {
+    if (!cached && providerReady) {
       const historicalAttempt = await this.findHistoricalAttempt(
         context,
         fingerprint,
       );
-      if (historicalAttempt) this.classifyHistoricalAttempt(historicalAttempt);
+      if (historicalAttempt) {
+        await this.classifyHistoricalAttempt(context, historicalAttempt);
+      }
     }
+    if (!providerReady) {
+      const claimed = await this.options.repository.claim({
+        candidateId: context.candidate.id,
+        snapshotId: context.snapshot.id,
+        inputFingerprint: fingerprint,
+        provider: COMMERCIAL_COPY_FALLBACK_PROVIDER,
+        model: COMMERCIAL_COPY_FALLBACK_MODEL,
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        startedAt: this.clock(),
+        expected: context,
+        affiliateLinkHash: sha256(context.product.affiliateLink as string),
+        validatedAt: this.clock(),
+      });
+      if (!claimed) return this.classifyExistingClaim(context, fingerprint);
+      return this.deterministicFallback(
+        context,
+        fingerprint,
+        'FAILED',
+        'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+        false,
+        { inputTokens: null, outputTokens: null, totalTokens: null },
+      );
+    }
+    const providerFacts = this.providerFacts(context);
     const provider = this.assertProvider();
     const claimed = await this.options.repository.claim({
       candidateId: context.candidate.id,
@@ -753,26 +1042,23 @@ export class CommercialPromotionCopyGenerationService {
         },
         'Commercial AI copy provider failed',
       );
-      await this.terminalFailure(
+      return this.deterministicFallback(
+        context,
         fingerprint,
         ambiguous ? 'AMBIGUOUS' : 'FAILED',
         providerError.publicCode,
         providerError.requestMayHaveStarted,
+        {
+          inputTokens: providerError.inputTokens,
+          outputTokens: providerError.outputTokens,
+          totalTokens: providerError.totalTokens,
+        },
         {
           httpStatus: providerError.httpStatus,
           providerErrorCode: providerError.providerErrorCode,
           providerErrorType: providerError.providerErrorType,
           providerErrorParam: providerError.providerErrorParam,
         },
-        {
-          inputTokens: providerError.inputTokens,
-          outputTokens: providerError.outputTokens,
-          totalTokens: providerError.totalTokens,
-        },
-      );
-      throw new AppError(
-        ambiguous ? 'Resultado do provider e ambiguo' : 'Provider de IA falhou',
-        providerError.publicCode,
       );
     }
 
@@ -786,6 +1072,13 @@ export class CommercialPromotionCopyGenerationService {
         sanitizeCommercialAiCopyValidationFailureCodes(
           validation.publicFailureCodes,
         );
+      const auditFailureCodes =
+        sanitizeCommercialAiCopyValidationFailureCodes(
+          validation.auditFailureCodes,
+        );
+      const auditEvidence = sanitizeCommercialAiCopyValidationAuditEvidence(
+        validation.auditEvidence,
+      );
       this.options.logger?.error(
         {
           event: 'commercial-ai-copy.validation-failed',
@@ -794,24 +1087,23 @@ export class CommercialPromotionCopyGenerationService {
           model: normalizeCommercialAiCopyModel(providerResult.model),
           failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
           validationFailureCodes,
+          auditFailureCodes,
+          auditEvidence,
           inputTokens: providerResult.usage.inputTokens,
           outputTokens: providerResult.usage.outputTokens,
           totalTokens: providerResult.usage.totalTokens,
         },
         'Commercial AI copy validation failed',
       );
-      await this.terminalFailure(
+      return this.deterministicFallback(
+        context,
         fingerprint,
         'FAILED',
         'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
         true,
-        {},
         providerResult.usage,
-        validationFailureCodes,
-      );
-      throw new AppError(
-        'Output da IA rejeitado',
-        'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+        {},
+        [...validationFailureCodes, ...auditFailureCodes],
       );
     }
     const validatedOutput = validation.sanitizedOutput;
@@ -834,7 +1126,11 @@ export class CommercialPromotionCopyGenerationService {
         error instanceof AppError
           ? error.code
           : 'COMMERCIAL_AI_COPY_OUTPUT_INVALID';
+      if (code === 'COMMERCIAL_AI_COPY_URL_INVALID' || code === 'COMMERCIAL_AI_COPY_BODY_TOO_LONG') {
+        return this.deterministicFallback(context, fingerprint, 'FAILED', code, true, providerResult.usage);
+      }
       await this.terminalFailure(
+        context,
         fingerprint,
         'FAILED',
         code,
@@ -892,6 +1188,7 @@ export class CommercialPromotionCopyGenerationService {
         return this.result(currentContext, proved.copy, false);
       }
       await this.terminalFailure(
+        context,
         fingerprint,
         'AMBIGUOUS',
         'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
@@ -936,7 +1233,7 @@ export class CommercialPromotionCopyGenerationService {
   async findCopy(candidateId: string) {
     const found =
       await this.options.repository.findCopyForCandidate(candidateId);
-    if (!found || found.copy.source !== 'AI') {
+    if (!found || !supportedPromotionCopySource(found.copy)) {
       throw new AppError(
         'Copy promocional nao encontrada',
         'COMMERCIAL_AI_COPY_NOT_FOUND',

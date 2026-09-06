@@ -361,6 +361,8 @@ describeDatabase('validated AI promotion copy database fixture', () => {
     });
 
     const result = await repository.markAttemptTerminal({
+      candidateId: candidateId('failed'),
+      snapshotId: snapshotId('failed'),
       inputFingerprint: fingerprint,
       status: 'FAILED',
       failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
@@ -368,7 +370,10 @@ describeDatabase('validated AI promotion copy database fixture', () => {
       validationFailureCodes: ['UNKNOWN', 'AI_HEADLINE_LENGTH', 'AI_HEADLINE_LENGTH', 'AI_BODY_LENGTH', null as unknown as string],
       completedAt: NOW,
     });
-    expect(result).toBe(true);
+    expect(result).toEqual({
+      kind: 'TERMINALIZED',
+      candidateBlocked: false,
+    });
 
     const attempts = await prisma.commercialCopyGenerationAttempt.findMany({
       where: { candidateId: candidateId('failed') },
@@ -382,6 +387,8 @@ describeDatabase('validated AI promotion copy database fixture', () => {
 
     // Attempt já terminal não é alterado
     const result2 = await repository.markAttemptTerminal({
+      candidateId: candidateId('failed'),
+      snapshotId: snapshotId('failed'),
       inputFingerprint: fingerprint,
       status: 'AMBIGUOUS',
       failureCode: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
@@ -389,7 +396,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
       validationFailureCodes: ['AI_CTA_LENGTH'],
       completedAt: NOW,
     });
-    expect(result2).toBe(false);
+    expect(result2).toEqual({ kind: 'CONFLICT' });
 
     const attempts2 = await prisma.commercialCopyGenerationAttempt.findMany({
       where: { candidateId: candidateId('failed') },

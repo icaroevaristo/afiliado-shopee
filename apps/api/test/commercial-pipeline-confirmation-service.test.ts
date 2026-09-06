@@ -281,6 +281,7 @@ const build = ({
     deliveryHistory: {
       wasProductSentToGroup: async () => alreadySent,
       findLastSentAtByGroup: async () => null,
+      countSentCampaignProductsToGroup: async () => (alreadySent ? 1 : 0),
     },
     copy: { generate },
     publisher,

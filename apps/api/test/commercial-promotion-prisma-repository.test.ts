@@ -1,7 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Prisma test double mirrors the generated client's dynamic delegate surface. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { PrismaCommercialPromotionRepository } from '../src/prisma-repositories';
+import {
+  PrismaCommercialDeliveryHistoryRepository,
+  PrismaCommercialPromotionRepository,
+} from '../src/prisma-repositories';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
+import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
 import type {
   CommercialPromotionCandidateRecord,
   CommercialPromotionMaterializationInput,
@@ -10,12 +15,69 @@ import type {
 
 const NOW = new Date('2026-07-29T15:00:00.000Z');
 
+describe('materialização manual e histórico terminal', () => {
+  it.each([
+    ['BLOCKED', 'FAILED', false], ['QUEUED', 'FAILED', false],
+    ['COPY_READY', 'AMBIGUOUS', false], ['BLOCKED', 'FAILED', true],
+    ['COPY_READY', 'AMBIGUOUS', true],
+  ] as const)('%s/%s com novo snapshot=%s', async (status, attemptStatus, nextSnapshot) => {
+    const current = candidate('campaign-1', 'a', {
+      status, generatedCopyId: status === 'COPY_READY' ? 'copy-history' : null,
+      blockedReason: status === 'BLOCKED' ? 'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED' : null,
+    });
+    const history = [{ id: 'history', candidateId: current.id, snapshotId: current.snapshotId,
+      status: attemptStatus, inputFingerprint: 'old-provider-version' }];
+    const before = structuredClone(history);
+    const selectedSnapshot = { ...snapshot('a'), ...(nextSnapshot ? {
+      id: 'snapshot-a-v2', revision: 2, fingerprint: 'fingerprint-a-v2',
+    } : {}) };
+    const update = vi.fn(async ({ data }: any) => ({ ...current, ...data }));
+    const transaction = {
+      commercialGroupCampaign: { findUnique: vi.fn(async () => campaign('campaign-1', 'niche-1')) },
+      productLead: { findUnique: vi.fn(async () => product('a', {
+        commercialSnapshotRevision: selectedSnapshot.revision,
+        commercialSnapshotFingerprint: selectedSnapshot.fingerprint,
+      })) },
+      commercialOfferSnapshot: { findUnique: vi.fn(async () => selectedSnapshot) },
+      commercialPromotionCandidate: { findUnique: vi.fn(async () => current), update, create: vi.fn() },
+      commercialCopyGenerationAttempt: { findFirst: vi.fn(async ({ where }: any) => history.find(
+        (attempt) => attempt.candidateId === where.candidateId && attempt.snapshotId === where.snapshotId,
+      ) ?? null) },
+    };
+    const transact = vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction));
+    const repository = new PrismaCommercialPromotionRepository({ $transaction: transact } as never);
+    const result = repository.ensureManualCandidate({
+      campaignId: current.campaignId, productId: current.productId,
+      snapshotId: selectedSnapshot.id, snapshotRevision: selectedSnapshot.revision,
+      snapshotFingerprint: selectedSnapshot.fingerprint,
+      commercialScore: 70, scorePolicyVersion: 'official-v2', minimumScoreUsed: 60,
+      scoreBreakdown: { ...current.scoreBreakdown, policyVersion: 'official-v2' }, promotionSignals: ['CURRENT_DISCOUNT'],
+      priceDropPercent: null, expiresAt: null, now: NOW,
+    });
+    if (nextSnapshot) {
+      await expect(result).resolves.toMatchObject({ status: 'QUEUED', snapshotId: 'snapshot-a-v2',
+        generatedCopyId: null, blockedReason: null });
+      expect(update).toHaveBeenCalledOnce();
+    } else {
+      await expect(result).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED' });
+      expect(update).not.toHaveBeenCalled();
+    }
+    expect(transaction.commercialPromotionCandidate.create).not.toHaveBeenCalled();
+    expect(history).toEqual(before);
+    expect(transact).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'Serializable', maxWait: 1000, timeout: 10000,
+    });
+  });
+});
+
 type State = {
   campaigns: any[];
   groups: any[];
   products: any[];
   snapshots: any[];
   candidates: any[];
+  attempts: any[];
+  copies: Record<string, unknown>[];
   dispatches: any[];
 };
 
@@ -133,6 +195,8 @@ const initialState = (): State => ({
   products: [],
   snapshots: [],
   candidates: [],
+  attempts: [],
+  copies: [],
   dispatches: [],
 });
 
@@ -200,6 +264,14 @@ class PromotionPrismaFake {
             ]),
           )
         : structuredClone(found);
+    }
+    if (include.copyGenerationAttempts) {
+      result.copyGenerationAttempts = this.state.attempts
+        .filter(({ candidateId }) => candidateId === record.id)
+        .map((attempt) => structuredClone(attempt));
+    }
+    if (include.generatedCopy) {
+      result.generatedCopy = structuredClone(this.state.copies.find(({ id }) => id === record.generatedCopyId) ?? null);
     }
     return result;
   }
@@ -835,6 +907,325 @@ describe('PrismaCommercialPromotionRepository', () => {
     expect(JSON.stringify(result.items)).not.toMatch(
       /affiliate|productLink|providerProductId|shopId|fingerprint|scoreBreakdown/i,
     );
+  });
+
+  it('lista capacidade sem terminal e expõe contagens nominais separadas', async () => {
+    const state = initialState();
+    addProducts(state, 'terminal', 'ready', 'queued', 'sent');
+    state.candidates.push(
+      candidate('campaign-1', 'terminal', {
+        status: 'BLOCKED',
+        blockedReason: 'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED',
+      }),
+      candidate('campaign-1', 'ready', { status: 'COPY_READY' }),
+      candidate('campaign-1', 'queued', { status: 'QUEUED' }),
+      candidate('campaign-1', 'sent', { status: 'DISPATCHED' }),
+    );
+    const repository = new PrismaCommercialPromotionRepository(
+      new PromotionPrismaFake(state).asClient(),
+    );
+
+    const result = await repository.listQueue({
+      campaignId: 'campaign-1',
+      page: 1,
+      limit: 200,
+      capacityOnly: true,
+    });
+
+    expect(result.items.map(({ productId }) => productId).sort()).toEqual([
+      'queued',
+      'ready',
+    ]);
+    expect(result.total).toBe(2);
+    expect(result.health).toEqual({
+      nominalCount: 2,
+      usableCount: 0,
+      copyReadyCount: 0,
+      nominalCopyReadyCount: 1,
+      terminalCount: 1,
+    });
+  });
+
+  it('conta como utilizável somente candidate publicável com snapshot, imagem e proveniência atuais', async () => {
+    const state = initialState();
+    addProducts(
+      state,
+      'valid',
+      'expired',
+      'unavailable',
+      'no-image',
+      'stale',
+      'low-score',
+      'terminal-attempt',
+      'preparing', 'queued-copy', 'ready-valid', 'ready-wrong-product',
+      'ready-wrong-snapshot', 'ready-wrong-candidate', 'ready-wrong-fingerprint',
+      'ready-legacy', 'ready-wrong-version', 'ready-missing-copy', 'ready-missing-attempt',
+      'ready-invalid-content', 'ready-stale-price',
+    );
+    for (const entry of state.products) {
+      entry.productLink = `https://shopee.com.br/product/${entry.id}`;
+      entry.affiliateLink = `https://s.shopee.com.br/${entry.id}`;
+      entry.urlImagem = `https://images.example.invalid/${entry.id}.jpg`;
+      const fingerprint = fingerprintCommercialOffer({
+        source: 'OFFICIAL',
+        providerProductId: entry.providerProductId,
+        productLink: entry.productLink,
+        affiliateLink: entry.affiliateLink,
+        price: entry.preco,
+        priceMin: entry.precoMin,
+        priceMax: entry.precoMax,
+        discountRate: entry.desconto,
+        commissionRate: entry.comissao,
+        offerStartsAt: entry.offerStartsAt,
+        offerEndsAt: entry.offerEndsAt,
+        unavailableAt: entry.unavailableAt,
+      });
+      entry.commercialSnapshotFingerprint = fingerprint;
+      state.snapshots.find(({ productId }) => productId === entry.id).fingerprint =
+        fingerprint;
+    }
+    state.products.find(({ id }) => id === 'unavailable').unavailableAt = NOW;
+    state.products.find(({ id }) => id === 'no-image').urlImagem = '';
+    state.products.find(({ id }) => id === 'stale').commercialSnapshotFingerprint =
+      'different-fingerprint';
+    state.candidates.push(
+      candidate('campaign-1', 'valid'),
+      candidate('campaign-1', 'expired', {
+        expiresAt: new Date(NOW.getTime() - 1),
+      }),
+      candidate('campaign-1', 'unavailable'),
+      candidate('campaign-1', 'no-image'),
+      candidate('campaign-1', 'stale'),
+      candidate('campaign-1', 'low-score', {
+        commercialScore: 59,
+        minimumScoreUsed: 60,
+      }),
+      candidate('campaign-1', 'terminal-attempt'),
+    );
+    state.attempts.push({
+      candidateId: 'candidate-campaign-1-terminal-attempt',
+      snapshotId: 'snapshot-terminal-attempt',
+      status: 'FAILED',
+      generatedCopyId: null,
+    });
+    state.candidates.push(candidate('campaign-1', 'preparing'),
+      candidate('campaign-1', 'queued-copy', { generatedCopyId: 'orphan-copy' }));
+    state.attempts.push({ candidateId: 'candidate-campaign-1-preparing', snapshotId: 'snapshot-preparing', status: 'STARTED' });
+    for (const id of ['ready-valid', 'ready-wrong-product', 'ready-wrong-snapshot',
+      'ready-wrong-candidate', 'ready-wrong-fingerprint', 'ready-legacy', 'ready-wrong-version',
+      'ready-missing-copy', 'ready-missing-attempt', 'ready-invalid-content', 'ready-stale-price']) {
+      state.candidates.push(candidate('campaign-1', id, { status: 'COPY_READY', generatedCopyId: `copy-${id}` }));
+      if (id !== 'ready-missing-copy') state.copies.push({
+        id: `copy-${id}`, productId: id === 'ready-wrong-product' ? 'other' : id,
+        snapshotId: id === 'ready-wrong-snapshot' ? 'other' : `snapshot-${id}`,
+        createdFromCandidateId: id === 'ready-wrong-candidate' ? 'other' : `candidate-campaign-1-${id}`,
+        inputFingerprint: `input-${id}`, source: 'LEGACY_TEMPLATE',
+        titulo: 'OFERTA SELECIONADA', mensagem: id === 'ready-invalid-content'
+          ? 'Frete grátis garantido' : `Produto ${id}\n🔥 POR: R$ ${id === 'ready-stale-price' ? '70' : '80'},00\n💸 20% OFF`,
+        cta: `🛒 Compre aqui: https://s.shopee.com.br/${id}`, hashtags: '',
+        provider: id === 'ready-legacy' ? 'arbitrary-template' : 'deterministic-safe-fallback', model: 'commercial-safe-fallback-v1',
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: id === 'ready-wrong-version' ? 'old' : COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+      });
+      if (id !== 'ready-missing-attempt') state.attempts.push({
+        candidateId: `candidate-campaign-1-${id}`, snapshotId: `snapshot-${id}`,
+        generatedCopyId: `copy-${id}`, status: 'SUCCEEDED',
+        inputFingerprint: id === 'ready-wrong-fingerprint' ? 'other' : `input-${id}`,
+      });
+    }
+    const repository = new PrismaCommercialPromotionRepository(
+      new PromotionPrismaFake(state).asClient(),
+    );
+
+    const result = await repository.listQueue({
+      campaignId: 'campaign-1',
+      page: 1,
+      limit: 200,
+      capacityOnly: true,
+    });
+
+    expect(result.health).toMatchObject({ nominalCount: 20, usableCount: 2, terminalCount: 1, copyReadyCount: 1 });
+  });
+
+  it('lê capacidade e delivery no mesmo snapshot RepeatableRead durante preparação concorrente', async () => {
+    const state = initialState();
+    addProducts(state, 'a');
+    const entry = state.products[0];
+    entry.productLink = 'https://shopee.com.br/product/a';
+    entry.affiliateLink = 'https://s.shopee.com.br/a';
+    const fingerprint = fingerprintCommercialOffer({
+      source: 'OFFICIAL', providerProductId: entry.providerProductId,
+      productLink: entry.productLink, affiliateLink: entry.affiliateLink,
+      price: entry.preco, priceMin: entry.precoMin, priceMax: entry.precoMax,
+      discountRate: entry.desconto, commissionRate: entry.comissao,
+      offerStartsAt: null, offerEndsAt: null, unavailableAt: null,
+    });
+    entry.commercialSnapshotFingerprint = fingerprint;
+    state.snapshots[0].fingerprint = fingerprint;
+    state.candidates.push(candidate('campaign-1', 'a'));
+    const snapshotClient = new PromotionPrismaFake(state).asClient();
+    const readCapacity = snapshotClient.commercialPromotionCandidate.findMany;
+    snapshotClient.commercialPromotionCandidate.findMany = vi.fn(async (args) => {
+      const records = await readCapacity(args);
+      // Concurrent STARTED claim after the snapshot has been acquired.
+      state.attempts.push({ candidateId: 'candidate-campaign-1-a', snapshotId: 'snapshot-a', status: 'STARTED' });
+      state.candidates.push(candidate('campaign-1', 'later'));
+      return records;
+    });
+    snapshotClient.whatsAppDispatch.findMany = vi.fn(async () => [{ productId: 'a' }]);
+    snapshotClient.commercialPipelineRun = { findMany: vi.fn(async () => [{ productId: 'a' }]) };
+    const outsideRead = vi.fn(() => { throw new Error('read outside snapshot'); });
+    const transact = vi.fn(async (callback: (tx: typeof snapshotClient) => Promise<unknown>) => callback(snapshotClient));
+    const repository = new PrismaCommercialPromotionRepository({
+      commercialPromotionCandidate: { findMany: outsideRead, count: outsideRead },
+      whatsAppDispatch: { findMany: outsideRead }, commercialPipelineRun: { findMany: outsideRead },
+      $transaction: transact,
+    } as never);
+    const result = await repository.listQueue({ campaignId: 'campaign-1', groupId: 'group-1', capacityOnly: true, page: 1, limit: 200 });
+    expect(result.health).toEqual({ nominalCount: 1, usableCount: 0, copyReadyCount: 0, nominalCopyReadyCount: 0, terminalCount: 0,
+      alreadySentCount: 1, usableAlreadySentCount: 1 });
+    expect(result.total).toBe(1);
+    expect(state.attempts.length).toBeGreaterThan(0);
+    expect(outsideRead).not.toHaveBeenCalled();
+    expect(transact).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'RepeatableRead' });
+    expect(snapshotClient.commercialPromotionCandidate.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: { product: true, snapshot: true, generatedCopy: true, copyGenerationAttempts: true },
+    }));
+  });
+
+  it('conta produtos já enviados no grupo pela união de dispatch e run confirmado sem duplicar overlap', async () => {
+    const candidateFindMany = vi.fn().mockResolvedValue([
+      { productId: 'product-a' },
+      { productId: 'product-b' },
+      { productId: 'product-c' },
+    ]);
+    const dispatchFindMany = vi.fn().mockResolvedValue([
+      { productId: 'product-a' },
+      { productId: 'product-b' },
+    ]);
+    const runFindMany = vi.fn().mockResolvedValue([
+      { productId: 'product-b' },
+      { productId: 'product-c' },
+    ]);
+    const repository = new PrismaCommercialDeliveryHistoryRepository({
+      commercialPromotionCandidate: { findMany: candidateFindMany },
+      whatsAppDispatch: { findMany: dispatchFindMany },
+      commercialPipelineRun: { findMany: runFindMany },
+    } as never);
+
+    await expect(
+      repository.countSentCampaignProductsToGroup({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+      }),
+    ).resolves.toBe(3);
+
+    expect(candidateFindMany).toHaveBeenCalledWith({
+      where: {
+        campaignId: 'campaign-1',
+        status: { in: ['QUEUED', 'COPY_READY'] },
+      },
+      select: { productId: true },
+      distinct: ['productId'],
+    });
+    expect(dispatchFindMany).toHaveBeenCalledWith({
+      where: {
+        productId: { in: ['product-a', 'product-b', 'product-c'] },
+        destinationId: 'group-1',
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
+      },
+      select: { productId: true },
+      distinct: ['productId'],
+    });
+    expect(runFindMany).toHaveBeenCalledWith({
+      where: {
+        productId: { in: ['product-a', 'product-b', 'product-c'] },
+        groupDestinationId: 'group-1',
+        mode: 'CONFIRMED',
+        status: 'COMPLETED',
+      },
+      select: { productId: true },
+      distinct: ['productId'],
+    });
+  });
+
+  it('exclui do sent utilizável o candidato materialmente terminal sem apagar o sent nominal', async () => {
+    const capacityRecord = (
+      id: string,
+      copyGenerationAttempts: any[] = [],
+    ) => {
+      const baseProduct = product(id, {
+        productLink: `https://shopee.com.br/product/${id}`,
+        affiliateLink: `https://s.shopee.com.br/${id}`,
+        urlImagem: `https://images.example.invalid/${id}.jpg`,
+      });
+      const fingerprint = fingerprintCommercialOffer({
+        source: 'OFFICIAL',
+        providerProductId: baseProduct.providerProductId,
+        productLink: baseProduct.productLink,
+        affiliateLink: baseProduct.affiliateLink,
+        price: baseProduct.preco,
+        priceMin: baseProduct.precoMin,
+        priceMax: baseProduct.precoMax,
+        discountRate: baseProduct.desconto,
+        commissionRate: baseProduct.comissao,
+        offerStartsAt: baseProduct.offerStartsAt,
+        offerEndsAt: baseProduct.offerEndsAt,
+        unavailableAt: baseProduct.unavailableAt,
+      });
+      return {
+        ...candidate('campaign-1', id),
+        product: { ...baseProduct, commercialSnapshotFingerprint: fingerprint },
+        snapshot: { ...snapshot(id), fingerprint },
+        copyGenerationAttempts,
+      };
+    };
+    const usable = capacityRecord('usable');
+    const terminal = capacityRecord('terminal', [
+      {
+        snapshotId: 'snapshot-terminal',
+        status: 'FAILED',
+        generatedCopyId: null,
+      },
+    ]);
+    const candidateFindMany = vi.fn(async ({ include }: any) =>
+      include
+        ? [usable, terminal]
+        : [{ productId: 'usable' }, { productId: 'terminal' }],
+    );
+    const dispatchFindMany = vi.fn(async ({ where }: any) =>
+      where.productId.in.includes('terminal') ? [{ productId: 'terminal' }] : [],
+    );
+    const runFindMany = vi.fn().mockResolvedValue([]);
+    const repository = new PrismaCommercialDeliveryHistoryRepository({
+      commercialPromotionCandidate: { findMany: candidateFindMany },
+      whatsAppDispatch: { findMany: dispatchFindMany },
+      commercialPipelineRun: { findMany: runFindMany },
+    } as never);
+
+    await expect(
+      repository.countSentCampaignProductsToGroup({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      repository.countSentCampaignProductsToGroup({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+        usableOnly: true,
+      }),
+    ).resolves.toBe(0);
+
+    expect(dispatchFindMany).toHaveBeenLastCalledWith({
+      where: {
+        productId: { in: ['usable'] },
+        destinationId: 'group-1',
+        status: { in: ['SENT', 'DELIVERED', 'READ'] },
+      },
+      select: { productId: true },
+      distinct: ['productId'],
+    });
   });
   it('retira QUEUED stale da fila elegivel e deixa o proximo candidate assumir rank 1', async () => {
     const state = initialState();

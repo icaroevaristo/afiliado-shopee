@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
 
 import {
   PrismaCommercialDispatchOutboxRepository,
@@ -213,7 +214,15 @@ describe('PrismaCommercialDispatchOutboxRepository transaction', () => {
     });
   });
 
-  it('reserva copy candidate-scoped sem criar GeneratedCopy legacy', async () => {
+  it.each([
+    { source: 'AI', provider: 'openai', model: 'selected-model', allowed: true },
+    { source: 'LEGACY_TEMPLATE', provider: 'deterministic-safe-fallback', model: 'commercial-safe-fallback-v1', allowed: true },
+    { source: 'LEGACY_TEMPLATE', provider: null, model: null, allowed: false },
+    { source: 'LEGACY_TEMPLATE', provider: 'other', model: 'commercial-safe-fallback-v1', allowed: false },
+    { source: 'LEGACY_TEMPLATE', provider: 'deterministic-safe-fallback', model: 'other', allowed: false },
+    { source: 'LEGACY_TEMPLATE', provider: 'deterministic-safe-fallback', model: 'commercial-safe-fallback-v1', promptVersion: 'old', allowed: false },
+    { source: 'LEGACY_TEMPLATE', provider: 'deterministic-safe-fallback', model: 'commercial-safe-fallback-v1', validationVersion: null, allowed: false },
+  ])('outbox respeita a identidade completa $source/$provider/$model', async (identity) => {
     const generatedCopyCreate = vi.fn();
     const candidateUpdateMany = vi.fn(async () => ({ count: 1 }));
     const transaction = {
@@ -228,13 +237,21 @@ describe('PrismaCommercialDispatchOutboxRepository transaction', () => {
         })),
       },
       generatedCopy: {
-        findUnique: vi.fn(async () => ({
+        findUnique: vi.fn(async ({ select }: { select: Record<string, boolean> }) => {
+          const stored = {
           id: 'ai-copy-id',
           productId: 'product-id',
-          source: 'AI',
+          source: identity.source,
+          provider: identity.provider,
+          model: identity.model,
+          promptVersion: 'promptVersion' in identity ? identity.promptVersion : COMMERCIAL_AI_COPY_PROMPT_VERSION,
+          validationVersion: 'validationVersion' in identity ? identity.validationVersion : COMMERCIAL_AI_COPY_VALIDATION_VERSION,
           snapshotId: 'snapshot-id',
           createdFromCandidateId: 'candidate-id',
-        })),
+          };
+          // Model Prisma projection: omitted columns must not leak into a fake.
+          return Object.fromEntries(Object.entries(stored).filter(([key]) => select[key]));
+        }),
         create: generatedCopyCreate,
       },
       commercialPromotionCandidate: {
@@ -258,6 +275,15 @@ describe('PrismaCommercialDispatchOutboxRepository transaction', () => {
         callback(transaction),
     } as never);
 
+    if (!identity.allowed) {
+      await expect(repository.createPendingConfirmation(candidateInput)).rejects.toMatchObject({
+        code: 'COMMERCIAL_OUTBOX_CANDIDATE_COPY_INVALID',
+      });
+      expect(candidateUpdateMany).not.toHaveBeenCalled();
+      expect(transaction.whatsAppDispatch.create).not.toHaveBeenCalled();
+      expect(transaction.commercialDispatchOutbox.create).not.toHaveBeenCalled();
+      return;
+    }
     await expect(
       repository.createPendingConfirmation(candidateInput),
     ).resolves.toMatchObject({

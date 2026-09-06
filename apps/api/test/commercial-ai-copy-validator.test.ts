@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   COMMERCIAL_AI_COPY_VALIDATION_FAILURE_CODES,
   CommercialAiCopyValidator,
+  sanitizeCommercialAiCopyValidationAuditEvidence,
   sanitizeCommercialAiCopyValidationFailureCodes,
 } from '../src/commercial-ai-copy-validator';
 import { COMMERCIAL_AI_COPY_PROHIBITED_PHRASES } from '../src/commercial-ai-copy-policy';
@@ -187,6 +188,62 @@ describe('CommercialAiCopyValidator V6', () => {
 
     expect(result.valid).toBe(false);
     expect(result.publicFailureCodes).toContain('AI_FACTUAL_VALUE_FORBIDDEN');
+  });
+
+  it('preserva o código público factual e separa causas auditáveis', () => {
+    const money = validator.validate(
+      { headline: 'OFERTA SEGURA', body: 'Produto por R$ especial' },
+      'Produto verificado',
+    );
+    const unsupported = validator.validate(
+      { headline: 'OFERTA SEGURA', body: 'Produto Fantasma com Bluetooth' },
+      'Produto verificado',
+    );
+    const missing = validator.validate(
+      { headline: 'OFERTA SEGURA', body: 'Uma escolha prática para sua rotina.' },
+      'Produto verificado',
+    );
+
+    for (const result of [money, unsupported, missing]) {
+      expect(result.publicFailureCodes).toContain('AI_FACTUAL_VALUE_FORBIDDEN');
+    }
+    expect(money.auditFailureCodes).toContain(
+      'AI_FACTUAL_CAUSE_MONEY_OR_PERCENT',
+    );
+    expect(unsupported.auditFailureCodes).toContain(
+      'AI_FACTUAL_CAUSE_UNSUPPORTED_IDENTITY',
+    );
+    expect(missing.auditFailureCodes).toContain(
+      'AI_FACTUAL_CAUSE_MISSING_IDENTITY',
+    );
+    expect(money.auditEvidence).toContain('money:R$');
+    expect(unsupported.auditEvidence).toContain('identity:fantasma');
+    expect(missing.auditEvidence).toContain('missing:product-identity');
+  });
+
+  it('limita evidência auditável a tokens permitidos e redige identidades sensíveis', () => {
+    expect(
+      sanitizeCommercialAiCopyValidationAuditEvidence([
+        'money:R$',
+        'percent:%',
+        'identity:fantasma',
+        'missing:product-identity',
+      ]),
+    ).toEqual([
+      'identity:fantasma',
+      'missing:product-identity',
+      'money:R$',
+      'percent:%',
+    ]);
+
+    const unsafe = sanitizeCommercialAiCopyValidationAuditEvidence([
+      'https://example.invalid/private',
+      'Authorization: Bearer abc',
+      'secret=abc',
+      '{"fullResponse":"private"}',
+      'identity:token',
+    ]);
+    expect(unsafe).toEqual(['identity:[redacted]']);
   });
 
   it('aceita body no limite exato e rejeita o primeiro caractere excedente', () => {

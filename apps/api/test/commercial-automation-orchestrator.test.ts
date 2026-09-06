@@ -645,6 +645,7 @@ const createRealCandidateFlowForIntegration = () => {
     deliveryHistory: {
       wasProductSentToGroup: vi.fn(async () => false),
       findLastSentAtByGroup: vi.fn(async () => null),
+      countSentCampaignProductsToGroup: vi.fn(async () => 0),
     } as never,
     copies: {
       loadContext: vi.fn(async (candidateId: keyof typeof contexts) =>
@@ -826,6 +827,7 @@ const createStatefulCrossTickCandidateFlow = () => {
     findLastSentAtByGroup: vi.fn(async (groupId: string) =>
       sentAtByGroup.get(groupId) ?? null,
     ),
+    countSentCampaignProductsToGroup: vi.fn(async () => 0),
   };
   const mining = {
     mine: vi.fn(async (campaignId: string) => {

@@ -8,7 +8,7 @@ import {
   JOB_NAMES,
   type WhatsAppDispatchJob,
 } from '@shopee-auto-affiliate-ai/queue';
-import type { CommercialAiCopyProvider } from '../../api/src/commercial-ai-copy-provider';
+import { CommercialAiCopyProviderError, type CommercialAiCopyProvider } from '../../api/src/commercial-ai-copy-provider';
 import { CommercialAiCopyValidator } from '../../api/src/commercial-ai-copy-validator';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
 import { CommercialPromotionCopyGenerationService } from '../../api/src/commercial-promotion-copy-generation-service';
@@ -310,6 +310,7 @@ const listTargetsWithRealFairness = async ({
       wasProductSentToGroup: vi.fn(),
       findLastSentAtByGroup: async (groupId: string) =>
         lastSentAtByGroup.get(groupId) ?? null,
+      countSentCampaignProductsToGroup: vi.fn(async () => 0),
     },
     copies: { loadContext: vi.fn(), findCopyForCandidate: vi.fn() },
     mining: { mine: vi.fn() },
@@ -549,15 +550,40 @@ class MemoryE2ECopyRepository implements CommercialPromotionCopyRepository {
     return { completed: true as const, copy };
   }
 
+  async completeFallback(
+    input: Parameters<
+      CommercialPromotionCopyRepository['completeFallback']
+    >[0],
+  ) {
+    const result = await this.complete(input);
+    const attempt = this.attempts.get(input.inputFingerprint);
+    if (result.completed && attempt) {
+      attempt.status = 'SUCCEEDED';
+      attempt.generatedCopyId = result.copy.id;
+      attempt.failureCode = null;
+      attempt.providerErrorCode = input.providerErrorCode ?? input.failureCode;
+      attempt.requestMayHaveStarted = input.requestMayHaveStarted;
+      attempt.validationFailureCodes = input.validationFailureCodes ?? [];
+    }
+    return result;
+  }
+
   async markAttemptTerminal(
     input: Parameters<
       CommercialPromotionCopyRepository['markAttemptTerminal']
     >[0],
   ) {
     const attempt = this.attempts.get(input.inputFingerprint);
-    if (!attempt || attempt.status !== 'STARTED') return false;
+    if (
+      !attempt ||
+      attempt.status !== 'STARTED' ||
+      attempt.candidateId !== input.candidateId ||
+      attempt.snapshotId !== input.snapshotId
+    ) {
+      return { kind: 'CONFLICT' as const };
+    }
     Object.assign(attempt, input, { updatedAt: input.completedAt });
-    return true;
+    return { kind: 'TERMINALIZED' as const, candidateBlocked: false };
   }
 
   async findCopyForCandidate(candidateId: string) {
@@ -888,11 +914,13 @@ describe('Phase 9 E2E local sem SEND', () => {
     });
   });
   it.each([
-    { deliveryMode: 'IMAGE' as const, deliveryImageUrl: offer.imageUrl },
-    { deliveryMode: 'TEXT' as const, deliveryImageUrl: '' },
+    { deliveryMode: 'IMAGE' as const, deliveryImageUrl: offer.imageUrl, fallback: false },
+    { deliveryMode: 'TEXT' as const, deliveryImageUrl: '', fallback: false },
+    { deliveryMode: 'IMAGE' as const, deliveryImageUrl: offer.imageUrl, fallback: true },
+    { deliveryMode: 'TEXT' as const, deliveryImageUrl: '', fallback: true },
   ])(
-    'compoe identidade, ranking e lifecycle $deliveryMode sem efeito externo',
-    async ({ deliveryMode, deliveryImageUrl }) => {
+    'compoe identidade, ranking e lifecycle $deliveryMode fallback=$fallback sem efeito externo',
+    async ({ deliveryMode, deliveryImageUrl, fallback }) => {
       const identity = resolveShopeeProductIdentity(offer);
       expect(identity).toMatchObject({
         key: 'OFFICIAL:' + offer.providerProductId,
@@ -950,7 +978,9 @@ describe('Phase 9 E2E local sem SEND', () => {
       const endToEndCopyRepository = new MemoryE2ECopyRepository(
         copyContextFixture(deliveryImageUrl),
       );
-      const endToEndCopyProvider = phase9CopyProvider();
+      const endToEndCopyProvider = fallback ? { generate: vi.fn().mockRejectedValue(
+        new CommercialAiCopyProviderError('FAILED_CONFIRMED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', {}, undefined, false),
+      ) } : phase9CopyProvider();
       const endToEndCopyService = phase9CopyService(
         endToEndCopyRepository,
         endToEndCopyProvider,
@@ -969,6 +999,17 @@ describe('Phase 9 E2E local sem SEND', () => {
       if (!linkedEndToEndCopy)
         throw new Error('phase9 linked E2E copy missing');
       const endToEndCopy = linkedEndToEndCopy.copy;
+      expect(endToEndCopy).toMatchObject({
+        source: fallback ? 'LEGACY_TEMPLATE' : 'AI',
+        provider: fallback ? 'deterministic-safe-fallback' : 'openai',
+        model: fallback ? 'commercial-safe-fallback-v1' : 'phase9-model',
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+      });
+      await expect(endToEndCopyService.generate('candidate-1', 'GERAR_COPY_COM_IA')).resolves.toMatchObject({
+        cacheHit: true, generatedCopyId: endToEndCopy.id,
+      });
+      expect(endToEndCopyProvider.generate).toHaveBeenCalledOnce();
       const generatedCopyId = endToEndCopy.id;
       const endToEndDraft = phase9DraftFor(
         endToEndCopyRepository.context,
@@ -980,7 +1021,7 @@ describe('Phase 9 E2E local sem SEND', () => {
       expect(endToEndCopy.createdFromCandidateId).toBe('candidate-1');
       let candidateStatus: 'COPY_READY' | 'RESERVED' | 'DISPATCHED' =
         'COPY_READY';
-      const caption = `Oferta validada\n\nConfira: ${affiliateLink}`;
+      const caption = endToEndDraft.caption;
       let run = createRun(caption);
       let dispatch: WhatsAppDispatchRecord | null = null;
       let outbox: CommercialDispatchOutboxRecord | null = null;
@@ -1036,13 +1077,15 @@ describe('Phase 9 E2E local sem SEND', () => {
         productId: offer.id,
         snapshotId: 'snapshot-1',
         createdFromCandidateId: 'candidate-1',
-        source: 'AI',
+        source: endToEndCopy.source,
+        provider: endToEndCopy.provider,
+        model: endToEndCopy.model,
         promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
         validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
-        titulo: 'Oferta validada',
-        mensagem: 'Produto com dados atuais.',
-        cta: `Confira: ${affiliateLink}`,
-        hashtags: '#oferta',
+        titulo: endToEndCopy.titulo,
+        mensagem: endToEndCopy.mensagem,
+        cta: endToEndCopy.cta,
+        hashtags: endToEndCopy.hashtags,
         promotionCandidates: [candidate()],
       });
 
@@ -1191,6 +1234,7 @@ describe('Phase 9 E2E local sem SEND', () => {
         deliveryHistory: {
           wasProductSentToGroup: vi.fn(async () => false),
           findLastSentAtByGroup: vi.fn(async () => null),
+          countSentCampaignProductsToGroup: vi.fn(async () => 0),
         },
         copy: { generate: vi.fn(() => caption) },
         publisher: new CommercialDispatchOutboxPublisher({

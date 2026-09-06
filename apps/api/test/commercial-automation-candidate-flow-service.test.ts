@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
 
 import {
   CommercialAutomationCandidateFlowService,
@@ -13,6 +14,7 @@ import type {
   CommercialGroupCampaignRecord,
   CommercialPromotionCopyContext,
   CommercialPromotionCopyRepository,
+  CommercialPromotionCandidateRepository,
   CommercialPromotionCandidateRecord,
   CommercialPromotionQueueItem,
   GeneratedCopyRecord,
@@ -337,8 +339,7 @@ const createSubject = (input: {
   campaigns.findByLogicalGroupFingerprint.mockResolvedValue(currentCampaign);
   const candidates = {
     listQueue: vi.fn<
-      (input: { campaignId: string; page?: number; limit?: number }) =>
-        Promise<{ items: CommercialPromotionQueueItem[]; total: number }>
+      CommercialPromotionCandidateRepository['listQueue']
     >(async () => ({ items: [queue], total: 1 })),
     blockCandidate: vi.fn(async (input: {
       candidateId: string;
@@ -428,6 +429,9 @@ const createSubject = (input: {
     wasProductSentToGroup: vi.fn<
       (productId: string, groupId: string) => Promise<boolean>
     >(async () => false),
+    countSentCampaignProductsToGroup: vi.fn<
+      (input: { campaignId: string; groupId: string; usableOnly?: boolean }) => Promise<number>
+    >(async () => 0),
     findLastSentAtByGroup: vi.fn<
       (groupId: string) => Promise<Date | null>
     >(async (groupId) => {
@@ -506,6 +510,18 @@ const selection = (
 });
 
 describe('CommercialAutomationCandidateFlowService', () => {
+  it('usa métricas de delivery do snapshot da fila sem misturar novas consultas', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({ items: [], total: 4, health: {
+      nominalCount: 4, usableCount: 1, copyReadyCount: 1, terminalCount: 2,
+      alreadySentCount: 2, usableAlreadySentCount: 1,
+    } });
+    subject.deliveryHistory.countSentCampaignProductsToGroup.mockRejectedValue(new Error('must use snapshot'));
+    const result = await subject.service.preflight(subject.target);
+    expect(result.queue).toMatchObject({ nominalCount: 4, usableCount: 1,
+      copyReadyCount: 1, terminalCount: 2, alreadySentCount: 2 });
+    expect(subject.deliveryHistory.countSentCampaignProductsToGroup).not.toHaveBeenCalled();
+  });
   it('transporta o dailyLimit obrigatorio da campanha para o target sem aplicar quota', async () => {
     // dailyLimit e Int obrigatorio no schema; null nao e um estado valido.
     const subject = createSubject({
@@ -524,8 +540,10 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
     expect(subject.candidates.listQueue).toHaveBeenCalledWith({
       campaignId: 'campaign-1',
+      groupId: 'group-1',
       page: 1,
-      limit: 2,
+      limit: 200,
+      capacityOnly: true,
     });
   });
 
@@ -1489,11 +1507,15 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
   });
 
-  it('retira rejeicao terminal da capacidade util e preserva o motivo agregado', async () => {
+  it('T16 retira rejeicao terminal da capacidade util e preserva o motivo agregado', async () => {
     const subject = createSubject({ candidate: { status: 'QUEUED', generatedCopyId: null } });
     const first = queueItem({ status: 'QUEUED', generatedCopyId: null, rankPosition: 1 });
     const second = queueItem({ id: 'candidate-2', status: 'QUEUED', generatedCopyId: null, rankPosition: 2 });
-    subject.candidates.listQueue.mockResolvedValue({ items: [first, second], total: 2 });
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [first, second],
+      total: 2,
+      health: { nominalCount: 2, usableCount: 1, copyReadyCount: 0, terminalCount: 1 },
+    });
     subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
       context({ id: candidateId, status: 'QUEUED', generatedCopyId: null, rankPosition: candidateId === 'candidate-1' ? 1 : 2 }),
     );
@@ -1511,9 +1533,136 @@ describe('CommercialAutomationCandidateFlowService', () => {
         eligibleCount: 1,
         rejectedCount: 1,
         rejectionSummary: { COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED: 1 },
+        nominalCount: 2,
+        usableCount: 1,
+        copyReadyCount: 0,
+        terminalCount: 1,
+        alreadySentCount: 0,
       },
     });
     expect(subject.candidates.blockCandidate).not.toHaveBeenCalled();
+  });
+
+  it('T17 retira já enviados materialmente usáveis da capacidade global, inclusive fora da primeira página', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [queueItem()],
+      total: 200,
+      health: { nominalCount: 250, usableCount: 250, copyReadyCount: 1, terminalCount: 0 },
+    });
+    subject.deliveryHistory.countSentCampaignProductsToGroup.mockImplementation(
+      async ({ usableOnly }) => {
+        void usableOnly;
+        return 73;
+      },
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      queue: {
+        candidateCount: 250,
+        eligibleCount: 177,
+        rejectedCount: 73,
+        rejectionSummary: {},
+        nominalCount: 250,
+        usableCount: 177,
+        copyReadyCount: 1,
+        terminalCount: 0,
+        alreadySentCount: 73,
+      },
+    });
+    expect(subject.deliveryHistory.countSentCampaignProductsToGroup).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      groupId: 'group-1',
+    });
+    expect(subject.deliveryHistory.countSentCampaignProductsToGroup).toHaveBeenCalledWith({
+      campaignId: 'campaign-1',
+      groupId: 'group-1',
+      usableOnly: true,
+    });
+    expect(subject.deliveryHistory.wasProductSentToGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('não reduz usable duas vezes quando o already-sent está fora da interseção utilizável', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [queueItem()],
+      total: 3,
+      health: { nominalCount: 3, usableCount: 2, copyReadyCount: 1, terminalCount: 1 },
+    });
+    subject.deliveryHistory.countSentCampaignProductsToGroup.mockImplementation(
+      async ({ usableOnly }) => (usableOnly ? 0 : 1),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      queue: {
+        candidateCount: 3,
+        eligibleCount: 2,
+        rejectedCount: 1,
+        nominalCount: 3,
+        usableCount: 2,
+        copyReadyCount: 1,
+        terminalCount: 1,
+        alreadySentCount: 1,
+      },
+    });
+  });
+
+  it('reduz usable exatamente uma vez quando o already-sent é otherwise-usable', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [queueItem()],
+      total: 4,
+      health: { nominalCount: 4, usableCount: 4, copyReadyCount: 1, terminalCount: 0 },
+    });
+    subject.deliveryHistory.countSentCampaignProductsToGroup.mockImplementation(
+      async ({ usableOnly }) => (usableOnly ? 1 : 1),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      queue: {
+        candidateCount: 4,
+        eligibleCount: 3,
+        rejectedCount: 1,
+        nominalCount: 4,
+        usableCount: 3,
+        copyReadyCount: 1,
+        terminalCount: 0,
+        alreadySentCount: 1,
+      },
+    });
+  });
+
+  it('mantém métricas separadas quando já enviado também pertence ao conjunto terminal/inutilizável', async () => {
+    const subject = createSubject();
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [queueItem()],
+      total: 4,
+      health: { nominalCount: 4, usableCount: 2, copyReadyCount: 1, terminalCount: 2 },
+    });
+    subject.deliveryHistory.countSentCampaignProductsToGroup.mockImplementation(
+      async ({ usableOnly }) => (usableOnly ? 1 : 2),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      queue: {
+        candidateCount: 4,
+        eligibleCount: 1,
+        rejectedCount: 3,
+        nominalCount: 4,
+        usableCount: 1,
+        copyReadyCount: 1,
+        terminalCount: 2,
+        alreadySentCount: 2,
+      },
+    });
   });
 
   it('substitui output invalido por proximo candidate uma unica vez sem repetir o contrato rejeitado', async () => {
@@ -2027,6 +2176,28 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledWith(
       'candidate-ready-rank-2',
     );
+  });
+
+  it('aceita somente o fallback determinístico certificado como COPY_READY', async () => {
+    const subject = createSubject();
+    subject.copies.findCopyForCandidate.mockResolvedValue({
+      candidate: candidateRecord({ status: 'COPY_READY', generatedCopyId: 'copy-1' }),
+      copy: {
+        ...copy(),
+        source: 'LEGACY_TEMPLATE',
+        provider: 'deterministic-safe-fallback',
+        model: 'commercial-safe-fallback-v1',
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+      },
+      snapshotRevision: 1,
+    });
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: 'candidate-1',
+      candidateStatus: 'COPY_READY',
+    });
   });
 
 });

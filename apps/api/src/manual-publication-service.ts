@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
+import { isCommercialPromotionFallbackCopy } from './commercial-promotion-copy-fallback';
 import { commercialProductRejections } from './commercial-offer-eligibility';
 import type { CommercialMessageDraft } from './commercial-message-draft-service';
 import { CommercialMessageDraftService } from './commercial-message-draft-service';
@@ -415,6 +416,7 @@ const knownBlocker = (error: unknown) =>
       'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
       'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       'COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED',
+      'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED',
       'COMMERCIAL_OUTBOX_AMBIGUOUS',
       'COMMERCIAL_OUTBOX_INCONSISTENT',
       'COMMERCIAL_OUTBOX_PUBLICATION_UNCERTAIN',
@@ -512,7 +514,8 @@ export class ManualPublicationService {
       found.candidate.id !== context.candidate.id ||
       found.candidate.status !== 'COPY_READY' ||
       found.candidate.generatedCopyId !== found.copy.id ||
-      found.copy.source !== 'AI' ||
+      (found.copy.source !== 'AI' &&
+        !isCommercialPromotionFallbackCopy(found.copy)) ||
       found.candidate.snapshotId !== context.snapshot.id ||
       found.copy.productId !== context.product.id ||
       found.copy.snapshotId !== context.snapshot.id ||
@@ -862,6 +865,55 @@ export class ManualPublicationService {
       );
     }
     return item;
+  }
+
+  private previewRequest(
+    acceptance: ManualPublicationRequestCreateData,
+  ): ManualPublicationRequestRecord {
+    if (
+      !acceptance.id ||
+      acceptance.mode !== 'PREVIEW' ||
+      acceptance.status !== 'PREVIEW_READY'
+    ) {
+      return fail(
+        'A preview manual nao possui uma view efemera valida',
+        'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
+      );
+    }
+    const createdAt = acceptance.createdAt ?? this.clock();
+    return {
+      id: acceptance.id,
+      idempotencyKey: acceptance.idempotencyKey,
+      payloadHash: acceptance.payloadHash,
+      mode: 'PREVIEW',
+      productId: acceptance.productId,
+      requestedSnapshotId: acceptance.requestedSnapshotId,
+      requestedSnapshotRevision: acceptance.requestedSnapshotRevision,
+      requestedSnapshotFingerprint: acceptance.requestedSnapshotFingerprint,
+      status: 'PREVIEW_READY',
+      createdAt,
+      updatedAt: createdAt,
+      completedAt: null,
+      processingOwnerId: null,
+      processingLeaseExpiresAt: null,
+      targets: acceptance.targets.map((target) => ({
+        id: target.id ?? `${acceptance.id}-${target.destinationId}`,
+        requestId: acceptance.id!,
+        destinationId: target.destinationId,
+        campaignId: target.campaignId,
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        assignedInstanceName: target.assignedInstanceName,
+        candidateId: null,
+        runId: null,
+        dispatchId: null,
+        outboxId: null,
+        status: target.status ?? 'ACCEPTED',
+        blockedReason: null,
+        investigationRequired: false,
+        createdAt,
+        updatedAt: createdAt,
+      })),
+    };
   }
 
   private async updateTargetState(
@@ -1862,63 +1914,20 @@ export class ManualPublicationService {
     input: ManualPublicationPreviewInput,
   ): Promise<ManualPublicationResult> {
     assertStrictPreviewInput(input);
-    const normalizedProductId = normalizeId(input.productId, 'productId');
-    const normalizedDestinationIds = uniqueDestinationIds(input.destinationIds);
-    const normalizedKey = normalizeId(input.idempotencyKey, 'idempotencyKey');
-    const expectedHash = manualPublicationPayloadHash(
-      canonicalManualPublicationPayload({
-        mode: 'PREVIEW',
-        productId: normalizedProductId,
-        destinationIds: normalizedDestinationIds,
-      }),
-    );
-    const existing =
-      await this.options.requests.findByIdempotencyKey(normalizedKey);
-    if (existing) {
-      if (
-        !requestMatchesOperation(existing, {
-          mode: 'PREVIEW',
-          productId: normalizedProductId,
-          payloadHash: expectedHash,
-        })
-      ) {
-        return fail(
-          'A chave de idempotencia ja representa outra operacao ou payload',
-          'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
-        );
-      }
-      if (existing.status !== 'PREVIEW_READY') {
-        return fail(
-          'A request de preview possui estado invalido',
-          'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
-        );
-      }
-      return { request: await this.view(existing), created: false };
-    }
     const requestId = `manual-publication-preview-${randomUUID()}`;
     const acceptance = await this.buildAcceptance(input, requestId, 'PREVIEW');
-    const accepted = await this.options.requests.accept(acceptance);
-    if (
-      accepted.request.mode !== 'PREVIEW' ||
-      accepted.request.status !== 'PREVIEW_READY'
-    ) {
-      return fail(
-        'A request de preview nao possui estado persistido seguro',
-        'MANUAL_PUBLICATION_PREVIEW_STATE_INVALID',
-      );
-    }
+    const request = this.previewRequest(acceptance);
     this.options.logger?.info(
       {
         event: 'manual-publication.preview.ready',
-        requestId: accepted.request.id,
-        created: accepted.created,
-        targetCount: accepted.request.targets.length,
+        requestId: request.id,
+        targetCount: request.targets.length,
       },
       'Manual publication preview ready',
     );
     return {
-      request: await this.view(accepted.request),
-      created: accepted.created,
+      request: await this.view(request),
+      created: false,
     };
   }
 

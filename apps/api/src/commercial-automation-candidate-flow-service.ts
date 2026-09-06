@@ -15,7 +15,11 @@ import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   type CommercialPromotionCopyGenerationService,
 } from './commercial-promotion-copy-generation-service';
-import { isCommercialPromotionTerminalCandidateBlockReason } from './commercial-promotion-candidate-terminal';
+import {
+  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+  isCommercialPromotionTerminalCandidateBlockReason,
+} from './commercial-promotion-candidate-terminal';
+import { isCommercialPromotionFallbackCopy } from './commercial-promotion-copy-fallback';
 import {
   CommercialMessageDraftService,
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED as COMMERCIAL_IMAGE_REQUIRED,
@@ -105,6 +109,11 @@ export type CommercialAutomationCandidatePreflight =
         eligibleCount: number;
         rejectedCount: number;
         rejectionSummary?: Record<string, number>;
+        nominalCount?: number;
+        usableCount?: number;
+        copyReadyCount?: number;
+        terminalCount?: number;
+        alreadySentCount?: number;
       };
     }
   | {
@@ -114,6 +123,11 @@ export type CommercialAutomationCandidatePreflight =
         eligibleCount: number;
         rejectedCount: number;
         rejectionSummary?: Record<string, number>;
+        nominalCount?: number;
+        usableCount?: number;
+        copyReadyCount?: number;
+        terminalCount?: number;
+        alreadySentCount?: number;
       };
     };
 
@@ -126,6 +140,11 @@ export type CommercialAutomationCandidateSelection = {
     eligibleCount: number;
     rejectedCount: number;
     rejectionSummary?: Record<string, number>;
+    nominalCount?: number;
+    usableCount?: number;
+    copyReadyCount?: number;
+    terminalCount?: number;
+    alreadySentCount?: number;
   };
 };
 
@@ -154,6 +173,7 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   COMMERCIAL_AFFILIATE_LINK_SNAPSHOT_MISMATCH,
   COMMERCIAL_AI_COPY_SNAPSHOT_OUTDATED,
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
 ] as const;
 
@@ -177,7 +197,9 @@ type CandidateFlowOptions = {
     Partial<Pick<CommercialPromotionCandidateRepository, 'blockCandidate'>>;
   deliveryHistory: Pick<
     CommercialDeliveryHistoryRepository,
-    'wasProductSentToGroup' | 'findLastSentAtByGroup'
+    | 'wasProductSentToGroup'
+    | 'findLastSentAtByGroup'
+    | 'countSentCampaignProductsToGroup'
   >;
   copies: Pick<
     CommercialPromotionCopyRepository,
@@ -544,7 +566,8 @@ export class CommercialAutomationCandidateFlowService {
       found.candidate.id !== context.candidate.id ||
       found.candidate.status !== 'COPY_READY' ||
       found.candidate.generatedCopyId !== found.copy.id ||
-      found.copy.source !== 'AI' ||
+      (found.copy.source !== 'AI' &&
+        !isCommercialPromotionFallbackCopy(found.copy)) ||
       found.candidate.snapshotId !== context.snapshot.id ||
       found.copy.productId !== context.product.id ||
       found.copy.snapshotId !== context.snapshot.id ||
@@ -894,15 +917,40 @@ export class CommercialAutomationCandidateFlowService {
     const queue = await this.options.candidates.listQueue({
       campaignId: campaign.id,
       page: 1,
-      limit: campaign.queueTargetSize,
+      limit: 200,
+      capacityOnly: true,
+      groupId: group.id,
     });
+    const [aggregateAlreadySentCount, aggregateUsableAlreadySentCount] =
+      queue.health?.alreadySentCount !== undefined &&
+      queue.health.usableAlreadySentCount !== undefined
+      ? [queue.health.alreadySentCount, queue.health.usableAlreadySentCount]
+      : await Promise.all([
+        this.options.deliveryHistory.countSentCampaignProductsToGroup({
+          campaignId: campaign.id,
+          groupId: group.id,
+        }),
+        this.options.deliveryHistory.countSentCampaignProductsToGroup({
+          campaignId: campaign.id,
+          groupId: group.id,
+          usableOnly: true,
+        }),
+      ]);
     const rejectionSummary: Record<string, number> = {};
+    const terminalCandidateIds = new Set<string>();
+    const alreadySentCandidateIds = new Set<string>();
     const excluded = new Set(options.excludeCandidateIds ?? []);
     const onRejected = async (
       _item: CommercialPromotionQueueItem,
       code: string,
     ) => {
       incrementReason(rejectionSummary, code);
+      if (isCommercialPromotionTerminalCandidateBlockReason(code)) {
+        terminalCandidateIds.add(_item.id);
+      }
+      if (code === 'ALREADY_SENT_TO_GROUP') {
+        alreadySentCandidateIds.add(_item.id);
+      }
     };
     const orderedCandidates = queue.items
       .filter(
@@ -914,7 +962,6 @@ export class CommercialAutomationCandidateFlowService {
     let selected:
       | { candidateId: string; candidateStatus: 'COPY_READY' | 'QUEUED' }
       | undefined;
-    let usefulCount = 0;
     for (const item of orderedCandidates) {
       if (item.status === 'COPY_READY') {
         const ready = await this.findReadyCandidate(
@@ -924,7 +971,6 @@ export class CommercialAutomationCandidateFlowService {
           onRejected,
         );
         if (ready) {
-          usefulCount += 1;
           selected ??= {
             candidateId: ready.context.candidate.id,
             candidateStatus: 'COPY_READY',
@@ -939,18 +985,37 @@ export class CommercialAutomationCandidateFlowService {
         onRejected,
       );
       if (queued) {
-        usefulCount += 1;
         selected ??= {
           candidateId: queued.candidate.id,
           candidateStatus: 'QUEUED',
         };
       }
     }
+    const nominalCount = queue.health?.nominalCount ?? queue.total;
+    const alreadySentCount = aggregateAlreadySentCount;
+    const usableBeforeDelivery = queue.health?.usableCount ?? Math.max(
+      nominalCount -
+        Math.max(queue.health?.terminalCount ?? 0, terminalCandidateIds.size),
+      0,
+    );
+    const usableAlreadySentCount = aggregateUsableAlreadySentCount;
+    const usableCount = Math.max(
+      usableBeforeDelivery - (queue.health?.alreadySentCount !== undefined ? 0 : usableAlreadySentCount),
+      0,
+    );
     const queueSummary = {
-      candidateCount: queue.total,
-      eligibleCount: usefulCount,
-      rejectedCount: Math.max(queue.total - usefulCount, 0),
+      candidateCount: nominalCount,
+      eligibleCount: usableCount,
+      rejectedCount: Math.max(nominalCount - usableCount, 0),
       rejectionSummary,
+      nominalCount,
+      usableCount,
+      copyReadyCount:
+        queue.health?.copyReadyCount ??
+        orderedCandidates.filter(({ status }) => status === 'COPY_READY').length,
+      terminalCount:
+        queue.health?.terminalCount ?? terminalCandidateIds.size,
+      alreadySentCount,
     };
     if (selected) return { outcome: 'READY', ...selected, queue: queueSummary };
     return { outcome: 'NO_CANDIDATE', queue: queueSummary };

@@ -15,6 +15,7 @@ import {
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
 } from './commercial-ai-copy-prompt';
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
+import { isCommercialPromotionFallbackCopy } from './commercial-promotion-copy-fallback';
 
 import {
   COMMERCIAL_AUTOMATION_IMAGE_REQUIRED,
@@ -191,7 +192,8 @@ export class SenderService {
       }
 
       if (
-        dispatch.generatedCopy.source !== 'AI' ||
+        (dispatch.generatedCopy.source !== 'AI' &&
+          !isCommercialPromotionFallbackCopy(dispatch.generatedCopy)) ||
         dispatch.generatedCopy.promptVersion !==
           COMMERCIAL_AI_COPY_PROMPT_VERSION ||
         dispatch.generatedCopy.validationVersion !==

@@ -88,8 +88,7 @@ export const parseCommercialPromotionCopyCliArgs = (
 export type CommercialPromotionCopyGenerateEnvironment = {
   ci: boolean;
   databaseUrl: string;
-  enabled: boolean;
-  providerConfigured: boolean;
+  fallbackAvailable: boolean;
   automationMode: AppEnv['COMMERCIAL_AUTOMATION_MODE'];
   automationEnabled: boolean;
   automationPaused: boolean;
@@ -118,10 +117,10 @@ export const assertCommercialPromotionCopyGenerateEnvironment = (
       'COMMERCIAL_AI_COPY_LOCAL_ENVIRONMENT_REQUIRED',
     );
   }
-  if (!environment.enabled || !environment.providerConfigured) {
+  if (!environment.fallbackAvailable) {
     cliError(
-      'Provider de IA nao configurado',
-      'COMMERCIAL_AI_COPY_PROVIDER_NOT_CONFIGURED',
+      'Fallback deterministico indisponivel',
+      'COMMERCIAL_AI_COPY_FALLBACK_UNAVAILABLE',
     );
   }
   if (
@@ -214,10 +213,7 @@ export const runCommercialPromotionCopyCli = async (
     assertCommercialPromotionCopyGenerateEnvironment({
       ci: Boolean(process.env.CI),
       databaseUrl: config.DATABASE_URL,
-      enabled: config.COMMERCIAL_AI_COPY_ENABLED,
-      providerConfigured: Boolean(
-        config.OPENAI_API_KEY && config.COMMERCIAL_AI_COPY_MODEL,
-      ),
+      fallbackAvailable: true,
       automationMode: config.COMMERCIAL_AUTOMATION_MODE,
       automationEnabled: config.COMMERCIAL_AUTOMATION_ENABLED,
       automationPaused: true,
@@ -260,8 +256,7 @@ export const runCommercialPromotionCopyCli = async (
       environment: {
         ci: Boolean(process.env.CI),
         databaseUrl: config.DATABASE_URL,
-        enabled: config.COMMERCIAL_AI_COPY_ENABLED,
-        providerConfigured: Boolean(provider),
+        fallbackAvailable: true,
         automationMode: config.COMMERCIAL_AUTOMATION_MODE,
         automationEnabled: config.COMMERCIAL_AUTOMATION_ENABLED,
         automationPaused: settings?.paused === true,
