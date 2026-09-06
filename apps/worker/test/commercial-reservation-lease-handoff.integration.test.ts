@@ -245,6 +245,7 @@ describe('commercial reservation lease handoff integration', () => {
       },
       destination: {
         id: dispatch.destinationId,
+        name: 'Grupo controlado',
         destination: groupDestination,
         type: 'GROUP',
         active: true,
@@ -330,6 +331,8 @@ describe('commercial reservation lease handoff integration', () => {
         return dispatch;
       }),
       markFailed: vi.fn(),
+      applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+      expireSubmittedConfirmations: vi.fn(async () => []),
     };
     const promotions = {
       findAttemptContextByGeneratedCopyId: vi.fn(async () => ({
@@ -450,10 +453,10 @@ describe('commercial reservation lease handoff integration', () => {
     expect(candidateStatus).toBe('RESERVED');
     expect(jobState).toBe('completed');
     expect(attemptsMade).toBe(1);
-    expect(attempt.read()).toEqual({
-      attemptExecutionId: null,
-      attemptReservedAt: null,
-      attemptLeaseExpiresAt: null,
+    expect(attempt.read()).toMatchObject({
+      attemptExecutionId: executionId,
+      attemptReservedAt: expect.any(Date),
+      attemptLeaseExpiresAt: renewedLease,
     });
   });
 });

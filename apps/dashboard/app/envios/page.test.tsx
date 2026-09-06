@@ -135,7 +135,8 @@ describe('SendsPage — Lote 7', () => {
     expect(buttonWithText(screen.container, 'Todos')).toBeDefined();
     expect(firstLevel).toContain('Enviado');
     expect(firstLevel).toContain('Não enviado');
-    expect(firstLevel).toContain('Aguardando confirmação');
+    expect(firstLevel).not.toContain('Aguardando confirmação');
+    expect(firstLevel).toContain('Enfileirado');
     expect(firstLevel).toContain('Em processamento');
     expect(firstLevel).toContain('Grupo Casa');
     expect(firstLevel).toContain('R$ 79,90');
@@ -188,11 +189,14 @@ describe('SendsPage — Lote 7', () => {
     const screen = await render(<SendsPage />);
     await settle();
 
-    await click(buttonWithText(screen.container, 'Enviados')!);
+    await click(buttonWithText(screen.container, 'Confirmados pelo servidor')!);
     await settle();
 
     expect(listDispatchesMock).toHaveBeenLastCalledWith({ status: 'SENT' });
-    const selected = buttonWithText(screen.container, 'Enviados')!;
+    const selected = buttonWithText(
+      screen.container,
+      'Confirmados pelo servidor',
+    )!;
     expect(selected.getAttribute('aria-pressed')).toBe('true');
     await screen.unmount();
   });

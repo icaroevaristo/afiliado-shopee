@@ -143,10 +143,7 @@ export type ManualPublicationLifecycleFinalizerLogger = {
   error: (obj: unknown, msg?: string) => void;
 };
 
-type ManualPublicationLifecycleFinalizerRepository = Pick<
-  ManualPublicationRequestRepository,
-  'finalizeAfterCommercialDispatch'
-> & {
+type ManualPublicationLifecycleFinalizerRepository = {
   finalizeAfterCommercialDispatch: NonNullable<
     ManualPublicationRequestRepository['finalizeAfterCommercialDispatch']
   >;

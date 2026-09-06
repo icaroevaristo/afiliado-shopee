@@ -299,6 +299,7 @@ export const createSenderService = ({
   draftService,
   groupSendPolicy,
   instanceName,
+  confirmationTimeoutMs,
 }: {
   repositories: Pick<ApplicationRepositories, 'whatsappDispatches'> &
     Partial<{

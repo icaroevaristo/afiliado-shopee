@@ -8,6 +8,7 @@ import type {
   CommercialPipelineRunFinalizationRepository,
   CommercialPromotionAttemptContext,
   WhatsAppDispatchRecord,
+  WhatsAppDispatchStatus,
 } from '../src/repositories';
 
 const now = new Date('2026-07-25T23:00:00.000Z');
@@ -32,11 +33,7 @@ const build = (
     investigationRequired,
     createdAt: now,
   };
-  let persistedDispatchStatus:
-    | 'SENT'
-    | 'FAILED'
-    | 'PROCESSING'
-    | 'PENDING' = 'PENDING';
+  let persistedDispatchStatus: WhatsAppDispatchStatus = 'PENDING';
   const finalizeByDispatchId = vi.fn(async () => {
     const kind: CommercialPipelineRunFinalizationKind =
       run.finalStatus === 'SENT' || persistedDispatchStatus === 'SENT'
@@ -140,7 +137,7 @@ const build = (
     update,
     finalizeByDispatchId,
     setPersistedDispatchStatus: (
-      status: 'SENT' | 'FAILED' | 'PROCESSING' | 'PENDING',
+      status: WhatsAppDispatchStatus,
     ) => {
       persistedDispatchStatus = status;
     },
@@ -154,7 +151,7 @@ const build = (
 };
 
 const dispatch = (
-  status: 'SENT' | 'FAILED' | 'PROCESSING' | 'PENDING',
+  status: WhatsAppDispatchStatus,
 ): WhatsAppDispatchRecord => ({
   id: 'dispatch-id',
   productId: 'product-id',

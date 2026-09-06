@@ -417,6 +417,8 @@ describe('commercial candidate dispatch integration', () => {
       ),
       markSubmitted,
       markFailed: vi.fn(),
+      applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+      expireSubmittedConfirmations: vi.fn(async () => []),
       createPending: vi.fn(),
       list: vi.fn(),
     };

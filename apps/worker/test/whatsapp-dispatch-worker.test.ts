@@ -120,6 +120,7 @@ const commercialDispatch: WhatsAppDispatchDetails = {
   instanceName: 'instance',
   destination: {
     id: 'dest-commercial',
+    name: 'Commercial group',
     destination: commercialGroupId,
     type: 'GROUP',
     active: true,
@@ -319,6 +320,8 @@ const createHandoffRepositories = (input: {
         attemptCount: 1,
       }),
       markFailed: vi.fn(),
+      applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+      expireSubmittedConfirmations: vi.fn(async () => []),
       createPending: vi.fn(),
       list: vi.fn(),
     },
@@ -612,6 +615,8 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdForSending: vi.fn().mockResolvedValue(dispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -870,6 +875,8 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdForSending: vi.fn().mockResolvedValue(fakeDispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -932,6 +939,8 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -1004,6 +1013,8 @@ describe('processWhatsAppDispatchJob', () => {
         createPending: vi.fn(),
         findByIdForSending: vi.fn().mockResolvedValue(commercialDispatch),
         list: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),
@@ -1075,6 +1086,8 @@ describe('processWhatsAppDispatchJob', () => {
         findByIdForSending,
         list: vi.fn(),
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
       },
       commercialRuns: {
         create: vi.fn(),

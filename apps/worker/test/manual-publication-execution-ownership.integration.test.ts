@@ -249,6 +249,7 @@ const dispatchBase = (): WhatsAppDispatchDetails => ({
   updatedAt: now,
   destination: {
     id: group.id,
+    name: group.name,
     destination: groupDestination,
     type: 'GROUP',
     active: true,
@@ -890,6 +891,8 @@ describe('manual publication execution ownership integration', () => {
             },
           ),
           markFailed: vi.fn(),
+          applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+          expireSubmittedConfirmations: vi.fn(async () => []),
           createPending: vi.fn(),
           list: vi.fn(),
         },

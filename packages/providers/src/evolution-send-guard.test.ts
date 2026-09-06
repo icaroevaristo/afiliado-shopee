@@ -5,7 +5,10 @@ import {
   normalizeEvolutionDestination,
 } from './evolution-send-guard';
 import type { ProviderLogger } from './evolution-api-whatsapp-provider';
-import { createWhatsAppProvider } from './whatsapp-provider-factory';
+import {
+  createWhatsAppProvider,
+  type WhatsAppProviderFactoryOptions,
+} from './whatsapp-provider-factory';
 
 const DESTINATION = '0000000000000';
 const API_KEY = 'test-only-api-key';
@@ -23,7 +26,34 @@ const evolutionConfig = {
   EVOLUTION_API_URL: 'http://localhost:8080',
   EVOLUTION_API_KEY: API_KEY,
   EVOLUTION_INSTANCE_NAME: 'test-instance',
+  WHATSAPP_DELIVERY_WEBHOOK_URL:
+    'http://host.docker.internal:3333/whatsapp/events/messages.update',
+  WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'dedicated-webhook-test-token',
 };
+
+const readyDeliveryWebhookClient = () =>
+  vi.fn(async () =>
+    new Response(
+      JSON.stringify({
+        enabled: true,
+        url: evolutionConfig.WHATSAPP_DELIVERY_WEBHOOK_URL,
+        events: ['MESSAGES_UPDATE'],
+        headers: {
+          authorization: `Bearer ${evolutionConfig.WHATSAPP_DELIVERY_WEBHOOK_TOKEN}`,
+        },
+        byEvents: false,
+        base64: false,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  );
+
+const providerOptions = (
+  httpClient: NonNullable<WhatsAppProviderFactoryOptions['httpClient']>,
+): WhatsAppProviderFactoryOptions => ({
+  httpClient,
+  deliveryWebhookHttpClient: readyDeliveryWebhookClient(),
+});
 
 describe('normalizeEvolutionDestination', () => {
   it('remove formatacao e preserva comparacao exata por digitos', () => {
@@ -131,7 +161,7 @@ describe('EvolutionSendGuard', () => {
 describe('Evolution safe mode provider integration', () => {
   it('fica ativo por padrao e bloqueia antes do HTTP com allowlist vazia', async () => {
     const httpClient = vi.fn();
-    const provider = createWhatsAppProvider(evolutionConfig, { httpClient });
+    const provider = createWhatsAppProvider(evolutionConfig, providerOptions(httpClient));
 
     await expect(
       provider.sendMessage({ destination: DESTINATION, message: 'Test only' }),
@@ -149,7 +179,7 @@ describe('Evolution safe mode provider integration', () => {
         ...evolutionConfig,
         EVOLUTION_ALLOWED_DESTINATIONS: `+00 (00) 00000-0000`,
       },
-      { httpClient },
+      providerOptions(httpClient),
     );
 
     await expect(
@@ -187,7 +217,7 @@ describe('Evolution safe mode provider integration', () => {
           ...evolutionConfig,
           EVOLUTION_ALLOWED_DESTINATIONS: [DESTINATION],
         },
-        { httpClient, timeoutMs: 5 },
+        { ...providerOptions(httpClient), timeoutMs: 5 },
       );
 
       await expect(
@@ -210,7 +240,7 @@ describe('Evolution safe mode provider integration', () => {
     const httpClient = vi.fn().mockImplementation(async () => response());
     const provider = createWhatsAppProvider(
       { ...evolutionConfig, EVOLUTION_SAFE_MODE: false },
-      { httpClient },
+      providerOptions(httpClient),
     );
 
     await provider.sendMessage({
@@ -232,7 +262,7 @@ describe('Evolution safe mode provider integration', () => {
         ...evolutionConfig,
         EVOLUTION_ALLOWED_DESTINATIONS: ['0000111111111'],
       },
-      { httpClient },
+      providerOptions(httpClient),
     );
 
     let caught: unknown;

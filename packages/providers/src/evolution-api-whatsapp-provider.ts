@@ -13,6 +13,7 @@ import type { EvolutionGroupSendGuard } from './evolution-group-send-guard';
 import { fingerprintWhatsAppGroupId } from './whatsapp-group-directory';
 import { WhatsAppSendError } from './whatsapp-send-error';
 import { buildEvolutionMessagePayload } from './evolution-payload-builder';
+import { EvolutionDeliveryWebhookReadiness } from './evolution-delivery-webhook';
 
 export type HttpClient = (
   input: string | URL | Request,
@@ -33,6 +34,10 @@ export type EvolutionApiWhatsAppProviderOptions = {
   timeoutMs?: number;
   sendGuard?: EvolutionSendGuard;
   groupSendGuard?: EvolutionGroupSendGuard;
+  deliveryWebhookUrl?: string;
+  deliveryWebhookToken?: string;
+  deliveryWebhookHttpClient?: HttpClient;
+  deliveryWebhookPort?: number;
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -127,6 +132,7 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
   private readonly timeoutMs: number;
   private readonly sendGuard?: EvolutionSendGuard;
   private readonly groupSendGuard?: EvolutionGroupSendGuard;
+  private readonly deliveryWebhookReadiness?: EvolutionDeliveryWebhookReadiness;
 
   constructor(options: EvolutionApiWhatsAppProviderOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
@@ -154,10 +160,37 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.sendGuard = options.sendGuard;
     this.groupSendGuard = options.groupSendGuard;
+    if (options.deliveryWebhookUrl && options.deliveryWebhookToken) {
+      this.deliveryWebhookReadiness = new EvolutionDeliveryWebhookReadiness({
+        baseUrl: this.baseUrl,
+        apiKey: this.apiKey,
+        instanceName: this.instanceName,
+        callbackUrl: options.deliveryWebhookUrl,
+        callbackToken: options.deliveryWebhookToken,
+        callbackPort: options.deliveryWebhookPort,
+        httpClient: options.deliveryWebhookHttpClient ?? this.httpClient,
+        timeoutMs: this.timeoutMs,
+      });
+    }
   }
 
   beginRun(runId: string) {
     this.groupSendGuard?.beginRun(runId);
+  }
+
+  /**
+   * Verifies the official per-instance delivery callback before a consumer can
+   * accept dispatch work. sendMessage repeats this check immediately before
+   * the provider request because configuration can drift after startup.
+   */
+  async assertReady() {
+    if (!this.deliveryWebhookReadiness) {
+      throw new AppError(
+        'Webhook de confirmacao de entrega nao configurado',
+        'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+      );
+    }
+    await this.deliveryWebhookReadiness.ensureReady();
   }
 
   async sendMessage(input: WhatsAppSendInput): Promise<WhatsAppSendResult> {
@@ -210,6 +243,8 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
       destinationPublic = isGroup
         ? fingerprintWhatsAppGroupId(destination)
         : maskEvolutionDestination(destination);
+
+      await this.assertReady();
 
       if (isGroup) {
         if (!this.groupSendGuard) {

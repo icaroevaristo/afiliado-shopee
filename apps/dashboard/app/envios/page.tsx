@@ -57,9 +57,9 @@ const resolveGroupName = (
   dispatch: WhatsAppDispatch,
   groupNames: Readonly<Record<string, string>>,
 ) =>
-  groupNames[dispatch.destinationId] ??
-  dispatch.destination?.name ??
-  dispatch.commercialPipelineRun?.groupName ??
+  groupNames[dispatch.destinationId] ||
+  dispatch.destination?.name ||
+  dispatch.commercialPipelineRun?.groupName ||
   'Grupo não disponível';
 
 const resolveGroupFingerprint = (dispatch: WhatsAppDispatch) =>

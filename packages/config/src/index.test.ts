@@ -232,6 +232,9 @@ describe('envSchema Scheduler comercial', () => {
       EVOLUTION_API_URL: 'http://localhost:8080',
       EVOLUTION_API_KEY: 'placeholder-api-key',
       EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+      WHATSAPP_DELIVERY_WEBHOOK_URL:
+        'http://host.docker.internal:3333/whatsapp/events/messages.update',
+      WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'dedicated-webhook-token',
       EVOLUTION_SAFE_MODE: 'true',
       WHATSAPP_GROUP_SEND_ENABLED: 'true',
       SCHEDULER_ENABLED: 'false',
@@ -314,15 +317,17 @@ describe('envSchema WhatsApp provider', () => {
   );
 
   it('valida configuracao Evolution e remove a barra final da URL', () => {
-    expect(
-      envSchema.parse({
-        ...baseEnv,
-        WHATSAPP_PROVIDER: 'evolution',
-        EVOLUTION_API_URL: 'http://localhost:8080///',
-        EVOLUTION_API_KEY: 'test-api-key',
-        EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
-      }).EVOLUTION_API_URL,
-    ).toBe('http://localhost:8080');
+    const config = envSchema.parse({
+      ...baseEnv,
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://localhost:8080///',
+      EVOLUTION_API_KEY: 'test-api-key',
+      EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+    });
+
+    expect(config.EVOLUTION_API_URL).toBe('http://localhost:8080');
+    expect(config.WHATSAPP_DELIVERY_WEBHOOK_URL).toBeUndefined();
+    expect(config.WHATSAPP_DELIVERY_WEBHOOK_TOKEN).toBeUndefined();
   });
 
   it.each([
@@ -340,6 +345,21 @@ describe('envSchema WhatsApp provider', () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it('rejeita token de webhook igual ao token local quando ambos existem', () => {
+    const result = envSchema.safeParse({
+      ...baseEnv,
+      WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'local-api-token',
+      LOCAL_API_AUTH_TOKEN: 'local-api-token',
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message)).toContain(
+        'WHATSAPP_DELIVERY_WEBHOOK_TOKEN_MUST_BE_DEDICATED',
+      );
+    }
   });
 
   it.each([1000, 60000])(

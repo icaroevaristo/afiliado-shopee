@@ -75,6 +75,10 @@ describe('WhatsApp delivery expiration invoker', () => {
   it('usa o mesmo finalizer manual idempotente no ciclo de expiração', async () => {
     const finalizeAfterCommercialDispatch = vi.fn(async () => ({
       outcome: 'FINALIZED' as const,
+      requestId: 'request-1',
+      targetId: 'target-1',
+      targetStatus: 'AMBIGUOUS' as const,
+      requestStatus: 'AMBIGUOUS' as const,
       writes: 1,
     }));
     const finalizer = createManualPublicationLifecycleFinalizer({
@@ -92,6 +96,8 @@ describe('WhatsApp delivery expiration invoker', () => {
         expireSubmittedConfirmations: vi.fn(async () => [
           {
             id: 'dispatch-1',
+            productId: 'product-1',
+            destinationId: 'destination-1',
             status: 'AMBIGUOUS' as const,
             generatedCopyId: 'copy-1',
             attemptCount: 1,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { MockWhatsAppProvider } from '@shopee-auto-affiliate-ai/providers';
 
 import {
   WhatsAppDeliveryConfirmationService,
@@ -6,6 +7,10 @@ import {
   parseEvolutionDeliveryStatus,
   requireDeliveryEventString,
 } from '../src/whatsapp-delivery-confirmation-service';
+import type {
+  WhatsAppDeliveryEventInboxInput,
+  WhatsAppDeliveryEventInput,
+} from '../src/repositories';
 
 describe('WhatsApp delivery confirmation event contract', () => {
   it.each([
@@ -25,6 +30,68 @@ describe('WhatsApp delivery confirmation event contract', () => {
   it('ignores an unknown provider status instead of inventing confirmation', () => {
     expect(parseEvolutionDeliveryStatus('DELIVERED_SOMEHOW')).toBeNull();
     expect(parseEvolutionDeliveryStatus(99)).toBeNull();
+  });
+
+  it('moves a mock HTTP submission from SUBMITTED to SENT only after an injected SERVER_ACK event', async () => {
+    const provider = new MockWhatsAppProvider();
+    const acknowledgement = await provider.sendMessage({
+      destination: 'mock-destination',
+      destinationType: 'INDIVIDUAL',
+      message: 'Mensagem técnica de teste',
+    });
+    let dispatchStatus: 'SUBMITTED' | 'SENT' = 'SUBMITTED';
+    const record = vi.fn(async (input: WhatsAppDeliveryEventInboxInput) => {
+      const receivedAt = input.receivedAt ?? new Date();
+      return {
+        ...input,
+        receivedAt,
+        id: 'inbox-mock-1',
+        fingerprint: 'mock-server-ack',
+        state: 'PENDING' as const,
+        appliedAt: null,
+        createdAt: receivedAt,
+        updatedAt: receivedAt,
+      };
+    });
+    const applyDeliveryEvent = vi.fn(async (input: WhatsAppDeliveryEventInput) => {
+      expect(input.externalMessageId).toBe(acknowledgement.externalMessageId);
+      expect(dispatchStatus).toBe('SUBMITTED');
+      dispatchStatus = 'SENT';
+      return {
+        kind: 'UPDATED' as const,
+        dispatch: {
+          id: 'dispatch-mock-1',
+          productId: 'product-1',
+          destinationId: 'destination-1',
+          status: 'SENT' as const,
+          generatedCopyId: 'copy-1',
+          attemptCount: 1,
+        },
+      };
+    });
+    const service = new WhatsAppDeliveryConfirmationService({
+      dispatches: {
+        applyDeliveryEvent,
+        expireSubmittedConfirmations: vi.fn(async () => []),
+      },
+      deliveryEvents: { record, markProcessed: vi.fn(async () => true) },
+      runs: { finalizeByDispatchId: vi.fn(async () => null) } as never,
+      logger: { info: vi.fn(), error: vi.fn() } as never,
+    });
+
+    expect(dispatchStatus).toBe('SUBMITTED');
+    await expect(
+      service.consume({
+        instanceName: 'mock-instance',
+        externalMessageId: acknowledgement.externalMessageId,
+        status: 'SERVER_ACK',
+        occurredAt: acknowledgement.sentAt,
+      }),
+    ).resolves.toMatchObject({ kind: 'UPDATED', dispatch: { status: 'SENT' } });
+
+    expect(provider.sentMessages).toHaveLength(1);
+    expect(dispatchStatus).toBe('SENT');
+    expect(record.mock.calls[0]?.[0]).not.toHaveProperty('remoteJid');
   });
 
   it('rejects missing correlation fields before a lifecycle write', () => {
@@ -65,6 +132,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
         kind: 'UPDATED',
         dispatch: {
           id: 'dispatch-1',
+          productId: 'product-1',
+          destinationId: 'destination-1',
           status: 'SUBMITTED',
           generatedCopyId: 'copy-1',
           attemptCount: 1,
@@ -124,6 +193,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
         kind: 'UPDATED',
         dispatch: {
           id: 'dispatch-1',
+          productId: 'product-1',
+          destinationId: 'destination-1',
           status: 'DELIVERED',
           generatedCopyId: 'copy-1',
           attemptCount: 1,
@@ -133,6 +204,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
         kind: 'NOOP',
         dispatch: {
           id: 'dispatch-1',
+          productId: 'product-1',
+          destinationId: 'destination-1',
           status: 'DELIVERED',
           generatedCopyId: 'copy-1',
           attemptCount: 1,
@@ -145,6 +218,10 @@ describe('WhatsApp delivery confirmation event contract', () => {
         .mockRejectedValueOnce(new Error('finalizer unavailable'))
         .mockResolvedValueOnce({
           outcome: 'ALREADY_FINALIZED' as const,
+          requestId: 'request-1',
+          targetId: 'target-1',
+          targetStatus: 'SENT' as const,
+          requestStatus: 'COMPLETED' as const,
           writes: 0,
         }),
     };
@@ -201,6 +278,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
           kind: 'UPDATED' as const,
           dispatch: {
             id: 'dispatch-1',
+            productId: 'product-1',
+            destinationId: 'destination-1',
             status: 'READ' as const,
             generatedCopyId: 'copy-1',
             attemptCount: 1,
@@ -210,6 +289,10 @@ describe('WhatsApp delivery confirmation event contract', () => {
     ]);
     const finalizeAfterDispatch = vi.fn(async () => ({
       outcome: 'FINALIZED' as const,
+      requestId: 'request-1',
+      targetId: 'target-1',
+      targetStatus: 'SENT' as const,
+      requestStatus: 'COMPLETED' as const,
       writes: 1,
     }));
     const service = new WhatsAppDeliveryConfirmationService({
@@ -218,6 +301,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
           kind: 'PENDING' as const,
           dispatch: {
             id: 'dispatch-1',
+            productId: 'product-1',
+            destinationId: 'destination-1',
             status: 'DELIVERED' as const,
             generatedCopyId: 'copy-1',
             attemptCount: 1,
@@ -268,6 +353,8 @@ describe('WhatsApp delivery confirmation event contract', () => {
               kind: 'NOOP' as const,
               dispatch: {
                 id: 'dispatch-retry',
+                productId: 'product-1',
+                destinationId: 'destination-1',
                 status: 'DELIVERED' as const,
                 generatedCopyId: 'copy-1',
                 attemptCount: 1,

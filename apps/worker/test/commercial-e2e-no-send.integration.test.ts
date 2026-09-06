@@ -1271,6 +1271,8 @@ describe('Phase 9 E2E local sem SEND', () => {
         ),
         markSubmitted,
         markFailed: vi.fn(),
+        applyDeliveryEvent: vi.fn(async () => ({ kind: 'NOT_FOUND' as const })),
+        expireSubmittedConfirmations: vi.fn(async () => []),
         createPending: vi.fn(),
         list: vi.fn(),
       };

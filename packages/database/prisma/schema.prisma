@@ -177,7 +177,7 @@ model WhatsAppGroupInstanceAssignment {
   instance      WhatsAppInstance   @relation(fields: [instanceName], references: [name], onDelete: Restrict)
   position      Int
   createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  updatedAt     DateTime           @default(now()) @updatedAt
 
   @@unique([destinationId, position])
   @@unique([destinationId, instanceName])
@@ -357,9 +357,9 @@ model WhatsAppDeliveryEventInbox {
   state             WhatsAppDeliveryEventInboxState @default(PENDING)
   appliedAt         DateTime?
   createdAt         DateTime                         @default(now())
-  updatedAt         DateTime                         @updatedAt
+  updatedAt         DateTime                         @default(now()) @updatedAt
 
-  @@index([instanceName, externalMessageId, state, occurredAt])
+  @@index([instanceName, externalMessageId, state, occurredAt], map: "WhatsAppDeliveryEventInbox_instanceName_externalMessageId_state")
   @@index([state, occurredAt])
 }
 

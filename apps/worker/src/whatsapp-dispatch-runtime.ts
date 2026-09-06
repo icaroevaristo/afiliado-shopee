@@ -92,6 +92,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     ...options.providerFactoryOptions,
     logger,
   });
+  await provider.assertReady?.();
   const providerResolver = (instanceName: string) =>
     (options.providerFactory ?? createWhatsAppProvider)(
       { ...config, EVOLUTION_INSTANCE_NAME: instanceName },

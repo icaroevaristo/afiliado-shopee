@@ -271,6 +271,8 @@ export const envSchema = z
       .default(900),
     WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS:
       positiveIntegerFromEnv.pipe(z.number().min(10).max(3_600)).default(60),
+    WHATSAPP_DELIVERY_WEBHOOK_URL: optionalUrlFromEnv,
+    WHATSAPP_DELIVERY_WEBHOOK_TOKEN: optionalTrimmedString,
     WHATSAPP_GROUP_SEND_ENABLED: booleanFromEnv.default(false),
     WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: positiveIntegerFromEnv.default(1),
     SCHEDULER_ENABLED: booleanFromEnv.default(false),
@@ -433,6 +435,17 @@ export const envSchema = z
           });
         }
       }
+    }
+
+    if (
+      env.LOCAL_API_AUTH_TOKEN &&
+      env.WHATSAPP_DELIVERY_WEBHOOK_TOKEN === env.LOCAL_API_AUTH_TOKEN
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['WHATSAPP_DELIVERY_WEBHOOK_TOKEN'],
+        message: 'WHATSAPP_DELIVERY_WEBHOOK_TOKEN_MUST_BE_DEDICATED',
+      });
     }
 
     if (env.SCHEDULER_ENABLED) {

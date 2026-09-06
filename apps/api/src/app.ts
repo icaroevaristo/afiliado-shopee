@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import {
@@ -113,6 +113,7 @@ import { ManualPublicationLifecycleFinalizer } from './manual-publication-lifecy
 export type BuildAppOptions = {
   logger?: boolean;
   localApiAuthToken?: string;
+  deliveryWebhookAuthToken?: string;
   hunterProvider?: HunterProvider;
   prisma?: DatabaseClient;
   analyticsService?: Pick<AnalyticsService, 'getSnapshot'>;
@@ -824,7 +825,8 @@ export const sanitizeDispatchForCommonUi = <T extends {
     sourceInstanceName?: string | null;
   };
 }>(dispatch: T) => {
-  const { externalMessageId: _externalMessageId, ...safeDispatch } = dispatch;
+  const safeDispatch = { ...dispatch };
+  delete safeDispatch.externalMessageId;
   return {
     ...safeDispatch,
     destination: sanitizeDispatchDestination(dispatch.destination),
@@ -834,6 +836,16 @@ export const sanitizeDispatchForCommonUi = <T extends {
 export const buildApp = async (options: BuildAppOptions = {}) => {
   const app = Fastify({ logger: options.logger ?? true });
   const localApiAuthToken = options.localApiAuthToken?.trim();
+  const deliveryWebhookAuthToken = options.deliveryWebhookAuthToken?.trim();
+  if (
+    localApiAuthToken &&
+    deliveryWebhookAuthToken === localApiAuthToken
+  ) {
+    throw new AppError(
+      'Token do webhook de entrega deve ser dedicado',
+      'WHATSAPP_DELIVERY_WEBHOOK_TOKEN_MUST_BE_DEDICATED',
+    );
+  }
   const prisma = options.prisma ?? createPrismaClient();
   const hunterProvider = options.hunterProvider ?? new MockShopeeProvider();
   const rawShopeeOfferProvider =
@@ -1213,10 +1225,21 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       deliveryEvents: repositories.whatsappDeliveryEvents,
       runs: repositories.commercialRuns,
       promotionCandidates: repositories.commercialPromotions,
-      manualLifecycleFinalizer: new ManualPublicationLifecycleFinalizer(
-        repositories.manualPublicationRequests,
-        { logger: app.log },
-      ),
+      manualLifecycleFinalizer: (() => {
+        const finalizeAfterCommercialDispatch =
+          repositories.manualPublicationRequests.finalizeAfterCommercialDispatch;
+        return finalizeAfterCommercialDispatch
+          ? new ManualPublicationLifecycleFinalizer(
+              {
+                finalizeAfterCommercialDispatch:
+                  finalizeAfterCommercialDispatch.bind(
+                    repositories.manualPublicationRequests,
+                  ),
+              },
+              { logger: app.log },
+            )
+          : undefined;
+      })(),
       logger: app.log,
     });
     return deliveryConfirmationService;
@@ -1231,6 +1254,12 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
     optionsSuccessStatus: 204,
     preflightContinue: true,
   });
+
+  const sameSecret = (expected: string, received: string) =>
+    timingSafeEqual(
+      createHash('sha256').update(expected).digest(),
+      createHash('sha256').update(received).digest(),
+    );
 
   app.addHook('onRequest', async (request, reply) => {
     const origin = request.headers.origin;
@@ -1249,6 +1278,27 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       return;
     }
 
+    const isDeliveryWebhook =
+      request.method === 'POST' &&
+      request.url.split('?')[0] === '/whatsapp/events/messages.update';
+    const authorization = request.headers.authorization;
+    const bearerMatch = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
+    if (isDeliveryWebhook) {
+      if (!deliveryWebhookAuthToken) {
+        return reply.code(503).send({
+          error: 'WHATSAPP_DELIVERY_WEBHOOK_AUTH_NOT_CONFIGURED',
+          message: 'Autenticacao dedicada do webhook indisponivel',
+        });
+      }
+      if (!bearerMatch || !sameSecret(deliveryWebhookAuthToken, bearerMatch[1])) {
+        return reply.code(401).send({
+          error: 'WHATSAPP_DELIVERY_WEBHOOK_AUTH_REQUIRED',
+          message: 'Autenticacao dedicada do webhook obrigatoria',
+        });
+      }
+      return;
+    }
+
     if (!localApiAuthToken) {
       return reply.code(503).send({
         error: 'LOCAL_API_AUTH_NOT_CONFIGURED',
@@ -1256,8 +1306,6 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       });
     }
 
-    const authorization = request.headers.authorization;
-    const bearerMatch = /^Bearer ([^\s]+)$/.exec(authorization ?? '');
     if (!bearerMatch) {
       return reply.code(401).send({
         error: 'LOCAL_API_AUTH_REQUIRED',
@@ -1265,12 +1313,7 @@ export const buildApp = async (options: BuildAppOptions = {}) => {
       });
     }
 
-    const expected = Buffer.from(localApiAuthToken);
-    const received = Buffer.from(bearerMatch[1]);
-    if (
-      expected.length !== received.length ||
-      !timingSafeEqual(expected, received)
-    ) {
+    if (!sameSecret(localApiAuthToken, bearerMatch[1])) {
       return reply.code(401).send({
         error: 'LOCAL_API_AUTH_REQUIRED',
         message: 'Autenticacao local obrigatoria',

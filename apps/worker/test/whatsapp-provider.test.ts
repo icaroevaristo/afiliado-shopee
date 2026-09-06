@@ -28,11 +28,29 @@ const baseEnv = {
 const legacyWorkerConfig = (config: AppEnv): AppEnv => ({
   ...config,
   COMMERCIAL_AUTOMATION_MODE: 'send',
+  WHATSAPP_DELIVERY_WEBHOOK_URL:
+    config.WHATSAPP_DELIVERY_WEBHOOK_URL ??
+    'http://host.docker.internal:3333/whatsapp/events/messages.update',
+  WHATSAPP_DELIVERY_WEBHOOK_TOKEN:
+    config.WHATSAPP_DELIVERY_WEBHOOK_TOKEN ?? 'test-delivery-webhook-token',
 });
 
 const SAFE_TEST_DESTINATION = '0000000000000';
 
 const logger = { info: vi.fn(), error: vi.fn() };
+
+const deliveryWebhookHttpClient: HttpClient = async () =>
+  new Response(
+    JSON.stringify({
+      enabled: true,
+      url: 'http://host.docker.internal:3333/whatsapp/events/messages.update',
+      events: ['MESSAGES_UPDATE'],
+      headers: { authorization: 'Bearer test-delivery-webhook-token' },
+      byEvents: false,
+      base64: false,
+    }),
+    { status: 200 },
+  );
 
 const createInfrastructure = () => ({
   connection: {} as never,
@@ -87,15 +105,26 @@ const createPrismaMock = (
     whatsAppDestination: {},
     whatsAppDispatch: {
       findUnique: vi.fn(async () => dispatch),
+      findUniqueOrThrow: vi.fn(async () => dispatch),
       updateMany: vi.fn(
-        async ({ where }: { where: { status?: string } }) => {
+        async ({
+          where,
+          data,
+        }: {
+          where: { status?: string };
+          data?: { status?: string; attemptCount?: unknown };
+        }) => {
           if (where.status && dispatch.status !== where.status) {
             return { count: 0 };
           }
           dispatch = {
             ...dispatch,
-            status: 'PROCESSING',
-            attemptCount: dispatch.attemptCount + 1,
+            ...(data ?? {}),
+            ...(data?.status ? { status: data.status } : {}),
+            attemptCount:
+              typeof data?.attemptCount === 'object'
+                ? dispatch.attemptCount + 1
+                : dispatch.attemptCount,
           };
           return { count: 1 };
         },
@@ -138,7 +167,10 @@ const bootstrapProvider = async (
 
   await startWorker(legacyWorkerConfig(config), {
     logger,
-    providerFactoryOptions,
+    providerFactoryOptions: {
+      deliveryWebhookHttpClient,
+      ...providerFactoryOptions,
+    },
     infrastructureFactory: () => infrastructure,
     workerFactory,
   });
@@ -253,7 +285,7 @@ describe('WhatsApp provider worker bootstrap', () => {
 
     await expect(
       processDispatch(createPrismaMock(), provider),
-    ).resolves.toMatchObject({ status: 'SENT' });
+    ).resolves.toMatchObject({ status: 'SUBMITTED' });
     expect(provider).toBeInstanceOf(MockWhatsAppProvider);
     expect(workerFactory).toHaveBeenCalledTimes(1);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -365,6 +397,7 @@ describe('WhatsApp provider worker bootstrap', () => {
     await startWorker(legacyWorkerConfig(config), {
       logger,
       providerFactory,
+      providerFactoryOptions: { deliveryWebhookHttpClient },
       infrastructureFactory: () => infrastructure,
       workerFactory: (_redisUrl, options) => {
         resolver = options.whatsAppProviderResolver;
@@ -404,7 +437,7 @@ describe('whatsapp-dispatch worker provider integration', () => {
     await expect(
       processDispatch(createPrismaMock(), provider),
     ).resolves.toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       externalMessageId: 'mock-whatsapp-1',
     });
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -433,7 +466,7 @@ describe('whatsapp-dispatch worker provider integration', () => {
         provider,
       ),
     ).resolves.toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       externalMessageId: 'evolution-message-1',
     });
     expect(httpClient).toHaveBeenCalledTimes(1);
@@ -482,7 +515,7 @@ describe('whatsapp-dispatch worker provider integration', () => {
         createPrismaMock('PENDING', SAFE_TEST_DESTINATION),
         provider,
       ),
-    ).resolves.toMatchObject({ status: 'SENT' });
+    ).resolves.toMatchObject({ status: 'SUBMITTED' });
     await expect(
       processDispatch(
         createPrismaMock('PENDING', SAFE_TEST_DESTINATION),

@@ -631,8 +631,10 @@ export const createWhatsAppDispatchWorker = (
             promotionCandidates: repositories.commercialPromotions,
             manualLifecycleFinalizer,
             logger: {
-              info: (obj, message) => workerLogger.info(obj, message),
-              error: (obj, message) => workerLogger.error(obj, message),
+              info: (obj: unknown, message?: string) =>
+                workerLogger.info(obj, message),
+              error: (obj: unknown, message?: string) =>
+                workerLogger.error(obj, message),
             },
           })
         : (() => {

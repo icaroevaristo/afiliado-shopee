@@ -15,6 +15,7 @@ const INSTANCE = 'test-instance';
 const groupDestination = (
   overrides: Partial<WhatsAppDispatchDetails['destination']> = {},
 ): WhatsAppDispatchDetails['destination'] => ({
+  name: overrides.name ?? 'Grupo de teste',
   destination: GROUP_ID,
   type: 'GROUP',
   active: true,
@@ -39,9 +40,15 @@ describe('WhatsAppGroupSendPolicy', () => {
         enabled: false,
         safeMode: false,
       }).assertAuthorized({
+        name: 'Destino individual',
         destination: '1000000000000',
         type: 'INDIVIDUAL',
         active: true,
+        paused: false,
+        available: true,
+        fingerprint: null,
+        sourceInstanceName: null,
+        assignedInstanceName: null,
       }),
     ).not.toThrow();
   });

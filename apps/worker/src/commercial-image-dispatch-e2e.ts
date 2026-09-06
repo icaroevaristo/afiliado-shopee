@@ -620,6 +620,7 @@ export const createRealCommercialImageDispatchE2ERuntime = async (
           'COMMERCIAL_E2E_WORKER_ALREADY_STARTED',
         );
       }
+      await provider.assertReady?.();
       worker = createWhatsAppDispatchWorker(config.REDIS_URL, {
         connection: redis,
         prisma,

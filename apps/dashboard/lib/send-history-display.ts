@@ -25,7 +25,7 @@ export const SEND_HISTORY_FILTERS: Array<{
   { value: 'SENT', label: 'Confirmados pelo servidor' },
   { value: 'DELIVERED', label: 'Entregues' },
   { value: 'READ', label: 'Lidos' },
-  { value: 'PENDING', label: 'Aguardando' },
+  { value: 'PENDING', label: 'Enfileirados' },
   { value: 'FAILED', label: 'Com problema' },
   { value: 'PROCESSING', label: 'Em processamento' },
   { value: 'AMBIGUOUS', label: 'Precisa de investigação' },
@@ -67,8 +67,8 @@ export function presentSendHistoryStatus(
       };
     case 'PENDING':
       return {
-        label: 'Aguardando confirmação',
-        description: 'Ainda não há confirmação de publicação para este envio.',
+        label: 'Enfileirado',
+        description: 'O envio aguarda processamento controlado.',
         tone: 'warning',
       };
     case 'PROCESSING':

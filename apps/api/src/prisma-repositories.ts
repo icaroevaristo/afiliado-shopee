@@ -5456,7 +5456,7 @@ export class PrismaManualPublicationRequestRepository implements ManualPublicati
           reason: 'MANUAL_PUBLICATION_TARGET_CONFLICT',
         };
       }
-      const sentWhere = {
+      const sentWhere: Prisma.WhatsAppDispatchWhereInput = {
         status: { in: ['SENT', 'DELIVERED', 'READ'] },
         sentAt: { gte: input.dayStartsAt, lt: input.dayEndsAt },
         destination: { type: 'GROUP' as const },
@@ -6371,7 +6371,7 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
     dayStartsAt: Date;
     dayEndsAt: Date;
   }) {
-    const sentDuringDay = {
+    const sentDuringDay: Prisma.WhatsAppDispatchWhereInput = {
       status: { in: ['SENT', 'DELIVERED', 'READ'] },
       sentAt: { gte: dayStartsAt, lt: dayEndsAt },
       destination: { type: 'GROUP' as const },
@@ -6404,13 +6404,24 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
           })
         : Promise.resolve(null),
     ]);
+    const countDispatches = (row: (typeof countsByGroup)[number]) => {
+      const count = row._count;
+      if (!count || typeof count._all !== 'number') {
+        throw new AppError(
+          'Contagem de dispatches comerciais indisponivel',
+          'COMMERCIAL_AUTOMATION_HISTORY_COUNT_INVALID',
+        );
+      }
+      return count._all;
+    };
     const globalSentToday = countsByGroup.reduce(
-      (total, row) => total + row._count._all,
+      (total, row) => total + countDispatches(row),
       0,
     );
     const groupSentToday = groupId
-      ? (countsByGroup.find((row) => row.destinationId === groupId)?._count
-          ._all ?? 0)
+      ? countsByGroup
+          .filter((row) => row.destinationId === groupId)
+          .reduce((total, row) => total + countDispatches(row), 0)
       : 0;
     return {
       globalSentToday,
@@ -8711,7 +8722,7 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
         return { kind: 'NOOP' as const, dispatch: (await readCurrent()).dispatch };
       }
 
-      const transition =
+      const transition: Prisma.WhatsAppDispatchUpdateManyArgs | null =
         input.status === 'SERVER_ACK' && current.status === 'SUBMITTED'
           ? {
               where: {

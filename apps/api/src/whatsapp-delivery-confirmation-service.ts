@@ -9,6 +9,7 @@ import type {
   CommercialPipelineRunRepository,
   CommercialPromotionCandidateRepository,
   WhatsAppDeliveryEventInboxRepository,
+  WhatsAppDeliveryEventApplyResult,
   WhatsAppDeliveryEventInput,
   WhatsAppDeliveryEventReplay,
   WhatsAppDeliveryEventStatus,
@@ -57,6 +58,11 @@ const eventWasApplied = (result: WhatsAppDeliveryEventReplay['result']) =>
 const eventIsAmbiguous = (result: WhatsAppDeliveryEventReplay['result']) =>
   result.kind === 'AMBIGUOUS' ||
   (result.kind === 'NOOP' && !result.dispatch);
+
+const hasDeliveryDispatch = (
+  result: WhatsAppDeliveryEventApplyResult,
+): result is Extract<WhatsAppDeliveryEventApplyResult, { dispatch: WhatsAppDispatchRecord }> =>
+  'dispatch' in result && result.dispatch !== undefined;
 
 /**
  * Persists Evolution MESSAGES_UPDATE transitions. The repository applies a
@@ -112,7 +118,7 @@ export class WhatsAppDeliveryConfirmationService {
     }
 
     if (
-      result.kind !== 'AMBIGUOUS' &&
+      (result.kind === 'UPDATED' || result.kind === 'NOOP') &&
       result.dispatch &&
       isTerminalOrConfirmed(result.dispatch.status)
     ) {
@@ -124,7 +130,7 @@ export class WhatsAppDeliveryConfirmationService {
 
     await this.dependencies.deliveryEvents.markProcessed({
       fingerprint: inboxRecord.fingerprint,
-      state: eventIsAmbiguous({ fingerprint: inboxRecord.fingerprint, result })
+      state: eventIsAmbiguous(result)
         ? 'AMBIGUOUS'
         : eventWasApplied(result)
           ? 'APPLIED'
@@ -163,7 +169,10 @@ export class WhatsAppDeliveryConfirmationService {
       [];
     const dispatchesToFinalize = new Map<string, WhatsAppDispatchRecord>();
     for (const replay of replayed) {
-      if (replay.result.dispatch && isTerminalOrConfirmed(replay.result.dispatch.status)) {
+      if (
+        hasDeliveryDispatch(replay.result) &&
+        isTerminalOrConfirmed(replay.result.dispatch.status)
+      ) {
         dispatchesToFinalize.set(replay.result.dispatch.id, replay.result.dispatch);
       }
     }
@@ -174,7 +183,7 @@ export class WhatsAppDeliveryConfirmationService {
     for (const replay of replayed) {
       await this.dependencies.deliveryEvents.markProcessed({
         fingerprint: replay.fingerprint,
-        state: eventIsAmbiguous(replay)
+        state: eventIsAmbiguous(replay.result)
           ? 'AMBIGUOUS'
           : eventWasApplied(replay.result)
             ? 'APPLIED'

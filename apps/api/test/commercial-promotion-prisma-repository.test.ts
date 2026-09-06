@@ -324,7 +324,9 @@ class PromotionPrismaFake {
           .filter(
             (dispatch) =>
               where.productId.in.includes(dispatch.productId) &&
-              dispatch.status === where.status &&
+              (typeof where.status === 'string'
+                ? dispatch.status === where.status
+                : where.status.in.includes(dispatch.status)) &&
               dispatch.sentAt instanceof Date &&
               dispatch.sentAt >= where.sentAt.gte &&
               dispatch.type === where.destination.type &&
@@ -336,7 +338,9 @@ class PromotionPrismaFake {
           this.state.dispatches.find(
             (dispatch) =>
               where.productId.in.includes(dispatch.productId) &&
-              dispatch.status === where.status &&
+              (typeof where.status === 'string'
+                ? dispatch.status === where.status
+                : where.status.in.includes(dispatch.status)) &&
               dispatch.sentAt instanceof Date &&
               dispatch.sentAt >= where.sentAt.gte &&
               dispatch.type === where.destination.type &&

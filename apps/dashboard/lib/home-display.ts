@@ -79,7 +79,7 @@ export function translateHomeDispatchStatus(status: string | null | undefined): 
     case 'PROCESSING':
       return 'Em processamento';
     case 'PENDING':
-      return 'Aguardando confirmação';
+      return 'Enfileirado';
     case 'FAILED':
       return 'Não realizado';
     case 'AMBIGUOUS':

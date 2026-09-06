@@ -563,11 +563,18 @@ describe('controlled BullMQ job and isolated worker', () => {
         prisma: {
           whatsAppDispatch: {
             findUnique: vi.fn(async () => dispatch),
-            updateMany: vi.fn(async () => {
+            findUniqueOrThrow: vi.fn(async () => dispatch),
+            updateMany: vi.fn(async ({ data }) => {
               dispatch = {
                 ...dispatch,
-                status: 'PROCESSING',
-                attemptCount: dispatch.attemptCount + 1,
+                ...data,
+                ...(typeof data.status === 'string'
+                  ? { status: data.status }
+                  : {}),
+                attemptCount:
+                  typeof data.attemptCount === 'object'
+                    ? dispatch.attemptCount + 1
+                    : dispatch.attemptCount,
               };
               return { count: 1 };
             }),
@@ -589,7 +596,7 @@ describe('controlled BullMQ job and isolated worker', () => {
       message: WHATSAPP_DISPATCH_E2E_MESSAGE,
     });
     expect(result).toMatchObject({
-      status: 'SENT',
+      status: 'SUBMITTED',
       attemptCount: 1,
       externalMessageId: 'external-message-present',
     });
@@ -644,7 +651,6 @@ describe('dispatch API lookup', () => {
       status: 'SENT',
       attemptCount: 1,
       sentAt: expect.any(String),
-      externalMessageId: 'external-message-present',
       product: { nome: 'E2E TEST — Produto controlado' },
       generatedCopy: { titulo: 'Teste E2E controlado' },
       destination: { destination: maskEvolutionDestination(DESTINATION) },

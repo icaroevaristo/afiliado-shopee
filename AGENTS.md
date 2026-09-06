@@ -272,6 +272,18 @@ Dependencias:
 - Consumer autenticado `POST /whatsapp/events/messages.update` e endpoint
   operacional autenticado de expiração de confirmações; ambos são idempotentes
   e não iniciam envio.
+- Evolution 2.3.7 usa webhook por instância com `MESSAGES_UPDATE`, URL
+  host-only `http://host.docker.internal:<porta>/whatsapp/events/messages.update`
+  e `Authorization: Bearer` dedicado. Antes de qualquer request de envio, o
+  provider lê/configura/rele a integração; URL, evento, formato e token
+  divergentes falham fechados sem iniciar SEND. A rota não aceita
+  `LOCAL_API_AUTH_TOKEN` como substituto do token dedicado.
+  A porta da callback deve ser exatamente `PORT` da API (`3333` por padrão)
+  quando o provider é criado pelo runtime.
+  O `MockWhatsAppProvider` somente devolve o ACK HTTP com `externalMessageId`,
+  mantendo o dispatch em `SUBMITTED`; nunca inventa `MESSAGES_UPDATE`. A prova
+  de reachability usa o `WebhookController.emit` compilado da imagem oficial,
+  configurado apenas por monitor e Prisma falsos em memória, sem SEND.
 
 Proximos passos previstos:
 

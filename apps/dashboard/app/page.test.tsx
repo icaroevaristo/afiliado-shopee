@@ -256,7 +256,9 @@ describe('OverviewPage', () => {
     await flush();
 
     expect(screen.container.textContent).toContain('Aguardando confirmação');
-    expect(screen.container.textContent).toContain('Há um envio aguardando confirmação.');
+    expect(screen.container.textContent).toContain(
+      'Há um envio aguardando confirmação do provedor.',
+    );
     const sendStage = Array.from(screen.container.querySelectorAll('.ops-home-journey-stage')).find(
       (stage) => stage.querySelector('.ops-home-journey-label')?.textContent === 'Envio',
     );

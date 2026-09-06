@@ -213,9 +213,9 @@ export const createPipelineProductWorker = (
         runs: repositories.commercialRuns,
         promotionCandidates: repositories.commercialPromotions,
         logger: {
-          info: (obj, message) =>
+          info: (obj: unknown, message?: string) =>
             workerLogger.info(obj, message),
-          error: (obj, message) =>
+          error: (obj: unknown, message?: string) =>
             workerLogger.error(obj, message),
         },
         manualLifecycleFinalizer,
@@ -440,6 +440,7 @@ export const startWorker = async (
       ...options.providerFactoryOptions,
       logger,
     });
+    await whatsAppProvider.assertReady?.();
     const groupSendPolicy = new WhatsAppGroupSendPolicy({
       enabled: config.WHATSAPP_GROUP_SEND_ENABLED,
       safeMode: config.EVOLUTION_SAFE_MODE,
