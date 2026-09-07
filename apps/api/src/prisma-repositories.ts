@@ -68,7 +68,7 @@ import type {
   CommercialPreparedMessageClaimInput,
   CommercialPreparedMessageCreateInput,
   CommercialPreparedMessageHandoffInput,
-  CommercialPreparedMessageHandoffResult,
+  CommercialPreparedMessageHandoffOutcome,
   CommercialPreparedMessageRecord,
   CommercialPreparedMessageRepository,
   ManualPublicationAcceptance,
@@ -7469,12 +7469,13 @@ export class PrismaCommercialPreparedMessageRepository
 
   async handoff(
     input: CommercialPreparedMessageHandoffInput,
-  ): Promise<CommercialPreparedMessageHandoffResult | null> {
+  ): Promise<CommercialPreparedMessageHandoffOutcome> {
     if (input.leaseExpiresAt.getTime() <= input.now.getTime()) {
-      throw new AppError(
-        'Lease da mensagem preparada deve permanecer no futuro',
-        'COMMERCIAL_PREPARED_HANDOFF_LEASE_INVALID',
-      );
+      return {
+        outcome: 'PRECOMMIT_REJECTED',
+        reason: 'COMMERCIAL_PREPARED_HANDOFF_LEASE_INVALID',
+        rollbackConfirmed: true,
+      };
     }
     const runId = `commercial-prepared-${input.preparedId}-run`;
     const dispatchId = `commercial-prepared-${input.preparedId}-dispatch`;
@@ -7482,7 +7483,7 @@ export class PrismaCommercialPreparedMessageRepository
     const outboxId = `commercial-prepared-${input.preparedId}-outbox`;
 
     try {
-      return await this.prisma.$transaction(
+      const committed = await this.prisma.$transaction(
         async (transaction) => {
           const campaignLock = await transaction.$queryRaw<Array<{ id: string }>>(
             Prisma.sql`
@@ -7492,7 +7493,12 @@ export class PrismaCommercialPreparedMessageRepository
               FOR UPDATE
             `,
           );
-          if (campaignLock.length !== 1) return null;
+          if (campaignLock.length !== 1) {
+            throw new AppError(
+              'Campaign do handoff preparado nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
 
           const preparedLock = await transaction.$queryRaw<Array<{ id: string }>>(
             Prisma.sql`
@@ -7502,7 +7508,12 @@ export class PrismaCommercialPreparedMessageRepository
               FOR UPDATE
             `,
           );
-          if (preparedLock.length !== 1) return null;
+          if (preparedLock.length !== 1) {
+            throw new AppError(
+              'Mensagem preparada nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
 
           const prepared = await transaction.commercialPreparedMessage.findUnique({
             where: { id: input.preparedId },
@@ -7515,7 +7526,12 @@ export class PrismaCommercialPreparedMessageRepository
               instance: true,
             },
           });
-          if (!prepared) return null;
+          if (!prepared) {
+            throw new AppError(
+              'Mensagem preparada nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
 
           const expectedScheduleRevision =
             input.scheduleRevision ?? prepared.scheduleRevision;
@@ -7716,7 +7732,12 @@ export class PrismaCommercialPreparedMessageRepository
               attemptLeaseExpiresAt: true,
             },
           });
-          if (!campaign) return null;
+          if (!campaign) {
+            throw new AppError(
+              'Campaign do handoff preparado nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
           if (
             campaign.attemptExecutionId &&
             campaign.attemptExecutionId !== input.executionId
@@ -7870,15 +7891,33 @@ export class PrismaCommercialPreparedMessageRepository
         },
         { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
       );
+      return { outcome: 'HANDOFF_COMMITTED', handoff: committed };
     } catch (error) {
-      if (isTransactionConflictError(error)) return null;
-      if (isUniqueConstraintError(error)) {
-        throw new AppError(
-          'Handoff preparado encontrou identidade duplicada',
-          'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
-        );
+      if (error instanceof AppError) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: error.code,
+          rollbackConfirmed: true,
+        };
       }
-      throw error;
+      if (isTransactionConflictError(error)) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_PREPARED_HANDOFF_TRANSACTION_CONFLICT',
+          rollbackConfirmed: true,
+        };
+      }
+      if (isUniqueConstraintError(error)) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
+          rollbackConfirmed: true,
+        };
+      }
+      return {
+        outcome: 'OUTCOME_UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+      };
     }
   }
 

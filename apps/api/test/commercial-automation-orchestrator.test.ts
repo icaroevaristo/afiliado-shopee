@@ -33,6 +33,23 @@ import type {
   CommercialAutomationTarget,
 } from '../src/repositories';
 
+type TestPreparedConfirmationOutcome =
+  | {
+      outcome: 'PRECOMMIT_REJECTED';
+      reason: string;
+      rollbackConfirmed: true;
+    }
+  | {
+      outcome: 'OUTCOME_UNKNOWN';
+      failureCode: string;
+    }
+  | {
+      outcome: 'HANDOFF_COMMITTED';
+      handoff: { runId: string };
+      publication: 'PUBLISHED';
+      result?: { runId: string };
+    };
+
 const NOW = new Date('2026-07-26T15:00:00.000Z');
 
 class MemoryExecutions implements CommercialAutomationExecutionRepository {
@@ -249,6 +266,7 @@ const createSubject = ({
   preparedInventoryOverride,
   policyOverride,
   clock,
+  preparedConfirmationOutcomes,
 }: {
   withCandidateFlow?: boolean;
   targets?: CommercialAutomationTarget[];
@@ -263,6 +281,7 @@ const createSubject = ({
     'evaluateAutomationReadiness'
   >;
   clock?: () => Date;
+  preparedConfirmationOutcomes?: TestPreparedConfirmationOutcome[];
 } = {}) => {
   const resolvedTargets: CommercialAutomationTarget[] = targets ?? [
     {
@@ -403,9 +422,19 @@ const createSubject = ({
   };
   const confirmation = {
     confirm: vi.fn(async () => ({ status: 'queued' })),
-    confirmPrepared: vi.fn(async (input: { preparedId: string }) => ({
-      runId: `commercial-prepared-${input.preparedId}-run`,
-    })),
+    confirmPrepared: vi.fn(async (input: { preparedId: string }) => {
+      const configuredOutcome = preparedConfirmationOutcomes?.shift();
+      return (
+        configuredOutcome ?? {
+          outcome: 'HANDOFF_COMMITTED' as const,
+          handoff: {
+            runId: `commercial-prepared-${input.preparedId}-run`,
+          },
+          publication: 'PUBLISHED' as const,
+          result: { runId: `commercial-prepared-${input.preparedId}-run` },
+        }
+      );
+    }),
   };
   const commercialRuns = {
     findById: vi.fn(
@@ -1172,6 +1201,156 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
     expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
     expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
+  it('invalida rejeicao pre-commit do handoff e tenta o proximo READY no mesmo slot', async () => {
+    const preparedMessage = (suffix: string) => ({
+      id: `prepared-message-${suffix}`,
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: `candidate-${suffix}`,
+      snapshotId: `snapshot-${suffix}`,
+      generatedCopyId: `copy-${suffix}`,
+      copyPreview: `copy ${suffix}`,
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const candidateX = preparedMessage('x');
+    const candidateY = preparedMessage('y');
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async () => [candidateX, candidateY][claimIndex++] ?? null),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      preparedConfirmationOutcomes: [
+        {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+          rollbackConfirmed: true,
+        },
+        {
+          outcome: 'HANDOFF_COMMITTED',
+          handoff: { runId: `commercial-prepared-${candidateY.id}-run` },
+          publication: 'PUBLISHED',
+          result: { runId: `commercial-prepared-${candidateY.id}-run` },
+        },
+      ],
+    });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'precommit-rejection-replacement',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result).toMatchObject({
+      status: 'queued',
+      commercialRunId: `commercial-prepared-${candidateY.id}-run`,
+    });
+    expect(preparedInventory.claimReady).toHaveBeenCalledTimes(2);
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledWith({
+      id: candidateX.id,
+      ownerId: 'execution-1',
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      now: NOW,
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledTimes(2);
+    expect(subject.confirmation.confirmPrepared).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ preparedId: candidateX.id }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.confirmation.confirmPrepared).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ preparedId: candidateY.id }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.executions.records[0]).toMatchObject({
+      status: 'QUEUED',
+      commercialRunId: `commercial-prepared-${candidateY.id}-run`,
+    });
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
+  it('preserva handoff com resultado desconhecido como AMBIGUOUS sem liberar o claim', async () => {
+    const preparedMessage = {
+      id: 'prepared-message-unknown',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-unknown',
+      snapshotId: 'snapshot-unknown',
+      generatedCopyId: 'copy-unknown',
+      copyPreview: 'copy unknown',
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const preparedInventory = {
+      claimReady: vi.fn(async () => preparedMessage),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      preparedConfirmationOutcomes: [
+        {
+          outcome: 'OUTCOME_UNKNOWN',
+          failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+        },
+      ],
+    });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'unknown-handoff-outcome',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result).toMatchObject({
+      status: 'ambiguous',
+      commercialRunId: null,
+    });
+    expect(subject.executions.records[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(subject.commercialRuns.findById).not.toHaveBeenCalled();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(preparedInventory.invalidateReserved).not.toHaveBeenCalled();
   });
 
   it('invalida prepared incompatível e substitui pelo próximo READY no mesmo slot', async () => {

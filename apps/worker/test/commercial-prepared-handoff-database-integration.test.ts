@@ -634,8 +634,11 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
       },
     });
 
-    await expect(prepared.handoff?.(handoffInput(ready.id))).rejects.toMatchObject({
-      code: 'COMMERCIAL_PREPARED_HANDOFF_PRODUCT_ALREADY_SENT',
+    const competingHandoff = await prepared.handoff?.(handoffInput(ready.id));
+    expect(competingHandoff).toEqual({
+      outcome: 'PRECOMMIT_REJECTED',
+      reason: 'COMMERCIAL_PREPARED_HANDOFF_PRODUCT_ALREADY_SENT',
+      rollbackConfirmed: true,
     });
     expect(
       await prisma.commercialPreparedMessage.findUnique({
@@ -687,7 +690,18 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
     if (!fencedHandoff) throw new Error('prepared handoff method is unavailable');
     releaseNicheUpdate();
     await concurrentPolicyUpdate;
-    await expect(fencedHandoff).resolves.toBeNull();
+    const fencedOutcome = await fencedHandoff;
+    expect(fencedOutcome).toMatchObject({
+      outcome: 'PRECOMMIT_REJECTED',
+      rollbackConfirmed: true,
+    });
+    if (fencedOutcome.outcome !== 'PRECOMMIT_REJECTED') {
+      throw new Error('fenced handoff unexpectedly became unknown');
+    }
+    expect([
+      'COMMERCIAL_PREPARED_HANDOFF_TRANSACTION_CONFLICT',
+      'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    ]).toContain(fencedOutcome.reason);
     expect(
       await prisma.commercialPreparedMessage.findUnique({
         where: { id: ready.id },
@@ -771,28 +785,42 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
         handoffInput(ready.id),
         COMMERCIAL_CONFIRMATION_TOKEN,
       );
-      const handoff = await prepared.handoff?.(handoffInput(ready.id));
+      expect(confirmed).toMatchObject({
+        outcome: 'HANDOFF_COMMITTED',
+        publication: 'PUBLISHED',
+      });
+      if (confirmed.outcome !== 'HANDOFF_COMMITTED') {
+        throw new Error('confirmation did not produce a durable handoff');
+      }
+      const handoff = confirmed.handoff;
       expect(handoff).toMatchObject({
         candidateId: IDS.candidate,
         generatedCopyId: IDS.copy,
         dispatchId: `commercial-prepared-${ready.id}-dispatch`,
         jobId: `commercial-prepared-${ready.id}-job`,
       });
-      if (!handoff) throw new Error('handoff did not produce a durable outbox');
       expect(confirmed).toMatchObject({
-        runId: handoff.runId,
-        outboxId: handoff.outbox.id,
-        dispatchWasCreated: true,
-        jobWasCreated: true,
+        handoff: { runId: handoff.runId, outbox: { id: handoff.outbox.id } },
+        result: {
+          runId: handoff.runId,
+          outboxId: handoff.outbox.id,
+          dispatchWasCreated: true,
+          jobWasCreated: true,
+        },
       });
       const repeated = await confirmationService.confirmPrepared(
         handoffInput(ready.id),
         COMMERCIAL_CONFIRMATION_TOKEN,
         { deferPublication: true },
       );
+      if (repeated.outcome !== 'HANDOFF_COMMITTED') {
+        throw new Error('repeated handoff did not remain durable');
+      }
       expect(repeated).toMatchObject({
-        runId: handoff.runId,
-        outboxId: handoff.outbox.id,
+        outcome: 'HANDOFF_COMMITTED',
+        publication: 'NOT_ATTEMPTED',
+        handoff: { runId: handoff.runId, outbox: { id: handoff.outbox.id } },
+        result: { runId: handoff.runId, outboxId: handoff.outbox.id },
       });
 
       const publishedJob = await dispatchQueue.getJob(handoff.jobId);

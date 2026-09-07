@@ -945,6 +945,21 @@ export type CommercialPreparedMessageHandoffResult = {
   generatedCopyId: string;
 };
 
+export type CommercialPreparedMessageHandoffOutcome =
+  | {
+      outcome: 'PRECOMMIT_REJECTED';
+      reason: string;
+      rollbackConfirmed: true;
+    }
+  | {
+      outcome: 'HANDOFF_COMMITTED';
+      handoff: CommercialPreparedMessageHandoffResult;
+    }
+  | {
+      outcome: 'OUTCOME_UNKNOWN';
+      failureCode: string;
+    };
+
 export interface CommercialPreparedMessageRepository {
   countReady(input: {
     campaignId: string;
@@ -989,7 +1004,7 @@ export interface CommercialPreparedMessageRepository {
   ): Promise<CommercialPreparedMessageRecord | null>;
   handoff?(
     input: CommercialPreparedMessageHandoffInput,
-  ): Promise<CommercialPreparedMessageHandoffResult | null>;
+  ): Promise<CommercialPreparedMessageHandoffOutcome>;
   markDispatched(input: {
     id: string;
     ownerId: string;
