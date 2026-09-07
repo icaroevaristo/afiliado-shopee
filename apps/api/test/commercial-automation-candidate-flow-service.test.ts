@@ -293,8 +293,9 @@ const createSubject = (input: {
   let currentCandidate = candidateRecord(input.candidate);
   const currentCampaign = campaign(input.campaign);
   const currentGroup = group(input.group);
+  const currentNiche = { ...(input.niche ?? {}) };
   const currentContext = () =>
-    context(currentCandidate, input.product, input.niche);
+    context(currentCandidate, input.product, currentNiche);
   const copyRecord = copy();
   const queue = queueItem(currentCandidate);
   const listAll = vi.fn(async () => [currentGroup]);
@@ -493,11 +494,15 @@ const createSubject = (input: {
     mining,
     deliveryHistory,
     pipeline,
+    niche: currentNiche,
     setCampaign: (value: Partial<CommercialGroupCampaignRecord>) => {
       Object.assign(currentCampaign, value);
     },
     setCandidate: (value: Partial<CommercialPromotionCandidateRecord>) => {
       currentCandidate = candidateRecord(value);
+    },
+    setNiche: (value: Partial<CommercialNicheRecord>) => {
+      Object.assign(currentNiche, value);
     },
   };
 };
@@ -779,6 +784,80 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.mining.mine).not.toHaveBeenCalled();
     expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
+  });
+
+  it('exclui candidate fora da política atual e seleciona o próximo READY local', async () => {
+    const subject = createSubject({
+      candidate: { status: 'QUEUED', generatedCopyId: null },
+    });
+    const first = queueItem({
+      id: 'candidate-x',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 1,
+    });
+    const second = queueItem({
+      id: 'candidate-y',
+      status: 'QUEUED',
+      generatedCopyId: null,
+      rankPosition: 2,
+    });
+    let maxPrice: string | null = null;
+    subject.candidates.listQueue.mockResolvedValue({
+      items: [first, second],
+      total: 2,
+    });
+    subject.copies.loadContext.mockImplementation(async (candidateId: string) =>
+      (() => {
+        const price = candidateId === first.id ? '100.00' : '40.00';
+        const current = context(
+          {
+            id: candidateId,
+            status: 'QUEUED',
+            generatedCopyId: null,
+            rankPosition: candidateId === first.id ? 1 : 2,
+          },
+          { price },
+          { maxPrice },
+        );
+        const fingerprint = fingerprintCommercialOffer({
+          source: 'OFFICIAL',
+          providerProductId: PROVIDER_PRODUCT_ID,
+          productLink: PRODUCT_LINK,
+          affiliateLink: AFFILIATE_LINK,
+          price,
+          priceMin: null,
+          priceMax: null,
+          discountRate: 20,
+          commissionRate: 10,
+          offerStartsAt: null,
+          offerEndsAt: new Date('2026-08-09T12:00:00.000Z'),
+          unavailableAt: null,
+        });
+        current.product.commercialSnapshotFingerprint = fingerprint;
+        current.snapshot.fingerprint = fingerprint;
+        return current;
+      })(),
+    );
+
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: first.id,
+    });
+
+    maxPrice = '50';
+    await expect(subject.service.preflight(subject.target)).resolves.toMatchObject({
+      outcome: 'READY',
+      candidateId: second.id,
+      queue: {
+        usableCount: 1,
+        rejectionSummary: {
+          COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED: 1,
+        },
+      },
+    });
+    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.mining.mine).not.toHaveBeenCalled();
   });
 
   it('fixa C1 do preflight e falha sem selecionar C2 quando C1 fica invalido', async () => {
@@ -2018,7 +2097,10 @@ describe('CommercialAutomationCandidateFlowService', () => {
       preparationOptions,
     );
 
-    await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
+    await expect(subject.service.revalidate(prepared)).resolves.toEqual({
+      nicheId: subject.target.nicheId,
+      nicheUpdatedAt: NOW,
+    });
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledOnce();
   });
 
@@ -2028,14 +2110,29 @@ describe('CommercialAutomationCandidateFlowService', () => {
     { field: 'includeKeywords', niche: { includeKeywords: ['inexistente'] } },
     { field: 'minimumScore', niche: { minimumScore: 90 } },
   ])('bloqueia revalidacao quando a politica do nicho muda em $field', async ({ niche }) => {
-    const subject = createSubject({ niche });
+    const subject = createSubject();
     const prepared = await subject.service.prepare(
       selection(subject.target),
       preparationOptions,
     );
+    subject.setNiche(niche);
 
     await expect(subject.service.revalidate(prepared)).rejects.toMatchObject({
       code: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    });
+  });
+
+  it('mantém candidate compatível quando o minimumScore atual fica menos restritivo', async () => {
+    const subject = createSubject();
+    const prepared = await subject.service.prepare(
+      selection(subject.target),
+      preparationOptions,
+    );
+    subject.setNiche({ minimumScore: 50 });
+
+    await expect(subject.service.revalidate(prepared)).resolves.toEqual({
+      nicheId: subject.target.nicheId,
+      nicheUpdatedAt: NOW,
     });
   });
 

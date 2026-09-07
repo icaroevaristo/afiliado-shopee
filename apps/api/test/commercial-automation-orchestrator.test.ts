@@ -5,6 +5,7 @@ import {
   COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED,
   COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED,
   COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED,
+  COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE,
   COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED,
   CommercialAutomationOrchestrator,
 } from '../src/commercial-automation-orchestrator';
@@ -15,6 +16,7 @@ import {
   type CommercialAutomationCandidateAttemptReservationResult,
   type CommercialAutomationCandidateSelection,
   type CommercialAutomationCandidatePreflight,
+  type CommercialAutomationCandidatePolicyFence,
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
@@ -339,7 +341,16 @@ const createSubject = ({
         nicheId: target.nicheId,
       };
     }),
-    revalidate: vi.fn(async () => undefined),
+    revalidate: vi.fn<
+      (input: {
+        candidateId: string;
+        generatedCopyId: string;
+        campaignId: string;
+        groupId: string;
+        logicalGroupFingerprint?: string;
+        nicheId?: string;
+      }) => Promise<CommercialAutomationCandidatePolicyFence>
+    >(async () => ({ nicheId: 'niche-1', nicheUpdatedAt: NOW })),
     reserveAttempt: vi.fn<
       (
         target: CommercialAutomationTarget,
@@ -1084,6 +1095,7 @@ describe('CommercialAutomationOrchestrator', () => {
       claimReady: vi.fn(async () => null),
       markDispatched: vi.fn(async () => false),
       release: vi.fn(async () => false),
+      invalidateReserved: vi.fn(async () => false),
     };
     const subject = createSubject({ preparedInventoryOverride: preparedInventory });
 
@@ -1131,6 +1143,7 @@ describe('CommercialAutomationOrchestrator', () => {
       claimReady: vi.fn(async () => preparedMessage),
       markDispatched: vi.fn(async () => true),
       release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => false),
     };
     const subject = createSubject({ preparedInventoryOverride: preparedInventory });
 
@@ -1159,6 +1172,163 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
     expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
     expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
+  it('invalida prepared incompatível e substitui pelo próximo READY no mesmo slot', async () => {
+    const preparedMessage = (suffix: string) => ({
+      id: `prepared-message-${suffix}`,
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: `candidate-${suffix}`,
+      snapshotId: `snapshot-${suffix}`,
+      generatedCopyId: `copy-${suffix}`,
+      copyPreview: `copy ${suffix}`,
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const candidateX = preparedMessage('x');
+    const candidateY = preparedMessage('y');
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async (input: { ownerId: string; instanceName: string }) => {
+        expect(input.ownerId).toBe('execution-1');
+        expect(input.instanceName).toBe('affiliate-bot');
+        const claimed = [candidateX, candidateY][claimIndex];
+        claimIndex += 1;
+        return claimed;
+      }),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      targets: [
+        {
+          groupId: 'group-1',
+          groupName: 'Grupo 1',
+          logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+          campaignId: 'campaign-1',
+          nicheId: 'niche-1',
+          instanceName: 'affiliate-bot',
+          dailyLimit: 60,
+        },
+      ],
+    });
+    subject.candidateFlow.revalidate.mockImplementation(async (input) => {
+      if (input.candidateId === candidateX.candidateId) {
+        throw new AppError(
+          'Politica mudou',
+          'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        );
+      }
+      return { nicheId: 'niche-1', nicheUpdatedAt: NOW };
+    });
+
+    const policyReplacementResult = await subject.orchestrator.executeTick({
+        schedulerJobId: 'scheduled-commercial-automation',
+        bullMqJobId: 'policy-replacement-slot',
+        mode: 'send',
+        provider: 'official',
+      });
+    expect(policyReplacementResult).toMatchObject({ status: 'queued' });
+
+    expect(preparedInventory.claimReady).toHaveBeenCalledTimes(2);
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledWith({
+      id: candidateX.id,
+      ownerId: 'execution-1',
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      now: NOW,
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparedId: candidateY.id,
+        executionId: 'execution-1',
+        instanceName: 'affiliate-bot',
+      }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+  });
+
+  it('encerra com motivo explícito quando não existe READY compatível para substituir', async () => {
+    const preparedMessage = {
+      id: 'prepared-message-only',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-only',
+      snapshotId: 'snapshot-only',
+      generatedCopyId: 'copy-only',
+      copyPreview: 'copy',
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async () => {
+        claimIndex += 1;
+        return claimIndex === 1 ? preparedMessage : null;
+      }),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+    subject.candidateFlow.revalidate.mockRejectedValue(
+      new AppError(
+        'Politica mudou',
+        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      ),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        schedulerJobId: 'scheduled-commercial-automation',
+        bullMqJobId: 'policy-replacement-empty',
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: [COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE],
+    });
+
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirmPrepared).not.toHaveBeenCalled();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -1525,6 +1695,7 @@ describe('CommercialAutomationOrchestrator', () => {
     const order: string[] = [];
     subject.candidateFlow.revalidate.mockImplementation(async () => {
       order.push('revalidate');
+      return { nicheId: 'niche-1', nicheUpdatedAt: NOW };
     });
     subject.candidateFlow.renewAttempt.mockImplementation(async (input) => {
       order.push('renew');

@@ -930,6 +930,8 @@ export type CommercialPreparedMessageHandoffInput = {
   logicalGroupFingerprint: string;
   scheduleRevision?: number;
   assignmentRevision?: number;
+  expectedNicheId: string;
+  expectedNicheUpdatedAt: Date;
   now: Date;
   leaseExpiresAt: Date;
 };
@@ -953,6 +955,15 @@ export interface CommercialPreparedMessageRepository {
     assignmentRevision?: number;
     now?: Date;
   }): Promise<number>;
+  listReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
+  }): Promise<CommercialPreparedMessageRecord[]>;
   listProtectedCandidateIds?(input: {
     campaignId: string;
     groupDestinationId: string;
@@ -989,10 +1000,15 @@ export interface CommercialPreparedMessageRepository {
     ownerId: string;
     now: Date;
   }): Promise<boolean>;
-  invalidateReserved?(input: {
+  invalidateReserved(input: {
     id: string;
     ownerId: string;
     reason: string;
+    now: Date;
+  }): Promise<boolean>;
+  invalidateReadyForPolicy(input: {
+    id: string;
+    reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED';
     now: Date;
   }): Promise<boolean>;
   recoverExpired(input: { now: Date; limit: number }): Promise<number>;

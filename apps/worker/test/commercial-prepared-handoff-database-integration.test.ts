@@ -92,6 +92,8 @@ const RACE_SNAPSHOT_FINGERPRINT = fingerprintCommercialOffer({
   unavailableAt: null,
 });
 
+let nicheUpdatedAt: Date;
+
 describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
   const prisma = createPrismaClient(process.env.DATABASE_URL);
   const repositories = createPrismaRepositories(prisma);
@@ -162,6 +164,12 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
         minimumScore: 60,
       },
     });
+    const createdNiche = await prisma.commercialNiche.findUnique({
+      where: { id: IDS.niche },
+      select: { updatedAt: true },
+    });
+    if (!createdNiche) throw new Error('handoff niche fixture was not created');
+    nicheUpdatedAt = createdNiche.updatedAt;
     await prisma.whatsAppInstance.createMany({
       data: [
         { name: INSTANCE_A, active: true, paused: false },
@@ -459,6 +467,8 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
     logicalGroupFingerprint: GROUP_FINGERPRINT,
     scheduleRevision: 1,
     assignmentRevision: 1,
+    expectedNicheId: IDS.niche,
+    expectedNicheUpdatedAt: nicheUpdatedAt,
     now: NOW,
     leaseExpiresAt,
   });
@@ -473,6 +483,8 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
     logicalGroupFingerprint: RACE_GROUP_FINGERPRINT,
     scheduleRevision: 1,
     assignmentRevision: 1,
+    expectedNicheId: IDS.niche,
+    expectedNicheUpdatedAt: nicheUpdatedAt,
     now: NOW,
     leaseExpiresAt,
   });
@@ -643,6 +655,56 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
 
     await prisma.whatsAppDispatch.delete({ where: { id: IDS.competingDispatch } });
     await prisma.generatedCopy.delete({ where: { id: IDS.competingCopy } });
+
+    let nicheLockAcquired!: () => void;
+    const nicheLocked = new Promise<void>((resolve) => {
+      nicheLockAcquired = resolve;
+    });
+    let releaseNicheUpdate!: () => void;
+    const continueNicheUpdate = new Promise<void>((resolve) => {
+      releaseNicheUpdate = resolve;
+    });
+    const concurrentPolicyUpdate = prisma.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "CommercialNiche"
+        WHERE "id" = ${IDS.niche}
+        FOR UPDATE
+      `;
+      if (locked.length !== 1) throw new Error('niche lock fixture was not found');
+      nicheLockAcquired();
+      await continueNicheUpdate;
+      return transaction.commercialNiche.update({
+        where: { id: IDS.niche },
+        data: {
+          maxPrice: 50,
+          updatedAt: new Date(NOW.getTime() + 1_000),
+        },
+      });
+    });
+    await nicheLocked;
+    const fencedHandoff = prepared.handoff?.(handoffInput(ready.id));
+    if (!fencedHandoff) throw new Error('prepared handoff method is unavailable');
+    releaseNicheUpdate();
+    await concurrentPolicyUpdate;
+    await expect(fencedHandoff).resolves.toBeNull();
+    expect(
+      await prisma.commercialPreparedMessage.findUnique({
+        where: { id: ready.id },
+        select: { status: true, runId: true },
+      }),
+    ).toEqual({ status: 'RESERVED', runId: null });
+    expect(
+      await prisma.commercialPipelineRun.count({ where: { productId: IDS.product } }),
+    ).toBe(0);
+    const restoredNiche = await prisma.commercialNiche.update({
+      where: { id: IDS.niche },
+      data: {
+        maxPrice: null,
+        updatedAt: new Date(NOW.getTime() + 2_000),
+      },
+    });
+    nicheUpdatedAt = restoredNiche.updatedAt;
 
     const redisUrl = process.env.REDIS_URL;
     if (!redisUrl) throw new Error('disposable Redis URL missing');

@@ -13,6 +13,8 @@ const describeDatabase = enabled ? describe : describe.skip;
 const PREFIX = 'discovery-fence-db-fixture';
 const CHECKPOINT_IDENTITY = `${PREFIX}-identity`;
 const EXPIRY_CHECKPOINT_IDENTITY = `${PREFIX}-expiry-identity`;
+const CROSS_QUERY_NEW_IDENTITY = `${PREFIX}-cross-new-identity`;
+const CROSS_QUERY_OLD_IDENTITY = `${PREFIX}-cross-old-identity`;
 const CAMPAIGN_ID = `${PREFIX}-campaign`;
 const NICHE_ID = `${PREFIX}-niche`;
 const PRODUCT_PROVIDER_ID = `${PREFIX}-provider`;
@@ -223,6 +225,138 @@ describeDatabase('commercial discovery write fence PostgreSQL fixture', () => {
       leaseOwnerId: `${PREFIX}-owner-b`,
       leaseRevision: leaseB.leaseRevision,
     });
+  });
+
+  it('ignora observacao antiga de outra query quando ambas as leases continuam validas', async () => {
+    const leaseNow = new Date(NOW.getTime() + 180_000);
+    const leaseExpiresAt = new Date(leaseNow.getTime() + 600_000);
+    const newLease = await checkpoints.acquire({
+      identityFingerprint: CROSS_QUERY_NEW_IDENTITY,
+      source: 'OFFICIAL',
+      campaignId: CAMPAIGN_ID,
+      nicheId: NICHE_ID,
+      query: { categoryId: CATEGORY_ID, sort: 'commission_desc' },
+      ownerId: `${PREFIX}-cross-new-owner`,
+      now: leaseNow,
+      leaseExpiresAt,
+    });
+    const oldLease = await checkpoints.acquire({
+      identityFingerprint: CROSS_QUERY_OLD_IDENTITY,
+      source: 'OFFICIAL',
+      campaignId: CAMPAIGN_ID,
+      nicheId: NICHE_ID,
+      query: { categoryId: CATEGORY_ID, sort: 'sales_desc' },
+      ownerId: `${PREFIX}-cross-old-owner`,
+      now: leaseNow,
+      leaseExpiresAt,
+    });
+    if (!newLease || !oldLease) throw new Error('cross-query lease missing');
+
+    const newestObservedAt = new Date(NOW.getTime() + 240_000);
+    const olderObservedAt = new Date(NOW.getTime() + 210_000);
+    await expect(
+      offers.upsertOfficialOfferWithSnapshot(
+        offer('40.00', newestObservedAt),
+        {
+          checkpointId: newLease.id,
+          ownerId: `${PREFIX}-cross-new-owner`,
+          leaseRevision: newLease.leaseRevision,
+          now: newestObservedAt,
+        },
+      ),
+    ).resolves.toMatchObject({
+      snapshotRevision: 2,
+      snapshotCreated: true,
+    });
+    await expect(
+      offers.upsertOfficialOfferWithSnapshot(
+        offer('10.00', olderObservedAt),
+        {
+          checkpointId: oldLease.id,
+          ownerId: `${PREFIX}-cross-old-owner`,
+          leaseRevision: oldLease.leaseRevision,
+          now: newestObservedAt,
+        },
+      ),
+    ).resolves.toMatchObject({
+      snapshotRevision: 2,
+      commercialStateChanged: false,
+      snapshotCreated: false,
+    });
+
+    const persistedProduct = await prisma.productLead.findUnique({
+      where: {
+        source_providerProductId: {
+          source: 'OFFICIAL',
+          providerProductId: PRODUCT_PROVIDER_ID,
+        },
+      },
+      select: {
+        preco: true,
+        fetchedAt: true,
+        commercialSnapshotRevision: true,
+      },
+    });
+    if (!persistedProduct) throw new Error('cross-query product missing');
+    expect(persistedProduct.fetchedAt).toEqual(newestObservedAt);
+    expect(persistedProduct.commercialSnapshotRevision).toBe(2);
+    expect(persistedProduct?.preco.toString()).toBe('40');
+    const snapshots = await prisma.commercialOfferSnapshot.findMany({
+      where: {
+        product: {
+          source: 'OFFICIAL',
+          providerProductId: PRODUCT_PROVIDER_ID,
+        },
+      },
+      orderBy: { revision: 'asc' },
+      select: { revision: true, price: true, capturedAt: true },
+    });
+    expect(snapshots.map((snapshot) => ({
+      revision: snapshot.revision,
+      price: snapshot.price.toString(),
+      capturedAt: snapshot.capturedAt,
+    }))).toEqual([
+      expect.objectContaining({ revision: 1, price: '20' }),
+      expect.objectContaining({
+        revision: 2,
+        price: '40',
+        capturedAt: newestObservedAt,
+      }),
+    ]);
+    const checkpointsState = await prisma.commercialDiscoveryCheckpoint.findMany({
+      where: { id: { in: [newLease.id, oldLease.id] } },
+      orderBy: { identityFingerprint: 'asc' },
+      select: {
+        id: true,
+        identityFingerprint: true,
+        leaseOwnerId: true,
+        leaseRevision: true,
+        leaseExpiresAt: true,
+        status: true,
+        page: true,
+        cursor: true,
+      },
+    });
+    expect(checkpointsState).toEqual([
+      expect.objectContaining({
+        id: newLease.id,
+        identityFingerprint: CROSS_QUERY_NEW_IDENTITY,
+        leaseOwnerId: `${PREFIX}-cross-new-owner`,
+        leaseRevision: newLease.leaseRevision,
+        status: 'ACTIVE',
+        page: 1,
+        cursor: null,
+      }),
+      expect.objectContaining({
+        id: oldLease.id,
+        identityFingerprint: CROSS_QUERY_OLD_IDENTITY,
+        leaseOwnerId: `${PREFIX}-cross-old-owner`,
+        leaseRevision: oldLease.leaseRevision,
+        status: 'ACTIVE',
+        page: 1,
+        cursor: null,
+      }),
+    ]);
   });
 
   it('rejeita a escrita quando o lease expira durante a janela externa mesmo com now antigo', async () => {

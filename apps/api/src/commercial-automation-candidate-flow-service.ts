@@ -120,6 +120,14 @@ export type CommercialAutomationCandidateRevalidation = Pick<
   nicheId?: string;
 };
 
+export type CommercialAutomationCandidatePolicyFence = {
+  nicheId: string;
+  nicheUpdatedAt: Date;
+};
+
+export const COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED =
+  'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED';
+
 export type CommercialAutomationCandidatePreflight =
   | {
       outcome: 'READY';
@@ -198,6 +206,7 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
+  COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
 ] as const;
 
 export type CommercialAutomationBenignNoCandidateCode =
@@ -714,6 +723,7 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
+        this.assertCurrentNichePolicy(loaded.context);
         this.assertAffiliateLinkEligible(loaded.context, {
           candidateId: item.id,
           campaignId: campaign.id,
@@ -771,6 +781,7 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
+        this.assertCurrentNichePolicy(context);
         this.assertAffiliateLinkEligible(context, {
           candidateId: item.id,
           campaignId: campaign.id,
@@ -839,6 +850,7 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
       );
     }
+    this.assertCurrentNichePolicy(context);
     try {
       this.assertAffiliateLinkEligible(context, {
         candidateId: selection.candidateId,
@@ -887,6 +899,7 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
       );
     }
+    this.assertCurrentNichePolicy(loaded.context);
     try {
       this.assertAffiliateLinkEligible(loaded.context, {
         candidateId: selection.candidateId,
@@ -971,6 +984,7 @@ export class CommercialAutomationCandidateFlowService {
     const rejectionSummary: Record<string, number> = {};
     const terminalCandidateIds = new Set<string>();
     const alreadySentCandidateIds = new Set<string>();
+    const policyRejectedCandidateIds = new Set<string>();
     const excluded = new Set(options.excludeCandidateIds ?? []);
     const onRejected = async (
       _item: CommercialPromotionQueueItem,
@@ -982,6 +996,9 @@ export class CommercialAutomationCandidateFlowService {
       }
       if (code === 'ALREADY_SENT_TO_GROUP') {
         alreadySentCandidateIds.add(_item.id);
+      }
+      if (code === COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED) {
+        policyRejectedCandidateIds.add(_item.id);
       }
     };
     const orderedCandidates = queue.items
@@ -1038,7 +1055,9 @@ export class CommercialAutomationCandidateFlowService {
     );
     const usableAlreadySentCount = aggregateUsableAlreadySentCount;
     const usableCount = Math.max(
-      usableBeforeDelivery - (queue.health?.alreadySentCount !== undefined ? 0 : usableAlreadySentCount),
+      usableBeforeDelivery -
+        policyRejectedCandidateIds.size -
+        (queue.health?.alreadySentCount !== undefined ? 0 : usableAlreadySentCount),
       0,
     );
     const queueSummary = {
@@ -1048,9 +1067,15 @@ export class CommercialAutomationCandidateFlowService {
       rejectionSummary,
       nominalCount,
       usableCount,
-      copyReadyCount:
-        queue.health?.copyReadyCount ??
-        orderedCandidates.filter(({ status }) => status === 'COPY_READY').length,
+      copyReadyCount: Math.max(
+        (queue.health?.copyReadyCount ??
+          orderedCandidates.filter(({ status }) => status === 'COPY_READY').length) -
+          orderedCandidates.filter(
+            ({ id, status }) =>
+              status === 'COPY_READY' && policyRejectedCandidateIds.has(id),
+          ).length,
+        0,
+      ),
       terminalCount:
         queue.health?.terminalCount ?? terminalCandidateIds.size,
       alreadySentCount,
@@ -1310,7 +1335,7 @@ export class CommercialAutomationCandidateFlowService {
     if (context.product.source !== 'OFFICIAL') {
       throw appError(
         'Candidato preparado nao e uma oferta oficial persistida',
-        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
       );
     }
     const product = context.product;
@@ -1354,22 +1379,21 @@ export class CommercialAutomationCandidateFlowService {
       } catch {
         throw appError(
           'Politica do nicho mudou desde o preparo',
-          'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+          COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
         );
       }
     })();
-    if (
-      !match.matched ||
-      context.candidate.minimumScoreUsed !== context.niche.minimumScore
-    ) {
+    if (!match.matched) {
       throw appError(
         'Politica do nicho mudou desde o preparo',
-        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
       );
     }
   }
 
-  async revalidate(input: CommercialAutomationCandidateRevalidation) {
+  async revalidate(
+    input: CommercialAutomationCandidateRevalidation,
+  ): Promise<CommercialAutomationCandidatePolicyFence> {
     const groups = await this.listAuthorizedGroups();
     const group = groups.find((candidate) => candidate.id === input.groupId);
     if (
@@ -1415,5 +1439,9 @@ export class CommercialAutomationCandidateFlowService {
     }
     this.assertCurrentNichePolicy(loaded.context);
     this.draft(loaded);
+    return {
+      nicheId: loaded.context.niche.id,
+      nicheUpdatedAt: loaded.context.niche.updatedAt,
+    };
   }
 }

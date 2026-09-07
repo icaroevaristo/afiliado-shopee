@@ -87,4 +87,31 @@ describe('commercial prepared inventory recovery', () => {
       'OFFER_EXPIRED',
     );
   });
+
+  it.each([
+    ['snapshot novo', (record: CommercialPreparedMessageMaterialityRecord) => {
+      record.candidate.product.commercialSnapshotRevision = 2;
+    }],
+    ['produto indisponivel', (record: CommercialPreparedMessageMaterialityRecord) => {
+      record.candidate.product.unavailableAt = NOW;
+    }],
+  ] as const)('não deixa TTL local esconder %s', (_label, mutate) => {
+    const record = materialityRecord();
+    record.expiresAt = NOW;
+    mutate(record);
+
+    expect(commercialPreparedMessageInvalidationReason(record, NOW)).toBe(
+      'SNAPSHOT_OR_COPY_STALE',
+    );
+  });
+
+  it('mantém a classificação da oferta expirada quando o TTL local também venceu', () => {
+    const record = materialityRecord();
+    record.expiresAt = NOW;
+    record.candidate.snapshot.offerEndsAt = NOW;
+
+    expect(commercialPreparedMessageInvalidationReason(record, NOW)).toBe(
+      'OFFER_EXPIRED',
+    );
+  });
 });

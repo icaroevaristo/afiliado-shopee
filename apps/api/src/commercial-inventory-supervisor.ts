@@ -5,7 +5,10 @@ import type {
   CommercialAutomationInventoryPreparation,
   CommercialAutomationCandidatePreflight,
   CommercialAutomationCandidateSelection,
+  CommercialAutomationCandidatePolicyFence,
+  CommercialAutomationCandidateRevalidation,
 } from './commercial-automation-candidate-flow-service';
+import { COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED } from './commercial-automation-candidate-flow-service';
 import type {
   CommercialAutomationMode,
   CommercialAutomationProvider,
@@ -50,6 +53,9 @@ type CandidateFlow = {
   prepareInventory(
     selection: CommercialAutomationCandidateSelection,
   ): Promise<CommercialAutomationInventoryPreparation>;
+  revalidate(
+    input: CommercialAutomationCandidateRevalidation,
+  ): Promise<CommercialAutomationCandidatePolicyFence>;
 };
 
 export type CommercialInventorySupervisorReport = {
@@ -263,6 +269,41 @@ export class CommercialInventorySupervisor {
     };
   }
 
+  private async reconcilePreparedPolicy(
+    target: CommercialAutomationTarget,
+    revisions: { scheduleRevision: number; assignmentRevision: number },
+  ) {
+    const preparedRows = await this.dependencies.preparedMessages.listReady({
+      campaignId: target.campaignId,
+      groupDestinationId: target.groupId,
+      instanceName: target.instanceName ?? '',
+      logicalGroupFingerprint: target.logicalGroupFingerprint,
+      scheduleRevision: revisions.scheduleRevision,
+      assignmentRevision: revisions.assignmentRevision,
+      now: this.clock(),
+    });
+    for (const prepared of preparedRows) {
+      try {
+        await this.dependencies.candidateFlow.revalidate({
+          candidateId: prepared.candidateId,
+          generatedCopyId: prepared.generatedCopyId,
+          campaignId: prepared.campaignId,
+          groupId: prepared.groupDestinationId,
+          logicalGroupFingerprint: prepared.logicalGroupFingerprint,
+        });
+      } catch (error) {
+        if (safeErrorCode(error) !== COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED) {
+          throw error;
+        }
+        await this.dependencies.preparedMessages.invalidateReadyForPolicy({
+          id: prepared.id,
+          reason: COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
+          now: this.clock(),
+        });
+      }
+    }
+  }
+
   private async discover(
     target: CommercialAutomationTarget,
     report: CommercialInventorySupervisorReport,
@@ -470,6 +511,7 @@ export class CommercialInventorySupervisor {
         sharedRouteCandidateIds.get(routeKey) ?? new Set<string>();
       sharedRouteCandidateIds.set(routeKey, routeCandidateIds);
       const instanceName = target.instanceName ?? '';
+      await this.reconcilePreparedPolicy(target, revisions);
       const existing = await this.dependencies.preparedMessages.countReady({
         campaignId: target.campaignId,
         groupDestinationId: target.groupId,

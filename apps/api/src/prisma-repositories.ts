@@ -1217,6 +1217,21 @@ export class PrismaShopeeOfferRepository
                 lastSnapshot?.revision === currentRevision &&
                 lastSnapshot.fingerprint === currentFingerprint;
           if (!coherent) throw new OfficialOfferSnapshotConflictError();
+          // fetchedAt is the provider observation time carried by the offer.
+          // It is the only ordering signal available across independent
+          // checkpoint leases; receipt time is deliberately not used as a
+          // provider version. Older observations are acknowledged as a
+          // no-op, so a late response cannot roll the catalog back.
+          if (offer.fetchedAt.getTime() < current.fetchedAt.getTime()) {
+            await assertCommercialDiscoveryWriteFence(transaction, writeFence);
+            return {
+              product: mapShopeeOffer(current),
+              productAction: 'updated' as const,
+              commercialStateChanged: false,
+              snapshotCreated: false,
+              snapshotRevision: currentRevision,
+            };
+          }
 
           const commercialStateChanged = currentFingerprint !== fingerprint;
           const snapshotRevision = commercialStateChanged
@@ -7016,6 +7031,22 @@ export class PrismaCommercialPreparedMessageRepository
     ).length;
   }
 
+  async listReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
+  }) {
+    const rows = await this.listMateriallyReady({
+      ...input,
+      now: input.now ?? new Date(),
+    });
+    return rows.map(mapPreparedMessage);
+  }
+
   async listProtectedCandidateIds(input: {
     campaignId: string;
     groupDestinationId: string;
@@ -7504,6 +7535,28 @@ export class PrismaCommercialPreparedMessageRepository
             );
           }
 
+          const nicheLock = await transaction.$queryRaw<
+            Array<{ id: string; updatedAt: Date }>
+          >(Prisma.sql`
+            SELECT "id", "updatedAt"
+            FROM "CommercialNiche"
+            WHERE "id" = ${prepared.campaign.nicheId}
+            FOR UPDATE
+          `);
+          const lockedNiche = nicheLock[0];
+          if (
+            !lockedNiche ||
+            lockedNiche.id !== input.expectedNicheId ||
+            prepared.campaign.nicheId !== input.expectedNicheId ||
+            lockedNiche.updatedAt.getTime() !==
+              input.expectedNicheUpdatedAt.getTime()
+          ) {
+            throw new AppError(
+              'Politica do nicho mudou antes do handoff preparado',
+              'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+            );
+          }
+
           const assignedInstances = prepared.groupDestination.instanceAssignments
             .sort((left, right) => left.position - right.position)
             .map((assignment) => assignment.instanceName);
@@ -7835,6 +7888,82 @@ export class PrismaCommercialPreparedMessageRepository
       data: { status: 'DISPATCHED', reservationOwnerId: null, reservationLeaseExpiresAt: null, updatedAt: input.now },
     });
     return result.count === 1;
+  }
+
+  async invalidateReserved(input: {
+    id: string;
+    ownerId: string;
+    reason: string;
+    now: Date;
+  }) {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const current =
+          await transaction.commercialPreparedMessage.findUnique({
+            where: { id: input.id },
+            select: {
+              status: true,
+              reservationOwnerId: true,
+              runId: true,
+            },
+          });
+        if (
+          !current ||
+          current.status !== 'RESERVED' ||
+          current.reservationOwnerId !== input.ownerId ||
+          current.runId !== null
+        ) {
+          return false;
+        }
+        const result =
+          await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: input.id,
+              status: 'RESERVED',
+              reservationOwnerId: input.ownerId,
+              runId: null,
+            },
+            data: {
+              status: 'INVALIDATED',
+              reservationOwnerId: null,
+              reservationLeaseExpiresAt: null,
+              invalidatedReason: input.reason,
+              invalidatedAt: input.now,
+              updatedAt: input.now,
+            },
+          });
+        return result.count === 1;
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
+  }
+
+  async invalidateReadyForPolicy(input: {
+    id: string;
+    reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED';
+    now: Date;
+  }) {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const result =
+          await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: input.id,
+              status: 'READY',
+              runId: null,
+              candidate: { status: 'COPY_READY' },
+            },
+            data: {
+              status: 'INVALIDATED',
+              invalidatedReason: input.reason,
+              invalidatedAt: input.now,
+              updatedAt: input.now,
+            },
+          });
+        return result.count === 1;
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
   }
 
   async release(input: { id: string; ownerId: string; now: Date }) {

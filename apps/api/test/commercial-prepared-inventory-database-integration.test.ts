@@ -910,6 +910,9 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         select: { status: true },
       }),
     ).toEqual({ status: 'COPY_READY' });
+    await prisma.commercialPreparedMessage.deleteMany({
+      where: { candidateId: expiredFixture.candidateId, status: 'READY' },
+    });
   });
 
   it('avança além de 100 READY válidos para invalidar um registro posterior', async () => {
@@ -978,11 +981,12 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
     ).resolves.toBe(101);
   });
 
-  it('reminera e reprepara automaticamente um candidate após a invalidação do snapshot', async () => {
+  it('reminera e reprepara após TTL vencido combinado com snapshot N+1', async () => {
     const fixture = fixtures.find(({ candidateId }) =>
       candidateId.endsWith('-reprepare-candidate'),
     );
     if (!fixture) throw new Error('reprepare fixture missing');
+    const changeNow = new Date(NOW.getTime() + 31 * 60_000);
 
     const preparedBeforeChange = await prepared.createReady({
       campaignId: REPREPARE.campaign,
@@ -1045,7 +1049,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
     });
 
     await expect(
-      prepared.invalidateStale({ now: NOW, limit: 10 }),
+      prepared.invalidateStale({ now: changeNow, limit: 10 }),
     ).resolves.toBe(1);
     expect(
       await prisma.commercialPromotionCandidate.findUnique({
@@ -1068,7 +1072,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         id: 'commercial-automation',
         paused: false,
         pausedAt: null,
-        resumedAt: NOW,
+        resumedAt: changeNow,
         preparedLowWatermark: 1,
         preparedTarget: 1,
         usableCandidateLowWatermark: 1,
@@ -1080,7 +1084,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
       update: {
         paused: false,
         pausedAt: null,
-        resumedAt: NOW,
+        resumedAt: changeNow,
         preparedLowWatermark: 1,
         preparedTarget: 1,
         usableCandidateLowWatermark: 1,
@@ -1096,7 +1100,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         repositories,
         score: { calculate: () => 0 },
         logger: { info: () => undefined },
-        clock: () => NOW,
+        clock: () => changeNow,
       });
       const copyGeneration = createCommercialPromotionCopyGenerationService({
         repositories,
@@ -1111,7 +1115,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
           maximumCopyLength: 1_000,
         },
         logger: { info: () => undefined, error: () => undefined },
-        clock: () => NOW,
+        clock: () => changeNow,
       });
       const reprepareGroup = await repositories.whatsappGroups.findById(
         REPREPARE.destination,
@@ -1136,7 +1140,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
           },
         },
         instanceName: REPREPARE.instance,
-        clock: () => NOW,
+        clock: () => changeNow,
       });
       const syncOffers = {
         run: vi.fn(async () => ({
@@ -1153,7 +1157,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         niches: repositories.commercialNiches,
         syncOffers,
         logger: { info: () => undefined, error: () => undefined },
-        clock: () => NOW,
+        clock: () => changeNow,
       });
 
       const preview = await mining.preview(REPREPARE.campaign, {});
@@ -1249,5 +1253,114 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         });
       }
     }
+  });
+
+  it('invalida TTL vencido combinado com indisponibilidade e bloqueia o candidate', async () => {
+    const fixture = await createFixture('unavailable-combined');
+    const preparedRow = await prepared.createReady({
+      campaignId: IDS.campaign,
+      groupDestinationId: IDS.destination,
+      instanceName: IDS.instance,
+      logicalGroupFingerprint: 'persistent-inventory-group',
+      candidateId: fixture.candidateId,
+      generatedCopyId: fixture.copyId,
+      copyPreview: 'Oferta https://example.invalid/affiliate',
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 30 * 60_000),
+      now: NOW,
+    });
+    if (!preparedRow) throw new Error('combined unavailable row missing');
+    await prisma.commercialPreparedMessage.update({
+      where: { id: preparedRow.id },
+      data: { expiresAt: NOW, updatedAt: NOW },
+    });
+    await prisma.productLead.update({
+      where: { id: fixture.productId },
+      data: { unavailableAt: NOW },
+    });
+
+    await expect(
+      prepared.invalidateStale({ now: NOW, limit: 100 }),
+    ).resolves.toBeGreaterThanOrEqual(1);
+    await expect(
+      prisma.commercialPreparedMessage.findUnique({
+        where: { id: preparedRow.id },
+        select: { status: true, invalidatedReason: true },
+      }),
+    ).resolves.toEqual({
+      status: 'INVALIDATED',
+      invalidatedReason: 'SNAPSHOT_OR_COPY_STALE',
+    });
+    await expect(
+      prisma.commercialPromotionCandidate.findUnique({
+        where: { id: fixture.candidateId },
+        select: { status: true },
+      }),
+    ).resolves.toEqual({ status: 'BLOCKED' });
+  });
+
+  it('invalida RESERVED por política com CAS de owner sem reabrir o candidate', async () => {
+    const fixture = await createFixture('policy-invalidation');
+    const preparedRow = await prepared.createReady({
+      campaignId: IDS.campaign,
+      groupDestinationId: IDS.destination,
+      instanceName: IDS.instance,
+      logicalGroupFingerprint: 'persistent-inventory-group',
+      candidateId: fixture.candidateId,
+      generatedCopyId: fixture.copyId,
+      copyPreview: 'Oferta https://example.invalid/affiliate',
+      scheduleRevision: 2,
+      assignmentRevision: 1,
+      now: NOW,
+    });
+    if (!preparedRow) throw new Error('policy invalidation row missing');
+    await prisma.commercialPreparedMessage.update({
+      where: { id: preparedRow.id },
+      data: {
+        status: 'RESERVED',
+        reservationOwnerId: 'policy-execution-owner',
+        reservationLeaseExpiresAt: new Date(NOW.getTime() + 60_000),
+      },
+    });
+
+    await expect(
+      prepared.invalidateReserved({
+        id: preparedRow.id,
+        ownerId: 'policy-execution-owner',
+        reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        now: NOW,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      prepared.invalidateReserved({
+        id: preparedRow.id,
+        ownerId: 'policy-execution-owner',
+        reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        now: NOW,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      prisma.commercialPreparedMessage.findUnique({
+        where: { id: preparedRow.id },
+        select: {
+          status: true,
+          reservationOwnerId: true,
+          reservationLeaseExpiresAt: true,
+          invalidatedReason: true,
+        },
+      }),
+    ).resolves.toEqual({
+      status: 'INVALIDATED',
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      invalidatedReason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    });
+    await expect(
+      prisma.commercialPromotionCandidate.findUnique({
+        where: { id: fixture.candidateId },
+        select: { status: true },
+      }),
+    ).resolves.toEqual({ status: 'COPY_READY' });
   });
 });

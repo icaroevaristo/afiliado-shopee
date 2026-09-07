@@ -90,12 +90,15 @@ export const commercialPreparedMessageInvalidationReason = (
   ) {
     return 'OFFER_EXPIRED';
   }
+  if (!isCommercialPreparedMessageCommercialContentFresh(record, now)) {
+    return 'SNAPSHOT_OR_COPY_STALE';
+  }
   if (record.expiresAt <= now) return 'PREPARED_EXPIRED';
   return 'SNAPSHOT_OR_COPY_STALE';
 };
 
-/** The single material content contract shared by every prepared inventory path. */
-export const isCommercialPreparedMessageContentFresh = (
+/** Content validity is independent from the local lifetime of the preparation. */
+const isCommercialPreparedMessageCommercialContentFresh = (
   record: CommercialPreparedMessageMaterialityRecord,
   now: Date,
 ) => {
@@ -104,7 +107,6 @@ export const isCommercialPreparedMessageContentFresh = (
   const sameInstant = (left: Date | null, right: Date | null) =>
     (left?.getTime() ?? null) === (right?.getTime() ?? null);
   return (
-    record.expiresAt > now &&
     record.candidate.productId === record.candidate.product.id &&
     record.candidate.snapshotId === record.candidate.snapshot.id &&
     record.candidate.snapshotId === record.snapshotId &&
@@ -137,6 +139,14 @@ export const isCommercialPreparedMessageContentFresh = (
     record.candidate.generatedCopy?.snapshotId === record.snapshotId
   );
 };
+
+/** The single material content contract shared by every prepared inventory path. */
+export const isCommercialPreparedMessageContentFresh = (
+  record: CommercialPreparedMessageMaterialityRecord,
+  now: Date,
+) =>
+  record.expiresAt > now &&
+  isCommercialPreparedMessageCommercialContentFresh(record, now);
 
 /** A reservation can be reopened only while its candidate is still publicable. */
 export const isCommercialPreparedMessageCandidateReady = (

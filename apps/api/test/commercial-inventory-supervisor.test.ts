@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import { CommercialInventorySupervisor } from '../src/commercial-inventory-supervisor';
 import {
   decideCommercialPreparedRecovery,
   type CommercialPreparedRecoveryEvidence,
 } from '../src/commercial-prepared-inventory-recovery';
+import type { CommercialAutomationCandidatePolicyFence } from '../src/commercial-automation-candidate-flow-service';
 import type {
   CommercialAutomationSettingsRecord,
   CommercialDiscoveryCheckpointRecord,
@@ -16,6 +18,10 @@ import type {
 } from '../src/repositories';
 
 const now = new Date('2026-09-06T12:00:00.000Z');
+const policyFence: CommercialAutomationCandidatePolicyFence = {
+  nicheId: 'niche-1',
+  nicheUpdatedAt: now,
+};
 
 const target = {
   groupId: 'group-1',
@@ -149,12 +155,43 @@ class MemoryCheckpointRepository implements CommercialDiscoveryCheckpointReposit
 
 const emptyPreparedRepository = (): CommercialPreparedMessageRepository => ({
   countReady: vi.fn(async () => 0),
+  listReady: vi.fn(async () => []),
   createReady: vi.fn(async () => null),
   claimReady: vi.fn(async () => null),
   markDispatched: vi.fn(async () => false),
   release: vi.fn(async () => false),
+  invalidateReserved: vi.fn(async () => false),
+  invalidateReadyForPolicy: vi.fn(async () => false),
   recoverExpired: vi.fn(async () => 0),
   invalidateStale: vi.fn(async () => 0),
+});
+
+const preparedRecord = (
+  candidateId: string,
+  createdAt = now,
+): CommercialPreparedMessageRecord => ({
+  id: `prepared-${candidateId}`,
+  campaignId: target.campaignId,
+  groupDestinationId: target.groupId,
+  instanceName: target.instanceName ?? '',
+  logicalGroupFingerprint: target.logicalGroupFingerprint,
+  candidateId,
+  snapshotId: `snapshot-${candidateId}`,
+  generatedCopyId: `copy-${candidateId}`,
+  copyPreview: `copy ${candidateId}`,
+  runId: null,
+  status: 'READY',
+  reservationOwnerId: null,
+  reservationLeaseExpiresAt: null,
+  scheduleRevision: 1,
+  assignmentRevision: 1,
+  preparationRevision: 1,
+  expiresAt: new Date(createdAt.getTime() + 15 * 60_000),
+  offerEndsAt: null,
+  invalidatedReason: null,
+  invalidatedAt: null,
+  createdAt,
+  updatedAt: createdAt,
 });
 
 describe('CommercialInventorySupervisor', () => {
@@ -174,6 +211,7 @@ describe('CommercialInventorySupervisor', () => {
       prepareInventory: vi.fn(async () => {
         throw new Error('unused');
       }),
+      revalidate: vi.fn(async () => policyFence),
     };
     const supervisor = new CommercialInventorySupervisor({
       candidateFlow,
@@ -236,6 +274,7 @@ describe('CommercialInventorySupervisor', () => {
       prepareInventory: vi.fn(async () => {
         throw new Error('unused');
       }),
+      revalidate: vi.fn(async () => policyFence),
     };
     const syncOffers = vi.fn();
     const supervisor = new CommercialInventorySupervisor({
@@ -271,6 +310,7 @@ describe('CommercialInventorySupervisor', () => {
       prepareInventory: vi.fn(async () => {
         throw new Error('unused');
       }),
+      revalidate: vi.fn(async () => policyFence),
     };
     const preparedMessages = {
       ...emptyPreparedRepository(),
@@ -299,6 +339,111 @@ describe('CommercialInventorySupervisor', () => {
       preparedMessages: 0,
     });
     expect(candidateFlow.preflight).not.toHaveBeenCalled();
+    expect(syncOffers).not.toHaveBeenCalled();
+  });
+
+  it('remove READY incompatível antes de contar capacidade e prepara substituto local', async () => {
+    const preparedRows = [preparedRecord('candidate-x'), preparedRecord('candidate-y')];
+    const candidateFlow = {
+      listTargets: vi.fn(async () => [target]),
+      preflight: vi.fn(async () => ({
+        outcome: 'READY' as const,
+        candidateId: 'candidate-z',
+        snapshotId: 'snapshot-candidate-z',
+        candidateStatus: 'COPY_READY' as const,
+        queue: { candidateCount: 3, eligibleCount: 1, rejectedCount: 2 },
+      })),
+      replenish: vi.fn(async () => ({ rejectionSummary: {} })),
+      prepareInventory: vi.fn(async (selection: { candidateId: string; snapshotId?: string }) => ({
+        generatedCopyId: `copy-${selection.candidateId}`,
+        candidateId: selection.candidateId,
+        snapshotId: selection.snapshotId ?? 'snapshot-candidate-z',
+        campaignId: target.campaignId,
+        groupId: target.groupId,
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        nicheId: target.nicheId,
+        copyPreview: 'copy candidate-z https://example.invalid/affiliate',
+        offerEndsAt: null,
+      })),
+      revalidate: vi.fn(async (input: { candidateId: string }) => {
+        if (input.candidateId === 'candidate-x') {
+          throw new AppError(
+            'Politica mudou',
+            'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+          );
+        }
+        return policyFence;
+      }),
+    };
+    const preparedMessages: CommercialPreparedMessageRepository = {
+      ...emptyPreparedRepository(),
+      countReady: vi.fn(async () =>
+        preparedRows.filter((row) => row.status === 'READY').length,
+      ),
+      listReady: vi.fn(async () =>
+        preparedRows.filter((row) => row.status === 'READY'),
+      ),
+      listProtectedCandidateIds: vi.fn(async () =>
+        preparedRows
+          .filter((row) => row.status === 'READY')
+          .map((row) => row.candidateId),
+      ),
+      createReady: vi.fn(async (input: CommercialPreparedMessageCreateInput) => {
+        const created = preparedRecord(input.candidateId, input.now);
+        preparedRows.push({
+          ...created,
+          campaignId: input.campaignId,
+          groupDestinationId: input.groupDestinationId,
+          instanceName: input.instanceName,
+          logicalGroupFingerprint: input.logicalGroupFingerprint,
+          generatedCopyId: input.generatedCopyId,
+          copyPreview: input.copyPreview ?? '',
+        });
+        return preparedRows[preparedRows.length - 1];
+      }),
+      invalidateReadyForPolicy: vi.fn(async (input) => {
+        const row = preparedRows.find(({ id }) => id === input.id);
+        if (!row || row.status !== 'READY') return false;
+        row.status = 'INVALIDATED';
+        row.invalidatedReason = input.reason;
+        row.invalidatedAt = input.now;
+        row.updatedAt = input.now;
+        return true;
+      }),
+    };
+    const syncOffers = vi.fn();
+    const supervisor = new CommercialInventorySupervisor({
+      candidateFlow,
+      preparedMessages,
+      checkpoints: new MemoryCheckpointRepository(),
+      settings: {
+        getOrCreate: vi.fn(async () => settings),
+        get: vi.fn(async () => settings),
+        setPaused: vi.fn(async () => settings),
+        updateSchedule: vi.fn(async () => settings),
+      },
+      niches: { findById: vi.fn(async () => niche) },
+      syncOffers: { run: syncOffers },
+      logger: { info: vi.fn(), error: vi.fn() },
+      clock: () => now,
+    });
+
+    await expect(
+      supervisor.run({ mode: 'send', provider: 'official' }),
+    ).resolves.toMatchObject({
+      preparedMessages: 1,
+      preparedReady: 2,
+      skipped: 0,
+    });
+    expect(candidateFlow.revalidate).toHaveBeenCalledTimes(2);
+    expect(preparedMessages.invalidateReadyForPolicy).toHaveBeenCalledWith({
+      id: 'prepared-candidate-x',
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      now,
+    });
+    expect(preparedMessages.createReady).toHaveBeenCalledWith(
+      expect.objectContaining({ candidateId: 'candidate-z' }),
+    );
     expect(syncOffers).not.toHaveBeenCalled();
   });
 
@@ -339,9 +484,11 @@ describe('CommercialInventorySupervisor', () => {
         copyPreview: `copy-${selection.candidateId} https://example.invalid/affiliate`,
         offerEndsAt: null,
       })),
+      revalidate: vi.fn(async () => policyFence),
     };
     const preparedMessages: CommercialPreparedMessageRepository = {
       countReady: vi.fn(async () => readyCandidateIds.length),
+      listReady: vi.fn(async () => []),
       listProtectedCandidateIds: vi.fn(async () => [...readyCandidateIds]),
       createReady: vi.fn(async (input: CommercialPreparedMessageCreateInput) => {
         readyCandidateIds.push(input.candidateId);
@@ -373,6 +520,8 @@ describe('CommercialInventorySupervisor', () => {
       claimReady: vi.fn(async () => null),
       markDispatched: vi.fn(async () => false),
       release: vi.fn(async () => false),
+      invalidateReserved: vi.fn(async () => false),
+      invalidateReadyForPolicy: vi.fn(async () => false),
       recoverExpired: vi.fn(async () => 0),
       invalidateStale: vi.fn(async () => 0),
     };
@@ -467,6 +616,7 @@ describe('CommercialInventorySupervisor', () => {
         copyPreview: `copy-${selection.candidateId} https://example.invalid/affiliate`,
         offerEndsAt: null,
       })),
+      revalidate: vi.fn(async () => policyFence),
     };
     const listProtectedCandidateIds = vi.fn(async (input: {
       instanceName: string;
@@ -505,11 +655,14 @@ describe('CommercialInventorySupervisor', () => {
     });
     const preparedMessages: CommercialPreparedMessageRepository = {
       countReady,
+      listReady: vi.fn(async () => []),
       listProtectedCandidateIds,
       createReady,
       claimReady: vi.fn(async () => null),
       markDispatched: vi.fn(async () => false),
       release: vi.fn(async () => false),
+      invalidateReserved: vi.fn(async () => false),
+      invalidateReadyForPolicy: vi.fn(async () => false),
       recoverExpired: vi.fn(async () => 0),
       invalidateStale: vi.fn(async () => 0),
     };

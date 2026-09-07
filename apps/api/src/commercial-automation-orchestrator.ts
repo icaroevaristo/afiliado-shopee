@@ -26,7 +26,9 @@ import type {
   CommercialAutomationCandidateSelection,
   CommercialAutomationCandidatePreflight,
   CommercialAutomationCandidateAttemptReservationResult,
+  CommercialAutomationCandidatePolicyFence,
 } from './commercial-automation-candidate-flow-service';
+import { COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED } from './commercial-automation-candidate-flow-service';
 import type { CommercialPromotionMiningReport } from './commercial-promotion-mining-service';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
 import { COMMERCIAL_READY_INVENTORY_EMPTY } from './commercial-inventory-supervisor';
@@ -74,6 +76,9 @@ export const COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID =
   'COMMERCIAL_AUTOMATION_EXECUTION_LEASE_INVALID';
 export const COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE =
   'COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE';
+export const COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE =
+  'COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE';
+const MAX_POLICY_REPLACEMENT_ATTEMPTS = 4;
 
 export type { CommercialAutomationMode, CommercialAutomationProvider };
 
@@ -220,6 +225,12 @@ export class CommercialAutomationOrchestrator {
         }): Promise<CommercialPreparedMessageRecord | null>;
         markDispatched(input: { id: string; ownerId: string; now: Date }): Promise<boolean>;
         release(input: { id: string; ownerId: string; now: Date }): Promise<boolean>;
+        invalidateReserved(input: {
+          id: string;
+          ownerId: string;
+          reason: string;
+          now: Date;
+        }): Promise<boolean>;
       };
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
       candidateFlow?: {
@@ -258,7 +269,7 @@ export class CommercialAutomationOrchestrator {
           groupId: string;
           logicalGroupFingerprint?: string;
           nicheId?: string;
-        }): Promise<void>;
+        }): Promise<CommercialAutomationCandidatePolicyFence>;
         reserveAttempt(
           target: CommercialAutomationTarget,
           input: {
@@ -368,7 +379,10 @@ export class CommercialAutomationOrchestrator {
       | undefined;
     let reservationReleaseAttempted = false;
     let preparedInventoryClaim: CommercialPreparedMessageRecord | undefined;
-    let preparedReleaseAttempted = false;
+    let preparedClaimFinalized = false;
+    let preparedNichePolicyFence:
+      | CommercialAutomationCandidatePolicyFence
+      | undefined;
     const releaseReservationBeforeConfirmation = async () => {
       if (
         !reservationAcquired ||
@@ -405,9 +419,9 @@ export class CommercialAutomationOrchestrator {
         this.dependencies.preparedInventory &&
         preparedInventoryClaim &&
         !confirmationAttempted &&
-        !preparedReleaseAttempted
+        !preparedClaimFinalized
       ) {
-        preparedReleaseAttempted = true;
+        preparedClaimFinalized = true;
         await this.dependencies.preparedInventory.release({
           id: preparedInventoryClaim.id,
           ownerId: ownership.executionId,
@@ -1130,14 +1144,103 @@ export class CommercialAutomationOrchestrator {
         );
       }
       if (preparedInventoryClaim) {
-        await this.dependencies.candidateFlow!.revalidate({
-          candidateId: preparedInventoryClaim.candidateId,
-          generatedCopyId: preparedInventoryClaim.generatedCopyId,
-          campaignId: preparedInventoryClaim.campaignId,
-          groupId: preparedInventoryClaim.groupDestinationId,
-          logicalGroupFingerprint:
-            preparedInventoryClaim.logicalGroupFingerprint,
-        });
+        let policyReplacementAttempts = 0;
+        let policyReplacementFailure: string | undefined;
+        while (preparedInventoryClaim) {
+          const claim = preparedInventoryClaim;
+          try {
+            preparedNichePolicyFence =
+              await this.dependencies.candidateFlow!.revalidate({
+                candidateId: claim.candidateId,
+                generatedCopyId: claim.generatedCopyId,
+                campaignId: claim.campaignId,
+                groupId: claim.groupDestinationId,
+                logicalGroupFingerprint: claim.logicalGroupFingerprint,
+              });
+            break;
+          } catch (error) {
+            if (
+              safeFailureCode(error) !==
+              COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED
+            ) {
+              throw error;
+            }
+            policyReplacementAttempts += 1;
+            preparedClaimFinalized = true;
+            preparedInventoryClaim = undefined;
+            const invalidated =
+              await this.dependencies.preparedInventory!.invalidateReserved({
+                id: claim.id,
+                ownerId: ownership.executionId,
+                reason: COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
+                now: this.clock(),
+              });
+            if (!invalidated) {
+              policyReplacementFailure =
+                'COMMERCIAL_AUTOMATION_POLICY_INVALIDATION_CONFLICT';
+              break;
+            }
+            if (
+              policyReplacementAttempts >= MAX_POLICY_REPLACEMENT_ATTEMPTS
+            ) {
+              policyReplacementFailure =
+                COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE;
+              break;
+            }
+            const replacementNow = this.clock();
+            const replacement =
+              await this.dependencies.preparedInventory!.claimReady({
+                campaignId: selectedTarget!.campaignId,
+                groupDestinationId: selectedTarget!.groupId,
+                instanceName: selectedTarget!.instanceName ?? '',
+                logicalGroupFingerprint:
+                  selectedTarget!.logicalGroupFingerprint,
+                ...(selectedTarget!.scheduleRevision !== undefined
+                  ? { scheduleRevision: selectedTarget!.scheduleRevision }
+                  : {}),
+                ...(selectedTarget!.assignmentRevision !== undefined
+                  ? { assignmentRevision: selectedTarget!.assignmentRevision }
+                  : {}),
+                ownerId: execution.id,
+                now: replacementNow,
+                leaseExpiresAt: addMilliseconds(
+                  replacementNow,
+                  this.dependencies.leaseSeconds * 1000,
+                ),
+              });
+            if (!replacement) {
+              policyReplacementFailure =
+                COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE;
+              break;
+            }
+            preparedInventoryClaim = replacement;
+            preparedClaimFinalized = false;
+            selectedCandidateSelection = {
+              target: selectedTarget!,
+              candidateId: replacement.candidateId,
+              candidateStatus: 'COPY_READY',
+              queue: { candidateCount: 1, eligibleCount: 1, rejectedCount: 0 },
+            };
+            commercialRunId = `commercial-prepared-${replacement.id}-run`;
+          }
+        }
+        if (policyReplacementFailure) {
+          commercialRunId = undefined;
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [policyReplacementFailure],
+              failureCode: policyReplacementFailure,
+              completedAt: this.clock(),
+            }),
+          );
+        }
+        if (!preparedNichePolicyFence) {
+          throw new AppError(
+            'Fence da politica do nicho ausente antes do handoff',
+            'COMMERCIAL_AUTOMATION_NICHE_POLICY_FENCE_MISSING',
+          );
+        }
       } else {
         await this.dependencies.candidateFlow!.revalidate(candidatePreparation!);
         const renewedAt = this.clock();
@@ -1166,6 +1269,13 @@ export class CommercialAutomationOrchestrator {
       }
       confirmationAttempted = true;
       if (preparedInventoryClaim) {
+        if (!preparedNichePolicyFence) {
+          throw new AppError(
+            'Fence da politica do nicho ausente antes do handoff',
+            'COMMERCIAL_AUTOMATION_NICHE_POLICY_FENCE_MISSING',
+          );
+        }
+        const nichePolicyFence = preparedNichePolicyFence;
         if (!this.dependencies.confirmation.confirmPrepared) {
           throw new AppError(
             'Handoff da mensagem preparada indisponivel no orchestrator',
@@ -1185,6 +1295,8 @@ export class CommercialAutomationOrchestrator {
               preparedInventoryClaim.logicalGroupFingerprint,
             scheduleRevision: preparedInventoryClaim.scheduleRevision,
             assignmentRevision: preparedInventoryClaim.assignmentRevision,
+            expectedNicheId: nichePolicyFence.nicheId,
+            expectedNicheUpdatedAt: nichePolicyFence.nicheUpdatedAt,
             now,
             leaseExpiresAt: addMilliseconds(
               now,
