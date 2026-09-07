@@ -72,6 +72,8 @@ describe('PrismaWhatsAppDispatchRepository', () => {
         hashtags: '#promo',
         createdFromCandidateId: 'cand-1',
         source: 'AI',
+        provider: 'openai',
+        model: 'gpt-test',
         promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
         validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
         promotionCandidates: [
@@ -137,6 +139,8 @@ describe('PrismaWhatsAppDispatchRepository', () => {
     });
     expect(callArgs.select.generatedCopy.select).toMatchObject({
       source: true,
+      provider: true,
+      model: true,
       promptVersion: true,
       validationVersion: true,
     });
@@ -163,6 +167,8 @@ describe('PrismaWhatsAppDispatchRepository', () => {
       },
       generatedCopy: {
         source: 'AI',
+        provider: 'openai',
+        model: 'gpt-test',
         promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
         validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
         promotionCandidates: [

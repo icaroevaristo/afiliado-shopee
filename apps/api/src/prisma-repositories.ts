@@ -58,6 +58,7 @@ import type {
   CommercialCopyGenerationAttemptStatusRecord,
   CommercialPromotionMaterializationInput,
   CommercialPromotionSnapshotRecord,
+  CommercialPromotionSignal,
   CommercialManualCandidateMaterializationInput,
   ManualPublicationAcceptance,
   ManualPublicationQuotaReservation,
@@ -125,9 +126,16 @@ import {
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import { APPROVED_PRODUCT_MIN_SCORE } from './repositories';
 import {
+  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+  COMMERCIAL_PROMOTION_TERMINAL_CANDIDATE_BLOCK_REASONS,
   canReactivateCommercialPromotionCandidate,
+  isCommercialPromotionTerminalCandidateBlockReason,
   isCommercialPromotionTerminalCandidateForSnapshot,
+  type CommercialPromotionTerminalCandidateBlockReason,
 } from './commercial-promotion-candidate-terminal';
+import { isCommercialPromotionFallbackCopy, isSafeStoredCommercialPromotionCopy } from './commercial-promotion-copy-fallback';
+import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from './commercial-ai-copy-prompt';
+import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 import {
   COMMERCIAL_EXECUTION_OWNERSHIP_LOST,
   COMMERCIAL_AUTOMATION_SCHEDULE_REVISION_STALE,
@@ -149,7 +157,7 @@ import {
 } from './shopee-product-identity';
 import { sha256 } from './commercial-ai-copy-fingerprint';
 import { sanitizeCommercialAiCopyValidationFailureCodes } from './commercial-ai-copy-validator';
-import { isSafeAssembledCommercialPromotionCopy } from './commercial-promotion-copy-assembler';
+
 
 const prismaErrorCode = (error: unknown) =>
   typeof error === 'object' && error !== null && 'code' in error
@@ -2360,6 +2368,9 @@ const mapCommercialAiCopyAttemptStatus = (
 ): CommercialCopyGenerationAttemptStatusRecord => ({
   id: String(record.id),
   candidateId: String(record.candidateId),
+  snapshotId: String(record.snapshotId),
+  inputFingerprint: String(record.inputFingerprint),
+  generatedCopyId: (record.generatedCopyId as string | null) ?? null,
   provider: String(record.provider),
   model: String(record.model),
   promptVersion: String(record.promptVersion),
@@ -2529,6 +2540,152 @@ const promotionPersistenceError = (error: unknown): never => {
     'Falha ao persistir fila promocional',
     'COMMERCIAL_PROMOTION_PERSISTENCE_FAILED',
   );
+};
+
+const isHttpUrl = (value: unknown) => {
+  if (typeof value !== 'string' || value.trim() !== value || !value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const commercialPromotionQueueCapacityInclude = {
+  product: true,
+  snapshot: true,
+  generatedCopy: true,
+  copyGenerationAttempts: true,
+} satisfies Prisma.CommercialPromotionCandidateInclude;
+
+type CommercialPromotionQueueCapacityRecord =
+  Prisma.CommercialPromotionCandidateGetPayload<{
+    include: typeof commercialPromotionQueueCapacityInclude;
+  }>;
+
+const toCommercialPromotionSignals = (
+  signals: string[],
+): CommercialPromotionSignal[] | null => {
+  const recognized = signals.filter(
+    (signal): signal is CommercialPromotionSignal =>
+      signal === 'PRICE_DROP' ||
+      signal === 'DISCOUNT_INCREASE' ||
+      signal === 'NEWLY_OBSERVED' ||
+      signal === 'CURRENT_DISCOUNT',
+  );
+  return recognized.length === signals.length ? recognized : null;
+};
+
+const isCommercialPromotionQueueCapacityUsable = (
+  record: CommercialPromotionQueueCapacityRecord,
+  now: Date,
+) => {
+  const { product, snapshot, copyGenerationAttempts: attempts, generatedCopy: copy } =
+    record;
+  const promotionSignals = toCommercialPromotionSignals(record.promotionSignals);
+  if (promotionSignals === null) return false;
+  if (
+    (record.status !== 'QUEUED' && record.status !== 'COPY_READY') ||
+    record.blockedReason !== null ||
+    (record.expiresAt !== null && record.expiresAt <= now) ||
+    record.commercialScore < record.minimumScoreUsed ||
+    product.source !== 'OFFICIAL' ||
+    product.unavailableAt !== null ||
+    (product.offerStartsAt !== null && product.offerStartsAt > now) ||
+    (product.offerEndsAt !== null && product.offerEndsAt <= now) ||
+    snapshot.unavailableAt !== null ||
+    (snapshot.offerEndsAt !== null && snapshot.offerEndsAt <= now) ||
+    attempts.some(
+      (attempt) =>
+        attempt.snapshotId === record.snapshotId &&
+        (attempt.status === 'STARTED' ||
+          attempt.status === 'FAILED' ||
+          attempt.status === 'AMBIGUOUS'),
+    ) ||
+    !isHttpUrl(product.urlImagem)
+  ) {
+    return false;
+  }
+  if (record.status === 'QUEUED') {
+    if (record.generatedCopyId || copy || attempts.some(
+      (attempt) => attempt.snapshotId === record.snapshotId && attempt.status === 'SUCCEEDED',
+    )) return false;
+  } else if (
+    !copy || !record.generatedCopyId || copy.id !== record.generatedCopyId ||
+    copy.productId !== record.productId || copy.snapshotId !== record.snapshotId ||
+    copy.createdFromCandidateId !== record.id ||
+    (copy.source !== 'AI' && !isCommercialPromotionFallbackCopy(copy)) ||
+    copy.promptVersion !== COMMERCIAL_AI_COPY_PROMPT_VERSION ||
+    copy.validationVersion !== COMMERCIAL_AI_COPY_VALIDATION_VERSION ||
+    !copy.inputFingerprint || !copy.provider || !copy.model ||
+    !attempts.some((attempt) =>
+      attempt.status === 'SUCCEEDED' && attempt.candidateId === record.id &&
+      attempt.snapshotId === record.snapshotId && attempt.generatedCopyId === copy.id &&
+      attempt.inputFingerprint === copy.inputFingerprint,
+    )
+  ) return false;
+  if (record.status === 'COPY_READY') {
+    if (!copy) return false;
+    try {
+      if (!isSafeStoredCommercialPromotionCopy({
+        titulo: copy.titulo,
+        mensagem: copy.mensagem,
+        cta: copy.cta,
+        hashtags: copy.hashtags,
+        source: copy.source,
+        provider: copy.provider,
+        model: copy.model,
+        promptVersion: copy.promptVersion,
+        validationVersion: copy.validationVersion,
+      }, {
+        productName: product.nome,
+        shopName: product.loja,
+        price: decimalString(product.preco) ?? '',
+        discountRate: product.desconto,
+        promotionSignals,
+        priceDropPercent: decimalString(record.priceDropPercent) ?? null,
+      }, product.affiliateLink ?? '', 4096)) return false;
+    } catch { return false; }
+  }
+  return validateCommercialAffiliateLinkProvenance({
+    candidate: {
+      id: record.id,
+      campaignId: record.campaignId,
+      productId: record.productId,
+      snapshotId: record.snapshotId,
+    },
+    campaign: { id: record.campaignId },
+    product: {
+      id: product.id,
+      source: 'OFFICIAL',
+      providerProductId: product.providerProductId,
+      productName: product.nome,
+      shopName: product.loja,
+      productLink: product.productLink,
+      affiliateLink: product.affiliateLink,
+      price: decimalString(product.preco) ?? '',
+      priceMin: decimalString(product.precoMin) ?? null,
+      priceMax: decimalString(product.precoMax) ?? null,
+      discountRate: product.desconto,
+      commissionRate: product.comissao,
+      rating: product.nota,
+      sales: product.vendidos,
+      offerStartsAt: product.offerStartsAt,
+      urlImagem: product.urlImagem,
+      offerEndsAt: product.offerEndsAt,
+      unavailableAt: product.unavailableAt,
+      commercialSnapshotRevision: product.commercialSnapshotRevision,
+      commercialSnapshotFingerprint: product.commercialSnapshotFingerprint,
+      updatedAt: product.updatedAt,
+    },
+    snapshot: {
+      id: snapshot.id,
+      productId: snapshot.productId,
+      revision: snapshot.revision,
+      fingerprint: snapshot.fingerprint,
+    },
+  }).valid;
 };
 
 export class PrismaCommercialPromotionRepository
@@ -2753,6 +2910,19 @@ export class PrismaCommercialPromotionRepository
               'MANUAL_PUBLICATION_TARGET_CONFLICT',
             );
           }
+          if (current?.snapshotId === input.snapshotId && (
+            isCommercialPromotionTerminalCandidateForSnapshot({
+              status: current.status, blockedReason: current.blockedReason,
+              currentSnapshotId: current.snapshotId, nextSnapshotId: input.snapshotId,
+            }) ||
+            await transaction.commercialCopyGenerationAttempt.findFirst({
+              where: { candidateId: current.id, snapshotId: input.snapshotId,
+                status: { in: ['FAILED', 'AMBIGUOUS'] } },
+              select: { id: true },
+            })
+          )) {
+            throw new AppError('Snapshot possui falha terminal de copy', COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED);
+          }
           if (
             current?.status === 'DISPATCHED' &&
             current.dedupeUntil !== null &&
@@ -2767,7 +2937,7 @@ export class PrismaCommercialPromotionRepository
           const data = {
             snapshotId: input.snapshotId,
             status:
-              current?.status === 'COPY_READY'
+              current?.status === 'COPY_READY' && current.snapshotId === input.snapshotId
                 ? ('COPY_READY' as const)
                 : ('QUEUED' as const),
             rankPosition: null,
@@ -2789,11 +2959,11 @@ export class PrismaCommercialPromotionRepository
                 data: {
                   ...data,
                   generatedCopyId:
-                    current.status === 'COPY_READY'
+                    current.status === 'COPY_READY' && current.snapshotId === input.snapshotId
                       ? current.generatedCopyId
                       : null,
                   queuedAt:
-                    current.status === 'COPY_READY'
+                    current.status === 'COPY_READY' && current.snapshotId === input.snapshotId
                       ? current.queuedAt
                       : input.now,
                 },
@@ -3155,10 +3325,58 @@ export class PrismaCommercialPromotionRepository
     page: number;
     limit: number;
     status?: CommercialPromotionCandidateRecord['status'];
+    capacityOnly?: boolean;
+    groupId?: string;
   }) {
-    const where = { campaignId: input.campaignId, status: input.status };
-    const [records, total] = await Promise.all([
-      this.prisma.commercialPromotionCandidate.findMany({
+    return this.prisma.$transaction(async (transaction) => {
+    const now = new Date();
+    const where = input.capacityOnly
+      ? {
+          campaignId: input.campaignId,
+          status: {
+            in: ['QUEUED', 'COPY_READY'] as CommercialPromotionCandidateRecord['status'][],
+          },
+        }
+      : { campaignId: input.campaignId, status: input.status };
+    const nominalCountPromise = input.capacityOnly
+      ? transaction.commercialPromotionCandidate.count({
+          where: {
+            campaignId: input.campaignId,
+            status: {
+              in: ['QUEUED', 'COPY_READY'] as CommercialPromotionCandidateRecord['status'][],
+            },
+          },
+        })
+      : Promise.resolve(0);
+    const copyReadyCountPromise = input.capacityOnly
+      ? transaction.commercialPromotionCandidate.count({
+          where: { campaignId: input.campaignId, status: 'COPY_READY' },
+        })
+      : Promise.resolve(0);
+    const capacityRecordsPromise = input.capacityOnly
+      ? transaction.commercialPromotionCandidate.findMany({
+          where: {
+            campaignId: input.campaignId,
+            status: {
+              in: ['QUEUED', 'COPY_READY'] as CommercialPromotionCandidateRecord['status'][],
+            },
+          },
+          include: commercialPromotionQueueCapacityInclude,
+        })
+      : Promise.resolve([]);
+    const terminalCountPromise = input.capacityOnly
+      ? transaction.commercialPromotionCandidate.count({
+          where: {
+            campaignId: input.campaignId,
+            status: 'BLOCKED',
+            blockedReason: {
+              in: [...COMMERCIAL_PROMOTION_TERMINAL_CANDIDATE_BLOCK_REASONS],
+            },
+          },
+        })
+      : Promise.resolve(0);
+    const [records, total, nominalCount, copyReadyCount, capacityRecords, terminalCount] = await Promise.all([
+      transaction.commercialPromotionCandidate.findMany({
         where,
         include: {
           product: { select: { nome: true, preco: true, desconto: true } },
@@ -3173,8 +3391,35 @@ export class PrismaCommercialPromotionRepository
         skip: (input.page - 1) * input.limit,
         take: input.limit,
       }),
-      this.prisma.commercialPromotionCandidate.count({ where }),
+      transaction.commercialPromotionCandidate.count({ where }),
+      nominalCountPromise,
+      copyReadyCountPromise,
+      capacityRecordsPromise,
+      terminalCountPromise,
     ]);
+    const usableRecords = capacityRecords.filter((record) =>
+      isCommercialPromotionQueueCapacityUsable(record, now),
+    );
+    // Delivery and candidate relations are read from the same MVCC snapshot.
+    const sentProductIds = new Set<string>();
+    if (input.capacityOnly && input.groupId && capacityRecords.length) {
+      const productIds = capacityRecords.map(({ productId }) => productId);
+      const [dispatches, runs] = await Promise.all([
+        transaction.whatsAppDispatch.findMany({
+          where: { productId: { in: productIds }, destinationId: input.groupId,
+            status: { in: ['SENT', 'DELIVERED', 'READ'] } },
+          select: { productId: true }, distinct: ['productId'],
+        }),
+        transaction.commercialPipelineRun.findMany({
+          where: { productId: { in: productIds }, groupDestinationId: input.groupId,
+            mode: 'CONFIRMED', status: 'COMPLETED' },
+          select: { productId: true }, distinct: ['productId'],
+        }),
+      ]);
+      for (const row of [...dispatches, ...runs]) {
+        if (row.productId) sentProductIds.add(row.productId);
+      }
+    }
     return {
       items: records.map((record) => {
         const mapped = mapCommercialPromotionCandidate(
@@ -3192,7 +3437,25 @@ export class PrismaCommercialPromotionRepository
         };
       }),
       total,
+      ...(input.capacityOnly
+        ? {
+            health: {
+              nominalCount,
+              usableCount: usableRecords.filter(({ productId }) => !sentProductIds.has(productId)).length,
+              copyReadyCount: usableRecords.filter((record) => record.status === 'COPY_READY' && !sentProductIds.has(record.productId)).length,
+              nominalCopyReadyCount: copyReadyCount,
+              terminalCount: terminalCount + capacityRecords.filter((record) =>
+                record.copyGenerationAttempts.some((attempt) => attempt.snapshotId === record.snapshotId &&
+                  ['FAILED', 'AMBIGUOUS'].includes(attempt.status))).length,
+              ...(input.groupId ? {
+                alreadySentCount: sentProductIds.size,
+                usableAlreadySentCount: usableRecords.filter(({ productId }) => sentProductIds.has(productId)).length,
+              } : {}),
+            },
+          }
+        : {}),
     };
+    }, { isolationLevel: 'RepeatableRead' });
   }
 
   async blockCandidate(input: {
@@ -3548,6 +3811,9 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
       select: {
         id: true,
         candidateId: true,
+        snapshotId: true,
+        inputFingerprint: true,
+        generatedCopyId: true,
         provider: true,
         model: true,
         promptVersion: true,
@@ -3597,32 +3863,17 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
               failureCode,
             );
           }
-          const restartedBudgetAttempt =
-            await transaction.commercialCopyGenerationAttempt.updateMany({
-              where: {
-                inputFingerprint: input.inputFingerprint,
-                status: 'FAILED',
-                failureCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
-                requestMayHaveStarted: false,
-                generatedCopyId: null,
-              },
-              data: {
-                status: 'STARTED',
-                failureCode: null,
-                requestMayHaveStarted: false,
-                providerHttpStatus: null,
-                providerErrorCode: null,
-                providerErrorType: null,
-                providerErrorParam: null,
-                inputTokens: null,
-                outputTokens: null,
-                totalTokens: null,
-                validationFailureCodes: [],
-                startedAt: input.startedAt,
-                completedAt: null,
-              },
-            });
-          if (restartedBudgetAttempt.count === 1) return;
+          const prior = await transaction.commercialCopyGenerationAttempt.findFirst({
+            where: { candidateId: input.candidateId, snapshotId: input.snapshotId,
+              status: { in: ['STARTED', 'FAILED', 'AMBIGUOUS'] } },
+            select: { status: true },
+          });
+          if (prior) {
+            throw new AppError('Snapshot ja possui tentativa de preparacao',
+              ['FAILED', 'AMBIGUOUS'].includes(prior.status)
+                ? COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED
+                : 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS');
+          }
           await transaction.commercialCopyGenerationAttempt.create({
             data: {
               candidateId: input.candidateId,
@@ -3678,7 +3929,8 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
               input.validatedAt,
             ) ||
             !copy ||
-            copy.source !== 'AI' ||
+            (copy.source !== 'AI' &&
+              !isCommercialPromotionFallbackCopy(copy)) ||
             copy.inputFingerprint !== input.inputFingerprint ||
             copy.productId !== input.expected.product.id ||
             copy.createdFromCandidateId !== input.expected.candidate.id ||
@@ -3687,9 +3939,8 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
             copy.promptVersion !== input.promptVersion ||
             copy.validationVersion !== input.validationVersion ||
             !current?.product.affiliateLink ||
-            !isSafeAssembledCommercialPromotionCopy(
-              input.assembled,
-              current.product.affiliateLink,
+            !isSafeStoredCommercialPromotionCopy(
+              { ...copy, ...input.assembled },
               {
                 productName: current.product.productName,
                 shopName: current.product.shopName,
@@ -3698,6 +3949,7 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
                 promotionSignals: current.candidate.promotionSignals,
                 priceDropPercent: current.candidate.priceDropPercent,
               },
+              current.product.affiliateLink,
               input.maximumLength,
             )
           ) {
@@ -3767,7 +4019,8 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
               'COPY_READY',
             ) ||
             !copy ||
-            copy.source !== 'AI' ||
+            (copy.source !== 'AI' &&
+              !isCommercialPromotionFallbackCopy(copy)) ||
             copy.inputFingerprint !== input.inputFingerprint ||
             copy.productId !== input.expected.product.id ||
             copy.snapshotId !== input.expected.snapshot.id ||
@@ -3777,9 +4030,8 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
             copy.promptVersion !== input.promptVersion ||
             copy.validationVersion !== input.validationVersion ||
             !current?.product.affiliateLink ||
-            !isSafeAssembledCommercialPromotionCopy(
-              input.assembled,
-              current.product.affiliateLink,
+            !isSafeStoredCommercialPromotionCopy(
+              { ...copy, ...input.assembled },
               {
                 productName: current.product.productName,
                 shopName: current.product.shopName,
@@ -3788,6 +4040,7 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
                 promotionSignals: current.candidate.promotionSignals,
                 priceDropPercent: current.candidate.priceDropPercent,
               },
+              current.product.affiliateLink,
               input.maximumLength,
             )
           ) {
@@ -4017,7 +4270,126 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
     }
   }
 
+  async completeFallback(
+    input: Parameters<CommercialPromotionCopyRepository['completeFallback']>[0],
+  ) {
+    if (!isCommercialPromotionFallbackCopy(input.copy)) {
+      return {
+        completed: false as const,
+        failureCode: 'COMMERCIAL_AI_COPY_CONFIGURATION_CHANGED',
+      };
+    }
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const current = await loadCommercialPromotionCopyContext(
+            transaction as CommercialCopyPrismaClient,
+            input.expected.candidate.id,
+          );
+          const failureCode = copyContextFailure(
+            current,
+            input.expected,
+            input.affiliateLinkHash,
+            input.completedAt,
+          );
+          const attempt =
+            await transaction.commercialCopyGenerationAttempt.findUnique({
+              where: { inputFingerprint: input.inputFingerprint },
+            });
+          if (
+            failureCode ||
+            !attempt ||
+            attempt.status !== 'STARTED' ||
+            attempt.candidateId !== input.expected.candidate.id ||
+            attempt.snapshotId !== input.expected.snapshot.id
+          ) {
+            return {
+              completed: false as const,
+              failureCode:
+                failureCode ?? 'COMMERCIAL_AI_COPY_CONFIGURATION_CHANGED',
+            };
+          }
+          let copy = await transaction.generatedCopy.findUnique({
+            where: { inputFingerprint: input.inputFingerprint },
+          });
+          if (copy && !sameGeneratedCopy(copy, input.copy)) {
+            return {
+              completed: false as const,
+              failureCode: 'COMMERCIAL_AI_COPY_CACHE_INCONSISTENT',
+            };
+          }
+          copy ??= await transaction.generatedCopy.create({ data: input.copy });
+          const terminalized =
+            await transaction.commercialCopyGenerationAttempt.updateMany({
+              where: { id: attempt.id, status: 'STARTED' },
+              data: {
+                // Preparation succeeded; the provider failure remains diagnostic.
+                // FAILED/AMBIGUOUS cannot reference a copy under the existing CHECK.
+                status: 'SUCCEEDED',
+                generatedCopyId: copy.id,
+                failureCode: null,
+                requestMayHaveStarted: input.requestMayHaveStarted,
+                providerHttpStatus: input.providerHttpStatus ?? null,
+                providerErrorCode: input.providerErrorCode ?? input.failureCode,
+                providerErrorType: input.providerErrorType ?? null,
+                providerErrorParam: input.providerErrorParam ?? null,
+                inputTokens: input.usage.inputTokens,
+                outputTokens: input.usage.outputTokens,
+                totalTokens: input.usage.totalTokens,
+                validationFailureCodes:
+                  sanitizeCommercialAiCopyValidationFailureCodes(
+                    input.validationFailureCodes,
+                  ),
+                completedAt: input.completedAt,
+              },
+            });
+          const candidate =
+            await transaction.commercialPromotionCandidate.updateMany({
+              where: {
+                id: input.expected.candidate.id,
+                snapshotId: input.expected.snapshot.id,
+                status: 'QUEUED',
+                generatedCopyId: null,
+                updatedAt: input.expected.candidate.updatedAt,
+              },
+              data: {
+                status: 'COPY_READY',
+                generatedCopyId: copy.id,
+                blockedReason: null,
+              },
+            });
+          if (terminalized.count !== 1 || candidate.count !== 1) {
+            throw new AppError(
+              'Fallback mudou durante a persistencia',
+              'COMMERCIAL_AI_COPY_FALLBACK_CONFLICT',
+            );
+          }
+          return {
+            completed: true as const,
+            copy: copy as GeneratedCopyRecord,
+          };
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        isTransactionConflictError(error) ||
+        isUniqueConstraintError(error) ||
+        (error instanceof AppError &&
+          error.code === 'COMMERCIAL_AI_COPY_FALLBACK_CONFLICT')
+      ) {
+        throw new AppError(
+          'Persistencia do fallback ficou inconclusiva',
+          'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+        );
+      }
+      throw error;
+    }
+  }
+
   async markAttemptTerminal(input: {
+    candidateId: string;
+    snapshotId: string;
     inputFingerprint: string;
     status: 'FAILED' | 'AMBIGUOUS';
     failureCode: string;
@@ -4030,31 +4402,170 @@ export class PrismaCommercialPromotionCopyRepository implements CommercialPromot
     outputTokens?: number | null;
     totalTokens?: number | null;
     validationFailureCodes?: string[];
+    candidateBlockReason?: CommercialPromotionTerminalCandidateBlockReason;
     completedAt: Date;
   }) {
-    const result = await this.prisma.commercialCopyGenerationAttempt.updateMany(
-      {
-        where: { inputFingerprint: input.inputFingerprint, status: 'STARTED' },
-        data: {
-          status: input.status,
-          failureCode: input.failureCode,
-          requestMayHaveStarted: input.requestMayHaveStarted,
-          providerHttpStatus: input.providerHttpStatus ?? null,
-          providerErrorCode: input.providerErrorCode ?? null,
-          providerErrorType: input.providerErrorType ?? null,
-          providerErrorParam: input.providerErrorParam ?? null,
-          inputTokens: input.inputTokens ?? null,
-          outputTokens: input.outputTokens ?? null,
-          totalTokens: input.totalTokens ?? null,
-          validationFailureCodes:
-            sanitizeCommercialAiCopyValidationFailureCodes(
-              input.validationFailureCodes,
-            ),
-          completedAt: input.completedAt,
+    if (
+      input.candidateBlockReason &&
+      !isCommercialPromotionTerminalCandidateBlockReason(
+        input.candidateBlockReason,
+      )
+    ) {
+      return { kind: 'CONFLICT' as const };
+    }
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const attempt =
+            await transaction.commercialCopyGenerationAttempt.findUnique({
+              where: { inputFingerprint: input.inputFingerprint },
+            });
+          if (
+            !attempt ||
+            attempt.candidateId !== input.candidateId ||
+            attempt.snapshotId !== input.snapshotId
+          ) {
+            return { kind: 'CONFLICT' as const };
+          }
+          let kind: 'TERMINALIZED' | 'REPAIRED';
+          if (attempt.status === 'STARTED') {
+            const terminalized =
+              await transaction.commercialCopyGenerationAttempt.updateMany({
+                where: {
+                  id: attempt.id,
+                  candidateId: input.candidateId,
+                  snapshotId: input.snapshotId,
+                  status: 'STARTED',
+                },
+                data: {
+                  status: input.status,
+                  failureCode: input.failureCode,
+                  requestMayHaveStarted: input.requestMayHaveStarted,
+                  providerHttpStatus: input.providerHttpStatus ?? null,
+                  providerErrorCode: input.providerErrorCode ?? null,
+                  providerErrorType: input.providerErrorType ?? null,
+                  providerErrorParam: input.providerErrorParam ?? null,
+                  inputTokens: input.inputTokens ?? null,
+                  outputTokens: input.outputTokens ?? null,
+                  totalTokens: input.totalTokens ?? null,
+                  validationFailureCodes:
+                    sanitizeCommercialAiCopyValidationFailureCodes(
+                      input.validationFailureCodes,
+                    ),
+                  completedAt: input.completedAt,
+                },
+              });
+            if (terminalized.count !== 1) {
+              throw new AppError(
+                'Tentativa mudou durante a terminalizacao',
+                'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT',
+              );
+            }
+            kind = 'TERMINALIZED';
+          } else if (
+            attempt.status === input.status &&
+            (attempt.failureCode === input.failureCode ||
+              (!attempt.failureCode &&
+                input.failureCode ===
+                  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED))
+          ) {
+            kind = 'REPAIRED';
+          } else {
+            return { kind: 'CONFLICT' as const };
+          }
+          if (!input.candidateBlockReason) {
+            return { kind, candidateBlocked: false };
+          }
+          const candidate =
+            await transaction.commercialPromotionCandidate.findUnique({
+              where: { id: input.candidateId },
+              select: {
+                snapshotId: true,
+                status: true,
+                generatedCopyId: true,
+                blockedReason: true,
+              },
+            });
+          if (!candidate) {
+            throw new AppError(
+              'Candidato ausente',
+              'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT',
+            );
+          }
+          if (candidate.snapshotId !== input.snapshotId) {
+            return { kind: 'CANDIDATE_ADVANCED' as const };
+          }
+          if (
+            candidate.status === 'BLOCKED' &&
+            isCommercialPromotionTerminalCandidateBlockReason(
+              candidate.blockedReason,
+            )
+          ) {
+            if (candidate.blockedReason !== input.candidateBlockReason) {
+              const repaired =
+                await transaction.commercialPromotionCandidate.updateMany({
+                  where: {
+                    id: input.candidateId,
+                    snapshotId: input.snapshotId,
+                    status: 'BLOCKED',
+                    blockedReason: candidate.blockedReason,
+                  },
+                  data: {
+                    rankPosition: null,
+                    blockedReason: input.candidateBlockReason,
+                    lastEvaluatedAt: input.completedAt,
+                  },
+                });
+              if (repaired.count !== 1) {
+                throw new AppError(
+                  'Candidato mudou durante o reparo',
+                  'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT',
+                );
+              }
+            }
+            return { kind, candidateBlocked: true };
+          }
+          if (!['QUEUED', 'COPY_READY'].includes(candidate.status)) {
+            throw new AppError(
+              'Candidato nao pode ser bloqueado',
+              'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT',
+            );
+          }
+          const blocked =
+            await transaction.commercialPromotionCandidate.updateMany({
+              where: {
+                id: input.candidateId,
+                snapshotId: input.snapshotId,
+                status: candidate.status,
+                generatedCopyId: candidate.generatedCopyId,
+              },
+              data: {
+                status: 'BLOCKED',
+                rankPosition: null,
+                blockedReason: input.candidateBlockReason,
+                lastEvaluatedAt: input.completedAt,
+              },
+            });
+          if (blocked.count !== 1) {
+            throw new AppError(
+              'Candidato mudou durante o bloqueio',
+              'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT',
+            );
+          }
+          return { kind, candidateBlocked: true };
         },
-      },
-    );
-    return result.count === 1;
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        isTransactionConflictError(error) ||
+        (error instanceof AppError &&
+          error.code === 'COMMERCIAL_AI_COPY_TERMINALIZATION_CONFLICT')
+      ) {
+        return { kind: 'CONFLICT' as const };
+      }
+      throw error;
+    }
   }
 
   async findCopyForCandidate(candidateId: string) {
@@ -4356,7 +4867,9 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
   constructor(
     private readonly prisma: Pick<
       DatabaseClient,
-      'whatsAppDispatch' | 'commercialPipelineRun'
+      | 'whatsAppDispatch'
+      | 'commercialPipelineRun'
+      | 'commercialPromotionCandidate'
     >,
   ) {}
 
@@ -4397,6 +4910,75 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
       select: { sentAt: true },
     });
     return dispatch?.sentAt ?? null;
+  }
+
+  async countSentCampaignProductsToGroup(input: {
+    campaignId: string;
+    groupId: string;
+    usableOnly?: boolean;
+  }): Promise<number> {
+    let productIds: string[];
+    if (input.usableOnly) {
+      const now = new Date();
+      const capacityRecords = await this.prisma.commercialPromotionCandidate.findMany({
+        where: {
+          campaignId: input.campaignId,
+          status: { in: ['QUEUED', 'COPY_READY'] },
+        },
+        include: commercialPromotionQueueCapacityInclude,
+      });
+      productIds = [
+        ...new Set(
+          capacityRecords
+            .filter((record) =>
+              isCommercialPromotionQueueCapacityUsable(
+                record,
+                now,
+              ),
+            )
+            .map(({ productId }) => productId),
+        ),
+      ];
+    } else {
+      const nominalCandidates = await this.prisma.commercialPromotionCandidate.findMany({
+        where: {
+          campaignId: input.campaignId,
+          status: { in: ['QUEUED', 'COPY_READY'] },
+        },
+        select: { productId: true },
+        distinct: ['productId'],
+      });
+      productIds = nominalCandidates.map(({ productId }) => productId);
+    }
+    if (productIds.length === 0) return 0;
+
+    const [sentDispatches, confirmedRuns] = await Promise.all([
+      this.prisma.whatsAppDispatch.findMany({
+        where: {
+          productId: { in: productIds },
+          destinationId: input.groupId,
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
+        },
+        select: { productId: true },
+        distinct: ['productId'],
+      }),
+      this.prisma.commercialPipelineRun.findMany({
+        where: {
+          productId: { in: productIds },
+          groupDestinationId: input.groupId,
+          mode: 'CONFIRMED',
+          status: 'COMPLETED',
+        },
+        select: { productId: true },
+        distinct: ['productId'],
+      }),
+    ]);
+    const sentProductIds = new Set<string>();
+    for (const { productId } of sentDispatches) sentProductIds.add(productId);
+    for (const { productId } of confirmedRuns) {
+      if (productId) sentProductIds.add(productId);
+    }
+    return sentProductIds.size;
   }
 }
 
@@ -4462,6 +5044,10 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
               id: true,
               productId: true,
               source: true,
+              provider: true,
+              model: true,
+              promptVersion: true,
+              validationVersion: true,
               snapshotId: true,
               createdFromCandidateId: true,
             },
@@ -4470,7 +5056,8 @@ export class PrismaCommercialDispatchOutboxRepository implements CommercialDispa
             !existingCopy ||
             existingCopy.id !== input.dispatch.generatedCopyId ||
             existingCopy.productId !== input.dispatch.productId ||
-            existingCopy.source !== 'AI' ||
+            (existingCopy.source !== 'AI' &&
+              !isCommercialPromotionFallbackCopy(existingCopy)) ||
             !existingCopy.snapshotId ||
             !existingCopy.createdFromCandidateId
           ) {
@@ -8367,6 +8954,8 @@ export class PrismaWhatsAppDispatchRepository implements WhatsAppDispatchReposit
             hashtags: true,
             createdFromCandidateId: true,
             source: true,
+            provider: true,
+            model: true,
             promptVersion: true,
             validationVersion: true,
             promotionCandidates: {

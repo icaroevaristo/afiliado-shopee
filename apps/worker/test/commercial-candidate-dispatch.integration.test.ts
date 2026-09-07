@@ -337,6 +337,7 @@ describe('commercial candidate dispatch integration', () => {
       deliveryHistory: {
         wasProductSentToGroup: vi.fn(async () => false),
         findLastSentAtByGroup: vi.fn(async () => null),
+        countSentCampaignProductsToGroup: vi.fn(async () => 0),
       },
       copy: { generate: vi.fn(() => caption) },
       publisher: new CommercialDispatchOutboxPublisher({

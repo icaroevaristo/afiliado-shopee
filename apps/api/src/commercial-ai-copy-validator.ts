@@ -10,7 +10,15 @@ export type CommercialAiCopyValidationResult = {
   valid: boolean;
   sanitizedOutput?: CommercialAiCopyOutput;
   publicFailureCodes: string[];
+  auditFailureCodes?: string[];
+  auditEvidence?: string[];
 };
+
+export const COMMERCIAL_AI_COPY_VALIDATION_AUDIT_CODES = [
+  'AI_FACTUAL_CAUSE_MONEY_OR_PERCENT',
+  'AI_FACTUAL_CAUSE_UNSUPPORTED_IDENTITY',
+  'AI_FACTUAL_CAUSE_MISSING_IDENTITY',
+] as const;
 
 export const COMMERCIAL_AI_COPY_VALIDATION_FAILURE_CODES = [
   'AI_OUTPUT_STRUCTURE_INVALID',
@@ -36,19 +44,61 @@ export const sanitizeCommercialAiCopyValidationFailureCodes = (
   input: unknown,
 ): string[] => {
   if (!Array.isArray(input)) return [];
+  const allowedCodes = new Set<string>([
+    ...COMMERCIAL_AI_COPY_VALIDATION_FAILURE_CODES,
+    ...COMMERCIAL_AI_COPY_VALIDATION_AUDIT_CODES,
+  ]);
   const validCodes = new Set<string>();
   for (const item of input) {
     if (typeof item === 'string' && item.length > 0 && item.length <= 100) {
-      if (
-        (COMMERCIAL_AI_COPY_VALIDATION_FAILURE_CODES as readonly string[]).includes(
-          item,
-        )
-      ) {
+      if (allowedCodes.has(item)) {
         validCodes.add(item);
       }
     }
   }
   return Array.from(validCodes).sort().slice(0, 20);
+};
+
+const AUDIT_EVIDENCE_MAX_ITEMS = 4;
+const AUDIT_EVIDENCE_MAX_LENGTH = 48;
+const AUDIT_EVIDENCE = /^(?:money:R\$|percent:%|identity:[\p{L}-]{1,24}|identity:\[redacted\]|missing:product-identity)$/u;
+const SENSITIVE_AUDIT_IDENTITY_WORDS = new Set([
+  'api',
+  'apikey',
+  'authorization',
+  'bearer',
+  'chave',
+  'key',
+  'password',
+  'secret',
+  'senha',
+  'token',
+]);
+
+export const sanitizeCommercialAiCopyValidationAuditEvidence = (
+  input: unknown,
+): string[] => {
+  if (!Array.isArray(input)) return [];
+  const evidence = new Set<string>();
+  for (const item of input) {
+    if (
+      typeof item === 'string' &&
+      item.length <= AUDIT_EVIDENCE_MAX_LENGTH &&
+      AUDIT_EVIDENCE.test(item)
+    ) {
+      const identity = item.startsWith('identity:')
+        ? item.slice('identity:'.length)
+        : null;
+      evidence.add(
+        identity &&
+          identity !== '[redacted]' &&
+          SENSITIVE_AUDIT_IDENTITY_WORDS.has(identity.toLowerCase())
+          ? 'identity:[redacted]'
+          : item,
+      );
+    }
+  }
+  return [...evidence].sort().slice(0, AUDIT_EVIDENCE_MAX_ITEMS);
 };
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
@@ -142,6 +192,16 @@ const unsupportedBodyIdentityWords = (body: string, productName: string) => {
       ),
     ),
   ];
+};
+
+const sanitizedUnsupportedIdentityEvidence = (words: readonly string[]) => {
+  const token = words.find(
+    (word) =>
+      word.length <= 24 &&
+      !SENSITIVE_AUDIT_IDENTITY_WORDS.has(word) &&
+      /^[\p{L}-]+$/u.test(word),
+  );
+  return token ? `identity:${token}` : 'identity:[redacted]';
 };
 
 const supportedBodyIdentityWords = (body: string, productName: string) => {
@@ -285,26 +345,41 @@ export class CommercialAiCopyValidator {
       textual.some((value) => MARKDOWN.test(value)),
       'AI_MARKDOWN_FORBIDDEN',
     );
+    const auditFailures = new Set<string>();
+    const hasMoneyOrPercent = textual.some((value) => MONEY_OR_PERCENT.test(value));
+    const unsupportedIdentityWords = unsupportedBodyIdentityWords(body, productName);
+    const unsupportedIdentity = body.length >= 10 && body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH && unsupportedIdentityWords.length > 0;
+    const missingIdentity = body.length >= 10 && body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH && Boolean(productName) && supportedBodyIdentityWords(body, productName).length === 0;
     add(
       failures,
-      textual.some((value) => MONEY_OR_PERCENT.test(value)),
+      hasMoneyOrPercent,
       'AI_FACTUAL_VALUE_FORBIDDEN',
     );
     add(
       failures,
-      body.length >= 10 &&
-        body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH &&
-        unsupportedBodyIdentityWords(body, productName).length > 0,
+      unsupportedIdentity,
       'AI_FACTUAL_VALUE_FORBIDDEN',
     );
     add(
       failures,
-      body.length >= 10 &&
-        body.length <= COMMERCIAL_AI_COPY_BODY_MAX_LENGTH &&
-        Boolean(productName) &&
-        supportedBodyIdentityWords(body, productName).length === 0,
+      missingIdentity,
       'AI_FACTUAL_VALUE_FORBIDDEN',
     );
+    add(auditFailures, hasMoneyOrPercent, 'AI_FACTUAL_CAUSE_MONEY_OR_PERCENT');
+    add(auditFailures, unsupportedIdentity, 'AI_FACTUAL_CAUSE_UNSUPPORTED_IDENTITY');
+    add(auditFailures, missingIdentity, 'AI_FACTUAL_CAUSE_MISSING_IDENTITY');
+    const auditEvidence = sanitizeCommercialAiCopyValidationAuditEvidence([
+      ...(hasMoneyOrPercent && textual.some((value) => /R\s*\$/iu.test(value))
+        ? ['money:R$']
+        : []),
+      ...(hasMoneyOrPercent && textual.some((value) => /%/u.test(value))
+        ? ['percent:%']
+        : []),
+      ...(unsupportedIdentity
+        ? [sanitizedUnsupportedIdentityEvidence(unsupportedIdentityWords)]
+        : []),
+      ...(missingIdentity ? ['missing:product-identity'] : []),
+    ]);
     add(
       failures,
       textual.some(hasCommercialAiCopyProhibitedClaim),
@@ -324,8 +399,14 @@ export class CommercialAiCopyValidator {
       'AI_EMOJI_LIMIT',
     );
     const publicFailureCodes = [...failures].sort();
+    const auditFailureCodes = [...auditFailures].sort().slice(0, 10);
     return publicFailureCodes.length > 0
-      ? { valid: false, publicFailureCodes }
+      ? {
+          valid: false,
+          publicFailureCodes,
+          ...(auditFailureCodes.length > 0 ? { auditFailureCodes } : {}),
+          ...(auditEvidence.length > 0 ? { auditEvidence } : {}),
+        }
       : {
           valid: true,
           sanitizedOutput: { headline, body },

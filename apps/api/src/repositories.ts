@@ -3,6 +3,7 @@ import type {
   ShopeeAffiliateOfferSource,
   ShopeeProductOffer,
 } from '@shopee-auto-affiliate-ai/providers';
+import type { CommercialPromotionTerminalCandidateBlockReason } from './commercial-promotion-candidate-terminal';
 
 export const APPROVED_PRODUCT_MIN_SCORE = 70;
 
@@ -419,6 +420,11 @@ export interface CommercialPipelineRunFinalizationRepository {
 export interface CommercialDeliveryHistoryRepository {
   wasProductSentToGroup(productId: string, groupId: string): Promise<boolean>;
   findLastSentAtByGroup(groupId: string): Promise<Date | null>;
+  countSentCampaignProductsToGroup(input: {
+    campaignId: string;
+    groupId: string;
+    usableOnly?: boolean;
+  }): Promise<number>;
 }
 
 export type CommercialDispatchOutboxStatus =
@@ -1471,7 +1477,22 @@ export interface CommercialPromotionCandidateRepository {
     page: number;
     limit: number;
     status?: CommercialPromotionCandidateStatus;
-  }): Promise<{ items: CommercialPromotionQueueItem[]; total: number }>;
+    capacityOnly?: boolean;
+    /** Include delivery counts in the same snapshot as queue capacity. */
+    groupId?: string;
+  }): Promise<{
+    items: CommercialPromotionQueueItem[];
+    total: number;
+    health?: {
+      nominalCount: number;
+      usableCount: number;
+      copyReadyCount: number;
+      nominalCopyReadyCount?: number;
+      terminalCount: number;
+      alreadySentCount?: number;
+      usableAlreadySentCount?: number;
+    };
+  }>;
   findByCampaignAndProduct?(
     campaignId: string,
     productId: string,
@@ -1539,6 +1560,9 @@ export type CommercialCopyGenerationAttemptStatusRecord = Pick<
   CommercialCopyGenerationAttemptRecord,
   | 'id'
   | 'candidateId'
+  | 'snapshotId'
+  | 'inputFingerprint'
+  | 'generatedCopyId'
   | 'provider'
   | 'model'
   | 'promptVersion'
@@ -1625,6 +1649,12 @@ export type CommercialAiCopyCompletionResult =
   | { completed: true; copy: GeneratedCopyRecord }
   | { completed: false; failureCode: string };
 
+export type CommercialAiCopyTerminalizationResult =
+  | { kind: 'TERMINALIZED'; candidateBlocked: boolean }
+  | { kind: 'REPAIRED'; candidateBlocked: boolean }
+  | { kind: 'CANDIDATE_ADVANCED' }
+  | { kind: 'CONFLICT' };
+
 export interface CommercialPromotionCopyRepository {
   loadContext(
     candidateId: string,
@@ -1683,7 +1713,22 @@ export interface CommercialPromotionCopyRepository {
   complete(
     input: CommercialAiCopyCompletionInput,
   ): Promise<CommercialAiCopyCompletionResult>;
+  completeFallback(
+    input: CommercialAiCopyCompletionInput & {
+      /** Provider outcome only; successful fallback persists SUCCEEDED + copy. */
+      status: 'FAILED' | 'AMBIGUOUS';
+      failureCode: string;
+      requestMayHaveStarted: boolean;
+      providerHttpStatus?: number | null;
+      providerErrorCode?: string | null;
+      providerErrorType?: string | null;
+      providerErrorParam?: string | null;
+      validationFailureCodes?: string[];
+    },
+  ): Promise<CommercialAiCopyCompletionResult>;
   markAttemptTerminal(input: {
+    candidateId: string;
+    snapshotId: string;
     inputFingerprint: string;
     status: 'FAILED' | 'AMBIGUOUS';
     failureCode: string;
@@ -1696,8 +1741,9 @@ export interface CommercialPromotionCopyRepository {
     outputTokens?: number | null;
     totalTokens?: number | null;
     validationFailureCodes?: string[];
+    candidateBlockReason?: CommercialPromotionTerminalCandidateBlockReason;
     completedAt: Date;
-  }): Promise<boolean>;
+  }): Promise<CommercialAiCopyTerminalizationResult>;
   findCopyForCandidate(candidateId: string): Promise<{
     candidate: CommercialPromotionCandidateRecord;
     copy: GeneratedCopyRecord;
@@ -1934,6 +1980,8 @@ export type WhatsAppDispatchDetails = WhatsAppDispatchRecord & {
     | 'hashtags'
     | 'createdFromCandidateId'
     | 'source'
+    | 'provider'
+    | 'model'
     | 'promptVersion'
     | 'validationVersion'
   > & {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
+import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
 
 import {
   canonicalManualPublicationPayload,
@@ -242,13 +243,26 @@ const createSubject = (
       error: Error;
     };
     markerError?: Error;
+    fallbackIdentity?: Record<string, string>;
   } = {},
 ) => {
   const groups = overrides.groups ?? [group('a'), group('b', false)];
   const campaigns = groups.map(campaign);
+  const storedCandidate = overrides.fallbackIdentity ? {
+    id: 'candidate-a', productId: 'product-1', snapshotId: 'snapshot-1',
+    generatedCopyId: 'copy-a', status: 'COPY_READY', expiresAt: null,
+  } : null;
+  const storedCopy = {
+    id: 'copy-a', productId: 'product-1', snapshotId: 'snapshot-1',
+    createdFromCandidateId: 'candidate-a', titulo: 'OFERTA SELECIONADA',
+    mensagem: 'Oferta oficial\n🔥 POR: R$ 99,90\n💸 20% OFF',
+    cta: '🛒 Compre aqui: https://example.invalid/affiliate', hashtags: '',
+    ...overrides.fallbackIdentity,
+  };
   const requests = new Map<string, ManualPublicationRequestRecord>();
   const events: string[] = [];
   let createdRequestCount = 0;
+  let acceptedRequestCount = 0;
   const outboxes = new Map<
     string,
     {
@@ -480,6 +494,7 @@ const createSubject = (
 
   const requestRepository: ManualPublicationRequestRepository = {
     accept: async (input) => {
+      acceptedRequestCount += 1;
       const existing = requests.get(input.idempotencyKey);
       if (existing) return { request: existing, created: false };
       createdRequestCount += 1;
@@ -598,12 +613,17 @@ const createSubject = (
       }),
     },
     candidates: {
-      findByCampaignAndProduct: async () => null,
+      findByCampaignAndProduct: async () => storedCandidate,
       listCampaignCandidates: async () => [],
     },
     copies: {
-      loadContext: async () => null,
-      findCopyForCandidate: async () => null,
+      loadContext: async () => storedCandidate ? {
+        candidate: storedCandidate, snapshot: snapshot(), product: {
+          id: 'product-1', unavailableAt: null, affiliateLink: offer().affiliateLink,
+          commercialSnapshotRevision: 1, urlImagem: offer().imageUrl,
+        },
+      } : null,
+      findCopyForCandidate: async () => storedCandidate ? { candidate: storedCandidate, copy: storedCopy } : null,
     },
     deliveryHistory: { wasProductSentToGroup: async () => false },
     policy: { evaluateManualSendSafety },
@@ -803,6 +823,9 @@ const createSubject = (
     get createdRequestCount() {
       return createdRequestCount;
     },
+    get acceptedRequestCount() {
+      return acceptedRequestCount;
+    },
   };
 };
 
@@ -923,7 +946,7 @@ describe('ManualPublicationService', () => {
     );
   });
 
-  it('previewOnlyWritesRequestTargets', async () => {
+  it('preview returns an ephemeral view with zero request or target writes', async () => {
     const subject = createSubject();
 
     const result = await subject.service.preview({
@@ -932,7 +955,7 @@ describe('ManualPublicationService', () => {
       destinationIds: ['a'],
     });
 
-    expect(result.created).toBe(true);
+    expect(result.created).toBe(false);
     expect(result.request).toMatchObject({
       mode: 'PREVIEW',
       status: 'PREVIEW_READY',
@@ -945,7 +968,9 @@ describe('ManualPublicationService', () => {
       dispatchId: null,
       outboxId: null,
     });
-    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
+    expect(subject.requests.size).toBe(0);
     expect(subject.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
@@ -953,6 +978,28 @@ describe('ManualPublicationService', () => {
     expect(subject.startExecution).not.toHaveBeenCalled();
     expect(subject.executions).toHaveLength(0);
   });
+
+  it.each([null, 'source', 'provider', 'model', 'promptVersion', 'validationVersion'] as const)(
+    'preview manual aceita identidade fallback completa e rejeita campo divergente %s', async (field) => {
+      const subject = createSubject('OFFICIAL', undefined, { fallbackIdentity: {
+        source: 'LEGACY_TEMPLATE', provider: 'deterministic-safe-fallback',
+        model: 'commercial-safe-fallback-v1', promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        ...(field ? { [field]: 'not-certified' } : {}),
+      } });
+      const options = await subject.service.getOptions('product-1');
+      expect(options.groups[0]).toMatchObject(field ? {
+        copyStatus: 'BLOCKED', draftPreview: null, blockers: ['COMMERCIAL_AI_COPY_CACHE_INCONSISTENT'],
+      } : {
+        copyStatus: 'READY', draftPreview: { generatedCopyId: 'copy-a',
+          caption: expect.stringContaining('https://example.invalid/affiliate') },
+      });
+      expect(subject.createdRequestCount).toBe(0);
+      expect(subject.updateTarget).not.toHaveBeenCalled();
+      expect(subject.prepareManual).not.toHaveBeenCalled();
+      expect(subject.confirm).not.toHaveBeenCalled();
+    },
+  );
 
   it('previewNoCandidateWrites previewNoReservation previewNoCopy previewNoRun previewNoDispatch previewNoOutbox previewNoBullMQ previewNoProvider', async () => {
     const subject = createSubject();
@@ -968,7 +1015,8 @@ describe('ManualPublicationService', () => {
     expect(subject.confirm).not.toHaveBeenCalled();
     expect(subject.startExecution).not.toHaveBeenCalled();
     expect(subject.executions).toHaveLength(0);
-    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
   });
 
   it('pausedAllowsPreview without consulting send policy', async () => {
@@ -1018,7 +1066,7 @@ describe('ManualPublicationService', () => {
     expect(subject.createdRequestCount).toBe(0);
   });
 
-  it('sameKeyReplay reuses the preview request without extra rows', async () => {
+  it('replays previews without persisting an idempotency request', async () => {
     const subject = createSubject();
     const input = {
       idempotencyKey: 'preview-replay-key',
@@ -1029,19 +1077,26 @@ describe('ManualPublicationService', () => {
     const first = await subject.service.preview(input);
     const second = await subject.service.preview(input);
 
-    expect(first.request.id).toBe(second.request.id);
+    expect(first.request.id).not.toBe(second.request.id);
+    expect(first.created).toBe(false);
     expect(second.created).toBe(false);
-    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
+    expect(subject.requests.size).toBe(0);
     expect(second.request.targets).toHaveLength(1);
   });
 
-  it('sameKeyConflict rejects a different preview payload without mutation', async () => {
-    const subject = createSubject();
-    await subject.service.preview({
-      idempotencyKey: 'preview-conflict-key',
-      productId: 'product-1',
-      destinationIds: ['a'],
+  it('does not reserve an idempotency key for a different valid preview', async () => {
+    const subject = createSubject('OFFICIAL', undefined, {
+      groups: [group('a'), group('b')],
     });
+    await expect(
+      subject.service.preview({
+        idempotencyKey: 'preview-conflict-key',
+        productId: 'product-1',
+        destinationIds: ['a'],
+      }),
+    ).resolves.toMatchObject({ created: false });
 
     await expect(
       subject.service.preview({
@@ -1049,13 +1104,13 @@ describe('ManualPublicationService', () => {
         productId: 'product-1',
         destinationIds: ['b'],
       }),
-    ).rejects.toMatchObject({
-      code: 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
-    });
-    expect(subject.createdRequestCount).toBe(1);
+    ).resolves.toMatchObject({ created: false });
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
+    expect(subject.requests.size).toBe(0);
   });
 
-  it('sameKeyConcurrent creates exactly one logical request', async () => {
+  it('concurrent previews create no durable rows', async () => {
     const subject = createSubject();
     const input = {
       idempotencyKey: 'preview-concurrent-key',
@@ -1068,13 +1123,17 @@ describe('ManualPublicationService', () => {
       subject.service.preview(input),
     ]);
 
-    expect(first.request.id).toBe(second.request.id);
-    expect(subject.createdRequestCount).toBe(1);
+    expect(first.request.id).not.toBe(second.request.id);
+    expect(first.created).toBe(false);
+    expect(second.created).toBe(false);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
+    expect(subject.requests.size).toBe(0);
     expect(first.request.targets).toHaveLength(1);
     expect(second.request.targets).toHaveLength(1);
   });
 
-  it('restartSafePreview never aggregates or advances a preview request', async () => {
+  it('find does not invent a request for an ephemeral preview', async () => {
     const subject = createSubject();
     const first = await subject.service.preview({
       idempotencyKey: 'preview-restart-key',
@@ -1082,14 +1141,12 @@ describe('ManualPublicationService', () => {
       destinationIds: ['a'],
     });
 
-    const reloaded = await subject.service.find(first.request.id);
-
-    expect(reloaded).toMatchObject({
-      id: first.request.id,
-      mode: 'PREVIEW',
-      status: 'PREVIEW_READY',
+    await expect(subject.service.find(first.request.id)).rejects.toMatchObject({
+      code: 'MANUAL_PUBLICATION_NOT_FOUND',
     });
-    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
+    expect(subject.requests.size).toBe(0);
     expect(subject.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
@@ -1234,30 +1291,27 @@ describe('ManualPublicationService', () => {
         destinationIds: ['a'],
       }),
     ).resolves.toMatchObject({ request: { status: 'PREVIEW_READY' } });
-    expect(one.createdRequestCount).toBe(1);
+    expect(one.acceptedRequestCount).toBe(0);
+    expect(one.createdRequestCount).toBe(0);
   });
 
-  it('previewCannotBecomeSend rejects before the SEND pipeline', async () => {
+  it('preview does not reserve a durable request before a later SEND', async () => {
     const subject = createSubject();
     const input = {
       idempotencyKey: 'preview-send-escalation-key',
       productId: 'product-1',
       destinationIds: ['a'],
     };
-    await subject.service.preview(input);
+    const preview = await subject.service.preview(input);
 
-    await expect(
-      subject.service.create({
-        ...input,
-        confirm: MANUAL_PUBLICATION_CONFIRMATION,
-      }),
-    ).rejects.toMatchObject({
-      code: 'MANUAL_PUBLICATION_IDEMPOTENCY_CONFLICT',
-    });
+    await expect(subject.service.find(preview.request.id)).rejects.toMatchObject(
+      { code: 'MANUAL_PUBLICATION_NOT_FOUND' },
+    );
     expect(subject.reserveAttempt).not.toHaveBeenCalled();
     expect(subject.prepareManual).not.toHaveBeenCalled();
     expect(subject.confirm).not.toHaveBeenCalled();
-    expect(subject.createdRequestCount).toBe(1);
+    expect(subject.acceptedRequestCount).toBe(0);
+    expect(subject.createdRequestCount).toBe(0);
   });
 
   it('bloqueia fonte MOCK antes de reserva, copy ou confirmacao', async () => {

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PrismaCommercialPromotionCopyRepository } from '../src/prisma-repositories';
+import { buildCommercialPromotionFallbackOutput, isSafeStoredCommercialPromotionCopy, validateCommercialPromotionFallbackOutput } from '../src/commercial-promotion-copy-fallback';
+import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 
 import {
   CommercialAiCopyProviderError,
@@ -13,8 +16,12 @@ import {
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   CommercialPromotionCopyGenerationService,
 } from '../src/commercial-promotion-copy-generation-service';
+import { COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED } from '../src/commercial-promotion-candidate-terminal';
 import { COMMERCIAL_AI_COPY_VALIDATION_VERSION } from '../src/commercial-ai-copy-prompt';
-import { CommercialAiCopyValidator } from '../src/commercial-ai-copy-validator';
+import {
+  CommercialAiCopyValidator,
+  sanitizeCommercialAiCopyValidationFailureCodes,
+} from '../src/commercial-ai-copy-validator';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import type {
   CommercialAiCopyClaimInput,
@@ -203,33 +210,10 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
   async claim(input: CommercialAiCopyClaimInput) {
     this.claimInputs.push(input);
     const existing = this.attempts.get(input.inputFingerprint);
-    if (existing) {
-      if (
-        existing.status === 'FAILED' &&
-        existing.failureCode === 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED' &&
-        !existing.requestMayHaveStarted &&
-        !existing.generatedCopyId
-      ) {
-        Object.assign(existing, {
-          status: 'STARTED' as const,
-          failureCode: null,
-          requestMayHaveStarted: false,
-          providerHttpStatus: null,
-          providerErrorCode: null,
-          providerErrorType: null,
-          providerErrorParam: null,
-          inputTokens: null,
-          outputTokens: null,
-          totalTokens: null,
-          validationFailureCodes: [],
-          startedAt: input.startedAt,
-          completedAt: null,
-          updatedAt: input.startedAt,
-        });
-        return true;
-      }
-      return false;
-    }
+    if (existing) return false;
+    if ([...this.attempts.values()].some((attempt) =>
+      attempt.candidateId === input.candidateId && attempt.snapshotId === input.snapshotId &&
+      ['STARTED', 'FAILED', 'AMBIGUOUS'].includes(attempt.status))) return false;
     this.attempts.set(input.inputFingerprint, {
       id: 'attempt-internal',
       candidateId: input.candidateId,
@@ -316,15 +300,111 @@ class MemoryCopyRepository implements CommercialPromotionCopyRepository {
     }
     return { completed: true as const, copy };
   }
+  async completeFallback(
+    input: Parameters<
+      CommercialPromotionCopyRepository['completeFallback']
+    >[0],
+  ) {
+    const attempt = this.attempts.get(input.inputFingerprint);
+    if (
+      !attempt ||
+      attempt.status !== 'STARTED' ||
+      !this.context ||
+      this.context.candidate.id !== input.expected.candidate.id ||
+      this.context.candidate.snapshotId !== input.expected.snapshot.id ||
+      this.context.candidate.status !== 'QUEUED' ||
+      this.context.candidate.generatedCopyId
+    ) {
+      return {
+        completed: false as const,
+        failureCode: 'COMMERCIAL_AI_COPY_CONFIGURATION_CHANGED',
+      };
+    }
+    const copy: GeneratedCopyRecord = {
+      id: this.copyId,
+      ...input.copy,
+      createdAt: input.completedAt,
+    };
+    this.copies.set(input.inputFingerprint, copy);
+    Object.assign(attempt, {
+      status: 'SUCCEEDED',
+      generatedCopyId: copy.id,
+      failureCode: null,
+      requestMayHaveStarted: input.requestMayHaveStarted,
+      providerHttpStatus: input.providerHttpStatus ?? null,
+      providerErrorCode: input.providerErrorCode ?? input.failureCode,
+      providerErrorType: input.providerErrorType ?? null,
+      providerErrorParam: input.providerErrorParam ?? null,
+      inputTokens: input.usage.inputTokens,
+      outputTokens: input.usage.outputTokens,
+      totalTokens: input.usage.totalTokens,
+      validationFailureCodes:
+        sanitizeCommercialAiCopyValidationFailureCodes(
+          input.validationFailureCodes,
+        ),
+      completedAt: input.completedAt,
+      updatedAt: input.completedAt,
+    });
+    this.context.candidate.status = 'COPY_READY';
+    this.context.candidate.generatedCopyId = copy.id;
+    this.context.candidate.blockedReason = null;
+    return { completed: true as const, copy };
+  }
   async markAttemptTerminal(
     input: Parameters<
       CommercialPromotionCopyRepository['markAttemptTerminal']
     >[0],
   ) {
     const attempt = this.attempts.get(input.inputFingerprint);
-    if (!attempt || attempt.status !== 'STARTED') return false;
-    Object.assign(attempt, input);
-    return true;
+    if (
+      !attempt ||
+      attempt.candidateId !== input.candidateId ||
+      attempt.snapshotId !== input.snapshotId
+    ) {
+      return { kind: 'CONFLICT' as const };
+    }
+    const kind =
+      attempt.status === 'STARTED'
+        ? ('TERMINALIZED' as const)
+        : attempt.status === input.status &&
+            (attempt.failureCode === input.failureCode ||
+              (!attempt.failureCode &&
+                input.failureCode ===
+                  COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED))
+          ? ('REPAIRED' as const)
+          : null;
+    if (!kind) return { kind: 'CONFLICT' as const };
+    if (kind === 'TERMINALIZED') {
+      Object.assign(attempt, input, { updatedAt: input.completedAt });
+    }
+    if (!input.candidateBlockReason) {
+      return { kind, candidateBlocked: false };
+    }
+    if (!this.context) return { kind: 'CONFLICT' as const };
+    if (this.context.candidate.snapshotId !== input.snapshotId) {
+      return { kind: 'CANDIDATE_ADVANCED' as const };
+    }
+    if (
+      this.context.candidate.status === 'BLOCKED' &&
+      [
+        'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+        COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+        COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+      ].includes(this.context.candidate.blockedReason ?? '')
+    ) {
+      this.context.candidate.blockedReason = input.candidateBlockReason;
+      return { kind, candidateBlocked: true };
+    }
+    if (
+      !['QUEUED', 'COPY_READY'].includes(this.context.candidate.status)
+    ) {
+      return { kind: 'CONFLICT' as const };
+    }
+    this.context.candidate.status = 'BLOCKED';
+    this.context.candidate.rankPosition = null;
+    this.context.candidate.blockedReason = input.candidateBlockReason;
+    this.context.candidate.lastEvaluatedAt = input.completedAt;
+    return { kind, candidateBlocked: true };
   }
   async findCopyForCandidate() {
     if (!this.context?.candidate.generatedCopyId) return null;
@@ -434,7 +514,126 @@ const service = (
   });
 
 describe('CommercialPromotionCopyGenerationService', () => {
-  it('preserva budget esgotado como falha pre-provider e permite o mesmo contract no proximo dayKey', async () => {
+  it.each(['FAILED', 'AMBIGUOUS', 'STARTED'] as const)('claim Prisma rejeita %s do snapshot inserido após precheck, mesmo com outro fingerprint', async (status) => {
+    const repository = new MemoryCopyRepository();
+    const expected = contextFixture();
+    const prior = { ...legacyAttempt(status, 'other-generation-fingerprint') };
+    const create = vi.fn();
+    const findFirst = vi.fn(async () => prior);
+    const transaction = {
+      commercialPromotionCandidate: { findUnique: vi.fn(async () => ({
+        ...expected.candidate, campaign: { ...expected.campaign, niche: expected.niche },
+        snapshot: expected.snapshot,
+        product: { ...expected.product, nome: expected.product.productName,
+          loja: expected.product.shopName, preco: expected.product.price,
+          precoMin: expected.product.priceMin, precoMax: expected.product.priceMax,
+          desconto: expected.product.discountRate, comissao: expected.product.commissionRate,
+          nota: expected.product.rating, vendidos: expected.product.sales },
+      })) },
+      commercialOfferSnapshot: { findUnique: vi.fn(async () => null) },
+      commercialCopyGenerationAttempt: { findFirst, create },
+    };
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof transaction) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(transaction);
+      },
+    );
+    const prismaRepository = new PrismaCommercialPromotionCopyRepository({ $transaction: transact } as never);
+    vi.spyOn(repository, 'claim').mockImplementation((input) => prismaRepository.claim(input));
+    const provider = validProvider();
+    await expect(service(repository, provider).generate('candidate-internal', 'GERAR_COPY_COM_IA')).rejects.toMatchObject({
+      code: status === 'STARTED' ? 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS' : COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+    });
+    expect(findFirst).toHaveBeenCalledWith({ where: { candidateId: expected.candidate.id,
+      snapshotId: expected.snapshot.id, status: { in: ['STARTED', 'FAILED', 'AMBIGUOUS'] } }, select: { status: true } });
+    expect(create).not.toHaveBeenCalled();
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(prior.status).toBe(status);
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'Serializable' });
+  });
+
+  it('o contrato factual não permite usar fallback para texto inventado, URL ou claim', () => {
+    const validator = new CommercialAiCopyValidator();
+    expect(validateCommercialPromotionFallbackOutput(validator, {
+      headline: 'OFERTA SELECIONADA', body: 'TV especial',
+    }, 'TV', []).valid).toBe(false);
+    for (const body of ['TV frete grátis', 'TV R$ 20', 'TV 50%', 'TV https://example.invalid/x']) {
+      expect(validateCommercialPromotionFallbackOutput(validator, {
+        headline: 'OFERTA SELECIONADA', body,
+      }, body, []).valid).toBe(false);
+    }
+  });
+  it.each(['FAILED_CONFIRMED', 'AMBIGUOUS'] as const)('fallback persiste com CHECK existente após provider %s', async (kind) => {
+    const repository = new MemoryCopyRepository();
+    const expected = contextFixture();
+    const attempt = { ...legacyAttempt('STARTED'), promptVersion: 'commercial-promotion-copy-v14',
+      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION };
+    const updateAttempt = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      // CommercialCopyGenerationAttempt_state_check, without a live database.
+      const row = { ...attempt, ...data };
+      const valid = (row.status === 'STARTED' && row.completedAt === null && row.generatedCopyId === null) ||
+        (row.status === 'SUCCEEDED' && row.completedAt !== null && row.generatedCopyId !== null && row.failureCode === null) ||
+        (['FAILED', 'AMBIGUOUS'].includes(row.status) && row.completedAt !== null && row.generatedCopyId === null);
+      if (!valid) throw new Error('CommercialCopyGenerationAttempt_state_check');
+      return { count: 1 };
+    });
+    const updateCandidate = vi.fn(async () => ({ count: 1 }));
+    const transaction = {
+      commercialPromotionCandidate: {
+        findUnique: vi.fn(async () => ({
+          ...expected.candidate,
+          campaign: { ...expected.campaign, niche: expected.niche },
+          snapshot: expected.snapshot,
+          product: { ...expected.product, nome: expected.product.productName,
+            loja: expected.product.shopName, preco: expected.product.price,
+            precoMin: expected.product.priceMin, precoMax: expected.product.priceMax,
+            desconto: expected.product.discountRate, comissao: expected.product.commissionRate,
+            nota: expected.product.rating, vendidos: expected.product.sales },
+        })),
+        updateMany: updateCandidate,
+      },
+      commercialOfferSnapshot: { findUnique: vi.fn(async () => null) },
+      commercialCopyGenerationAttempt: {
+        findUnique: vi.fn(async () => attempt), updateMany: updateAttempt,
+      },
+      generatedCopy: {
+        findUnique: vi.fn(async () => null),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'copy-internal', ...data })),
+      },
+    };
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof transaction) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(transaction);
+      },
+    );
+    const prismaRepository = new PrismaCommercialPromotionCopyRepository({ $transaction: transact } as never);
+    vi.spyOn(repository, 'completeFallback').mockImplementation((input) => prismaRepository.completeFallback(input));
+    const provider = { generate: vi.fn().mockRejectedValue(new CommercialAiCopyProviderError(
+      kind, 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', {}, undefined, true,
+    )) };
+    const result = await service(repository, provider).generate('candidate-internal', 'GERAR_COPY_COM_IA');
+    expect(result.status).toBe('COPY_READY');
+    expect(updateAttempt).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: 'SUCCEEDED', failureCode: null, generatedCopyId: 'copy-internal',
+      providerErrorCode: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED', requestMayHaveStarted: true,
+    }) }));
+    expect(updateCandidate).toHaveBeenCalledWith(expect.objectContaining({ data: {
+      status: 'COPY_READY', generatedCopyId: 'copy-internal', blockedReason: null,
+    } }));
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'Serializable' });
+    expect(provider.generate).toHaveBeenCalledOnce();
+  });
+  it('T1 usa fallback determinístico quando o budget impede a chamada e preserva a tentativa', async () => {
     const repository = new MemoryCopyRepository();
     let budgetNow = new Date('2026-08-01T12:00:00.000Z');
     const settingsRecord = {
@@ -491,28 +690,33 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({
-      code: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+      model: 'commercial-safe-fallback-v1',
     });
     expect(actualProvider.generate).not.toHaveBeenCalled();
     expect([...repository.attempts.values()][0]).toMatchObject({
-      status: 'FAILED',
-      failureCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
+      status: 'SUCCEEDED',
+      failureCode: null,
+      providerErrorCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
       requestMayHaveStarted: false,
     });
 
     budgetNow = new Date('2026-08-02T12:00:00.000Z');
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).resolves.toMatchObject({ status: 'COPY_READY' });
-    expect(actualProvider.generate).toHaveBeenCalledTimes(1);
+    ).resolves.toMatchObject({ status: 'COPY_READY', cacheHit: true });
+    expect(actualProvider.generate).not.toHaveBeenCalled();
     expect([...repository.attempts.values()][0]).toMatchObject({
       status: 'SUCCEEDED',
+      failureCode: null,
+      providerErrorCode: 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED',
       requestMayHaveStarted: false,
     });
   });
 
-  it('aprova preflight configurado sem construir ou chamar provider', () => {
+  it('T2 aprova preflight configurado sem construir ou chamar provider', () => {
     const repository = new MemoryCopyRepository();
     const copyService = new CommercialPromotionCopyGenerationService({
       repository,
@@ -538,7 +742,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('mantém preview read-only e sanitizado', async () => {
+  it('T3 mantém preview read-only e sanitizado', async () => {
     const repository = new MemoryCopyRepository();
     const before = JSON.stringify(repository.context);
     const report = await service(repository).preview('candidate-internal');
@@ -549,7 +753,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.attempts.size).toBe(0);
   });
 
-  it('envia ao provider o nome sanitizado e preserva a fonte original no contexto', async () => {
+  it('T4 envia ao provider somente o nome sanitizado e preserva a fonte original', async () => {
     const repository = new MemoryCopyRepository();
     const originalProductName = 'Air Fryer 6,5L 1700W 127V Original';
     repository.context!.product.productName = originalProductName;
@@ -604,7 +808,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('falha fechado antes do provider quando a sanitização remove toda a identidade', async () => {
+  it('usa referencia neutra sem claim ou provider quando a sanitização remove toda a identidade', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.product.productName = 'Original';
     const provider = validProvider();
@@ -614,27 +818,30 @@ describe('CommercialPromotionCopyGenerationService', () => {
         'candidate-internal',
         'GERAR_COPY_COM_IA',
       ),
-    ).rejects.toMatchObject({
-      code: 'COMMERCIAL_AI_COPY_MODEL_PRODUCT_NAME_INVALID',
+    ).resolves.toMatchObject({
+      status: 'COPY_READY', provider: 'deterministic-safe-fallback',
     });
 
     expect(provider.generate).not.toHaveBeenCalled();
-    expect(repository.claimInputs).toHaveLength(0);
-    expect(repository.attempts.size).toBe(0);
+    expect(repository.claimInputs).toHaveLength(1);
+    expect(repository.attempts.size).toBe(1);
+    expect([...repository.copies.values()][0].mensagem).toContain('Produto selecionado');
   });
 
-  it('marca output terminal rejeitado como inelegivel somente no fingerprint atual', async () => {
+  it('T5 repara estado legado terminal no mesmo snapshot e libera N+1', async () => {
     const repository = new MemoryCopyRepository();
     let rejectedFingerprint: string | null = null;
     repository.findAttemptByInputFingerprint = vi.fn(
       async (fingerprint: string) => {
         rejectedFingerprint ??= fingerprint;
         if (fingerprint !== rejectedFingerprint) return null;
-        return {
+        const attempt = {
           ...legacyAttempt('FAILED', fingerprint),
           failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
           validationFailureCodes: ['AI_PROHIBITED_CLAIM'],
         };
+        repository.attempts.set(fingerprint, attempt);
+        return attempt;
       },
     );
     const copyService = service(repository);
@@ -645,14 +852,27 @@ describe('CommercialPromotionCopyGenerationService', () => {
       eligible: false,
       blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
     });
+    expect(repository.context?.candidate.status).toBe('QUEUED');
     await expect(
       copyService.preview('candidate-internal'),
     ).resolves.toMatchObject({
       eligible: false,
       blockers: [COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED],
     });
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+    });
+    expect(repository.context?.candidate).toMatchObject({
+      status: 'BLOCKED',
+      rankPosition: null,
+      blockedReason: COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+    });
 
     repository.context!.candidate.snapshotId = 'snapshot-current-2';
+    repository.context!.candidate.status = 'QUEUED';
+    repository.context!.candidate.blockedReason = null;
     repository.context!.snapshot.id = 'snapshot-current-2';
     repository.context!.snapshot.revision = 3;
     repository.context!.product.commercialSnapshotRevision = 3;
@@ -668,11 +888,11 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
   it.each([
     ['STARTED', null, 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
-    ['AMBIGUOUS', null, 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+    ['AMBIGUOUS', null, 'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED'],
     [
       'FAILED',
       'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
-      'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
+      'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED',
     ],
   ] as const)(
     'mantem attempt %s fail-closed no preview',
@@ -724,7 +944,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     },
   );
 
-  it('gera uma copy AI, vincula snapshot e reutiliza COPY_READY sem nova chamada', async () => {
+  it('T8 gera copy AI, vincula snapshot e reutiliza COPY_READY sem nova chamada', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.snapshot.priceMax = '199.90';
     const provider = validProvider();
@@ -860,7 +1080,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     ['FAILED', 'COMMERCIAL_AI_COPY_PROVIDER_FAILED'],
     ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
   ] as const)(
-    'prioriza cache atual válido sobre histórico %s',
+    'cache atual válido não supera falha terminal %s do mesmo snapshot',
     async (status, failureCode) => {
       const repository = new MemoryCopyRepository();
       const provider = validProvider();
@@ -880,15 +1100,14 @@ describe('CommercialPromotionCopyGenerationService', () => {
       await expect(
         copyService.preview('candidate-internal'),
       ).resolves.toMatchObject({
-        eligible: true,
+        eligible: false,
         cacheAvailable: true,
-        blockers: [],
+        blockers: [COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED],
       });
       await expect(
         copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-      ).resolves.toMatchObject({
-        status: 'COPY_READY',
-        cacheHit: true,
+      ).rejects.toMatchObject({
+        code: COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
       });
 
       expect(provider.generate).toHaveBeenCalledOnce();
@@ -958,7 +1177,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(repository.copies.size).toBe(1);
   });
 
-  it('reutiliza a mesma copy AI quando somente o snapshot comercial muda', async () => {
+  it('T9 preserva histórico e reativa no snapshot N+1 sem segunda IA', async () => {
     const repository = new MemoryCopyRepository();
     const provider = validProvider();
     const copyService = service(repository, provider);
@@ -1012,7 +1231,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('falha fechado quando copy concluída deixa de corresponder ao fingerprint atual', async () => {
+  it('T10 falha fechado quando a copy diverge do fingerprint atual', async () => {
     const repository = new MemoryCopyRepository();
     repository.context!.product.productName = 'Produto Verificado A';
     repository.context!.product.shopName = 'Loja Verificada A';
@@ -1160,7 +1379,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('deduplica falha terminal quando somente product.updatedAt muda', async () => {
+  it('T6 reutiliza fallback sem nova chamada quando somente updatedAt muda', async () => {
     const repository = new MemoryCopyRepository();
     const provider: CommercialAiCopyProvider = {
       generate: vi
@@ -1175,26 +1394,30 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository, provider);
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' });
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+    });
     const [fingerprint] = repository.attempts.keys();
     repository.context!.product.updatedAt = new Date('2026-08-01T12:00:01Z');
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED' });
+    ).resolves.toMatchObject({ status: 'COPY_READY', cacheHit: true });
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect([...repository.attempts.keys()]).toEqual([fingerprint]);
-    expect(repository.context?.candidate.status).toBe('QUEUED');
+    expect(repository.context?.candidate.status).toBe('COPY_READY');
     expect([...repository.attempts.values()][0]).toMatchObject({
-      status: 'FAILED',
-      failureCode: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
+      status: 'SUCCEEDED',
+      failureCode: null,
+      providerErrorCode: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
       requestMayHaveStarted: false,
     });
-    expect(repository.copies.size).toBe(0);
+    expect(repository.copies.size).toBe(1);
   });
 
   it.each([
-    ['FAILED', 'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED'],
-    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS'],
+    ['FAILED', 'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED'],
+    ['AMBIGUOUS', 'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED'],
     ['STARTED', 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS'],
   ] as const)(
     'bloqueia attempt legado %s do mesmo contrato sem nova chamada ao provider',
@@ -1217,22 +1440,31 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
       expect(provider.generate).not.toHaveBeenCalled();
       expect(repository.attempts.size).toBe(1);
-      expect(repository.context?.candidate.status).toBe('QUEUED');
+      expect(repository.context?.candidate.status).toBe(
+        status === 'STARTED' ? 'QUEUED' : 'BLOCKED',
+      );
+      if (status !== 'STARTED') {
+        expect(repository.context?.candidate.blockedReason).toBe(
+          'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED',
+        );
+      }
     },
   );
 
-  it('mantem output invalid terminal no fingerprint atual sem chamar provider', async () => {
+  it('T7 torna o reparo legado idempotente sem chamar provider', async () => {
     const repository = new MemoryCopyRepository();
     let currentFingerprint: string | null = null;
     repository.findAttemptByInputFingerprint = vi.fn(
       async (fingerprint: string) => {
         currentFingerprint ??= fingerprint;
-        return {
+        const attempt = {
           ...legacyAttempt('FAILED', fingerprint),
           promptVersion: 'commercial-promotion-copy-v14',
           validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
           failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
         };
+        repository.attempts.set(fingerprint, attempt);
+        return attempt;
       },
     );
     repository.claim = vi.fn().mockResolvedValue(false);
@@ -1258,13 +1490,18 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     expect(currentFingerprint).toBeTruthy();
     expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate).toMatchObject({
+      status: 'BLOCKED',
+      blockedReason: COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
+    });
   });
 
-  it('ignora output invalid historico de fingerprint diferente e gera o fingerprint novo', async () => {
+  it('preserva output invalid de snapshot anterior e permite o snapshot atual', async () => {
     const repository = new MemoryCopyRepository();
     const historicalFingerprint = 'historical-output-invalid-fingerprint';
     repository.attempts.set(historicalFingerprint, {
       ...legacyAttempt('FAILED', historicalFingerprint),
+      snapshotId: 'snapshot-anterior',
       promptVersion: 'commercial-promotion-copy-v12',
       validationVersion: 'commercial-promotion-copy-validation-v4',
       failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
@@ -1336,12 +1573,12 @@ describe('CommercialPromotionCopyGenerationService', () => {
     [
       'AMBIGUOUS',
       'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
-      'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS',
+      'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED',
     ],
     [
       'FAILED',
       'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
-      'COMMERCIAL_AI_COPY_PREVIOUSLY_FAILED',
+      'COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED',
     ],
   ] as const)(
     'mantem preview e generate coerentes para tentativa historica %s',
@@ -1372,7 +1609,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     },
   );
 
-  it('não permite que uma tentativa FAILED v9/v4 bloqueie a geração v14/v6', async () => {
+  it('snapshot terminal continua bloqueado na troca do contrato legado 1', async () => {
     const repository = new MemoryCopyRepository();
     const v9Fingerprint = 'v9-fingerprint-mock-hash';
     repository.attempts.set(v9Fingerprint, {
@@ -1381,23 +1618,14 @@ describe('CommercialPromotionCopyGenerationService', () => {
       validationVersion: 'commercial-promotion-copy-validation-v4',
     });
     const provider = validProvider();
-
-    const result = await service(repository, provider).generate(
-      'candidate-internal',
-      'GERAR_COPY_COM_IA',
-    );
-
-    expect(result).toMatchObject({
-      status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v14',
-      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
-    });
-    expect(provider.generate).toHaveBeenCalledOnce();
-    expect(repository.attempts.get(v9Fingerprint)).toMatchObject({
-      promptVersion: 'commercial-promotion-copy-v9',
-      validationVersion: 'commercial-promotion-copy-validation-v4',
-      status: 'FAILED',
-    });
+    const history = structuredClone([...repository.attempts.values()]);
+    await expect(service(repository, provider).generate(
+      'candidate-internal', 'GERAR_COPY_COM_IA',
+    )).rejects.toMatchObject({ code: expect.stringMatching(/^COMMERCIAL_AI_COPY_TERMINAL_/) });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.status).toBe('BLOCKED');
+    expect([...repository.attempts.values()]).toEqual(history);
+    expect(repository.copies.size).toBe(0);
   });
 
   it('não reutiliza copy legada v2 com fingerprint diferente e preserva o histórico', async () => {
@@ -1428,7 +1656,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     );
   });
 
-  it('não permite que uma tentativa FAILED v3 bloqueie a geração v14', async () => {
+  it('snapshot terminal continua bloqueado na troca do contrato legado 2', async () => {
     const repository = new MemoryCopyRepository();
     const v3Fingerprint = 'v3-fingerprint-mock-hash';
     repository.attempts.set(
@@ -1436,24 +1664,17 @@ describe('CommercialPromotionCopyGenerationService', () => {
       legacyAttempt('FAILED', v3Fingerprint),
     );
     const provider = validProvider();
-
-    const result = await service(repository, provider).generate(
-      'candidate-internal',
-      'GERAR_COPY_COM_IA',
-    );
-
-    expect(result).toMatchObject({
-      status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v14',
-    });
-    expect(provider.generate).toHaveBeenCalledOnce();
-    expect(repository.attempts.size).toBe(2);
-    expect(repository.attempts.get(v3Fingerprint)?.promptVersion).toBe(
-      'commercial-promotion-copy-v3',
-    );
+    const history = structuredClone([...repository.attempts.values()]);
+    await expect(service(repository, provider).generate(
+      'candidate-internal', 'GERAR_COPY_COM_IA',
+    )).rejects.toMatchObject({ code: expect.stringMatching(/^COMMERCIAL_AI_COPY_TERMINAL_/) });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.status).toBe('BLOCKED');
+    expect([...repository.attempts.values()]).toEqual(history);
+    expect(repository.copies.size).toBe(0);
   });
 
-  it('não permite que uma tentativa FAILED v6/v3 bloqueie a geração v14/v6', async () => {
+  it('snapshot terminal continua bloqueado na troca do contrato legado 3', async () => {
     const repository = new MemoryCopyRepository();
     const v6Fingerprint = 'v6-fingerprint-mock-hash';
     repository.attempts.set(v6Fingerprint, {
@@ -1462,26 +1683,17 @@ describe('CommercialPromotionCopyGenerationService', () => {
       validationVersion: 'commercial-promotion-copy-validation-v3',
     });
     const provider = validProvider();
-
-    const result = await service(repository, provider).generate(
-      'candidate-internal',
-      'GERAR_COPY_COM_IA',
-    );
-
-    expect(result).toMatchObject({
-      status: 'COPY_READY',
-      promptVersion: 'commercial-promotion-copy-v14',
-      validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
-    });
-    expect(provider.generate).toHaveBeenCalledOnce();
-    expect(repository.attempts.get(v6Fingerprint)).toMatchObject({
-      promptVersion: 'commercial-promotion-copy-v6',
-      validationVersion: 'commercial-promotion-copy-validation-v3',
-      status: 'FAILED',
-    });
+    const history = structuredClone([...repository.attempts.values()]);
+    await expect(service(repository, provider).generate(
+      'candidate-internal', 'GERAR_COPY_COM_IA',
+    )).rejects.toMatchObject({ code: expect.stringMatching(/^COMMERCIAL_AI_COPY_TERMINAL_/) });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.status).toBe('BLOCKED');
+    expect([...repository.attempts.values()]).toEqual(history);
+    expect(repository.copies.size).toBe(0);
   });
 
-  it('não permite que um attempt FAILED v1 bloqueie a geração v14, gerando um fingerprint diferente e não o apagando', async () => {
+  it('snapshot terminal continua bloqueado na troca do contrato legado 4', async () => {
     const repository = new MemoryCopyRepository();
     // Simulate a failed attempt from v1
     const v1Fingerprint = 'v1-fingerprint-mock-hash';
@@ -1513,29 +1725,17 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
 
     const provider = validProvider();
-    const copyService = service(repository, provider);
-
-    const report = await copyService.preview('candidate-internal');
-    expect(report.cacheAvailable).toBe(false); // v14 preview não encontra cache de v1
-
-    const result = await copyService.generate(
-      'candidate-internal',
-      'GERAR_COPY_COM_IA',
-    );
-    expect(result.status).toBe('COPY_READY');
-    expect(provider.generate).toHaveBeenCalledTimes(1); // provider called for v14
-
-    const attempts = [...repository.attempts.values()];
-    expect(attempts.length).toBe(2); // v1 and v14 attempts
-    expect(attempts.find((a) => a.id === 'attempt-v1-failed')).toBeDefined(); // V1 attempt is preserved
-
-    const newAttempt = attempts.find((a) => a.id !== 'attempt-v1-failed')!;
-    expect(newAttempt.promptVersion).toBe('commercial-promotion-copy-v14');
-    expect(newAttempt.status).toBe('SUCCEEDED');
-    expect(newAttempt.inputFingerprint).not.toBe(v1Fingerprint);
+    const history = structuredClone([...repository.attempts.values()]);
+    await expect(service(repository, provider).generate(
+      'candidate-internal', 'GERAR_COPY_COM_IA',
+    )).rejects.toMatchObject({ code: expect.stringMatching(/^COMMERCIAL_AI_COPY_TERMINAL_/) });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.status).toBe('BLOCKED');
+    expect([...repository.attempts.values()]).toEqual(history);
+    expect(repository.copies.size).toBe(0);
   });
 
-  it('não permite que um attempt FAILED com validationVersion anterior bloqueie a geração atual', async () => {
+  it('snapshot terminal continua bloqueado na troca do contrato legado 5', async () => {
     const repository = new MemoryCopyRepository();
     const fingerprint = 'legacy-validation-v1-fingerprint';
     repository.attempts.set(fingerprint, {
@@ -1543,18 +1743,17 @@ describe('CommercialPromotionCopyGenerationService', () => {
       validationVersion: 'commercial-promotion-copy-validation-v1',
     });
     const provider = validProvider();
-
-    const result = await service(repository, provider).generate(
-      'candidate-internal',
-      'GERAR_COPY_COM_IA',
-    );
-
-    expect(result.status).toBe('COPY_READY');
-    expect(provider.generate).toHaveBeenCalledTimes(1);
-    expect(repository.attempts.size).toBe(2);
+    const history = structuredClone([...repository.attempts.values()]);
+    await expect(service(repository, provider).generate(
+      'candidate-internal', 'GERAR_COPY_COM_IA',
+    )).rejects.toMatchObject({ code: expect.stringMatching(/^COMMERCIAL_AI_COPY_TERMINAL_/) });
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.context?.candidate.status).toBe('BLOCKED');
+    expect([...repository.attempts.values()]).toEqual(history);
+    expect(repository.copies.size).toBe(0);
   });
 
-  it('registra somente diagnóstico sanitizado para falha do provider', async () => {
+  it('T11 registra diagnóstico sanitizado e usa fallback após falha do provider', async () => {
     const repository = new MemoryCopyRepository();
     const logger = { info: vi.fn(), error: vi.fn() };
     const provider: CommercialAiCopyProvider = {
@@ -1592,7 +1791,10 @@ describe('CommercialPromotionCopyGenerationService', () => {
 
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_QUOTA_EXCEEDED' });
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+    });
 
     const fields = logger.error.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(fields).toEqual({
@@ -1612,8 +1814,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(JSON.stringify(fields)).not.toContain('affiliate');
     expect(JSON.stringify(fields)).not.toContain('inputFingerprint');
     expect([...repository.attempts.values()][0]).toMatchObject({
-      status: 'FAILED',
-      failureCode: 'COMMERCIAL_AI_COPY_QUOTA_EXCEEDED',
+      status: 'SUCCEEDED',
+      failureCode: null,
       providerHttpStatus: 429,
       providerErrorCode: 'insufficient_quota',
       providerErrorType: 'insufficient_quota',
@@ -1624,7 +1826,7 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('marca timeout/rede incerta como AMBIGUOUS e bloqueia repetição', async () => {
+  it('T12 usa fallback após timeout ambíguo e não repete o provider', async () => {
     const repository = new MemoryCopyRepository();
     const provider: CommercialAiCopyProvider = {
       generate: vi.fn().mockRejectedValue(
@@ -1643,15 +1845,16 @@ describe('CommercialPromotionCopyGenerationService', () => {
     const copyService = service(repository, provider);
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({
-      code: 'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
     });
     await expect(
       copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toMatchObject({ code: 'COMMERCIAL_AI_COPY_RESULT_AMBIGUOUS' });
+    ).resolves.toMatchObject({ status: 'COPY_READY', cacheHit: true });
     expect(provider.generate).toHaveBeenCalledTimes(1);
     expect([...repository.attempts.values()][0]).toMatchObject({
-      status: 'AMBIGUOUS',
+      status: 'SUCCEEDED',
       requestMayHaveStarted: true,
       providerHttpStatus: 503,
       providerErrorCode: 'server_error',
@@ -1660,7 +1863,169 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('permite somente um provider em duas gerações concorrentes', async () => {
+  it.each([
+    [
+      'HTTP 500',
+      new CommercialAiCopyProviderError(
+        'FAILED_CONFIRMED',
+        'COMMERCIAL_AI_COPY_PROVIDER_SERVER_ERROR',
+        { httpStatus: 500, providerErrorType: 'server_error' },
+        undefined,
+        true,
+      ),
+    ],
+    [
+      'network/offline',
+      new CommercialAiCopyProviderError(
+        'AMBIGUOUS',
+        'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS',
+        {},
+        undefined,
+        true,
+      ),
+    ],
+    [
+      'truncation/incomplete output',
+      new CommercialAiCopyProviderError(
+        'FAILED_CONFIRMED',
+        'COMMERCIAL_AI_COPY_OUTPUT_TOKEN_LIMIT',
+        { providerErrorCode: 'max_output_tokens' },
+        { inputTokens: 11, outputTokens: 22, totalTokens: 33 },
+        true,
+      ),
+    ],
+    [
+      'malformed structured output/invalid JSON',
+      new CommercialAiCopyProviderError(
+        'FAILED_CONFIRMED',
+        'COMMERCIAL_AI_COPY_PROVIDER_OUTPUT_INVALID',
+        {},
+        { inputTokens: 7, outputTokens: 9, totalTokens: 16 },
+        true,
+      ),
+    ],
+  ] as const)('T13 usa fallback direto para %s', async (_label, providerError) => {
+    const repository = new MemoryCopyRepository();
+    const provider: CommercialAiCopyProvider = {
+      generate: vi.fn().mockRejectedValue(providerError),
+    };
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+      model: 'commercial-safe-fallback-v1',
+    });
+
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(repository.copies.size).toBe(1);
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'SUCCEEDED',
+      failureCode: null,
+      requestMayHaveStarted: providerError.requestMayHaveStarted,
+      providerHttpStatus: providerError.httpStatus ?? null,
+      providerErrorCode: providerError.providerErrorCode ?? providerError.publicCode,
+      inputTokens: providerError.inputTokens,
+      outputTokens: providerError.outputTokens,
+      totalTokens: providerError.totalTokens,
+    });
+  });
+
+  it('T16 preserva STARTED se houver crash antes da persistência terminal do fallback', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider: CommercialAiCopyProvider = {
+      generate: vi.fn().mockRejectedValue(
+        new CommercialAiCopyProviderError(
+          'FAILED_CONFIRMED',
+          'COMMERCIAL_AI_COPY_PROVIDER_SERVER_ERROR',
+          { httpStatus: 500 },
+          undefined,
+          true,
+        ),
+      ),
+    };
+    vi.spyOn(repository, 'completeFallback').mockRejectedValueOnce(
+      new Error('simulated crash before terminal persistence'),
+    );
+    const copyService = service(repository, provider);
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+    });
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_GENERATION_IN_PROGRESS',
+    });
+
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(repository.copies.size).toBe(0);
+    expect(repository.context?.candidate).toMatchObject({
+      status: 'QUEUED',
+      generatedCopyId: null,
+    });
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'STARTED',
+      failureCode: null,
+      completedAt: null,
+    });
+  });
+
+  it('T17 recupera copy persistida se houver crash depois da persistência terminal do fallback', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider: CommercialAiCopyProvider = {
+      generate: vi.fn().mockRejectedValue(
+        new CommercialAiCopyProviderError(
+          'FAILED_CONFIRMED',
+          'COMMERCIAL_AI_COPY_PROVIDER_SERVER_ERROR',
+          { httpStatus: 500 },
+          undefined,
+          true,
+        ),
+      ),
+    };
+    const completeFallback = repository.completeFallback.bind(repository);
+    vi.spyOn(repository, 'completeFallback').mockImplementationOnce(
+      async (input) => {
+        await completeFallback(input);
+        throw new Error('simulated crash after terminal persistence');
+      },
+    );
+    const copyService = service(repository, provider);
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+    });
+    expect(repository.context?.candidate).toMatchObject({
+      status: 'COPY_READY',
+      generatedCopyId: 'copy-internal',
+    });
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'SUCCEEDED',
+      failureCode: null,
+      providerErrorCode: 'COMMERCIAL_AI_COPY_PROVIDER_SERVER_ERROR',
+      providerHttpStatus: 500,
+    });
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+      cacheHit: true,
+    });
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(repository.copies.size).toBe(1);
+  });
+  it('T15 permite somente um provider em duas gerações concorrentes', async () => {
     const repository = new MemoryCopyRepository();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -1700,6 +2065,30 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(provider.generate).toHaveBeenCalledTimes(1);
   });
 
+  it('T14 não usa fallback quando a persistência normal fica ambígua', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const fallback = vi.spyOn(repository, 'completeFallback');
+    repository.complete = vi.fn().mockRejectedValue(new Error('db timeout'));
+
+    await expect(
+      service(repository, provider).generate(
+        'candidate-internal',
+        'GERAR_COPY_COM_IA',
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+    });
+
+    expect(provider.generate).toHaveBeenCalledOnce();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(repository.copies.size).toBe(0);
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      failureCode: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
+    });
+  });
+
   it('marca falha se snapshot mudar durante a chamada', async () => {
     const repository = new MemoryCopyRepository();
     repository.completionFailure = 'COMMERCIAL_AI_COPY_CATALOG_CHANGED';
@@ -1716,32 +2105,205 @@ describe('CommercialPromotionCopyGenerationService', () => {
     });
   });
 
-  it('falha local persiste somente códigos permitidos, ordenados e deduplicados', async () => {
+  it('audita output inválido com evidência sanitizada e usa fallback determinístico', async () => {
     const repository = new MemoryCopyRepository();
+    const logger = { info: vi.fn(), error: vi.fn() };
     const p = validProvider();
     p.generate = vi.fn().mockResolvedValue({
       output: {
-        headline: 'x'.repeat(91), // AI_HEADLINE_LENGTH
-        body: 'x'.repeat(261), // AI_BODY_LENGTH
-        extra1: 1, // AI_OUTPUT_EXTRA_PROPERTY
-        extra2: 2,
+        headline: 'OFERTA SEGURA',
+        body: 'Produto verificado por R$ especial',
       },
       provider: 'openai',
       model: 'm',
       usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 },
     });
-    const s = service(repository, p);
+    const s = new CommercialPromotionCopyGenerationService({
+      repository,
+      provider: p,
+      config: {
+        enabled: true,
+        provider: 'openai',
+        model: 'selected-model',
+        apiKeyConfigured: true,
+        timeoutMs: 30_000,
+        maxOutputTokens: 300,
+        reasoningEffort: 'minimal',
+        maximumCopyLength: 1_000,
+      },
+      logger,
+      clock: () => now,
+    });
     await expect(
       s.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
-    ).rejects.toThrow('Output da IA rejeitado');
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+    });
     const attempt = [...repository.attempts.values()][0];
-    expect(attempt?.status).toBe('FAILED');
-    expect(attempt?.failureCode).toBe('COMMERCIAL_AI_COPY_OUTPUT_INVALID');
+    expect(attempt?.status).toBe('SUCCEEDED');
+    expect(attempt?.failureCode).toBeNull();
+    expect(attempt?.providerErrorCode).toBe('COMMERCIAL_AI_COPY_OUTPUT_INVALID');
     expect(attempt?.validationFailureCodes).toEqual([
-      'AI_BODY_LENGTH',
-      'AI_HEADLINE_LENGTH',
-      'AI_HEADLINE_UPPERCASE',
-      'AI_OUTPUT_EXTRA_PROPERTY',
+      'AI_FACTUAL_CAUSE_MONEY_OR_PERCENT',
+      'AI_FACTUAL_CAUSE_UNSUPPORTED_IDENTITY',
+      'AI_FACTUAL_VALUE_FORBIDDEN',
     ]);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-ai-copy.validation-failed',
+        failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
+        auditFailureCodes: expect.arrayContaining([
+          'AI_FACTUAL_CAUSE_MONEY_OR_PERCENT',
+          'AI_FACTUAL_CAUSE_UNSUPPORTED_IDENTITY',
+        ]),
+        auditEvidence: expect.arrayContaining([
+          'money:R$',
+          'identity:especial',
+        ]),
+      }),
+      'Commercial AI copy validation failed',
+    );
+  });
+
+  it('IA desabilitada com provider e credenciais configurados usa fallback sem chamada ou loop', async () => {
+    const repository = new MemoryCopyRepository();
+    const provider = validProvider();
+    const copyService = new CommercialPromotionCopyGenerationService({
+      repository,
+      provider,
+      config: {
+        enabled: false,
+        provider: 'openai',
+        model: 'selected-model',
+        apiKeyConfigured: true,
+        timeoutMs: 30_000,
+        maxOutputTokens: 300,
+        reasoningEffort: 'minimal',
+        maximumCopyLength: 1_000,
+      },
+      clock: () => now,
+    });
+    expect(copyService.preflight()).toMatchObject({
+      enabled: false, providerConfigured: true, apiKeyConfigured: true,
+    });
+    const first = await copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA');
+    expect(first).toMatchObject({
+      status: 'COPY_READY', cacheHit: false,
+      provider: 'deterministic-safe-fallback', model: 'commercial-safe-fallback-v1',
+    });
+    for (let replay = 0; replay < 2; replay += 1) {
+      await expect(copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA')).resolves.toMatchObject({
+        status: 'COPY_READY', cacheHit: true, generatedCopyId: first.generatedCopyId,
+        provider: 'deterministic-safe-fallback',
+      });
+    }
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.attempts.size).toBe(1);
+    expect(repository.copies.size).toBe(1);
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'SUCCEEDED', requestMayHaveStarted: false,
+      generatedCopyId: first.generatedCopyId, provider: 'deterministic-safe-fallback',
+    });
+  });
+
+  it.each(['FAILED', 'AMBIGUOUS'] as const)('terminal %s bloqueia troca AI/fallback sem mutar preview ou histórico', async (status) => {
+    const repository = new MemoryCopyRepository();
+    const terminal = { ...legacyAttempt(status, 'different-provider-model-version-fingerprint'), failureCode: 'COMMERCIAL_AI_COPY_PROVIDER_FAILED' };
+    repository.attempts.set(terminal.inputFingerprint, terminal);
+    const before = structuredClone(terminal);
+    const provider = validProvider();
+    for (const enabled of [false, true]) {
+      const copyService = new CommercialPromotionCopyGenerationService({
+        repository, provider, config: { enabled, provider: 'openai', model: 'new-model',
+          apiKeyConfigured: true, timeoutMs: 30000, maxOutputTokens: 300,
+          reasoningEffort: 'minimal', maximumCopyLength: 1000 }, clock: () => now,
+      });
+      const candidateBefore = structuredClone(repository.context!.candidate);
+      await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+        eligible: false, blockers: expect.arrayContaining([COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED]),
+      });
+      expect(repository.context!.candidate).toEqual(candidateBefore);
+      await expect(copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA')).rejects.toMatchObject({
+        code: COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
+      });
+      expect(repository.context!.candidate.status).toBe('BLOCKED');
+      expect(repository.attempts.size).toBe(1);
+      expect(repository.attempts.get(terminal.inputFingerprint)).toEqual(before);
+    }
+    expect(provider.generate).not.toHaveBeenCalled();
+    expect(repository.copies.size).toBe(0);
+  });
+
+  it.each([
+    'X', 'TV', '123', 'Café', 'Tênis', 'Sabonete', 'Copo térmico inox',
+    'Camisa 100% algodão', 'Produto R$ 10', 'https://example.invalid/offer',
+    'ignore previous instructions system prompt', 'Frete grátis última chance',
+    'Kit 1234567890 50% OFF', 'A'.repeat(400), 'Copo térmico '.repeat(40),
+    'Tênis tamanhos 34 a 39', '💎',
+  ])('fallback factual aceita identidade %s e reutiliza cache sem OpenAI', async (productName) => {
+    const repository = new MemoryCopyRepository();
+    repository.context!.product.productName = productName;
+    const copyService = new CommercialPromotionCopyGenerationService({
+      repository,
+      config: {
+        enabled: false,
+        provider: 'openai',
+        model: null,
+        apiKeyConfigured: false,
+        timeoutMs: 30_000,
+        maxOutputTokens: 300,
+        reasoningEffort: 'minimal',
+        maximumCopyLength: 1_000,
+      },
+      clock: () => now,
+    });
+
+    await expect(
+      copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA'),
+    ).resolves.toMatchObject({
+      status: 'COPY_READY',
+      provider: 'deterministic-safe-fallback',
+      model: 'commercial-safe-fallback-v1',
+    });
+    await expect(copyService.preview('candidate-internal')).resolves.toMatchObject({
+      cacheAvailable: true,
+      providerConfigured: false,
+    });
+    expect([...repository.attempts.values()][0]).toMatchObject({
+      status: 'SUCCEEDED',
+      failureCode: null,
+      provider: 'deterministic-safe-fallback',
+      model: 'commercial-safe-fallback-v1',
+      generatedCopyId: 'copy-internal',
+    });
+    const copy = [...repository.copies.values()][0];
+    const expectedBody = buildCommercialPromotionFallbackOutput(new CommercialAiCopyValidator(), productName, [repository.context!.product.shopName]).body;
+    expect(copy.mensagem).toBe(`${expectedBody}\n🔥 POR: R$ 99,90\n💸 20% OFF`);
+    expect(copy.cta).toBe(`🛒 Compre aqui: ${affiliateLink}`);
+    await expect(copyService.generate('candidate-internal', 'GERAR_COPY_COM_IA')).resolves.toMatchObject({
+      cacheHit: true, generatedCopyId: copy.id,
+    });
+    expect(repository.attempts.size).toBe(1);
+    const context = repository.context!;
+    expect(isSafeStoredCommercialPromotionCopy(copy, {
+      productName, shopName: context.product.shopName, price: context.product.price,
+      discountRate: context.product.discountRate, promotionSignals: context.candidate.promotionSignals,
+      priceDropPercent: context.candidate.priceDropPercent,
+    }, affiliateLink, 1000)).toBe(true);
+    const draft = new CommercialMessageDraftService().createDraft({
+      ...context.candidate, generatedCopyId: context.candidate.generatedCopyId ?? null,
+      generatedCopy: { ...copy, snapshotId: copy.snapshotId ?? null,
+        createdFromCandidateId: copy.createdFromCandidateId ?? null },
+      product: { ...context.product, urlImagem: context.product.urlImagem ?? '' }, snapshot: context.snapshot,
+    }, { now: () => now });
+    expect(draft.caption).toContain(copy.cta);
+    expect(draft.caption.split(affiliateLink)).toHaveLength(2);
+    if (productName.length < 10) {
+      // OpenAI remains subject to the original creative-output minimum length.
+      expect(new CommercialAiCopyValidator().validate({
+        headline: 'OFERTA SELECIONADA', body: productName,
+      }, productName).publicFailureCodes).toContain('AI_BODY_LENGTH');
+    }
   });
 });

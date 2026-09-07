@@ -17,6 +17,10 @@ import {
   COMMERCIAL_AI_COPY_PROMPT_VERSION,
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
 } from '../src/commercial-ai-copy-prompt';
+import {
+  COMMERCIAL_COPY_FALLBACK_MODEL,
+  COMMERCIAL_COPY_FALLBACK_PROVIDER,
+} from '../src/commercial-promotion-copy-fallback';
 import type {
   CommercialDispatchCandidateDetails,
   WhatsAppDispatchDetails,
@@ -1045,6 +1049,47 @@ describe('SenderService', () => {
           'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE',
         );
       });
+
+      it('aceita somente o fallback comercial certificado', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.generatedCopy.source = 'LEGACY_TEMPLATE';
+        dispatchData.generatedCopy.provider = COMMERCIAL_COPY_FALLBACK_PROVIDER;
+        dispatchData.generatedCopy.model = COMMERCIAL_COPY_FALLBACK_MODEL;
+        const prisma = prismaMock(dispatchData);
+        const provider = new MockWhatsAppProvider();
+
+        await createService(prisma, provider, {
+          draftService: validDraftService(),
+        }).sendDispatch('dispatch-1');
+
+        expect(prisma.whatsAppDispatch.updateMany).toHaveBeenCalledTimes(2);
+        expect(provider.sentMessages).toHaveLength(1);
+      });
+
+      it('mantem LEGACY_TEMPLATE arbitrario bloqueado', async () => {
+        const dispatchData = cloneCommercialDispatch();
+        dispatchData.generatedCopy.source = 'LEGACY_TEMPLATE';
+        dispatchData.generatedCopy.provider = 'legacy-provider';
+        dispatchData.generatedCopy.model = 'legacy-model';
+        await expectPreClaimFailure(
+          dispatchData,
+          'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE',
+        );
+      });
+
+      it.each(['provider', 'model', 'promptVersion', 'validationVersion'] as const)(
+        'bloqueia fallback com identidade %s divergente antes do claim e provider', async (field) => {
+          const dispatchData = cloneCommercialDispatch();
+          Object.assign(dispatchData.generatedCopy, {
+            source: 'LEGACY_TEMPLATE', provider: COMMERCIAL_COPY_FALLBACK_PROVIDER,
+            model: COMMERCIAL_COPY_FALLBACK_MODEL,
+            promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+            validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+            [field]: 'not-certified',
+          });
+          await expectPreClaimFailure(dispatchData, 'COMMERCIAL_MESSAGE_COPY_INCOMPATIBLE');
+        },
+      );
 
       it('bloqueia candidate ausente sem fallback legado', async () => {
         const dispatchData = cloneCommercialDispatch();

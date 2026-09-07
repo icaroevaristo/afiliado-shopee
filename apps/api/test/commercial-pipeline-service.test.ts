@@ -191,6 +191,12 @@ const build = ({
       wasProductSentToGroup: async (productId, groupId) =>
         sent.has(`${productId}:${groupId}`),
       findLastSentAtByGroup: async () => null,
+      countSentCampaignProductsToGroup: async ({ groupId }) =>
+        new Set(
+          candidates
+            .filter(({ id }) => sent.has(`${id}:${groupId}`))
+            .map(({ id }) => id),
+        ).size,
     },
     instances: {
       findByName: async (name: string) => ({

@@ -9,8 +9,7 @@ import {
 const safeEnvironment = () => ({
   ci: false,
   databaseUrl: 'postgresql://local@127.0.0.1:5432/test',
-  enabled: true,
-  providerConfigured: true,
+  fallbackAvailable: true,
   automationMode: 'preview' as const,
   automationEnabled: false,
   automationPaused: true,
@@ -61,8 +60,7 @@ describe('commercial promotion copy CLI', () => {
     const unsafe = [
       { ci: true },
       { databaseUrl: 'postgresql://remote@example.com:5432/prod' },
-      { enabled: false },
-      { providerConfigured: false },
+      { fallbackAvailable: false },
       { automationMode: 'send' as const },
       { automationEnabled: true },
       { automationPaused: false },

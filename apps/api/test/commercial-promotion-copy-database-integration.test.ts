@@ -6,7 +6,9 @@ import {
   type CommercialAiCopyProvider,
 } from '../src/commercial-ai-copy-provider';
 import { CommercialPromotionCopyGenerationService } from '../src/commercial-promotion-copy-generation-service';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import { PrismaCommercialPromotionCopyRepository } from '../src/prisma-repositories';
+import { sanitizeCommercialAiCopyValidationFailureCodes } from '../src/commercial-ai-copy-validator';
 
 const enabled = process.env.RUN_COMMERCIAL_AI_COPY_DB_TEST === 'true';
 const describeDatabase = enabled ? describe : describe.skip;
@@ -79,11 +81,28 @@ describeDatabase('validated AI promotion copy database fixture', () => {
       },
     });
     for (const name of CASES) {
+      const providerProductId = `${PREFIX}-provider-${name}`;
+      const productLink = `https://shopee.com.br/product/1/${providerProductId}`;
+      const affiliateLink = `https://s.shopee.com.br/affiliate-${providerProductId}`;
+      const fingerprint = fingerprintCommercialOffer({
+        source: 'OFFICIAL',
+        providerProductId,
+        productLink,
+        affiliateLink,
+        price: '99.9',
+        priceMin: null,
+        priceMax: null,
+        discountRate: 20,
+        commissionRate: 10,
+        offerStartsAt: null,
+        offerEndsAt: null,
+        unavailableAt: null,
+      });
       await prisma.productLead.create({
         data: {
           id: productId(name),
           source: 'OFFICIAL',
-          providerProductId: `${PREFIX}-provider-${name}`,
+          providerProductId,
           nome: `Produto ${name}`,
           categoria: 'fixture',
           preco: 99.9,
@@ -94,11 +113,12 @@ describeDatabase('validated AI promotion copy database fixture', () => {
           loja: 'Loja fixture',
           urlImagem: 'https://example.invalid/image',
           title: `Produto ${name}`,
-          affiliateLink: `https://example.invalid/affiliate/${name}`,
+          productLink,
+          affiliateLink,
           fetchedAt: NOW,
           lastSeenAt: NOW,
           commercialSnapshotRevision: 1,
-          commercialSnapshotFingerprint: `${PREFIX}-fingerprint-${name}`,
+          commercialSnapshotFingerprint: fingerprint,
         },
       });
       await prisma.commercialOfferSnapshot.create({
@@ -106,7 +126,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
           id: snapshotId(name),
           productId: productId(name),
           revision: 1,
-          fingerprint: `${PREFIX}-fingerprint-${name}`,
+          fingerprint,
           price: 99.9,
           discountRate: 20,
           commissionRate: 10,
@@ -233,38 +253,61 @@ describeDatabase('validated AI promotion copy database fixture', () => {
   });
 
   it.each([
-    ['failed', 'FAILED_CONFIRMED', 'FAILED', false],
-    ['ambiguous', 'AMBIGUOUS', 'AMBIGUOUS', true],
+    ['failed', 'FAILED_CONFIRMED', false],
+    ['ambiguous', 'AMBIGUOUS', true],
   ] as const)(
-    'preserva QUEUED e nenhuma copy para resultado %s',
-    async (name, kind, expectedStatus, requestMayHaveStarted) => {
+    'persiste fallback e preserva o diagnostico do provider para resultado %s',
+    async (name, kind, requestMayHaveStarted) => {
+      const providerErrorCode =
+        kind === 'AMBIGUOUS'
+          ? 'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS'
+          : 'COMMERCIAL_AI_COPY_PROVIDER_FAILED';
       const provider: CommercialAiCopyProvider = {
         generate: vi
           .fn()
           .mockRejectedValue(
             new CommercialAiCopyProviderError(
               kind,
-              kind === 'AMBIGUOUS'
-                ? 'COMMERCIAL_AI_COPY_PROVIDER_RESULT_AMBIGUOUS'
-                : 'COMMERCIAL_AI_COPY_PROVIDER_FAILED',
+              providerErrorCode,
             ),
           ),
       };
-      await expect(
-        service(provider).generate(candidateId(name), 'GERAR_COPY_COM_IA'),
-      ).rejects.toBeDefined();
+      const result = await service(provider).generate(
+        candidateId(name),
+        'GERAR_COPY_COM_IA',
+      );
+      expect(result.status).toBe('COPY_READY');
+      expect(result.provider).toBe('deterministic-safe-fallback');
+      expect(typeof result.generatedCopyId).toBe('string');
       expect(
         await prisma.commercialPromotionCandidate.findUnique({
           where: { id: candidateId(name) },
           select: { status: true, generatedCopyId: true },
         }),
-      ).toEqual({ status: 'QUEUED', generatedCopyId: null });
+      ).toEqual({ status: 'COPY_READY', generatedCopyId: result.generatedCopyId });
       expect(
         await prisma.commercialCopyGenerationAttempt.findFirst({
           where: { candidateId: candidateId(name) },
-          select: { status: true, requestMayHaveStarted: true },
+          select: {
+            status: true,
+            generatedCopyId: true,
+            failureCode: true,
+            providerErrorCode: true,
+            requestMayHaveStarted: true,
+          },
         }),
-      ).toEqual({ status: expectedStatus, requestMayHaveStarted });
+      ).toEqual({
+        status: 'SUCCEEDED',
+        generatedCopyId: result.generatedCopyId,
+        failureCode: null,
+        providerErrorCode,
+        requestMayHaveStarted,
+      });
+      expect(
+        await prisma.generatedCopy.count({
+          where: { createdFromCandidateId: candidateId(name) },
+        }),
+      ).toBe(1);
     },
   );
 
@@ -345,6 +388,19 @@ describeDatabase('validated AI promotion copy database fixture', () => {
 
   it('markAttemptTerminal sanitiza códigos (malformado, desconhecido, duplicado, fora de ordem)', async () => {
     const fingerprint = `${PREFIX}-mark-terminal-fingerprint`;
+    const rawValidationFailureCodes: unknown = [
+      'UNKNOWN',
+      'AI_HEADLINE_LENGTH',
+      'AI_HEADLINE_LENGTH',
+      'AI_BODY_LENGTH',
+      null,
+    ];
+    const validationFailureCodes =
+      sanitizeCommercialAiCopyValidationFailureCodes(rawValidationFailureCodes);
+    expect(validationFailureCodes).toEqual([
+      'AI_BODY_LENGTH',
+      'AI_HEADLINE_LENGTH',
+    ]);
     await prisma.commercialCopyGenerationAttempt.create({
       data: {
         id: `${PREFIX}-mark-terminal`,
@@ -361,14 +417,19 @@ describeDatabase('validated AI promotion copy database fixture', () => {
     });
 
     const result = await repository.markAttemptTerminal({
+      candidateId: candidateId('failed'),
+      snapshotId: snapshotId('failed'),
       inputFingerprint: fingerprint,
       status: 'FAILED',
       failureCode: 'COMMERCIAL_AI_COPY_OUTPUT_INVALID',
       requestMayHaveStarted: true,
-      validationFailureCodes: ['UNKNOWN', 'AI_HEADLINE_LENGTH', 'AI_HEADLINE_LENGTH', 'AI_BODY_LENGTH', null as unknown as string],
+      validationFailureCodes,
       completedAt: NOW,
     });
-    expect(result).toBe(true);
+    expect(result).toEqual({
+      kind: 'TERMINALIZED',
+      candidateBlocked: false,
+    });
 
     const attempts = await prisma.commercialCopyGenerationAttempt.findMany({
       where: { candidateId: candidateId('failed') },
@@ -382,6 +443,8 @@ describeDatabase('validated AI promotion copy database fixture', () => {
 
     // Attempt já terminal não é alterado
     const result2 = await repository.markAttemptTerminal({
+      candidateId: candidateId('failed'),
+      snapshotId: snapshotId('failed'),
       inputFingerprint: fingerprint,
       status: 'AMBIGUOUS',
       failureCode: 'COMMERCIAL_AI_COPY_PERSISTENCE_AMBIGUOUS',
@@ -389,7 +452,7 @@ describeDatabase('validated AI promotion copy database fixture', () => {
       validationFailureCodes: ['AI_CTA_LENGTH'],
       completedAt: NOW,
     });
-    expect(result2).toBe(false);
+    expect(result2).toEqual({ kind: 'CONFLICT' });
 
     const attempts2 = await prisma.commercialCopyGenerationAttempt.findMany({
       where: { candidateId: candidateId('failed') },
