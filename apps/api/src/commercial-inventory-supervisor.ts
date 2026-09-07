@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ShopeeProductOfferListInput } from '@shopee-auto-affiliate-ai/providers';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type {
-  CommercialAutomationCandidatePreparationOptions,
+  CommercialAutomationInventoryPreparation,
   CommercialAutomationCandidatePreflight,
   CommercialAutomationCandidateSelection,
 } from './commercial-automation-candidate-flow-service';
@@ -11,6 +11,7 @@ import type {
   CommercialAutomationProvider,
 } from './commercial-automation-execution-domain';
 import type {
+  CommercialDiscoveryWriteFence,
   CommercialAutomationSettingsRepository,
   CommercialDiscoveryCheckpointRepository,
   CommercialNicheRepository,
@@ -41,29 +42,14 @@ type InventoryLogger = {
 
 type CandidateFlow = {
   listTargets(): Promise<CommercialAutomationTarget[]>;
-  findRunByExecutionId?(executionId: string): Promise<{
-    id: string;
-    status: 'STARTED' | 'COMPLETED' | 'BLOCKED' | 'FAILED';
-  } | null>;
   preflight(
     target: CommercialAutomationTarget,
     options?: { excludeCandidateIds?: readonly string[] },
   ): Promise<CommercialAutomationCandidatePreflight>;
   replenish(target: CommercialAutomationTarget): Promise<unknown>;
-  prepare(
+  prepareInventory(
     selection: CommercialAutomationCandidateSelection,
-    options: Pick<
-      CommercialAutomationCandidatePreparationOptions,
-      'executionId' | 'existingRunId' | 'resolveExecution'
-    >,
-  ): Promise<{
-    runId: string;
-    generatedCopyId: string;
-    candidateId: string;
-    campaignId: string;
-    groupId: string;
-    logicalGroupFingerprint?: string;
-  }>;
+  ): Promise<CommercialAutomationInventoryPreparation>;
 };
 
 export type CommercialInventorySupervisorReport = {
@@ -89,9 +75,6 @@ type PreparedInventoryFill = {
 
 const safeErrorCode = (error: unknown) =>
   error instanceof AppError ? error.code : 'COMMERCIAL_INVENTORY_SUPERVISOR_FAILED';
-
-const preparedExecutionId = (candidateId: string, snapshotId?: string) =>
-  `prepared:${candidateId}:${snapshotId ?? 'legacy'}`;
 
 const hashIdentity = (
   source: string,
@@ -145,7 +128,10 @@ export class CommercialInventorySupervisor {
       settings: CommercialAutomationSettingsRepository;
       niches: Pick<CommercialNicheRepository, 'findById'>;
       syncOffers: {
-        run(input?: ShopeeProductOfferListInput): Promise<{
+        run(
+          input?: ShopeeProductOfferListInput,
+          options?: { writeFence?: CommercialDiscoveryWriteFence },
+        ): Promise<{
           fetched: number;
           created?: number;
           hasNextPage: boolean;
@@ -160,32 +146,57 @@ export class CommercialInventorySupervisor {
     this.clock = dependencies.clock ?? (() => new Date());
   }
 
-  private async prepareAvailable(
+  private async listProtectedCandidateIds(
     target: CommercialAutomationTarget,
-    report: CommercialInventorySupervisorReport,
-    targetLimit: number,
-    budget: InventoryRunBudget,
-  ): Promise<PreparedInventoryFill> {
-    const readyCandidateIds = new Set(
+    revisions: { scheduleRevision: number; assignmentRevision: number },
+  ) {
+    return (
       (await this.dependencies.preparedMessages.listProtectedCandidateIds?.({
         campaignId: target.campaignId,
         groupDestinationId: target.groupId,
         instanceName: target.instanceName ?? '',
         logicalGroupFingerprint: target.logicalGroupFingerprint,
+        scheduleRevision: revisions.scheduleRevision,
+        assignmentRevision: revisions.assignmentRevision,
+        now: this.clock(),
       })) ??
-        (await this.dependencies.preparedMessages.listReadyCandidateIds?.({
-          campaignId: target.campaignId,
-          groupDestinationId: target.groupId,
-          instanceName: target.instanceName ?? '',
-          logicalGroupFingerprint: target.logicalGroupFingerprint,
-        })) ??
-        [],
+      (await this.dependencies.preparedMessages.listReadyCandidateIds?.({
+        campaignId: target.campaignId,
+        groupDestinationId: target.groupId,
+        instanceName: target.instanceName ?? '',
+        logicalGroupFingerprint: target.logicalGroupFingerprint,
+        scheduleRevision: revisions.scheduleRevision,
+        assignmentRevision: revisions.assignmentRevision,
+      })) ??
+      []
     );
+  }
+
+  private async prepareAvailable(
+    target: CommercialAutomationTarget,
+    report: CommercialInventorySupervisorReport,
+    targetLimit: number,
+    budget: InventoryRunBudget,
+    revisions: { scheduleRevision: number; assignmentRevision: number },
+    sharedRouteCandidateIds: Set<string>,
+  ): Promise<PreparedInventoryFill> {
+    const protectedCandidateIds = await this.listProtectedCandidateIds(
+      target,
+      revisions,
+    );
+    const readyCandidateIds = new Set(sharedRouteCandidateIds);
+    for (const candidateId of protectedCandidateIds) {
+      readyCandidateIds.add(candidateId);
+      sharedRouteCandidateIds.add(candidateId);
+    }
     let preparedCount = await this.dependencies.preparedMessages.countReady({
       campaignId: target.campaignId,
       groupDestinationId: target.groupId,
       instanceName: target.instanceName ?? '',
       logicalGroupFingerprint: target.logicalGroupFingerprint,
+      scheduleRevision: revisions.scheduleRevision,
+      assignmentRevision: revisions.assignmentRevision,
+      now: this.clock(),
     });
     let preparedMessagesPrepared = 0;
     for (
@@ -201,40 +212,8 @@ export class CommercialInventorySupervisor {
       if (preflight.outcome !== 'READY') break;
       budget.preparedMessagesRemaining -= 1;
       try {
-        const executionId = preparedExecutionId(
-          preflight.candidateId,
-          preflight.snapshotId,
-        );
-        const prepared = await this.dependencies.candidateFlow.prepare(
+        const prepared = await this.dependencies.candidateFlow.prepareInventory(
           selectionFromPreflight(target, preflight),
-          {
-            executionId,
-            ...(this.dependencies.candidateFlow.findRunByExecutionId
-              ? {
-                  resolveExecution: async ({ candidateId, snapshotId }) => {
-                    const resolvedExecutionId = preparedExecutionId(
-                      candidateId,
-                      snapshotId,
-                    );
-                    const existingRun =
-                      await this.dependencies.candidateFlow.findRunByExecutionId?.(
-                        resolvedExecutionId,
-                      );
-                    const reusableRun =
-                      existingRun &&
-                      (existingRun.status === 'STARTED' ||
-                        existingRun.status === 'FAILED' ||
-                        existingRun.status === 'COMPLETED')
-                        ? existingRun
-                        : null;
-                    return {
-                      executionId: resolvedExecutionId,
-                      ...(reusableRun ? { existingRunId: reusableRun.id } : {}),
-                    };
-                  },
-                }
-              : {}),
-          },
         );
         const created = await this.dependencies.preparedMessages.createReady({
           campaignId: prepared.campaignId,
@@ -244,7 +223,10 @@ export class CommercialInventorySupervisor {
             prepared.logicalGroupFingerprint ?? target.logicalGroupFingerprint,
           candidateId: prepared.candidateId,
           generatedCopyId: prepared.generatedCopyId,
-          runId: prepared.runId,
+          copyPreview: prepared.copyPreview,
+          scheduleRevision: revisions.scheduleRevision,
+          assignmentRevision: revisions.assignmentRevision,
+          offerEndsAt: prepared.offerEndsAt,
           now: this.clock(),
         });
         if (!created) {
@@ -252,11 +234,15 @@ export class CommercialInventorySupervisor {
           continue;
         }
         readyCandidateIds.add(created.candidateId);
+        sharedRouteCandidateIds.add(created.candidateId);
         const refreshedCount = await this.dependencies.preparedMessages.countReady({
           campaignId: target.campaignId,
           groupDestinationId: target.groupId,
           instanceName: target.instanceName ?? '',
           logicalGroupFingerprint: target.logicalGroupFingerprint,
+          scheduleRevision: revisions.scheduleRevision,
+          assignmentRevision: revisions.assignmentRevision,
+          now: this.clock(),
         });
         preparedCount = refreshedCount;
         preparedMessagesPrepared += 1;
@@ -328,12 +314,20 @@ export class CommercialInventorySupervisor {
           ...(current.cursor ? { cursor: current.cursor } : {}),
         };
         budget.discoveryPagesRemaining -= 1;
-        const sync = await this.dependencies.syncOffers.run(input);
+        const sync = await this.dependencies.syncOffers.run(input, {
+          writeFence: {
+            checkpointId: current.id,
+            ownerId,
+            leaseRevision: current.leaseRevision,
+            now: this.clock(),
+          },
+        });
         report.fetchedProducts += sync.fetched;
         report.createdProducts += sync.created ?? 0;
         const next = await this.dependencies.checkpoints.advance({
           id: current.id,
           ownerId,
+          leaseRevision: current.leaseRevision,
           now: this.clock(),
           leaseExpiresAt: new Date(this.clock().getTime() + CHECKPOINT_LEASE_MS),
           page: sync.hasNextPage ? (sync.page ?? current.page) + 1 : current.page,
@@ -349,7 +343,13 @@ export class CommercialInventorySupervisor {
         current = next;
       } catch (error) {
         const code = safeErrorCode(error);
-        await this.dependencies.checkpoints.fail({ id: current.id, ownerId, now: this.clock(), errorCode: code });
+        await this.dependencies.checkpoints.fail({
+          id: current.id,
+          ownerId,
+          leaseRevision: current.leaseRevision,
+          now: this.clock(),
+          errorCode: code,
+        });
         report.failures.push(code);
         this.dependencies.logger.error(
           { event: 'commercial-inventory.discovery.failed', campaignId: target.campaignId, code },
@@ -402,27 +402,71 @@ export class CommercialInventorySupervisor {
       discoveryPagesRemaining: MAX_DISCOVERY_PAGES_PER_HEARTBEAT,
       preparedMessagesRemaining: MAX_PREPARED_MESSAGES_PER_HEARTBEAT,
     };
+    const scheduleRevision = Math.max(settings.scheduleRevision, 1);
+    // Materialize each ordered sender assignment so a prepared message remains
+    // valid for the planner's A-B-A-B rotation and its assignment revision.
+    const preparationTargets = targets.flatMap((target) => {
+      const orderedInstanceNames = target.orderedInstanceNames?.filter(
+        (name) => name.length > 0,
+      );
+      const instanceNames =
+        orderedInstanceNames && orderedInstanceNames.length > 0
+          ? orderedInstanceNames
+          : target.instanceName
+            ? [target.instanceName]
+            : [];
+      return instanceNames.map((instanceName) => ({
+        ...target,
+        instanceName,
+        assignmentRevision: target.assignmentRevision ?? 1,
+        scheduleRevision,
+      }));
+    });
+    const sharedRouteCandidateIds = new Map<string, Set<string>>();
 
-    for (const [targetIndex, target] of targets.entries()) {
+    for (const [targetIndex, target] of preparationTargets.entries()) {
       if (targetIndex >= MAX_TARGETS_PER_HEARTBEAT) {
-        report.skipped += targets.length - targetIndex;
+        report.skipped += preparationTargets.length - targetIndex;
         break;
       }
+      const revisions = {
+        scheduleRevision: target.scheduleRevision ?? scheduleRevision,
+        assignmentRevision: target.assignmentRevision ?? 1,
+      };
+      const routeKey = JSON.stringify([
+        target.campaignId,
+        target.groupId,
+        target.logicalGroupFingerprint,
+        revisions.scheduleRevision,
+        revisions.assignmentRevision,
+      ]);
+      const routeCandidateIds =
+        sharedRouteCandidateIds.get(routeKey) ?? new Set<string>();
+      sharedRouteCandidateIds.set(routeKey, routeCandidateIds);
       const instanceName = target.instanceName ?? '';
       const existing = await this.dependencies.preparedMessages.countReady({
         campaignId: target.campaignId,
         groupDestinationId: target.groupId,
         instanceName,
         logicalGroupFingerprint: target.logicalGroupFingerprint,
+        scheduleRevision: revisions.scheduleRevision,
+        assignmentRevision: revisions.assignmentRevision,
+        now: this.clock(),
       });
       if (existing >= preparedTarget) {
+        for (const candidateId of await this.listProtectedCandidateIds(
+          target,
+          revisions,
+        )) {
+          routeCandidateIds.add(candidateId);
+        }
         report.preparedReady += existing;
         report.futureSlotsCovered += Math.min(existing, preparedTarget);
         report.skipped += 1;
         continue;
       }
       if (budget.preparedMessagesRemaining <= 0) {
-        report.skipped += targets.length - targetIndex;
+        report.skipped += preparationTargets.length - targetIndex;
         break;
       }
       let preflight = await this.dependencies.candidateFlow.preflight(target);
@@ -436,6 +480,8 @@ export class CommercialInventorySupervisor {
         report,
         preparedTarget,
         budget,
+        revisions,
+        routeCandidateIds,
       );
       report.prepared += preparedFill.preparedCount;
       const usableCount = preflight.queue?.usableCount ?? 0;
@@ -461,6 +507,8 @@ export class CommercialInventorySupervisor {
           report,
           preparedTarget,
           budget,
+          revisions,
+          routeCandidateIds,
         );
         report.prepared += replenishedFill.preparedCount;
       }
@@ -469,6 +517,9 @@ export class CommercialInventorySupervisor {
         groupDestinationId: target.groupId,
         instanceName,
         logicalGroupFingerprint: target.logicalGroupFingerprint,
+        scheduleRevision: revisions.scheduleRevision,
+        assignmentRevision: revisions.assignmentRevision,
+        now: this.clock(),
       });
       report.preparedReady += finalReady;
       report.futureSlotsCovered += Math.min(finalReady, preparedTarget);

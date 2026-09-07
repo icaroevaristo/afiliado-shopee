@@ -9,8 +9,10 @@ import type {
   CommercialDiscoveryCheckpointRecord,
   CommercialDiscoveryCheckpointRepository,
   CommercialNicheRecord,
+  CommercialPreparedMessageCreateInput,
   CommercialPreparedMessageRecord,
   CommercialPreparedMessageRepository,
+  CommercialAutomationTarget,
 } from '../src/repositories';
 
 const now = new Date('2026-09-06T12:00:00.000Z');
@@ -89,6 +91,7 @@ class MemoryCheckpointRepository implements CommercialDiscoveryCheckpointReposit
         nextRefreshAt: null,
         leaseOwnerId: input.ownerId,
         leaseExpiresAt: input.leaseExpiresAt,
+        leaseRevision: 1,
         lastRequestAt: input.now,
         lastSuccessAt: null,
         lastErrorCode: null,
@@ -104,16 +107,21 @@ class MemoryCheckpointRepository implements CommercialDiscoveryCheckpointReposit
       ...this.record,
       leaseOwnerId: input.ownerId,
       leaseExpiresAt: input.leaseExpiresAt,
+      leaseRevision: this.record.leaseRevision + 1,
       lastRequestAt: input.now,
       ...(this.record.status === 'EXHAUSTED'
         ? { status: 'ACTIVE' as const, page: 1, cursor: null }
         : {}),
     };
-    return this.record;
+    return this.record ?? null;
   }
 
   async advance(input: Parameters<CommercialDiscoveryCheckpointRepository['advance']>[0]) {
-    if (!this.record || this.record.leaseOwnerId !== input.ownerId) return null;
+    if (
+      !this.record ||
+      this.record.leaseOwnerId !== input.ownerId ||
+      this.record.leaseRevision !== input.leaseRevision
+    ) return null;
     this.advanceOwners.push(input.ownerId);
     this.sequence += 1;
     this.record = {
@@ -163,7 +171,9 @@ describe('CommercialInventorySupervisor', () => {
       listTargets: vi.fn(async () => [target]),
       preflight: vi.fn(async () => ({ outcome: 'NO_CANDIDATE' as const })),
       replenish: vi.fn(async () => ({ rejectionSummary: {} })),
-      prepare: vi.fn(),
+      prepareInventory: vi.fn(async () => {
+        throw new Error('unused');
+      }),
     };
     const supervisor = new CommercialInventorySupervisor({
       candidateFlow,
@@ -184,11 +194,20 @@ describe('CommercialInventorySupervisor', () => {
     const first = await supervisor.run({ mode: 'send', provider: 'official' });
     expect(first.discoveredPages).toBe(2);
     expect(syncOffers).toHaveBeenCalledTimes(2);
-    expect(syncOffers).toHaveBeenNthCalledWith(1, {
-      categoryId: '123',
-      sort: 'commission_desc',
-      page: 1,
-    });
+    expect(syncOffers).toHaveBeenNthCalledWith(
+      1,
+      {
+        categoryId: '123',
+        sort: 'commission_desc',
+        page: 1,
+      },
+      expect.objectContaining({
+        writeFence: expect.objectContaining({
+          checkpointId: 'checkpoint-1',
+          leaseRevision: 1,
+        }),
+      }),
+    );
     expect(checkpoints.advanceOwners).toHaveLength(2);
     expect(checkpoints.advanceOwners[0]).toBe(checkpoints.advanceOwners[1]);
     expect(checkpoints.record?.status).toBe('EXHAUSTED');
@@ -197,7 +216,16 @@ describe('CommercialInventorySupervisor', () => {
     const second = await supervisor.run({ mode: 'send', provider: 'official' });
     expect(second.discoveredPages).toBe(2);
     expect(syncOffers).toHaveBeenCalledTimes(4);
-    expect(syncOffers).toHaveBeenNthCalledWith(3, expect.objectContaining({ page: 1 }));
+    expect(syncOffers).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ page: 1 }),
+      expect.objectContaining({
+        writeFence: expect.objectContaining({
+          checkpointId: 'checkpoint-1',
+          leaseRevision: 2,
+        }),
+      }),
+    );
   });
 
   it('respeita pausa persistida e não descobre nem prepara', async () => {
@@ -205,7 +233,9 @@ describe('CommercialInventorySupervisor', () => {
       listTargets: vi.fn(async () => [target]),
       preflight: vi.fn(),
       replenish: vi.fn(),
-      prepare: vi.fn(),
+      prepareInventory: vi.fn(async () => {
+        throw new Error('unused');
+      }),
     };
     const syncOffers = vi.fn();
     const supervisor = new CommercialInventorySupervisor({
@@ -238,7 +268,9 @@ describe('CommercialInventorySupervisor', () => {
       listTargets: vi.fn(async () => [target]),
       preflight: vi.fn(),
       replenish: vi.fn(),
-      prepare: vi.fn(),
+      prepareInventory: vi.fn(async () => {
+        throw new Error('unused');
+      }),
     };
     const preparedMessages = {
       ...emptyPreparedRepository(),
@@ -296,19 +328,22 @@ describe('CommercialInventorySupervisor', () => {
           : { outcome: 'NO_CANDIDATE' as const };
       }),
       replenish: vi.fn(async () => ({ rejectionSummary: {} })),
-      prepare: vi.fn(async (selection: { candidateId: string }) => ({
-        runId: `run-${selection.candidateId}`,
+      prepareInventory: vi.fn(async (selection: { candidateId: string; snapshotId?: string }) => ({
         generatedCopyId: `copy-${selection.candidateId}`,
         candidateId: selection.candidateId,
+        snapshotId: selection.snapshotId ?? `snapshot-${selection.candidateId.slice(-1)}`,
         campaignId: target.campaignId,
         groupId: target.groupId,
         logicalGroupFingerprint: target.logicalGroupFingerprint,
+        nicheId: target.nicheId,
+        copyPreview: `copy-${selection.candidateId} https://example.invalid/affiliate`,
+        offerEndsAt: null,
       })),
     };
     const preparedMessages: CommercialPreparedMessageRepository = {
       countReady: vi.fn(async () => readyCandidateIds.length),
       listProtectedCandidateIds: vi.fn(async () => [...readyCandidateIds]),
-      createReady: vi.fn(async (input) => {
+      createReady: vi.fn(async (input: CommercialPreparedMessageCreateInput) => {
         readyCandidateIds.push(input.candidateId);
         return {
           id: `prepared-${input.candidateId}`,
@@ -319,10 +354,15 @@ describe('CommercialInventorySupervisor', () => {
           candidateId: input.candidateId,
           snapshotId: `snapshot-${input.candidateId.slice(-1)}`,
           generatedCopyId: input.generatedCopyId,
-          runId: input.runId,
+          copyPreview: input.copyPreview ?? '',
+          runId: input.runId ?? null,
           status: 'READY',
-          reservationOwnerId: null,
-          reservationLeaseExpiresAt: null,
+           reservationOwnerId: null,
+           reservationLeaseExpiresAt: null,
+           scheduleRevision: input.scheduleRevision ?? 1,
+           assignmentRevision: input.assignmentRevision ?? 1,
+           expiresAt: new Date(input.now.getTime() + 15 * 60_000),
+          offerEndsAt: null,
           invalidatedReason: null,
           invalidatedAt: null,
           createdAt: input.now,
@@ -356,20 +396,153 @@ describe('CommercialInventorySupervisor', () => {
     expect(readyCandidateIds).toEqual(['candidate-a', 'candidate-b']);
     expect(preparedMessages.createReady).toHaveBeenCalledTimes(2);
     expect(report.preparedReady).toBe(2);
-    expect(candidateFlow.prepare).toHaveBeenNthCalledWith(
+    expect(candidateFlow.prepareInventory).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ candidateId: 'candidate-a' }),
-      { executionId: 'prepared:candidate-a:snapshot-a' },
     );
-    expect(candidateFlow.prepare).toHaveBeenNthCalledWith(
+    expect(candidateFlow.prepareInventory).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ candidateId: 'candidate-b' }),
-      { executionId: 'prepared:candidate-b:snapshot-b' },
     );
     expect(candidateFlow.preflight).toHaveBeenNthCalledWith(
       3,
-      target,
+      expect.objectContaining({
+        ...target,
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+      }),
       { excludeCandidateIds: ['candidate-a'] },
+    );
+  });
+
+  it('separa candidates entre as instancias ordenadas do mesmo grupo', async () => {
+    const multiInstanceTarget: CommercialAutomationTarget = {
+      ...target,
+      instanceName: 'instance-a',
+      orderedInstanceNames: ['instance-a', 'instance-b'],
+      assignmentRevision: 1,
+    };
+    const candidates = [
+      { candidateId: 'candidate-a', snapshotId: 'snapshot-a' },
+      { candidateId: 'candidate-b', snapshotId: 'snapshot-b' },
+      { candidateId: 'candidate-c', snapshotId: 'snapshot-c' },
+      { candidateId: 'candidate-d', snapshotId: 'snapshot-d' },
+    ];
+    const preparedByInstance = new Map<string, string[]>();
+    const candidateFlow = {
+      listTargets: vi.fn(async () => [multiInstanceTarget]),
+      preflight: vi.fn(async (
+        _target: CommercialAutomationTarget,
+        options?: { excludeCandidateIds?: readonly string[] },
+      ) => {
+        const candidate = candidates.find(
+          ({ candidateId }) =>
+            !options?.excludeCandidateIds?.includes(candidateId),
+        );
+        return candidate
+          ? {
+              outcome: 'READY' as const,
+              candidateId: candidate.candidateId,
+              snapshotId: candidate.snapshotId,
+              candidateStatus: 'COPY_READY' as const,
+              queue: { candidateCount: 4, eligibleCount: 4, rejectedCount: 0 },
+            }
+          : { outcome: 'NO_CANDIDATE' as const };
+      }),
+      replenish: vi.fn(async () => ({ rejectionSummary: {} })),
+      prepareInventory: vi.fn(async (selection: {
+        candidateId: string;
+        snapshotId?: string;
+      }) => ({
+        generatedCopyId: `copy-${selection.candidateId}`,
+        candidateId: selection.candidateId,
+        snapshotId: selection.snapshotId ?? 'missing-snapshot',
+        campaignId: multiInstanceTarget.campaignId,
+        groupId: multiInstanceTarget.groupId,
+        logicalGroupFingerprint: multiInstanceTarget.logicalGroupFingerprint,
+        nicheId: multiInstanceTarget.nicheId,
+        copyPreview: `copy-${selection.candidateId} https://example.invalid/affiliate`,
+        offerEndsAt: null,
+      })),
+    };
+    const listProtectedCandidateIds = vi.fn(async (input: {
+      instanceName: string;
+    }) => preparedByInstance.get(input.instanceName) ?? []);
+    const countReady = vi.fn(async (input: { instanceName: string }) =>
+      preparedByInstance.get(input.instanceName)?.length ?? 0,
+    );
+    const createReady = vi.fn(async (input: CommercialPreparedMessageCreateInput) => {
+      const instanceCandidates = preparedByInstance.get(input.instanceName) ?? [];
+      instanceCandidates.push(input.candidateId);
+      preparedByInstance.set(input.instanceName, instanceCandidates);
+      return {
+        id: `prepared-${input.instanceName}-${input.candidateId}`,
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        candidateId: input.candidateId,
+        snapshotId: input.candidateId.replace('candidate', 'snapshot'),
+        generatedCopyId: input.generatedCopyId,
+        copyPreview: input.copyPreview ?? '',
+        runId: input.runId ?? null,
+        status: 'READY' as const,
+        reservationOwnerId: null,
+        reservationLeaseExpiresAt: null,
+        scheduleRevision: input.scheduleRevision ?? 1,
+        assignmentRevision: input.assignmentRevision ?? 1,
+        expiresAt: new Date(input.now.getTime() + 15 * 60_000),
+        offerEndsAt: null,
+        invalidatedReason: null,
+        invalidatedAt: null,
+        createdAt: input.now,
+        updatedAt: input.now,
+      } satisfies CommercialPreparedMessageRecord;
+    });
+    const preparedMessages: CommercialPreparedMessageRepository = {
+      countReady,
+      listProtectedCandidateIds,
+      createReady,
+      claimReady: vi.fn(async () => null),
+      markDispatched: vi.fn(async () => false),
+      release: vi.fn(async () => false),
+      recoverExpired: vi.fn(async () => 0),
+      invalidateStale: vi.fn(async () => 0),
+    };
+    const supervisor = new CommercialInventorySupervisor({
+      candidateFlow,
+      preparedMessages,
+      checkpoints: new MemoryCheckpointRepository(),
+      settings: {
+        getOrCreate: vi.fn(async () => settings),
+        get: vi.fn(async () => settings),
+        setPaused: vi.fn(async () => settings),
+        updateSchedule: vi.fn(async () => settings),
+      },
+      niches: { findById: vi.fn(async () => niche) },
+      syncOffers: { run: vi.fn() },
+      logger: { info: vi.fn(), error: vi.fn() },
+      clock: () => now,
+    });
+
+    await supervisor.run({ mode: 'send', provider: 'official' });
+
+    expect(
+      createReady.mock.calls.map(([input]) => ({
+        instanceName: input.instanceName,
+        candidateId: input.candidateId,
+      })),
+    ).toEqual([
+      { instanceName: 'instance-a', candidateId: 'candidate-a' },
+      { instanceName: 'instance-a', candidateId: 'candidate-b' },
+      { instanceName: 'instance-b', candidateId: 'candidate-c' },
+      { instanceName: 'instance-b', candidateId: 'candidate-d' },
+    ]);
+    expect(preparedByInstance).toEqual(
+      new Map([
+        ['instance-a', ['candidate-a', 'candidate-b']],
+        ['instance-b', ['candidate-c', 'candidate-d']],
+      ]),
     );
   });
 });

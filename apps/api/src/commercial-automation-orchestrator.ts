@@ -212,6 +212,8 @@ export class CommercialAutomationOrchestrator {
           groupDestinationId: string;
           instanceName: string;
           logicalGroupFingerprint: string;
+          scheduleRevision?: number;
+          assignmentRevision?: number;
           ownerId: string;
           now: Date;
           leaseExpiresAt: Date;
@@ -276,7 +278,8 @@ export class CommercialAutomationOrchestrator {
           leaseExpiresAt: Date;
         }): Promise<CommercialGroupCampaignAttemptRenewal>;
       };
-      confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'>;
+      confirmation: Pick<CommercialPipelineConfirmationService, 'confirm'> &
+        Partial<Pick<CommercialPipelineConfirmationService, 'confirmPrepared'>>;
       commercialRuns: Pick<CommercialPipelineRunRepository, 'findById'>;
       executions: CommercialAutomationExecutionRepository;
       logger: CommercialAutomationLogger;
@@ -538,8 +541,10 @@ export class CommercialAutomationOrchestrator {
               { assignedInstanceName: target.instanceName, assignedInstanceNames: target.orderedInstanceNames },
               constraint.instanceName,
             ) &&
+            (target.scheduleRevision === undefined ||
+              target.scheduleRevision === constraint.scheduleRevision) &&
             (constraint.assignmentRevision === undefined || target.assignmentRevision === constraint.assignmentRevision)
-              ? [{ ...target, instanceName: constraint.instanceName, ...(constraint.assignmentRevision !== undefined ? { assignmentRevision: constraint.assignmentRevision } : {}) }]
+              ? [{ ...target, instanceName: constraint.instanceName, scheduleRevision: constraint.scheduleRevision, ...(constraint.assignmentRevision !== undefined ? { assignmentRevision: constraint.assignmentRevision } : {}) }]
               : [],
           );
         }
@@ -572,6 +577,12 @@ export class CommercialAutomationOrchestrator {
           groupDestinationId: target.groupId,
           instanceName: target.instanceName ?? '',
           logicalGroupFingerprint: target.logicalGroupFingerprint,
+          ...(target.scheduleRevision !== undefined
+            ? { scheduleRevision: target.scheduleRevision }
+            : {}),
+          ...(target.assignmentRevision !== undefined
+            ? { assignmentRevision: target.assignmentRevision }
+            : {}),
           ownerId: execution.id,
           now,
           leaseExpiresAt: addMilliseconds(now, this.dependencies.leaseSeconds * 1000),
@@ -623,6 +634,8 @@ export class CommercialAutomationOrchestrator {
                 },
                 constraint.instanceName,
               ) ||
+              (target.scheduleRevision !== undefined &&
+                target.scheduleRevision !== constraint.scheduleRevision) ||
               (constraint.assignmentRevision !== undefined &&
                 target.assignmentRevision !== constraint.assignmentRevision)
             ) {
@@ -633,6 +646,7 @@ export class CommercialAutomationOrchestrator {
             return [{
               ...target,
               instanceName: constraint.instanceName,
+              scheduleRevision: constraint.scheduleRevision,
               ...(constraint.assignmentRevision !== undefined
                 ? { assignmentRevision: constraint.assignmentRevision }
                 : {}),
@@ -841,16 +855,7 @@ export class CommercialAutomationOrchestrator {
               logicalGroupFingerprint?: string;
               nicheId?: string;
             }
-          | undefined = preparedInventoryClaim
-          ? {
-              runId: preparedInventoryClaim.runId,
-              generatedCopyId: preparedInventoryClaim.generatedCopyId,
-              candidateId: preparedInventoryClaim.candidateId,
-              campaignId: preparedInventoryClaim.campaignId,
-              groupId: preparedInventoryClaim.groupDestinationId,
-              logicalGroupFingerprint: preparedInventoryClaim.logicalGroupFingerprint,
-            }
-          : undefined;
+          | undefined;
         const prepareSelection = async (
           selection: CommercialAutomationCandidateSelection,
           miningReport = selectedMiningReport,
@@ -930,10 +935,16 @@ export class CommercialAutomationOrchestrator {
           );
         };
 
-        if (!prepared) {
+        if (preparedInventoryClaim?.runId) {
+          throw new AppError(
+            'Mensagem preparada possui identidade legada de run',
+            'COMMERCIAL_PREPARED_LEGACY_RUN_ID',
+          );
+        }
+        if (!preparedInventoryClaim && !prepared) {
           prepared = await prepareSelection(candidateSelection);
         }
-        if (!prepared) {
+        if (!preparedInventoryClaim && !prepared) {
           const localReplenishment =
             await this.dependencies.candidateFlow!.replenish(target);
           if (!(await renewReservedAttempt())) {
@@ -963,7 +974,7 @@ export class CommercialAutomationOrchestrator {
         }
 
         let fulfillmentStopReason: string | undefined;
-        if (!prepared) {
+        if (!preparedInventoryClaim && !prepared) {
           let replenishmentState = selectedShopeeReplenishment;
           if (replenishmentState && !replenishmentState.hasNextPage) {
             fulfillmentStopReason = COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED;
@@ -976,7 +987,7 @@ export class CommercialAutomationOrchestrator {
               COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED;
           }
 
-          while (!prepared && !fulfillmentStopReason) {
+          while (!preparedInventoryClaim && !prepared && !fulfillmentStopReason) {
             const page = replenishmentState?.nextPage ?? 1;
             const cursor = replenishmentState?.nextCursor;
             const pagesUsed = (replenishmentState?.pagesUsed ?? 0) + 1;
@@ -1056,7 +1067,7 @@ export class CommercialAutomationOrchestrator {
           }
         }
 
-        if (!prepared) {
+        if (!preparedInventoryClaim && !prepared) {
           const failureCode =
             fulfillmentStopReason ??
             COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE;
@@ -1069,9 +1080,13 @@ export class CommercialAutomationOrchestrator {
             }),
           );
         }
-        commercialRunId = prepared.runId;
-        existingGeneratedCopyId = prepared.generatedCopyId;
-        candidatePreparation = prepared;
+        if (preparedInventoryClaim) {
+          commercialRunId = `commercial-prepared-${preparedInventoryClaim.id}-run`;
+        } else if (prepared) {
+          commercialRunId = prepared.runId;
+          existingGeneratedCopyId = prepared.generatedCopyId;
+          candidatePreparation = prepared;
+        }
       } else {
         const dryRun = await this.dependencies.pipeline.dryRun({
           executionId: execution.id,
@@ -1108,18 +1123,18 @@ export class CommercialAutomationOrchestrator {
       }
 
       await heartbeat.checkpoint();
-      if (!candidatePreparation) {
+      if (!preparedInventoryClaim && !candidatePreparation) {
         throw new AppError(
           'Preparacao comercial ausente antes da confirmacao',
           'COMMERCIAL_AUTOMATION_CANDIDATE_PREPARATION_MISSING',
         );
       }
-      await this.dependencies.candidateFlow!.revalidate(candidatePreparation);
       if (!preparedInventoryClaim) {
+        await this.dependencies.candidateFlow!.revalidate(candidatePreparation!);
         const renewedAt = this.clock();
         const reservationRenewal =
           await this.dependencies.candidateFlow!.renewAttempt({
-            campaignId: candidatePreparation.campaignId,
+            campaignId: candidatePreparation!.campaignId,
             executionId: execution.id,
             renewedAt,
             leaseExpiresAt: addMilliseconds(
@@ -1141,25 +1156,43 @@ export class CommercialAutomationOrchestrator {
         }
       }
       confirmationAttempted = true;
-      await this.dependencies.confirmation.confirm(
-        commercialRunId,
-        COMMERCIAL_CONFIRMATION_TOKEN,
-        existingGeneratedCopyId
-          ? { existingGeneratedCopyId }
-          : undefined,
-      );
       if (preparedInventoryClaim) {
-        const markedDispatched = await this.dependencies.preparedInventory?.markDispatched({
-          id: preparedInventoryClaim.id,
-          ownerId: execution.id,
-          now: this.clock(),
-        });
-        if (!markedDispatched) {
+        if (!this.dependencies.confirmation.confirmPrepared) {
           throw new AppError(
-            'Mensagem preparada perdeu a reserva antes da finalizacao',
-            'COMMERCIAL_PREPARED_DISPATCH_TRANSITION_CONFLICT',
+            'Handoff da mensagem preparada indisponivel no orchestrator',
+            'COMMERCIAL_PREPARED_HANDOFF_UNAVAILABLE',
           );
         }
+        const now = this.clock();
+        const confirmed = await this.dependencies.confirmation.confirmPrepared(
+          {
+            preparedId: preparedInventoryClaim.id,
+            executionId: execution.id,
+            ownerId: execution.id,
+            campaignId: preparedInventoryClaim.campaignId,
+            groupDestinationId: preparedInventoryClaim.groupDestinationId,
+            instanceName: preparedInventoryClaim.instanceName,
+            logicalGroupFingerprint:
+              preparedInventoryClaim.logicalGroupFingerprint,
+            scheduleRevision: preparedInventoryClaim.scheduleRevision,
+            assignmentRevision: preparedInventoryClaim.assignmentRevision,
+            now,
+            leaseExpiresAt: addMilliseconds(
+              now,
+              this.dependencies.leaseSeconds * 1000,
+            ),
+          },
+          COMMERCIAL_CONFIRMATION_TOKEN,
+        );
+        commercialRunId = confirmed.runId;
+      } else {
+        await this.dependencies.confirmation.confirm(
+          commercialRunId!,
+          COMMERCIAL_CONFIRMATION_TOKEN,
+          existingGeneratedCopyId
+            ? { existingGeneratedCopyId }
+            : undefined,
+        );
       }
       return publicResult(
         await finish({

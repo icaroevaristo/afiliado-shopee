@@ -390,7 +390,12 @@ const createSubject = ({
       renewed: true,
     })),
   };
-  const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
+  const confirmation = {
+    confirm: vi.fn(async () => ({ status: 'queued' })),
+    confirmPrepared: vi.fn(async (input: { preparedId: string }) => ({
+      runId: `commercial-prepared-${input.preparedId}-run`,
+    })),
+  };
   const commercialRuns = {
     findById: vi.fn(
       async (): Promise<{
@@ -1071,10 +1076,15 @@ describe('CommercialAutomationOrchestrator', () => {
       candidateId: 'candidate-ready',
       snapshotId: 'snapshot-1',
       generatedCopyId: 'copy-ready-1',
-      runId: 'run-ready-1',
+      copyPreview: 'copy preview https://example.invalid/affiliate',
+      runId: null,
       status: 'READY' as const,
-      reservationOwnerId: null,
-      reservationLeaseExpiresAt: null,
+       reservationOwnerId: null,
+       reservationLeaseExpiresAt: null,
+       scheduleRevision: 1,
+       assignmentRevision: 1,
+       expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
       invalidatedReason: null,
       invalidatedAt: null,
       createdAt: NOW,
@@ -1098,12 +1108,19 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
     expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
-    expect(subject.confirmation.confirm).toHaveBeenCalledWith(
-      'run-ready-1',
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparedId: 'prepared-message-1',
+        executionId: 'execution-1',
+        ownerId: 'execution-1',
+        campaignId: 'campaign-1',
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+      }),
       expect.stringMatching(/.+/),
-      { existingGeneratedCopyId: 'copy-ready-1' },
     );
-    expect(preparedInventory.markDispatched).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
     expect(preparedInventory.release).not.toHaveBeenCalled();
   });
 
@@ -1712,7 +1729,11 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...targets[1],
+      }),
+    );
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
@@ -1769,9 +1790,19 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...targets[1],
+        scheduleRevision: 1,
+      }),
+    );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
-      expect.objectContaining({ target: targets[1] }),
+      expect.objectContaining({
+        target: expect.objectContaining({
+          ...targets[1],
+          scheduleRevision: 1,
+        }),
+      }),
       expect.any(Object),
     );
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(

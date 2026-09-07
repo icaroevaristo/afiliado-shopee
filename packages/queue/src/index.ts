@@ -34,6 +34,7 @@ export const QUEUE_NAMES = {
   productPipeline: 'product-pipeline',
   whatsappDispatch: 'whatsapp-dispatch',
   commercialAutomation: 'commercial-automation',
+  commercialInventoryRefill: 'commercial-inventory-refill',
 } as const;
 
 export const JOB_NAMES = {
@@ -41,6 +42,7 @@ export const JOB_NAMES = {
   whatsappDispatch: 'whatsapp-dispatch',
   commercialAutomationTick: 'commercial-automation-tick',
   commercialAutomationTarget: 'commercial-automation-target',
+  commercialInventoryRefill: 'commercial-inventory-refill',
 } as const;
 
 export const DEFAULT_PIPELINE_SCHEDULER_JOB_ID = 'scheduled-pipeline-product';
@@ -66,6 +68,12 @@ export const COMMERCIAL_AUTOMATION_JOB_OPTIONS: JobsOptions = {
   removeOnFail: false,
 };
 
+export const COMMERCIAL_INVENTORY_REFILL_JOB_OPTIONS: JobsOptions = {
+  attempts: 1,
+  removeOnComplete: false,
+  removeOnFail: false,
+};
+
 export const createRedisConnection = (url: string) =>
   new IORedis(url, { maxRetriesPerRequest: null });
 
@@ -77,6 +85,11 @@ export const createWhatsAppDispatchQueue = (connection: IORedis) =>
 
 export const createCommercialAutomationQueue = (connection: IORedis) =>
   new Queue<CommercialAutomationJob>(QUEUE_NAMES.commercialAutomation, {
+    connection,
+  });
+
+export const createCommercialInventoryRefillQueue = (connection: IORedis) =>
+  new Queue<CommercialInventoryRefillJob>(QUEUE_NAMES.commercialInventoryRefill, {
     connection,
   });
 
@@ -102,6 +115,10 @@ export type CommercialAutomationJob =
       kind: 'target';
       target: CommercialAutomationTargetConstraint;
     };
+export type CommercialInventoryRefillJob = {
+  mode: CommercialAutomationMode;
+  provider: 'official';
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -216,6 +233,39 @@ export const enqueueCommercialAutomationTarget = async (
     throw new AppError(
       'Job target deterministico existente possui payload divergente',
       'COMMERCIAL_AUTOMATION_TARGET_JOB_ID_PAYLOAD_CONFLICT',
+    );
+  }
+  return persistedJob;
+};
+
+export const enqueueCommercialInventoryRefill = async (
+  queue: Queue<CommercialInventoryRefillJob>,
+  data: CommercialInventoryRefillJob,
+  jobId: string,
+) => {
+  if (
+    data.mode !== 'send' ||
+    data.provider !== 'official' ||
+    !jobId.startsWith('commercial-inventory-refill-')
+  ) {
+    throw new AppError(
+      'Job de refill de inventario comercial com payload invalido',
+      'COMMERCIAL_INVENTORY_REFILL_JOB_INVALID',
+    );
+  }
+  await queue.add(JOB_NAMES.commercialInventoryRefill, data, {
+    ...COMMERCIAL_INVENTORY_REFILL_JOB_OPTIONS,
+    jobId,
+  });
+  const persistedJob = await queue.getJob(jobId);
+  if (
+    !persistedJob ||
+    persistedJob.name !== JOB_NAMES.commercialInventoryRefill ||
+    stableJson(persistedJob.data) !== stableJson(data)
+  ) {
+    throw new AppError(
+      'Job de refill de inventario comercial possui payload divergente',
+      'COMMERCIAL_INVENTORY_REFILL_JOB_PAYLOAD_CONFLICT',
     );
   }
   return persistedJob;

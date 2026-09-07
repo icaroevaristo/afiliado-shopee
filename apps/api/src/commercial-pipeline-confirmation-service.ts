@@ -16,6 +16,8 @@ import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
   CommercialDeliveryHistoryRepository,
   CommercialDispatchOutboxRepository,
+  CommercialPreparedMessageHandoffInput,
+  CommercialPreparedMessageRepository,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
   WhatsAppInstanceRepository,
@@ -57,6 +59,9 @@ export type CommercialPipelineConfirmationResult = {
   investigationRequired: false;
 };
 
+export type CommercialPreparedPipelineConfirmationResult =
+  CommercialPipelineConfirmationResult & { outboxId: string };
+
 export type CommercialPipelineConfirmationOptions = {
   existingGeneratedCopyId?: string;
   manual?: boolean;
@@ -73,6 +78,7 @@ export type CommercialPipelineConfirmationServiceOptions = {
   groups: WhatsAppGroupDirectoryRepository;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   outboxes: CommercialDispatchOutboxRepository;
+  preparedMessages?: Pick<CommercialPreparedMessageRepository, 'handoff'>;
   deliveryHistory: CommercialDeliveryHistoryRepository;
   copy: CommercialCopyGenerator;
   publisher: Pick<CommercialDispatchOutboxPublisher, 'publish'>;
@@ -415,6 +421,85 @@ export class CommercialPipelineConfirmationService {
         'COMMERCIAL_DISPATCH_FAILED',
       );
     }
+  }
+
+  async confirmPrepared(
+    input: CommercialPreparedMessageHandoffInput,
+    confirmation: string,
+    options: Pick<CommercialPipelineConfirmationOptions, 'deferPublication'> = {},
+  ): Promise<CommercialPreparedPipelineConfirmationResult> {
+    if (confirmation !== COMMERCIAL_CONFIRMATION_TOKEN) {
+      changed(
+        'Confirmacao comercial invalida',
+        'COMMERCIAL_CONFIRMATION_INVALID',
+      );
+    }
+    assertEnvironment(this.options.environment);
+    const preparedMessages = this.options.preparedMessages;
+    if (!preparedMessages?.handoff) {
+      throw new AppError(
+        'Handoff da mensagem preparada indisponivel',
+        'COMMERCIAL_PREPARED_HANDOFF_UNAVAILABLE',
+      );
+    }
+    const committed = await preparedMessages.handoff(input);
+    if (!committed) {
+      throw new AppError(
+        'Mensagem preparada ja nao esta disponivel para confirmacao',
+        'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+      );
+    }
+    if (!options.deferPublication) {
+      await this.options.publisher.publish(committed.outbox.id);
+    }
+    const run = await this.options.runs.findById(committed.runId);
+    if (
+      !run ||
+      run.id !== committed.runId ||
+      run.mode !== 'CONFIRMED' ||
+      run.dispatchId !== committed.dispatchId ||
+      !run.productName ||
+      !run.productPrice ||
+      !run.groupName ||
+      !run.groupFingerprint ||
+      !run.copyPreview
+    ) {
+      throw new AppError(
+        'Handoff preparado nao produziu run comercial consistente',
+        'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
+      );
+    }
+    this.options.logger.info(
+      {
+        event: options.deferPublication
+          ? 'commercial-pipeline.prepared.pending-publication'
+          : 'commercial-pipeline.prepared.queued',
+        runId: run.id,
+        preparedId: input.preparedId,
+      },
+      options.deferPublication
+        ? 'Prepared commercial pipeline awaiting publication'
+        : 'Prepared commercial pipeline queued',
+    );
+    return {
+      outboxId: committed.outbox.id,
+      runId: run.id,
+      mode: 'confirmed',
+      status: 'queued',
+      selectedProduct: { name: run.productName, price: run.productPrice },
+      selectedGroup: {
+        name: run.groupName,
+        fingerprint: run.groupFingerprint,
+      },
+      copyPreview: run.copyPreview,
+      dispatchWasCreated: true,
+      jobWasCreated: true,
+      messageWasSent: false,
+      dispatchStatus: 'pending',
+      attemptCount: 0,
+      externalMessageIdRecorded: false,
+      investigationRequired: false,
+    };
   }
 
   async markInvestigationRequired(runId: string) {

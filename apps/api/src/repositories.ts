@@ -273,6 +273,7 @@ export interface ShopeeOfferRepository {
   ): Promise<ShopeeOfferRecord>;
   upsertOfficialOfferWithSnapshot(
     offer: ShopeeProductOffer,
+    writeFence?: CommercialDiscoveryWriteFence,
   ): Promise<OfficialOfferSnapshotUpsertResult>;
   findOfferById(id: string): Promise<ShopeeOfferRecord | null>;
   listOffers(
@@ -802,6 +803,7 @@ export type CommercialDiscoveryCheckpointRecord = {
   nextRefreshAt: Date | null;
   leaseOwnerId: string | null;
   leaseExpiresAt: Date | null;
+  leaseRevision: number;
   lastRequestAt: Date | null;
   lastSuccessAt: Date | null;
   lastErrorCode: string | null;
@@ -825,6 +827,7 @@ export type CommercialDiscoveryCheckpointAcquireInput = {
 export type CommercialDiscoveryCheckpointAdvanceInput = {
   id: string;
   ownerId: string;
+  leaseRevision: number;
   now: Date;
   leaseExpiresAt: Date;
   page: number;
@@ -832,6 +835,13 @@ export type CommercialDiscoveryCheckpointAdvanceInput = {
   hasNextPage: boolean;
   fetchedProducts: number;
   nextRefreshAt: Date | null;
+};
+
+export type CommercialDiscoveryWriteFence = {
+  checkpointId: string;
+  ownerId: string;
+  leaseRevision: number;
+  now: Date;
 };
 
 export interface CommercialDiscoveryCheckpointRepository {
@@ -844,6 +854,7 @@ export interface CommercialDiscoveryCheckpointRepository {
   fail(input: {
     id: string;
     ownerId: string;
+    leaseRevision?: number;
     now: Date;
     errorCode: string;
   }): Promise<boolean>;
@@ -864,10 +875,15 @@ export type CommercialPreparedMessageRecord = {
   candidateId: string;
   snapshotId: string;
   generatedCopyId: string;
-  runId: string;
+  copyPreview: string;
+  runId: string | null;
   status: CommercialPreparedMessageStatus;
   reservationOwnerId: string | null;
   reservationLeaseExpiresAt: Date | null;
+  scheduleRevision: number;
+  assignmentRevision: number;
+  expiresAt: Date;
+  offerEndsAt: Date | null;
   invalidatedReason: string | null;
   invalidatedAt: Date | null;
   createdAt: Date;
@@ -881,7 +897,12 @@ export type CommercialPreparedMessageCreateInput = {
   logicalGroupFingerprint: string;
   candidateId: string;
   generatedCopyId: string;
-  runId: string;
+  copyPreview?: string;
+  runId?: string;
+  scheduleRevision?: number;
+  assignmentRevision?: number;
+  expiresAt?: Date;
+  offerEndsAt?: Date | null;
   now: Date;
 };
 
@@ -890,9 +911,34 @@ export type CommercialPreparedMessageClaimInput = {
   groupDestinationId: string;
   instanceName: string;
   logicalGroupFingerprint: string;
+  scheduleRevision?: number;
+  assignmentRevision?: number;
   ownerId: string;
   now: Date;
   leaseExpiresAt: Date;
+};
+
+export type CommercialPreparedMessageHandoffInput = {
+  preparedId: string;
+  executionId: string;
+  ownerId: string;
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  scheduleRevision?: number;
+  assignmentRevision?: number;
+  now: Date;
+  leaseExpiresAt: Date;
+};
+
+export type CommercialPreparedMessageHandoffResult = {
+  outbox: CommercialDispatchOutboxRecord;
+  runId: string;
+  dispatchId: string;
+  jobId: string;
+  candidateId: string;
+  generatedCopyId: string;
 };
 
 export interface CommercialPreparedMessageRepository {
@@ -901,18 +947,26 @@ export interface CommercialPreparedMessageRepository {
     groupDestinationId: string;
     instanceName: string;
     logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
   }): Promise<number>;
   listProtectedCandidateIds?(input: {
     campaignId: string;
     groupDestinationId: string;
     instanceName: string;
     logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
   }): Promise<string[]>;
   listReadyCandidateIds?(input: {
     campaignId: string;
     groupDestinationId: string;
     instanceName: string;
     logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
   }): Promise<string[]>;
   createReady(
     input: CommercialPreparedMessageCreateInput,
@@ -920,6 +974,9 @@ export interface CommercialPreparedMessageRepository {
   claimReady(
     input: CommercialPreparedMessageClaimInput,
   ): Promise<CommercialPreparedMessageRecord | null>;
+  handoff?(
+    input: CommercialPreparedMessageHandoffInput,
+  ): Promise<CommercialPreparedMessageHandoffResult | null>;
   markDispatched(input: {
     id: string;
     ownerId: string;
@@ -928,6 +985,12 @@ export interface CommercialPreparedMessageRepository {
   release(input: {
     id: string;
     ownerId: string;
+    now: Date;
+  }): Promise<boolean>;
+  invalidateReserved?(input: {
+    id: string;
+    ownerId: string;
+    reason: string;
     now: Date;
   }): Promise<boolean>;
   recoverExpired(input: { now: Date; limit: number }): Promise<number>;
@@ -978,6 +1041,7 @@ export type CommercialAutomationTarget = {
   /** Ordered sender set; legacy rows fall back to instanceName. */
   orderedInstanceNames?: string[];
   assignmentRevision?: number;
+  scheduleRevision?: number;
   logicalGroupFingerprint: string;
   campaignId: string;
   nicheId: string;

@@ -8,6 +8,7 @@ import {
 import type { CommercialAutomationEffectiveSchedule } from '../src/commercial-automation-policy-service';
 
 const now = new Date('2026-08-24T12:00:00.000Z');
+const nowFor100HealthySlots = new Date('2026-08-24T11:00:00.000Z');
 const MINUTE_MS = 60_000;
 
 const schedule: CommercialAutomationEffectiveSchedule = {
@@ -396,6 +397,64 @@ describe('commercial automation scheduler planner', () => {
         (slot) => slot.target.instanceName === 'afiliado-shopee-secondary',
       ),
     ).toHaveLength(30);
+  });
+
+  it('simula 100 slots saudaveis com confirmacao e provider sem duplicidade', () => {
+    const dailySchedule = {
+      ...schedule,
+      dailyGlobalLimit: 100,
+      dailyGroupLimit: 100,
+      minimumIntervalMinutes: 5,
+      staggerMinutes: 0,
+    };
+    const orderedInstances = [
+      'afiliado-shopee-local',
+      'afiliado-shopee-secondary',
+    ];
+    const providerCalls: string[] = [];
+    let lastSentAt: Date | null = null;
+    let lastSentInstanceName: string | null = null;
+
+    for (let sentToday = 0; sentToday < 100; sentToday += 1) {
+      const now = new Date(nowFor100HealthySlots.getTime() + sentToday * 5 * MINUTE_MS);
+      const result = planCommercialTargetSlots({
+        now,
+        schedule: dailySchedule,
+        targets: [
+          target('healthy-100', {
+            dailyLimit: 100,
+            cadenceMinutes: 5,
+            instanceName: orderedInstances[0],
+            orderedInstanceNames: orderedInstances,
+            instanceActiveByName: {
+              [orderedInstances[0]]: true,
+              [orderedInstances[1]]: true,
+            },
+            lastSentAt,
+            lastSentInstanceName,
+            groupSentToday: sentToday,
+          }),
+        ],
+        globalSentToday: sentToday,
+        horizonMinutes: 5,
+        enforceConfirmedSentRotation: true,
+      });
+      expect(result.slots).toHaveLength(1);
+      const slot = result.slots[0]!;
+      const providerCall = `${slot.slotKey}:${slot.target.instanceName}`;
+      expect(providerCalls).not.toContain(providerCall);
+      providerCalls.push(providerCall);
+      lastSentAt = slot.scheduledFor;
+      lastSentInstanceName = slot.target.instanceName;
+    }
+
+    expect(providerCalls).toHaveLength(100);
+    expect(
+      providerCalls.filter((call) => call.endsWith(':afiliado-shopee-local')),
+    ).toHaveLength(50);
+    expect(
+      providerCalls.filter((call) => call.endsWith(':afiliado-shopee-secondary')),
+    ).toHaveLength(50);
   });
 
   it('mantem o intervalo dominante em tres slots do mesmo grupo', () => {

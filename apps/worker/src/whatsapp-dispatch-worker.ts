@@ -253,7 +253,10 @@ const renewCommercialReservationForDispatch = async (input: {
     !execution ||
     execution.id !== run.executionId ||
     execution.mode !== 'SEND' ||
-    execution.status !== 'QUEUED' ||
+    (execution.status !== 'QUEUED' &&
+      (execution.status !== 'STARTED' ||
+        !execution.leaseExpiresAt ||
+        execution.leaseExpiresAt <= now)) ||
     execution.commercialRunId !== run.id
   ) {
     throw reservationHandoffError(

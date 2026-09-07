@@ -66,6 +66,7 @@ const POSTERIOR_MIGRATIONS = [
   '20260905120000_dashboard_operational_authority',
   '20260905130000_delivery_confirmation',
   '20260906100000_persistent_discovery_prepared_inventory',
+  '20260907100000_fulfillment_fences_and_ready_expiry',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
@@ -137,6 +138,8 @@ const HISTORICAL_HASHES: Record<string, string> = {
     '11f578429c3671cc824ef3b9bf009d33c2edf5bfbfb240bcc42bf95e7b432c68',
   '20260906100000_persistent_discovery_prepared_inventory':
     'ac2f8649d376a0231eb01fc73083ec4bb436afd1244a0f561f5acfdab6c45455',
+  '20260907100000_fulfillment_fences_and_ready_expiry':
+    '5a47fcc7b663f531beeef77379ade659964402f5bb1f29422e79af4428f69b71',
 };
 
 const migration = (migrationName: string, finished = true) => ({

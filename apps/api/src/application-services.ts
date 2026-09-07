@@ -201,6 +201,7 @@ export const createCommercialPipelineConfirmationService = ({
     | 'commercialDeliveryHistory'
     | 'whatsappInstances'
     | 'commercialDispatchOutboxes'
+    | 'commercialPreparedMessages'
   >;
   queue: CommercialDispatchOutboxQueue;
   instanceName: string;
@@ -213,6 +214,7 @@ export const createCommercialPipelineConfirmationService = ({
     groups: repositories.whatsappGroups,
     instances: repositories.whatsappInstances,
     outboxes: repositories.commercialDispatchOutboxes,
+    preparedMessages: repositories.commercialPreparedMessages,
     runs: repositories.commercialRuns,
     deliveryHistory: repositories.commercialDeliveryHistory,
     copy: new CommercialCopyService(maximumCopyLength),

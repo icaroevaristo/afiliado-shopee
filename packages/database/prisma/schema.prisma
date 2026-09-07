@@ -328,6 +328,7 @@ model CommercialDiscoveryCheckpoint {
   nextRefreshAt         DateTime?
   leaseOwnerId         String?
   leaseExpiresAt        DateTime?
+  leaseRevision        Int                                 @default(0)
   lastRequestAt         DateTime?
   lastSuccessAt         DateTime?
   lastErrorCode         String?
@@ -356,17 +357,22 @@ model CommercialPreparedMessage {
   snapshot                  CommercialOfferSnapshot         @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
   generatedCopyId           String
   generatedCopy             GeneratedCopy                   @relation(fields: [generatedCopyId], references: [id], onDelete: Restrict)
-  runId                     String                          @unique
-  run                       CommercialPipelineRun           @relation(fields: [runId], references: [id], onDelete: Restrict)
+  copyPreview               String                          @default("")
+  runId                     String?                         @unique
+  run                       CommercialPipelineRun?          @relation(fields: [runId], references: [id], onDelete: Restrict)
   status                    CommercialPreparedMessageStatus @default(READY)
   reservationOwnerId        String?
   reservationLeaseExpiresAt DateTime?
+  scheduleRevision          Int                             @default(1)
+  assignmentRevision        Int                             @default(1)
+  expiresAt                 DateTime
+  offerEndsAt               DateTime?
   invalidatedReason         String?
   invalidatedAt             DateTime?
   createdAt                 DateTime                        @default(now())
   updatedAt                 DateTime                        @updatedAt
 
-  @@unique([campaignId, candidateId, snapshotId, groupDestinationId])
+  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision])
   @@index([campaignId, status, groupDestinationId, instanceName])
   @@index([status, reservationLeaseExpiresAt])
   @@index([candidateId, snapshotId])

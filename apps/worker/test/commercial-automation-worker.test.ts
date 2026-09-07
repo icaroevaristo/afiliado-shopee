@@ -8,6 +8,7 @@ import {
 
 import {
   COMMERCIAL_AUTOMATION_WORKER_CONCURRENCY,
+  processCommercialInventoryRefillJob,
   processCommercialAutomationJob,
   startCommercialAutomationWorker,
 } from '../src/commercial-automation-worker';
@@ -371,6 +372,7 @@ describe('processCommercialAutomationJob', () => {
     const executeTick = vi.fn();
     const plan = vi.fn(async () => ({ slots: [] }));
     const enqueue = vi.fn(async () => undefined);
+    const enqueueInventoryRefill = vi.fn(async () => undefined);
     await processCommercialAutomationJob(
       {
         id: 'planner-tick-1',
@@ -381,22 +383,28 @@ describe('processCommercialAutomationJob', () => {
         orchestrator: { executeTick } as never,
         planner: { plan },
         enqueueTarget: enqueue,
+        enqueueInventoryRefill,
         provider: 'official',
         mode: 'send',
       },
     );
 
     expect(plan).toHaveBeenCalledOnce();
+    expect(enqueueInventoryRefill).toHaveBeenCalledWith(
+      { mode: 'send', provider: 'official' },
+      'commercial-inventory-refill-planner-tick-1',
+    );
     expect(plan).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'send', enqueue }),
     );
     expect(executeTick).not.toHaveBeenCalled();
   });
 
-  it('executa o supervisor de inventory antes do planner e nao o mistura ao target', async () => {
+  it('enfileira o refill separado e nao aguarda o supervisor no planner', async () => {
     const executeTick = vi.fn();
     const plan = vi.fn(async () => ({ slots: [] }));
     const enqueue = vi.fn(async () => undefined);
+    const enqueueInventoryRefill = vi.fn(async () => undefined);
     const inventory = vi.fn(async () => ({ preparedMessages: 0 }));
     await processCommercialAutomationJob(
       {
@@ -409,53 +417,108 @@ describe('processCommercialAutomationJob', () => {
         planner: { plan },
         inventorySupervisor: { run: inventory },
         enqueueTarget: enqueue,
+        enqueueInventoryRefill,
         provider: 'official',
         mode: 'send',
       },
     );
-    expect(inventory).toHaveBeenCalledWith({ mode: 'send', provider: 'official' });
-    expect(inventory.mock.invocationCallOrder[0]).toBeLessThan(
-      plan.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    expect(enqueueInventoryRefill).toHaveBeenCalledWith(
+      { mode: 'send', provider: 'official' },
+      'commercial-inventory-refill-planner-tick-inventory',
     );
+    expect(inventory).not.toHaveBeenCalled();
     expect(executeTick).not.toHaveBeenCalled();
   });
 
-  it('mantem o planner vivo quando o supervisor de inventory falha', async () => {
-    const executeTick = vi.fn();
+  it('permite que um target devido alcance o provider enquanto o refill permanece bloqueado', async () => {
+    let releaseEnqueue!: () => void;
+    const enqueueBlocked = new Promise<void>((resolve) => {
+      releaseEnqueue = resolve;
+    });
+    let plannerReturned = false;
     const plan = vi.fn(async () => ({ slots: [] }));
-    const enqueue = vi.fn(async () => undefined);
-    const error = vi.fn();
+    const enqueueTarget = vi.fn(async () => undefined);
+    const enqueueInventoryRefill = vi.fn(() => enqueueBlocked);
+    const targetProvider = vi.fn(async () => ({ status: 'sent' }));
+    const plannerRun = processCommercialAutomationJob(
+      {
+        id: 'planner-tick-blocked-refill',
+        name: JOB_NAMES.commercialAutomationTick,
+        data: { mode: 'send' },
+      },
+      {
+        orchestrator: { executeTick: vi.fn() } as never,
+        planner: { plan },
+        enqueueTarget,
+        enqueueInventoryRefill,
+        provider: 'official',
+        mode: 'send',
+      },
+    ).then((result) => {
+      plannerReturned = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(plan).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(plannerReturned).toBe(true);
+    expect(enqueueInventoryRefill).toHaveBeenCalledOnce();
+
+    const targetResult = await processCommercialAutomationJob(
+      {
+        id: 'commercial-target-slot-ready',
+        name: JOB_NAMES.commercialAutomationTarget,
+        data: {
+          mode: 'send',
+          kind: 'target',
+          target: {
+            campaignId: 'campaign-ready',
+            groupId: 'group-ready',
+            logicalGroupFingerprint: 'fingerprint-ready',
+            instanceName: 'instance-ready',
+            scheduledFor: '2026-09-07T12:00:00.000Z',
+            slotKey: 'slot-ready',
+            scheduleRevision: 1,
+          },
+        },
+      },
+      {
+        orchestrator: {
+          executeTick: async () => {
+            await targetProvider();
+            return { status: 'sent' };
+          },
+        } as never,
+        provider: 'official',
+        mode: 'send',
+      },
+    );
+
+    expect(targetResult).toEqual({ status: 'sent' });
+    expect(targetProvider).toHaveBeenCalledOnce();
+    releaseEnqueue();
+    await plannerRun;
+  });
+
+  it('mantem a falha do supervisor confinada ao consumer de refill', async () => {
     const inventory = vi.fn(async () => {
       throw new Error('discovery unavailable');
     });
 
     await expect(
-      processCommercialAutomationJob(
+      processCommercialInventoryRefillJob(
         {
-          id: 'planner-tick-inventory-failure',
-          name: JOB_NAMES.commercialAutomationTick,
-          data: { mode: 'send' },
+          id: 'commercial-inventory-refill-failure',
+          name: JOB_NAMES.commercialInventoryRefill,
+          data: { mode: 'send', provider: 'official' },
         },
         {
-          orchestrator: { executeTick } as never,
-          planner: { plan },
           inventorySupervisor: { run: inventory },
-          logger: { info: vi.fn(), error },
-          enqueueTarget: enqueue,
-          provider: 'official',
           mode: 'send',
         },
       ),
-    ).resolves.toEqual({ slots: [] });
-
-    expect(error).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'commercial-inventory.supervisor.failed',
-        errorType: 'Error',
-      }),
-      expect.stringContaining('planner continues'),
-    );
-    expect(executeTick).not.toHaveBeenCalled();
+    ).rejects.toThrow('discovery unavailable');
+    expect(inventory).toHaveBeenCalledWith({ mode: 'send', provider: 'official' });
   });
 
   it('bloqueia job target stale antes do orchestrator', async () => {
