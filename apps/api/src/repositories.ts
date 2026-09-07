@@ -1,6 +1,7 @@
 import type { Product } from '@shopee-auto-affiliate-ai/shared';
 import type {
   ShopeeAffiliateOfferSource,
+  ShopeeOfferSort,
   ShopeeProductOffer,
 } from '@shopee-auto-affiliate-ai/providers';
 import type { CommercialPromotionTerminalCandidateBlockReason } from './commercial-promotion-candidate-terminal';
@@ -765,9 +766,173 @@ export type CommercialAutomationSettingsRecord = {
   dailyGroupLimit?: number | null;
   dailyShopeeHttpLimit?: number | null;
   dailyOpenAiGenerationLimit?: number | null;
+  usableCandidateLowWatermark?: number;
+  usableCandidateTarget?: number;
+  preparedLowWatermark?: number;
+  preparedTarget?: number;
+  discoveryPagesPerRun?: number;
+  discoveryRefreshCooldownMinutes?: number;
   scheduleRevision: number;
   updatedAt: Date;
 };
+
+export type CommercialDiscoveryQuery = {
+  keyword?: string;
+  categoryId?: string;
+  minPrice?: string;
+  maxPrice?: string;
+  minCommissionRate?: number;
+  minDiscountRate?: number;
+  minRating?: number;
+  sort?: ShopeeOfferSort;
+};
+
+export type CommercialDiscoveryCheckpointStatus = 'ACTIVE' | 'EXHAUSTED';
+
+export type CommercialDiscoveryCheckpointRecord = {
+  id: string;
+  identityFingerprint: string;
+  source: ShopeeAffiliateOfferSource;
+  campaignId: string;
+  nicheId: string;
+  query: CommercialDiscoveryQuery;
+  page: number;
+  cursor: string | null;
+  status: CommercialDiscoveryCheckpointStatus;
+  nextRefreshAt: Date | null;
+  leaseOwnerId: string | null;
+  leaseExpiresAt: Date | null;
+  lastRequestAt: Date | null;
+  lastSuccessAt: Date | null;
+  lastErrorCode: string | null;
+  fetchedPages: number;
+  fetchedProducts: number;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type CommercialDiscoveryCheckpointAcquireInput = {
+  identityFingerprint: string;
+  source: ShopeeAffiliateOfferSource;
+  campaignId: string;
+  nicheId: string;
+  query: CommercialDiscoveryQuery;
+  ownerId: string;
+  now: Date;
+  leaseExpiresAt: Date;
+};
+
+export type CommercialDiscoveryCheckpointAdvanceInput = {
+  id: string;
+  ownerId: string;
+  now: Date;
+  leaseExpiresAt: Date;
+  page: number;
+  cursor: string | null;
+  hasNextPage: boolean;
+  fetchedProducts: number;
+  nextRefreshAt: Date | null;
+};
+
+export interface CommercialDiscoveryCheckpointRepository {
+  acquire(
+    input: CommercialDiscoveryCheckpointAcquireInput,
+  ): Promise<CommercialDiscoveryCheckpointRecord | null>;
+  advance(
+    input: CommercialDiscoveryCheckpointAdvanceInput,
+  ): Promise<CommercialDiscoveryCheckpointRecord | null>;
+  fail(input: {
+    id: string;
+    ownerId: string;
+    now: Date;
+    errorCode: string;
+  }): Promise<boolean>;
+}
+
+export type CommercialPreparedMessageStatus =
+  | 'READY'
+  | 'RESERVED'
+  | 'DISPATCHED'
+  | 'INVALIDATED';
+
+export type CommercialPreparedMessageRecord = {
+  id: string;
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  candidateId: string;
+  snapshotId: string;
+  generatedCopyId: string;
+  runId: string;
+  status: CommercialPreparedMessageStatus;
+  reservationOwnerId: string | null;
+  reservationLeaseExpiresAt: Date | null;
+  invalidatedReason: string | null;
+  invalidatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type CommercialPreparedMessageCreateInput = {
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  candidateId: string;
+  generatedCopyId: string;
+  runId: string;
+  now: Date;
+};
+
+export type CommercialPreparedMessageClaimInput = {
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  ownerId: string;
+  now: Date;
+  leaseExpiresAt: Date;
+};
+
+export interface CommercialPreparedMessageRepository {
+  countReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }): Promise<number>;
+  listProtectedCandidateIds?(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }): Promise<string[]>;
+  listReadyCandidateIds?(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }): Promise<string[]>;
+  createReady(
+    input: CommercialPreparedMessageCreateInput,
+  ): Promise<CommercialPreparedMessageRecord | null>;
+  claimReady(
+    input: CommercialPreparedMessageClaimInput,
+  ): Promise<CommercialPreparedMessageRecord | null>;
+  markDispatched(input: {
+    id: string;
+    ownerId: string;
+    now: Date;
+  }): Promise<boolean>;
+  release(input: {
+    id: string;
+    ownerId: string;
+    now: Date;
+  }): Promise<boolean>;
+  recoverExpired(input: { now: Date; limit: number }): Promise<number>;
+  invalidateStale(input: { now: Date; limit: number }): Promise<number>;
+}
 
 export type CommercialAutomationScheduleUpdate = {
   allowedStartTime?: string | null;

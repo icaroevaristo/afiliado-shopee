@@ -60,6 +60,14 @@ import type {
   CommercialPromotionSnapshotRecord,
   CommercialPromotionSignal,
   CommercialManualCandidateMaterializationInput,
+  CommercialDiscoveryCheckpointAcquireInput,
+  CommercialDiscoveryCheckpointAdvanceInput,
+  CommercialDiscoveryCheckpointRecord,
+  CommercialDiscoveryCheckpointRepository,
+  CommercialPreparedMessageClaimInput,
+  CommercialPreparedMessageCreateInput,
+  CommercialPreparedMessageRecord,
+  CommercialPreparedMessageRepository,
   ManualPublicationAcceptance,
   ManualPublicationQuotaReservation,
   ManualPublicationQuotaReservationInput,
@@ -134,6 +142,7 @@ import {
   type CommercialPromotionTerminalCandidateBlockReason,
 } from './commercial-promotion-candidate-terminal';
 import { isCommercialPromotionFallbackCopy, isSafeStoredCommercialPromotionCopy } from './commercial-promotion-copy-fallback';
+import { decideCommercialPreparedRecovery } from './commercial-prepared-inventory-recovery';
 import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from './commercial-ai-copy-prompt';
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 import {
@@ -170,16 +179,17 @@ const isUniqueConstraintError = (error: unknown) =>
 const isRecordNotFoundError = (error: unknown) =>
   prismaErrorCode(error) === 'P2025';
 
-const isTransactionConflictError = (error: unknown) =>
-  prismaErrorCode(error) === 'P2034';
-
-const isPrismaKnownError = (error: unknown) =>
-  /^P\d{4}$/.test(prismaErrorCode(error) ?? '');
-
 const databaseErrorCode = (error: unknown) =>
   typeof error === 'object' && error !== null && 'meta' in error
     ? String((error as { meta?: { code?: unknown } }).meta?.code ?? '')
     : '';
+
+const isTransactionConflictError = (error: unknown) =>
+  prismaErrorCode(error) === 'P2034' ||
+  (prismaErrorCode(error) === 'P2010' && databaseErrorCode(error) === '40001');
+
+const isPrismaKnownError = (error: unknown) =>
+  /^P\d{4}$/.test(prismaErrorCode(error) ?? '');
 
 class CommercialConfirmationNotClaimedError extends Error {}
 class CommercialOutboxStateConflictError extends Error {}
@@ -6657,6 +6667,555 @@ export class PrismaManualPublicationRequestRepository implements ManualPublicati
         'RECOVERY_CAS_CONFLICT',
       );
     }
+  }
+}
+
+const mapDiscoveryCheckpoint = (
+  record: {
+    id: string;
+    identityFingerprint: string;
+    source: 'MOCK' | 'MANUAL' | 'OFFICIAL';
+    campaignId: string;
+    nicheId: string;
+    query: Prisma.JsonValue;
+    page: number;
+    cursor: string | null;
+    status: 'ACTIVE' | 'EXHAUSTED';
+    nextRefreshAt: Date | null;
+    leaseOwnerId: string | null;
+    leaseExpiresAt: Date | null;
+    lastRequestAt: Date | null;
+    lastSuccessAt: Date | null;
+    lastErrorCode: string | null;
+    fetchedPages: number;
+    fetchedProducts: number;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+): CommercialDiscoveryCheckpointRecord | null => {
+  if (typeof record.query !== 'object' || record.query === null || Array.isArray(record.query)) {
+    return null;
+  }
+  const query: CommercialDiscoveryCheckpointRecord['query'] = {};
+  for (const [key, value] of Object.entries(record.query)) {
+    if (key === 'keyword' && typeof value === 'string') query.keyword = value;
+    if (key === 'categoryId' && typeof value === 'string') query.categoryId = value;
+    if (key === 'minPrice' && typeof value === 'string') query.minPrice = value;
+    if (key === 'maxPrice' && typeof value === 'string') query.maxPrice = value;
+    if (key === 'minCommissionRate' && typeof value === 'number') query.minCommissionRate = value;
+    if (key === 'minDiscountRate' && typeof value === 'number') query.minDiscountRate = value;
+    if (key === 'minRating' && typeof value === 'number') query.minRating = value;
+    if (key === 'sort' && typeof value === 'string') {
+      if (
+        value === 'relevance' ||
+        value === 'price_asc' ||
+        value === 'price_desc' ||
+        value === 'commission_desc' ||
+        value === 'sales_desc'
+      ) {
+        query.sort = value;
+      }
+    }
+  }
+  return {
+    ...record,
+    source: record.source,
+    query,
+  };
+};
+
+const mapPreparedMessage = (record: {
+  id: string;
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  candidateId: string;
+  snapshotId: string;
+  generatedCopyId: string;
+  runId: string;
+  status: 'READY' | 'RESERVED' | 'DISPATCHED' | 'INVALIDATED';
+  reservationOwnerId: string | null;
+  reservationLeaseExpiresAt: Date | null;
+  invalidatedReason: string | null;
+  invalidatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): CommercialPreparedMessageRecord => ({ ...record });
+
+export class PrismaCommercialDiscoveryCheckpointRepository
+  implements CommercialDiscoveryCheckpointRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  async acquire(input: CommercialDiscoveryCheckpointAcquireInput) {
+    const query: Prisma.InputJsonValue = { ...input.query };
+    const existing = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { identityFingerprint: input.identityFingerprint },
+    });
+    if (!existing) {
+      try {
+        const created = await this.prisma.commercialDiscoveryCheckpoint.create({
+          data: {
+            identityFingerprint: input.identityFingerprint,
+            source: input.source,
+            campaignId: input.campaignId,
+            nicheId: input.nicheId,
+            query,
+            leaseOwnerId: input.ownerId,
+            leaseExpiresAt: input.leaseExpiresAt,
+            lastRequestAt: input.now,
+          },
+        });
+        return mapDiscoveryCheckpoint(created);
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+      }
+    }
+    const current = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { identityFingerprint: input.identityFingerprint },
+    });
+    if (!current) return null;
+    if (
+      current.leaseExpiresAt !== null &&
+      current.leaseExpiresAt > input.now
+    ) {
+      return null;
+    }
+    if (
+      current.status === 'EXHAUSTED' &&
+      current.nextRefreshAt !== null &&
+      current.nextRefreshAt > input.now
+    ) {
+      return null;
+    }
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+        id: current.id,
+        status: current.status,
+        nextRefreshAt: current.nextRefreshAt,
+        OR: [
+          { leaseExpiresAt: null },
+          { leaseExpiresAt: { lte: input.now } },
+        ],
+      },
+      data: {
+        source: input.source,
+        campaignId: input.campaignId,
+        nicheId: input.nicheId,
+        query,
+        leaseOwnerId: input.ownerId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        lastRequestAt: input.now,
+        lastErrorCode: null,
+        ...(current.status === 'EXHAUSTED'
+          ? { status: 'ACTIVE' as const, page: 1, cursor: null, fetchedPages: 0, fetchedProducts: 0 }
+          : {}),
+      },
+    });
+    if (result.count !== 1) return null;
+    const acquired = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { id: current.id },
+    });
+    return acquired ? mapDiscoveryCheckpoint(acquired) : null;
+  }
+
+  async advance(input: CommercialDiscoveryCheckpointAdvanceInput) {
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+        id: input.id,
+        leaseOwnerId: input.ownerId,
+        leaseExpiresAt: { gt: input.now },
+        page: { lte: input.page },
+      },
+      data: {
+        page: input.page,
+        cursor: input.cursor,
+        status: input.hasNextPage ? 'ACTIVE' : 'EXHAUSTED',
+        nextRefreshAt: input.nextRefreshAt,
+        lastSuccessAt: input.now,
+        lastErrorCode: null,
+        leaseOwnerId: input.hasNextPage ? input.ownerId : null,
+        leaseExpiresAt: input.hasNextPage ? input.leaseExpiresAt : null,
+        fetchedPages: { increment: 1 },
+        fetchedProducts: { increment: input.fetchedProducts },
+      },
+    });
+    if (result.count !== 1) return null;
+    const updated = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { id: input.id },
+    });
+    return updated ? mapDiscoveryCheckpoint(updated) : null;
+  }
+
+  async fail(input: {
+    id: string;
+    ownerId: string;
+    now: Date;
+    errorCode: string;
+  }) {
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+        id: input.id,
+        leaseOwnerId: input.ownerId,
+        leaseExpiresAt: { gt: input.now },
+      },
+      data: {
+        lastErrorCode: input.errorCode,
+        leaseOwnerId: null,
+        leaseExpiresAt: null,
+        updatedAt: input.now,
+      },
+    });
+    return result.count === 1;
+  }
+}
+
+export class PrismaCommercialPreparedMessageRepository
+  implements CommercialPreparedMessageRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  async countReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }) {
+    return this.prisma.commercialPreparedMessage.count({
+      where: {
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        status: 'READY',
+        candidate: { status: 'COPY_READY' },
+      },
+    });
+  }
+
+  async listProtectedCandidateIds(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: {
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        status: { in: ['READY', 'RESERVED', 'DISPATCHED'] },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { candidateId: true },
+    });
+    return rows.map(({ candidateId }) => candidateId);
+  }
+
+  async listReadyCandidateIds(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+  }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: {
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        status: 'READY',
+        candidate: { status: 'COPY_READY' },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { candidateId: true },
+    });
+    return rows.map(({ candidateId }) => candidateId);
+  }
+
+  async createReady(input: CommercialPreparedMessageCreateInput) {
+    const candidate = await this.prisma.commercialPromotionCandidate.findUnique({
+      where: { id: input.candidateId },
+      include: { product: true, snapshot: true, generatedCopy: true },
+    });
+    const run = await this.prisma.commercialPipelineRun.findUnique({
+      where: { id: input.runId },
+      select: {
+        mode: true,
+        status: true,
+        productId: true,
+        groupDestinationId: true,
+        instanceName: true,
+        groupFingerprint: true,
+      },
+    });
+    if (
+      !candidate ||
+      !run ||
+      run.mode !== 'DRY_RUN' ||
+      run.status !== 'COMPLETED' ||
+      run.productId !== candidate.productId ||
+      run.groupDestinationId !== input.groupDestinationId ||
+      run.instanceName !== input.instanceName ||
+      run.groupFingerprint !== input.logicalGroupFingerprint ||
+      candidate.status !== 'COPY_READY' ||
+      candidate.campaignId !== input.campaignId ||
+      candidate.generatedCopyId !== input.generatedCopyId ||
+      !candidate.generatedCopy ||
+      candidate.generatedCopy.productId !== candidate.productId ||
+      candidate.generatedCopy.snapshotId !== candidate.snapshotId ||
+      candidate.product.commercialSnapshotRevision !== candidate.snapshot.revision ||
+      candidate.product.commercialSnapshotFingerprint !== candidate.snapshot.fingerprint
+    ) {
+      return null;
+    }
+    const group = await this.prisma.whatsAppDestination.findFirst({
+      where: {
+        id: input.groupDestinationId,
+        type: 'GROUP',
+        active: true,
+        available: true,
+        fingerprint: input.logicalGroupFingerprint,
+      },
+      select: { id: true },
+    });
+    const instance = await this.prisma.whatsAppInstance.findFirst({
+      where: { name: input.instanceName, active: true, paused: false },
+      select: { name: true },
+    });
+    if (!group || !instance) return null;
+    const where = {
+      campaignId_candidateId_snapshotId_groupDestinationId: {
+        campaignId: input.campaignId,
+        candidateId: input.candidateId,
+        snapshotId: candidate.snapshotId,
+        groupDestinationId: input.groupDestinationId,
+      },
+    };
+    const existing = await this.prisma.commercialPreparedMessage.findUnique({ where });
+    if (existing?.status === 'READY') {
+      return mapPreparedMessage(existing);
+    }
+    if (existing?.status === 'DISPATCHED' || existing?.status === 'RESERVED') {
+      return null;
+    }
+    if (existing) {
+      const updated = await this.prisma.commercialPreparedMessage.updateMany({
+        where: { id: existing.id, status: 'INVALIDATED' },
+        data: {
+          status: 'READY',
+          instanceName: input.instanceName,
+          logicalGroupFingerprint: input.logicalGroupFingerprint,
+          generatedCopyId: input.generatedCopyId,
+          runId: input.runId,
+          reservationOwnerId: null,
+          reservationLeaseExpiresAt: null,
+          invalidatedReason: null,
+          invalidatedAt: null,
+          updatedAt: input.now,
+        },
+      });
+      if (updated.count !== 1) return null;
+      const refreshed = await this.prisma.commercialPreparedMessage.findUnique({
+        where: { id: existing.id },
+      });
+      return refreshed ? mapPreparedMessage(refreshed) : null;
+    }
+    try {
+      const created = await this.prisma.commercialPreparedMessage.create({
+        data: {
+          campaignId: input.campaignId,
+          groupDestinationId: input.groupDestinationId,
+          instanceName: input.instanceName,
+          logicalGroupFingerprint: input.logicalGroupFingerprint,
+          candidateId: input.candidateId,
+          snapshotId: candidate.snapshotId,
+          generatedCopyId: input.generatedCopyId,
+          runId: input.runId,
+          status: 'READY',
+          createdAt: input.now,
+        },
+      });
+      return mapPreparedMessage(created);
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      const raced = await this.prisma.commercialPreparedMessage.findUnique({ where });
+      return raced?.status === 'READY' ? mapPreparedMessage(raced) : null;
+    }
+  }
+
+  async claimReady(input: CommercialPreparedMessageClaimInput) {
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id"
+            FROM "CommercialPreparedMessage"
+            WHERE "campaignId" = ${input.campaignId}
+              AND "groupDestinationId" = ${input.groupDestinationId}
+              AND "instanceName" = ${input.instanceName}
+              AND "logicalGroupFingerprint" = ${input.logicalGroupFingerprint}
+              AND "status" = 'READY'
+            ORDER BY "createdAt" ASC, "id" ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+          `);
+          const row = rows[0];
+          if (!row) return null;
+          const record = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: row.id },
+            include: {
+              candidate: {
+                include: { product: true, snapshot: true, generatedCopy: true },
+              },
+            },
+          });
+          if (!record || record.candidate.status !== 'COPY_READY') {
+            await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: 'CANDIDATE_NOT_COPY_READY',
+                invalidatedAt: input.now,
+              },
+            });
+            continue;
+          }
+          const current =
+            record.candidate.generatedCopyId === record.generatedCopyId &&
+            record.candidate.product.commercialSnapshotRevision ===
+              record.candidate.snapshot.revision &&
+            record.candidate.product.commercialSnapshotFingerprint ===
+              record.candidate.snapshot.fingerprint &&
+            record.candidate.generatedCopy?.snapshotId === record.snapshotId;
+          if (!current) {
+            await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: 'SNAPSHOT_OR_COPY_STALE',
+                invalidatedAt: input.now,
+              },
+            });
+            continue;
+          }
+          const updated = await transaction.commercialPreparedMessage.updateMany({
+            where: { id: row.id, status: 'READY' },
+            data: {
+              status: 'RESERVED',
+              reservationOwnerId: input.ownerId,
+              reservationLeaseExpiresAt: input.leaseExpiresAt,
+              updatedAt: input.now,
+            },
+          });
+          if (updated.count !== 1) continue;
+          const claimed = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: row.id },
+          });
+          return claimed ? mapPreparedMessage(claimed) : null;
+        }
+        return null;
+      }, { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 });
+    } catch (error) {
+      if (isTransactionConflictError(error)) return null;
+      throw error;
+    }
+  }
+
+  async markDispatched(input: { id: string; ownerId: string; now: Date }) {
+    const result = await this.prisma.commercialPreparedMessage.updateMany({
+      where: { id: input.id, status: 'RESERVED', reservationOwnerId: input.ownerId },
+      data: { status: 'DISPATCHED', reservationOwnerId: null, reservationLeaseExpiresAt: null, updatedAt: input.now },
+    });
+    return result.count === 1;
+  }
+
+  async release(input: { id: string; ownerId: string; now: Date }) {
+    const result = await this.prisma.commercialPreparedMessage.updateMany({
+      where: { id: input.id, status: 'RESERVED', reservationOwnerId: input.ownerId },
+      data: { status: 'READY', reservationOwnerId: null, reservationLeaseExpiresAt: null, updatedAt: input.now },
+    });
+    return result.count === 1;
+  }
+
+  async recoverExpired(input: { now: Date; limit: number }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: { status: 'RESERVED', reservationLeaseExpiresAt: { lte: input.now } },
+      include: {
+        run: {
+          select: {
+            mode: true,
+            status: true,
+            dispatchId: true,
+            dispatch: { select: { id: true } },
+            dispatchOutbox: { select: { id: true } },
+          },
+        },
+      },
+      orderBy: { reservationLeaseExpiresAt: 'asc' },
+      take: Math.min(Math.max(input.limit, 1), 100),
+    });
+    let recovered = 0;
+    for (const row of rows) {
+      const recoveryDecision = decideCommercialPreparedRecovery({
+        runMode: row.run.mode,
+        dispatchId: row.run.dispatchId,
+        dispatchExists: row.run.dispatch !== null,
+        outboxExists: row.run.dispatchOutbox !== null,
+      });
+      if (recoveryDecision === 'CLOSE_DISPATCHED') {
+        const terminalized = await this.prisma.commercialPreparedMessage.updateMany({
+          where: { id: row.id, status: 'RESERVED', reservationLeaseExpiresAt: { lte: input.now } },
+          data: {
+            status: 'DISPATCHED',
+            reservationOwnerId: null,
+            reservationLeaseExpiresAt: null,
+            invalidatedReason: 'CONFIRMATION_EFFECT_OBSERVED_DURING_RECOVERY',
+            updatedAt: input.now,
+          },
+        });
+        recovered += terminalized.count;
+        continue;
+      }
+      const result = await this.prisma.commercialPreparedMessage.updateMany({
+        where: { id: row.id, status: 'RESERVED', reservationLeaseExpiresAt: { lte: input.now } },
+        data: {
+          status: 'READY',
+          reservationOwnerId: null,
+          reservationLeaseExpiresAt: null,
+          updatedAt: input.now,
+        },
+      });
+      recovered += result.count;
+    }
+    return recovered;
+  }
+
+  async invalidateStale(input: { now: Date; limit: number }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: { status: 'READY' },
+      include: { candidate: { include: { product: true, snapshot: true, generatedCopy: true } } },
+      orderBy: { updatedAt: 'asc' },
+      take: Math.min(Math.max(input.limit, 1), 100),
+    });
+    let invalidated = 0;
+    for (const row of rows) {
+      const valid =
+        row.candidate.status === 'COPY_READY' &&
+        row.candidate.generatedCopyId === row.generatedCopyId &&
+        row.candidate.product.commercialSnapshotRevision === row.candidate.snapshot.revision &&
+        row.candidate.product.commercialSnapshotFingerprint === row.candidate.snapshot.fingerprint &&
+        row.candidate.generatedCopy?.snapshotId === row.snapshotId;
+      if (valid) continue;
+      const result = await this.prisma.commercialPreparedMessage.updateMany({
+        where: { id: row.id, status: row.status },
+        data: { status: 'INVALIDATED', invalidatedReason: 'SNAPSHOT_OR_COPY_STALE', invalidatedAt: input.now, reservationOwnerId: null, reservationLeaseExpiresAt: null, updatedAt: input.now },
+      });
+      invalidated += result.count;
+    }
+    return invalidated;
   }
 }
 

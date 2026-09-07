@@ -103,6 +103,13 @@ export const processCommercialAutomationJob = async (
         ) => Promise<void>;
       }): Promise<unknown>;
     };
+    inventorySupervisor?: {
+      run(input: {
+        mode: 'preview' | 'send';
+        provider: 'mock' | 'manual' | 'official';
+      }): Promise<unknown>;
+    };
+    logger?: CommercialAutomationRuntimeLogger;
     enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
     getScheduleRevision?: () => Promise<number>;
     clock?: () => Date;
@@ -187,6 +194,20 @@ export const processCommercialAutomationJob = async (
         'COMMERCIAL_AUTOMATION_TARGET_ENQUEUE_REQUIRED',
       );
     }
+    try {
+      await options.inventorySupervisor?.run({
+        mode: options.mode,
+        provider: options.provider,
+      });
+    } catch (error) {
+      options.logger?.error(
+        {
+          event: 'commercial-inventory.supervisor.failed',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Commercial inventory supervisor failed; planner continues',
+      );
+    }
     return options.planner.plan({
       now: options.clock?.() ?? new Date(),
       mode: options.mode,
@@ -222,6 +243,8 @@ export const createCommercialAutomationWorker = (
       processCommercialAutomationJob(job, {
         orchestrator: runtime.orchestrator,
         planner: runtime.planner,
+        inventorySupervisor: runtime.inventorySupervisor,
+        logger: options.logger,
         enqueueTarget: options.enqueueTarget,
         getScheduleRevision: () => runtime.planner.getScheduleRevision(),
         provider: config.SHOPEE_AFFILIATE_PROVIDER,

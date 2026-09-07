@@ -350,6 +350,53 @@ describe('CommercialPipelineService', () => {
     });
   });
 
+  it('reaproveita run COMPLETED apos interrupcao antes de criar o inventario preparado', async () => {
+    const { service, runs } = build();
+    const input = {
+      executionId: 'prepared:candidate-1',
+      candidate: {
+        id: 'candidate-1',
+        productId: 'product-a',
+        productName: 'Produto product-a',
+        price: '99.90',
+        commercialScore: 80,
+        scorePolicyVersion: 'official-v2' as const,
+        minimumScoreUsed: 60,
+        rankPosition: 1,
+        scoreBreakdown: {
+          policyVersion: 'official-v2' as const,
+          rawTotal: 80,
+          finalScore: 80,
+          components: {},
+        },
+      },
+      group: {
+        id: 'group-1',
+        name: 'Grupo ficticio autorizado',
+        fingerprint: 'grp_123456789abc',
+        assignedInstanceName: 'affiliate-bot',
+      },
+      campaign: 'commercial-automation',
+      copyPreview: 'copy pronta',
+      candidateCount: 1,
+      eligibleCount: 1,
+      rejectedCount: 0,
+      rejectionSummary: {},
+    };
+
+    const first = await service.dryRunFromPromotionCandidate(input);
+    const update = vi.spyOn(runs, 'update');
+    update.mockClear();
+
+    const replay = await service.dryRunFromPromotionCandidate({
+      ...input,
+      existingRunId: first.runId,
+    });
+
+    expect(replay.runId).toBe(first.runId);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('mantem runs legados sem executionId', async () => {
     const { service, runs } = build();
 

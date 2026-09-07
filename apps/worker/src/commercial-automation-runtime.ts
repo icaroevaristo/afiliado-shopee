@@ -21,6 +21,7 @@ import type { CommercialDispatchOutboxQueue } from '../../api/src/commercial-dis
 import { ScoreService } from '../../api/src/score-service';
 import { ShopeeOfferSyncService } from '../../api/src/shopee-offer-sync-service';
 import { CommercialAutomationSchedulerPlanner } from '../../api/src/commercial-automation-scheduler-planner';
+import { CommercialInventorySupervisor } from '../../api/src/commercial-inventory-supervisor';
 import {
   CommercialExternalProviderBudgetService,
   withOpenAiDailyBudget,
@@ -232,11 +233,22 @@ export const createCommercialAutomationOrchestratorRuntime = (
         },
       };
 
+  const inventorySupervisor = new CommercialInventorySupervisor({
+    candidateFlow,
+    preparedMessages: repositories.commercialPreparedMessages,
+    checkpoints: repositories.commercialDiscoveryCheckpoints,
+    settings: repositories.commercialAutomationSettings,
+    niches: repositories.commercialNiches,
+    syncOffers,
+    logger,
+  });
+
   return {
     planner,
+    inventorySupervisor,
     orchestrator: new CommercialAutomationOrchestrator({
       policy,
-      syncOffers,
+      preparedInventory: repositories.commercialPreparedMessages,
       pipeline,
       candidateFlow,
       confirmation,

@@ -393,6 +393,71 @@ describe('processCommercialAutomationJob', () => {
     expect(executeTick).not.toHaveBeenCalled();
   });
 
+  it('executa o supervisor de inventory antes do planner e nao o mistura ao target', async () => {
+    const executeTick = vi.fn();
+    const plan = vi.fn(async () => ({ slots: [] }));
+    const enqueue = vi.fn(async () => undefined);
+    const inventory = vi.fn(async () => ({ preparedMessages: 0 }));
+    await processCommercialAutomationJob(
+      {
+        id: 'planner-tick-inventory',
+        name: JOB_NAMES.commercialAutomationTick,
+        data: { mode: 'send' },
+      },
+      {
+        orchestrator: { executeTick } as never,
+        planner: { plan },
+        inventorySupervisor: { run: inventory },
+        enqueueTarget: enqueue,
+        provider: 'official',
+        mode: 'send',
+      },
+    );
+    expect(inventory).toHaveBeenCalledWith({ mode: 'send', provider: 'official' });
+    expect(inventory.mock.invocationCallOrder[0]).toBeLessThan(
+      plan.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
+  it('mantem o planner vivo quando o supervisor de inventory falha', async () => {
+    const executeTick = vi.fn();
+    const plan = vi.fn(async () => ({ slots: [] }));
+    const enqueue = vi.fn(async () => undefined);
+    const error = vi.fn();
+    const inventory = vi.fn(async () => {
+      throw new Error('discovery unavailable');
+    });
+
+    await expect(
+      processCommercialAutomationJob(
+        {
+          id: 'planner-tick-inventory-failure',
+          name: JOB_NAMES.commercialAutomationTick,
+          data: { mode: 'send' },
+        },
+        {
+          orchestrator: { executeTick } as never,
+          planner: { plan },
+          inventorySupervisor: { run: inventory },
+          logger: { info: vi.fn(), error },
+          enqueueTarget: enqueue,
+          provider: 'official',
+          mode: 'send',
+        },
+      ),
+    ).resolves.toEqual({ slots: [] });
+
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'commercial-inventory.supervisor.failed',
+        errorType: 'Error',
+      }),
+      expect.stringContaining('planner continues'),
+    );
+    expect(executeTick).not.toHaveBeenCalled();
+  });
+
   it('bloqueia job target stale antes do orchestrator', async () => {
     const executeTick = vi.fn();
     const target = {

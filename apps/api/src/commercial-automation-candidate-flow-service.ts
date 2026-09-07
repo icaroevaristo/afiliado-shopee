@@ -83,6 +83,13 @@ export type CommercialAutomationCandidateFlowResult = {
 export type CommercialAutomationCandidatePreparationOptions = {
   executionId: string;
   existingRunId?: string;
+  resolveExecution?: (input: {
+    candidateId: string;
+    snapshotId: string;
+  }) => Promise<{
+    executionId: string;
+    existingRunId?: string;
+  }>;
   manualSelection?: boolean;
   beforeExternalCopyGeneration?: () => Promise<void>;
   miningReport?: Pick<
@@ -103,6 +110,7 @@ export type CommercialAutomationCandidatePreflight =
   | {
       outcome: 'READY';
       candidateId: string;
+      snapshotId?: string;
       candidateStatus: 'COPY_READY' | 'QUEUED';
       queue?: {
         candidateCount: number;
@@ -134,6 +142,7 @@ export type CommercialAutomationCandidatePreflight =
 export type CommercialAutomationCandidateSelection = {
   target: CommercialAutomationTarget;
   candidateId: string;
+  snapshotId?: string;
   candidateStatus: 'COPY_READY' | 'QUEUED';
   queue: {
     candidateCount: number;
@@ -212,7 +221,8 @@ type CandidateFlowOptions = {
     'preview' | 'generate' | 'findCopy'
   >;
   draft: Pick<CommercialMessageDraftService, 'createDraft'>;
-  pipeline: Pick<CommercialPipelineService, 'dryRunFromPromotionCandidate'>;
+  pipeline: Pick<CommercialPipelineService, 'dryRunFromPromotionCandidate'> &
+    Partial<Pick<CommercialPipelineService, 'findRunByExecutionId'>>;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   instanceName: string;
   logger?: CandidateFlowLogger;
@@ -291,6 +301,13 @@ export class CommercialAutomationCandidateFlowService {
 
   constructor(private readonly options: CandidateFlowOptions) {
     this.clock = options.clock ?? (() => new Date());
+  }
+
+  findRunByExecutionId(executionId: string) {
+    return (
+      this.options.pipeline.findRunByExecutionId?.(executionId) ??
+      Promise.resolve(null)
+    );
   }
 
   private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
@@ -960,7 +977,11 @@ export class CommercialAutomationCandidateFlowService {
       )
       .sort(queueOrder);
     let selected:
-      | { candidateId: string; candidateStatus: 'COPY_READY' | 'QUEUED' }
+      | {
+          candidateId: string;
+          snapshotId: string;
+          candidateStatus: 'COPY_READY' | 'QUEUED';
+        }
       | undefined;
     for (const item of orderedCandidates) {
       if (item.status === 'COPY_READY') {
@@ -973,6 +994,7 @@ export class CommercialAutomationCandidateFlowService {
         if (ready) {
           selected ??= {
             candidateId: ready.context.candidate.id,
+            snapshotId: ready.context.snapshot.id,
             candidateStatus: 'COPY_READY',
           };
         }
@@ -987,6 +1009,7 @@ export class CommercialAutomationCandidateFlowService {
       if (queued) {
         selected ??= {
           candidateId: queued.candidate.id,
+          snapshotId: queued.snapshot.id,
           candidateStatus: 'QUEUED',
         };
       }
@@ -1092,6 +1115,7 @@ export class CommercialAutomationCandidateFlowService {
         currentSelection = {
           target: selection.target,
           candidateId: next.candidateId,
+          snapshotId: next.snapshotId,
           candidateStatus: next.candidateStatus,
           queue: next.queue ?? {
             candidateCount: 0,
@@ -1117,6 +1141,17 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
       );
     }
+    const resolvedExecution = options.resolveExecution
+      ? await options.resolveExecution({
+          candidateId: loaded.context.candidate.id,
+          snapshotId: loaded.context.snapshot.id,
+        })
+      : {
+          executionId: options.executionId,
+          ...(options.existingRunId
+            ? { existingRunId: options.existingRunId }
+            : {}),
+        };
     const draft = this.draft(loaded);
     const pipeline = await this.options.pipeline.dryRunFromPromotionCandidate({
       candidate: {
@@ -1131,8 +1166,8 @@ export class CommercialAutomationCandidateFlowService {
         scoreBreakdown: loaded.context.candidate.scoreBreakdown,
       },
       group,
-      executionId: options.executionId,
-      existingRunId: options.existingRunId,
+      executionId: resolvedExecution.executionId,
+      existingRunId: resolvedExecution.existingRunId,
       instanceName:
         currentSelection.target.instanceName ?? requireAssignedInstanceName(group),
       campaign: 'commercial-automation',

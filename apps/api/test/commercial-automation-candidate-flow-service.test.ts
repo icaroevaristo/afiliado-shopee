@@ -1710,10 +1710,30 @@ describe('CommercialAutomationCandidateFlowService', () => {
       }
       states.set(candidateId, 'COPY_READY');
     });
+    const resolveExecution = vi.fn(async (input: {
+      candidateId: string;
+      snapshotId: string;
+    }) => ({
+      executionId: `prepared:${input.candidateId}:${input.snapshotId}`,
+      existingRunId: `run-${input.candidateId}`,
+    }));
 
     await expect(
-      subject.service.prepare(selection(subject.target, 'QUEUED', 'candidate-1'), preparationOptions),
+      subject.service.prepare(selection(subject.target, 'QUEUED', 'candidate-1'), {
+        ...preparationOptions,
+        resolveExecution,
+      }),
     ).resolves.toMatchObject({ candidateId: 'candidate-2', generatedCopyId: 'copy-candidate-2' });
+    expect(resolveExecution).toHaveBeenCalledWith({
+      candidateId: 'candidate-2',
+      snapshotId: 'snapshot-1',
+    });
+    expect(subject.pipeline.dryRunFromPromotionCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionId: 'prepared:candidate-2:snapshot-1',
+        existingRunId: 'run-candidate-2',
+      }),
+    );
     expect(subject.copyGeneration.generate).toHaveBeenCalledTimes(2);
     expect(subject.copyGeneration.generate).toHaveBeenNthCalledWith(1, 'candidate-1', 'GERAR_COPY_COM_IA');
     expect(subject.copyGeneration.generate).toHaveBeenNthCalledWith(2, 'candidate-2', 'GERAR_COPY_COM_IA');

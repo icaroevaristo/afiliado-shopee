@@ -41,6 +41,8 @@ import {
   PrismaCommercialPipelineRunRepository,
   PrismaCommercialPromotionRepository,
   PrismaCommercialPromotionCopyRepository,
+  PrismaCommercialDiscoveryCheckpointRepository,
+  PrismaCommercialPreparedMessageRepository,
   PrismaCouponRepository,
   PrismaGeneratedCopyRepository,
   PrismaProductRepository,
@@ -68,6 +70,8 @@ import type {
   CommercialPromotionCandidateRepository,
   CommercialPromotionCatalogRepository,
   CommercialPromotionCopyRepository,
+  CommercialDiscoveryCheckpointRepository,
+  CommercialPreparedMessageRepository,
   CouponRepository,
   GeneratedCopyRepository,
   ProductRepository,
@@ -120,6 +124,8 @@ export type ApplicationRepositories = {
   commercialPromotions: CommercialPromotionCatalogRepository &
     CommercialPromotionCandidateRepository;
   commercialPromotionCopies: CommercialPromotionCopyRepository;
+  commercialDiscoveryCheckpoints: CommercialDiscoveryCheckpointRepository;
+  commercialPreparedMessages: CommercialPreparedMessageRepository;
   commercialAutomationSettings: CommercialAutomationSettingsRepository;
   commercialExternalProviderUsage: CommercialExternalProviderUsageRepository;
   commercialAutomationHistory: CommercialAutomationHistoryRepository;
@@ -357,6 +363,11 @@ export const createPrismaRepositories = (
     ),
     commercialPromotions,
     commercialPromotionCopies: new PrismaCommercialPromotionCopyRepository(
+      prisma,
+    ),
+    commercialDiscoveryCheckpoints:
+      new PrismaCommercialDiscoveryCheckpointRepository(prisma),
+    commercialPreparedMessages: new PrismaCommercialPreparedMessageRepository(
       prisma,
     ),
     commercialAutomationSettings:

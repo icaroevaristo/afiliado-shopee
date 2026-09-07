@@ -29,6 +29,7 @@ import type {
 } from './commercial-automation-candidate-flow-service';
 import type { CommercialPromotionMiningReport } from './commercial-promotion-mining-service';
 import type { CommercialPipelineService } from './commercial-pipeline-service';
+import { COMMERCIAL_READY_INVENTORY_EMPTY } from './commercial-inventory-supervisor';
 import { isCommercialInstanceAssigned } from './commercial-instance-stickiness';
 import type {
   CommercialAutomationTarget,
@@ -38,6 +39,7 @@ import type {
   CommercialAutomationExecutionOwnership,
   CommercialAutomationExecutionRepository,
   CommercialPipelineRunRepository,
+  CommercialPreparedMessageRecord,
 } from './repositories';
 
 type CommercialAutomationOfferSyncReport = {
@@ -199,10 +201,23 @@ export class CommercialAutomationOrchestrator {
         CommercialAutomationPolicyService,
         'evaluateAutomationReadiness'
       >;
-      syncOffers: {
+      syncOffers?: {
         run(
           input?: { page?: number; cursor?: string },
         ): Promise<CommercialAutomationOfferSyncReport>;
+      };
+      preparedInventory?: {
+        claimReady(input: {
+          campaignId: string;
+          groupDestinationId: string;
+          instanceName: string;
+          logicalGroupFingerprint: string;
+          ownerId: string;
+          now: Date;
+          leaseExpiresAt: Date;
+        }): Promise<CommercialPreparedMessageRecord | null>;
+        markDispatched(input: { id: string; ownerId: string; now: Date }): Promise<boolean>;
+        release(input: { id: string; ownerId: string; now: Date }): Promise<boolean>;
       };
       pipeline: Pick<CommercialPipelineService, 'dryRun'>;
       candidateFlow?: {
@@ -349,6 +364,8 @@ export class CommercialAutomationOrchestrator {
       | { campaignId: string; executionId: string }
       | undefined;
     let reservationReleaseAttempted = false;
+    let preparedInventoryClaim: CommercialPreparedMessageRecord | undefined;
+    let preparedReleaseAttempted = false;
     const releaseReservationBeforeConfirmation = async () => {
       if (
         !reservationAcquired ||
@@ -381,6 +398,20 @@ export class CommercialAutomationOrchestrator {
       data: Parameters<CommercialAutomationExecutionRepository['finish']>[1],
     ) => {
       await releaseReservationBeforeConfirmation();
+      if (
+        this.dependencies.preparedInventory &&
+        preparedInventoryClaim &&
+        !confirmationAttempted &&
+        !preparedReleaseAttempted
+      ) {
+        preparedReleaseAttempted = true;
+        await this.dependencies.preparedInventory.release({
+          id: preparedInventoryClaim.id,
+          ownerId: ownership.executionId,
+          now: this.clock(),
+        });
+        preparedInventoryClaim = undefined;
+      }
       await heartbeat.stop();
       return this.dependencies.executions.finish(ownership, data);
     };
@@ -431,6 +462,21 @@ export class CommercialAutomationOrchestrator {
         );
       }
 
+      if (
+        input.mode === 'send' &&
+        !this.dependencies.preparedInventory &&
+        !this.dependencies.syncOffers
+      ) {
+        return publicResult(
+          await finish({
+            status: 'BLOCKED',
+            reasons: [COMMERCIAL_READY_INVENTORY_EMPTY],
+            failureCode: COMMERCIAL_READY_INVENTORY_EMPTY,
+            completedAt: this.clock(),
+          }),
+        );
+      }
+
       await heartbeat.checkpoint();
       if (input.mode === 'send' && !this.dependencies.candidateFlow) {
         return publicResult(
@@ -455,11 +501,98 @@ export class CommercialAutomationOrchestrator {
       };
       const syncOffers = async (syncInput: { page?: number; cursor?: string }) => {
         await markExternalMayHaveStartedOnce();
+        if (!this.dependencies.syncOffers) {
+          throw new AppError(
+            'Sincronizacao Shopee indisponivel no caminho de slot',
+            COMMERCIAL_READY_INVENTORY_EMPTY,
+          );
+        }
         const report = await this.dependencies.syncOffers.run(syncInput);
         await heartbeat.checkpoint();
         return report;
       };
-      if (this.dependencies.candidateFlow) {
+      if (
+        input.mode === 'send' &&
+        this.dependencies.preparedInventory &&
+        this.dependencies.candidateFlow
+      ) {
+        let inventoryTargets = await this.dependencies.candidateFlow.listTargets();
+        if (input.targetConstraint) {
+          const constraint = input.targetConstraint;
+          const scheduledFor = Date.parse(constraint.scheduledFor);
+          if (!Number.isFinite(scheduledFor) || scheduledFor > this.clock().getTime()) {
+            return publicResult(
+              await finish({
+                status: 'BLOCKED',
+                reasons: [COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE],
+                failureCode: COMMERCIAL_AUTOMATION_SCHEDULED_SLOT_NOT_DUE,
+                completedAt: this.clock(),
+              }),
+            );
+          }
+          inventoryTargets = inventoryTargets.flatMap((target) =>
+            target.campaignId === constraint.campaignId &&
+            target.groupId === constraint.groupId &&
+            target.logicalGroupFingerprint === constraint.logicalGroupFingerprint &&
+            isCommercialInstanceAssigned(
+              { assignedInstanceName: target.instanceName, assignedInstanceNames: target.orderedInstanceNames },
+              constraint.instanceName,
+            ) &&
+            (constraint.assignmentRevision === undefined || target.assignmentRevision === constraint.assignmentRevision)
+              ? [{ ...target, instanceName: constraint.instanceName, ...(constraint.assignmentRevision !== undefined ? { assignmentRevision: constraint.assignmentRevision } : {}) }]
+              : [],
+          );
+        }
+        for (const target of inventoryTargets) {
+          const targetReadiness = await this.dependencies.policy.evaluateAutomationReadiness({
+            excludedExecutionId: execution.id,
+            target,
+          });
+          if (!targetReadiness.allowed) {
+            for (const reason of targetReadiness.reasons) targetReasons.add(reason);
+            continue;
+          }
+          selectedTarget = target;
+          break;
+        }
+        if (!selectedTarget) {
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [...targetReasons, 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'],
+              failureCode: 'COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE',
+              completedAt: this.clock(),
+            }),
+          );
+        }
+        const target = selectedTarget;
+        const now = this.clock();
+        preparedInventoryClaim = await this.dependencies.preparedInventory.claimReady({
+          campaignId: target.campaignId,
+          groupDestinationId: target.groupId,
+          instanceName: target.instanceName ?? '',
+          logicalGroupFingerprint: target.logicalGroupFingerprint,
+          ownerId: execution.id,
+          now,
+          leaseExpiresAt: addMilliseconds(now, this.dependencies.leaseSeconds * 1000),
+        }) ?? undefined;
+        if (!preparedInventoryClaim) {
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [COMMERCIAL_READY_INVENTORY_EMPTY],
+              failureCode: COMMERCIAL_READY_INVENTORY_EMPTY,
+              completedAt: now,
+            }),
+          );
+        }
+        selectedCandidateSelection = {
+          target,
+          candidateId: preparedInventoryClaim.candidateId,
+          candidateStatus: 'COPY_READY',
+          queue: { candidateCount: 1, eligibleCount: 1, rejectedCount: 0 },
+        };
+      } else if (this.dependencies.candidateFlow) {
         let targets: CommercialAutomationTarget[];
         try {
           targets = await this.dependencies.candidateFlow.listTargets();
@@ -698,7 +831,26 @@ export class CommercialAutomationOrchestrator {
         }
         const target = selectedTarget;
         let candidateSelection = selectedCandidateSelection;
-        let prepared;
+        let prepared:
+          | {
+              runId: string;
+              generatedCopyId: string;
+              candidateId: string;
+              campaignId: string;
+              groupId: string;
+              logicalGroupFingerprint?: string;
+              nicheId?: string;
+            }
+          | undefined = preparedInventoryClaim
+          ? {
+              runId: preparedInventoryClaim.runId,
+              generatedCopyId: preparedInventoryClaim.generatedCopyId,
+              candidateId: preparedInventoryClaim.candidateId,
+              campaignId: preparedInventoryClaim.campaignId,
+              groupId: preparedInventoryClaim.groupDestinationId,
+              logicalGroupFingerprint: preparedInventoryClaim.logicalGroupFingerprint,
+            }
+          : undefined;
         const prepareSelection = async (
           selection: CommercialAutomationCandidateSelection,
           miningReport = selectedMiningReport,
@@ -778,7 +930,9 @@ export class CommercialAutomationOrchestrator {
           );
         };
 
-        prepared = await prepareSelection(candidateSelection);
+        if (!prepared) {
+          prepared = await prepareSelection(candidateSelection);
+        }
         if (!prepared) {
           const localReplenishment =
             await this.dependencies.candidateFlow!.replenish(target);
@@ -961,29 +1115,30 @@ export class CommercialAutomationOrchestrator {
         );
       }
       await this.dependencies.candidateFlow!.revalidate(candidatePreparation);
-      const renewedAt = this.clock();
-      const reservationRenewal =
-        await this.dependencies.candidateFlow!.renewAttempt({
-          campaignId: candidatePreparation.campaignId,
-          executionId: execution.id,
-          renewedAt,
-          leaseExpiresAt: addMilliseconds(
+      if (!preparedInventoryClaim) {
+        const renewedAt = this.clock();
+        const reservationRenewal =
+          await this.dependencies.candidateFlow!.renewAttempt({
+            campaignId: candidatePreparation.campaignId,
+            executionId: execution.id,
             renewedAt,
-            this.dependencies.leaseSeconds * 1000,
-          ),
-        });
-      if (reservationRenewal.kind === 'CONFLICT') {
-        const failureCode =
-          'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT';
-        return publicResult(
-          await finish({
-            status: 'BLOCKED',
-            reasons: [failureCode],
-            commercialRunId,
-            failureCode,
-            completedAt: renewedAt,
-          }),
-        );
+            leaseExpiresAt: addMilliseconds(
+              renewedAt,
+              this.dependencies.leaseSeconds * 1000,
+            ),
+          });
+        if (reservationRenewal.kind === 'CONFLICT') {
+          const failureCode = 'COMMERCIAL_AUTOMATION_ATTEMPT_RENEWAL_CONFLICT';
+          return publicResult(
+            await finish({
+              status: 'BLOCKED',
+              reasons: [failureCode],
+              commercialRunId,
+              failureCode,
+              completedAt: renewedAt,
+            }),
+          );
+        }
       }
       confirmationAttempted = true;
       await this.dependencies.confirmation.confirm(
@@ -993,6 +1148,19 @@ export class CommercialAutomationOrchestrator {
           ? { existingGeneratedCopyId }
           : undefined,
       );
+      if (preparedInventoryClaim) {
+        const markedDispatched = await this.dependencies.preparedInventory?.markDispatched({
+          id: preparedInventoryClaim.id,
+          ownerId: execution.id,
+          now: this.clock(),
+        });
+        if (!markedDispatched) {
+          throw new AppError(
+            'Mensagem preparada perdeu a reserva antes da finalizacao',
+            'COMMERCIAL_PREPARED_DISPATCH_TRANSITION_CONFLICT',
+          );
+        }
+      }
       return publicResult(
         await finish({
           status: 'QUEUED',

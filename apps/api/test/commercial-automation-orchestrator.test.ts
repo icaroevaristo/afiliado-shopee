@@ -244,6 +244,7 @@ const createSubject = ({
   withCandidateFlow = true,
   targets,
   candidateFlowOverride,
+  preparedInventoryOverride,
   policyOverride,
   clock,
 }: {
@@ -252,6 +253,9 @@ const createSubject = ({
   candidateFlowOverride?: ConstructorParameters<
     typeof CommercialAutomationOrchestrator
   >[0]['candidateFlow'];
+  preparedInventoryOverride?: ConstructorParameters<
+    typeof CommercialAutomationOrchestrator
+  >[0]['preparedInventory'];
   policyOverride?: Pick<
     CommercialAutomationPolicyService,
     'evaluateAutomationReadiness'
@@ -405,6 +409,9 @@ const createSubject = ({
     pipeline: pipeline as never,
     ...(withCandidateFlow
       ? { candidateFlow: candidateFlowOverride ?? candidateFlow }
+      : {}),
+    ...(preparedInventoryOverride
+      ? { preparedInventory: preparedInventoryOverride }
       : {}),
     confirmation: confirmation as never,
     commercialRuns: commercialRuns as never,
@@ -1031,6 +1038,75 @@ const tick = {
 };
 
 describe('CommercialAutomationOrchestrator', () => {
+  it('bloqueia com READY vazio sem Shopee, OpenAI ou preparacao de copy no slot', async () => {
+    const preparedInventory = {
+      claimReady: vi.fn(async () => null),
+      markDispatched: vi.fn(async () => false),
+      release: vi.fn(async () => false),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'commercial-target-ready-empty',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result.status).toBe('blocked');
+    expect(result.reasons).toContain('COMMERCIAL_READY_INVENTORY_EMPTY');
+    expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it('consome READY persistido sem reexecutar Shopee ou OpenAI no slot', async () => {
+    const preparedMessage = {
+      id: 'prepared-message-1',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-ready',
+      snapshotId: 'snapshot-1',
+      generatedCopyId: 'copy-ready-1',
+      runId: 'run-ready-1',
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const preparedInventory = {
+      claimReady: vi.fn(async () => preparedMessage),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'commercial-target-ready',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result.status).toBe('queued');
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirm).toHaveBeenCalledWith(
+      'run-ready-1',
+      expect.stringMatching(/.+/),
+      { existingGeneratedCopyId: 'copy-ready-1' },
+    );
+    expect(preparedInventory.markDispatched).toHaveBeenCalledOnce();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it('cria ownership, lease e encerra o timer depois do tick', async () => {

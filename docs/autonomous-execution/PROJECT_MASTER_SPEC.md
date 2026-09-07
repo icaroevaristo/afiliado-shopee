@@ -81,6 +81,31 @@ O fluxo persistido relaciona, sem reescrever histórico:
 `GeneratedCopy` → `CommercialPipelineRun` → `WhatsAppDispatch` →
 `CommercialDispatchOutbox` → delivery history.
 
+## Persistent discovery and prepared inventory
+
+`CommercialDiscoveryCheckpoint` persists the exact provider query, page/cursor,
+exhaustion cooldown, request lease, and page counters. The inventory supervisor
+advances it only after the corresponding catalog page has been persisted. A
+bounded run may use one to three pages; a restart replays the last uncommitted
+page idempotently.
+
+`CommercialPreparedMessage` is the durable boundary between background
+preparation and a scheduled slot. It is `READY` only when the candidate is
+`COPY_READY`, its generated copy and snapshot still match the current product,
+and the campaign/group/instance/run identity is consistent. A slot claims the
+row with a PostgreSQL transaction and lease. It never performs discovery,
+mining, OpenAI generation, or copy preparation.
+
+```text
+SHOPEE_IN_SLOT_PATH=false
+OPENAI_IN_SLOT_PATH=false
+```
+
+When no row is READY the target finishes with
+`COMMERCIAL_READY_INVENTORY_EMPTY`. Expired reservations inspect the persisted
+run, outbox, and dispatch before recovery; effect evidence closes the row
+as `DISPATCHED`, preserving duplicate-send zero.
+
 `WhatsAppDestination` possui atualmente um `assignedInstanceName` sticky.
 `WhatsAppInstance` possui vários destinos; o planner cria um target por grupo,
 com `slotKey`, `scheduleRevision`, `scheduledFor`, `groupId` e `instanceName`.
