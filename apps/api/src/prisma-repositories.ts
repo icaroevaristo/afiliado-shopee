@@ -58,6 +58,7 @@ import type {
   CommercialCopyGenerationAttemptStatusRecord,
   CommercialPromotionMaterializationInput,
   CommercialPromotionSnapshotRecord,
+  CommercialPromotionSignal,
   CommercialManualCandidateMaterializationInput,
   ManualPublicationAcceptance,
   ManualPublicationQuotaReservation,
@@ -2551,30 +2552,56 @@ const isHttpUrl = (value: unknown) => {
   }
 };
 
+const commercialPromotionQueueCapacityInclude = {
+  product: true,
+  snapshot: true,
+  generatedCopy: true,
+  copyGenerationAttempts: true,
+} satisfies Prisma.CommercialPromotionCandidateInclude;
+
+type CommercialPromotionQueueCapacityRecord =
+  Prisma.CommercialPromotionCandidateGetPayload<{
+    include: typeof commercialPromotionQueueCapacityInclude;
+  }>;
+
+const toCommercialPromotionSignals = (
+  signals: string[],
+): CommercialPromotionSignal[] | null => {
+  const recognized = signals.filter(
+    (signal): signal is CommercialPromotionSignal =>
+      signal === 'PRICE_DROP' ||
+      signal === 'DISCOUNT_INCREASE' ||
+      signal === 'NEWLY_OBSERVED' ||
+      signal === 'CURRENT_DISCOUNT',
+  );
+  return recognized.length === signals.length ? recognized : null;
+};
+
 const isCommercialPromotionQueueCapacityUsable = (
-  record: Record<string, unknown>,
+  record: CommercialPromotionQueueCapacityRecord,
   now: Date,
 ) => {
-  const product = record.product as Record<string, unknown> | null;
-  const snapshot = record.snapshot as Record<string, unknown> | null;
-  const attempts = (record.copyGenerationAttempts as Record<string, unknown>[] | undefined) ?? [];
-  const copy = record.generatedCopy as Record<string, unknown> | null;
-  if (!product || !snapshot) return false;
+  const { product, snapshot, copyGenerationAttempts: attempts, generatedCopy: copy } =
+    record;
+  const promotionSignals = toCommercialPromotionSignals(record.promotionSignals);
+  if (promotionSignals === null) return false;
   if (
-    !['QUEUED', 'COPY_READY'].includes(String(record.status)) ||
-    Boolean(record.blockedReason) ||
-    (record.expiresAt instanceof Date && record.expiresAt <= now) ||
-    Number(record.commercialScore) < Number(record.minimumScoreUsed) ||
+    (record.status !== 'QUEUED' && record.status !== 'COPY_READY') ||
+    record.blockedReason !== null ||
+    (record.expiresAt !== null && record.expiresAt <= now) ||
+    record.commercialScore < record.minimumScoreUsed ||
     product.source !== 'OFFICIAL' ||
-    product.unavailableAt ||
-    (product.offerStartsAt instanceof Date && product.offerStartsAt > now) ||
-    (product.offerEndsAt instanceof Date && product.offerEndsAt <= now) ||
-    snapshot.unavailableAt ||
-    (snapshot.offerEndsAt instanceof Date && snapshot.offerEndsAt <= now) ||
+    product.unavailableAt !== null ||
+    (product.offerStartsAt !== null && product.offerStartsAt > now) ||
+    (product.offerEndsAt !== null && product.offerEndsAt <= now) ||
+    snapshot.unavailableAt !== null ||
+    (snapshot.offerEndsAt !== null && snapshot.offerEndsAt <= now) ||
     attempts.some(
       (attempt) =>
         attempt.snapshotId === record.snapshotId &&
-        ['STARTED', 'FAILED', 'AMBIGUOUS'].includes(String(attempt.status)),
+        (attempt.status === 'STARTED' ||
+          attempt.status === 'FAILED' ||
+          attempt.status === 'AMBIGUOUS'),
     ) ||
     !isHttpUrl(product.urlImagem)
   ) {
@@ -2598,58 +2625,65 @@ const isCommercialPromotionQueueCapacityUsable = (
       attempt.inputFingerprint === copy.inputFingerprint,
     )
   ) return false;
-  if (copy && record.status === 'COPY_READY') {
-    if (['titulo', 'mensagem', 'cta', 'hashtags'].some((key) => typeof copy[key] !== 'string')) return false;
+  if (record.status === 'COPY_READY') {
+    if (!copy) return false;
     try {
       if (!isSafeStoredCommercialPromotionCopy({
-        titulo: String(copy.titulo), mensagem: String(copy.mensagem), cta: String(copy.cta), hashtags: String(copy.hashtags),
-        source: String(copy.source), provider: String(copy.provider), model: String(copy.model),
-        promptVersion: String(copy.promptVersion), validationVersion: String(copy.validationVersion),
+        titulo: copy.titulo,
+        mensagem: copy.mensagem,
+        cta: copy.cta,
+        hashtags: copy.hashtags,
+        source: copy.source,
+        provider: copy.provider,
+        model: copy.model,
+        promptVersion: copy.promptVersion,
+        validationVersion: copy.validationVersion,
       }, {
-        productName: String(product.nome), shopName: String(product.loja),
-        price: decimalString(product.preco as PrismaDecimalLike) ?? '', discountRate: Number(product.desconto),
-        promotionSignals: record.promotionSignals as CommercialPromotionCopyContext['candidate']['promotionSignals'],
-        priceDropPercent: decimalString(record.priceDropPercent as PrismaDecimalLike | null) ?? null,
-      }, String(product.affiliateLink ?? ''), 4096)) return false;
+        productName: product.nome,
+        shopName: product.loja,
+        price: decimalString(product.preco) ?? '',
+        discountRate: product.desconto,
+        promotionSignals,
+        priceDropPercent: decimalString(record.priceDropPercent) ?? null,
+      }, product.affiliateLink ?? '', 4096)) return false;
     } catch { return false; }
   }
   return validateCommercialAffiliateLinkProvenance({
     candidate: {
-      id: String(record.id),
-      campaignId: String(record.campaignId),
-      productId: String(record.productId),
-      snapshotId: String(record.snapshotId),
+      id: record.id,
+      campaignId: record.campaignId,
+      productId: record.productId,
+      snapshotId: record.snapshotId,
     },
-    campaign: { id: String(record.campaignId) },
+    campaign: { id: record.campaignId },
     product: {
-      id: String(product.id),
-      source: product.source as CommercialPromotionCopyContext['product']['source'],
-      providerProductId: String(product.providerProductId),
-      productName: String(product.nome),
-      shopName: String(product.loja),
-      productLink: (product.productLink as string | null) ?? null,
-      affiliateLink: (product.affiliateLink as string | null) ?? null,
-      price: decimalString(product.preco as PrismaDecimalLike) ?? '',
-      priceMin: decimalString(product.precoMin as PrismaDecimalLike | null) ?? null,
-      priceMax: decimalString(product.precoMax as PrismaDecimalLike | null) ?? null,
-      discountRate: Number(product.desconto),
-      commissionRate: Number(product.comissao),
-      rating: Number(product.nota),
-      sales: Number(product.vendidos),
-      offerStartsAt: (product.offerStartsAt as Date | null) ?? null,
-      urlImagem: String(product.urlImagem ?? ''),
-      offerEndsAt: (product.offerEndsAt as Date | null) ?? null,
-      unavailableAt: (product.unavailableAt as Date | null) ?? null,
-      commercialSnapshotRevision: Number(product.commercialSnapshotRevision),
-      commercialSnapshotFingerprint:
-        (product.commercialSnapshotFingerprint as string | null) ?? null,
-      updatedAt: product.updatedAt as Date,
+      id: product.id,
+      source: 'OFFICIAL',
+      providerProductId: product.providerProductId,
+      productName: product.nome,
+      shopName: product.loja,
+      productLink: product.productLink,
+      affiliateLink: product.affiliateLink,
+      price: decimalString(product.preco) ?? '',
+      priceMin: decimalString(product.precoMin) ?? null,
+      priceMax: decimalString(product.precoMax) ?? null,
+      discountRate: product.desconto,
+      commissionRate: product.comissao,
+      rating: product.nota,
+      sales: product.vendidos,
+      offerStartsAt: product.offerStartsAt,
+      urlImagem: product.urlImagem,
+      offerEndsAt: product.offerEndsAt,
+      unavailableAt: product.unavailableAt,
+      commercialSnapshotRevision: product.commercialSnapshotRevision,
+      commercialSnapshotFingerprint: product.commercialSnapshotFingerprint,
+      updatedAt: product.updatedAt,
     },
     snapshot: {
-      id: String(snapshot.id),
-      productId: String(snapshot.productId),
-      revision: Number(snapshot.revision),
-      fingerprint: String(snapshot.fingerprint),
+      id: snapshot.id,
+      productId: snapshot.productId,
+      revision: snapshot.revision,
+      fingerprint: snapshot.fingerprint,
     },
   }).valid;
 };
@@ -3327,12 +3361,7 @@ export class PrismaCommercialPromotionRepository
               in: ['QUEUED', 'COPY_READY'] as CommercialPromotionCandidateRecord['status'][],
             },
           },
-          include: {
-            product: true,
-            snapshot: true,
-            generatedCopy: true,
-            copyGenerationAttempts: true,
-          },
+          include: commercialPromotionQueueCapacityInclude,
         })
       : Promise.resolve([]);
     const terminalCountPromise = input.capacityOnly
@@ -4896,19 +4925,14 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
           campaignId: input.campaignId,
           status: { in: ['QUEUED', 'COPY_READY'] },
         },
-        include: {
-          product: true,
-          snapshot: true,
-          generatedCopy: true,
-          copyGenerationAttempts: true,
-        },
+        include: commercialPromotionQueueCapacityInclude,
       });
       productIds = [
         ...new Set(
           capacityRecords
             .filter((record) =>
               isCommercialPromotionQueueCapacityUsable(
-                record as unknown as Record<string, unknown>,
+                record,
                 now,
               ),
             )

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 
 import { createCommercialPromotionMiningDomainService } from '../src/commercial-promotion-mining-service';
+import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
 import {
   PrismaCommercialGroupCampaignRepository,
   PrismaCommercialNicheRepository,
@@ -19,6 +20,22 @@ const IDS = {
   productB: 'promotion-fixture-product-b',
   productC: 'promotion-fixture-product-c',
 };
+
+const fingerprintFor = (id: string, discountRate: number) =>
+  fingerprintCommercialOffer({
+    source: 'OFFICIAL',
+    providerProductId: `provider-${id}`,
+    productLink: `https://shopee.com.br/product/1/${id}`,
+    affiliateLink: `https://s.shopee.com.br/affiliate-${id}`,
+    price: '80',
+    priceMin: '80',
+    priceMax: '80',
+    discountRate,
+    commissionRate: 20,
+    offerStartsAt: null,
+    offerEndsAt: null,
+    unavailableAt: null,
+  });
 
 describeDatabase('commercial promotion database fixture', () => {
   const prisma = createPrismaClient();
@@ -61,8 +78,8 @@ describeDatabase('commercial promotion database fixture', () => {
         loja: 'Loja fixture',
         categoryIds: ['fixture'],
         urlImagem: 'https://example.invalid/image',
-        productLink: 'https://example.invalid/product',
-        affiliateLink: 'https://example.invalid/affiliate',
+        productLink: `https://shopee.com.br/product/1/${id}`,
+        affiliateLink: `https://s.shopee.com.br/affiliate-${id}`,
         fetchedAt: createdAt,
         lastSeenAt: createdAt,
         commercialSnapshotRevision: revision,
@@ -84,6 +101,9 @@ describeDatabase('commercial promotion database fixture', () => {
         minimumScore: 0,
       },
     });
+    await prisma.whatsAppInstance.create({
+      data: { name: 'fixture-instance', active: true },
+    });
     await prisma.whatsAppDestination.create({
       data: {
         id: IDS.destination,
@@ -94,6 +114,7 @@ describeDatabase('commercial promotion database fixture', () => {
         available: true,
         fingerprint: 'grp_promotion_fixture',
         sourceInstanceName: 'fixture-instance',
+        assignedInstanceName: 'fixture-instance',
       },
     });
     await prisma.commercialGroupCampaign.create({
@@ -113,21 +134,21 @@ describeDatabase('commercial promotion database fixture', () => {
       discountRate: 20,
       createdAt: new Date(NOW.getTime() - 60 * 60 * 1_000),
       revision: 2,
-      fingerprint: 'fingerprint-a-2',
+      fingerprint: fingerprintFor(IDS.productA, 20),
     });
     await createProduct({
       id: IDS.productB,
       discountRate: 10,
       createdAt: new Date(NOW.getTime() - 60 * 60 * 1_000),
       revision: 1,
-      fingerprint: 'fingerprint-b-1',
+      fingerprint: fingerprintFor(IDS.productB, 10),
     });
     await createProduct({
       id: IDS.productC,
       discountRate: 0,
       createdAt: new Date(NOW.getTime() - 48 * 60 * 60 * 1_000),
       revision: 1,
-      fingerprint: 'fingerprint-c-1',
+      fingerprint: fingerprintFor(IDS.productC, 0),
     });
     await prisma.commercialOfferSnapshot.createMany({
       data: [
@@ -147,7 +168,7 @@ describeDatabase('commercial promotion database fixture', () => {
           id: 'promotion-fixture-snapshot-a-2',
           productId: IDS.productA,
           revision: 2,
-          fingerprint: 'fingerprint-a-2',
+          fingerprint: fingerprintFor(IDS.productA, 20),
           price: 80,
           discountRate: 20,
           commissionRate: 20,
@@ -159,7 +180,7 @@ describeDatabase('commercial promotion database fixture', () => {
           id: 'promotion-fixture-snapshot-b-1',
           productId: IDS.productB,
           revision: 1,
-          fingerprint: 'fingerprint-b-1',
+          fingerprint: fingerprintFor(IDS.productB, 10),
           price: 80,
           discountRate: 10,
           commissionRate: 20,
@@ -171,7 +192,7 @@ describeDatabase('commercial promotion database fixture', () => {
           id: 'promotion-fixture-snapshot-c-1',
           productId: IDS.productC,
           revision: 1,
-          fingerprint: 'fingerprint-c-1',
+          fingerprint: fingerprintFor(IDS.productC, 0),
           price: 80,
           discountRate: 0,
           commissionRate: 20,
@@ -196,6 +217,7 @@ describeDatabase('commercial promotion database fixture', () => {
       where: { id: { in: [IDS.productA, IDS.productB, IDS.productC] } },
     });
     await prisma.whatsAppDestination.delete({ where: { id: IDS.destination } });
+    await prisma.whatsAppInstance.delete({ where: { name: 'fixture-instance' } });
     await prisma.$disconnect();
   });
 

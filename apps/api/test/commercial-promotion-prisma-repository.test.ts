@@ -31,7 +31,12 @@ describe('materialização manual e histórico terminal', () => {
     const selectedSnapshot = { ...snapshot('a'), ...(nextSnapshot ? {
       id: 'snapshot-a-v2', revision: 2, fingerprint: 'fingerprint-a-v2',
     } : {}) };
-    const update = vi.fn(async ({ data }: any) => ({ ...current, ...data }));
+    const update = vi.fn(
+      async ({ data }: { data: Record<string, unknown> }) => ({
+        ...current,
+        ...data,
+      }),
+    );
     const transaction = {
       commercialGroupCampaign: { findUnique: vi.fn(async () => campaign('campaign-1', 'niche-1')) },
       productLead: { findUnique: vi.fn(async () => product('a', {
@@ -40,11 +45,26 @@ describe('materialização manual e histórico terminal', () => {
       })) },
       commercialOfferSnapshot: { findUnique: vi.fn(async () => selectedSnapshot) },
       commercialPromotionCandidate: { findUnique: vi.fn(async () => current), update, create: vi.fn() },
-      commercialCopyGenerationAttempt: { findFirst: vi.fn(async ({ where }: any) => history.find(
-        (attempt) => attempt.candidateId === where.candidateId && attempt.snapshotId === where.snapshotId,
-      ) ?? null) },
+      commercialCopyGenerationAttempt: {
+        findFirst: vi.fn(
+          async ({ where }: { where: { candidateId: string; snapshotId: string } }) =>
+            history.find(
+              (attempt) =>
+                attempt.candidateId === where.candidateId &&
+                attempt.snapshotId === where.snapshotId,
+            ) ?? null,
+        ),
+      },
     };
-    const transact = vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction));
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof transaction) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(transaction);
+      },
+    );
     const repository = new PrismaCommercialPromotionRepository({ $transaction: transact } as never);
     const result = repository.ensureManualCandidate({
       campaignId: current.campaignId, productId: current.productId,
@@ -64,7 +84,9 @@ describe('materialização manual e histórico terminal', () => {
     }
     expect(transaction.commercialPromotionCandidate.create).not.toHaveBeenCalled();
     expect(history).toEqual(before);
-    expect(transact).toHaveBeenCalledWith(expect.any(Function), {
+    expect(transact).toHaveBeenCalledOnce();
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({
       isolationLevel: 'Serializable', maxWait: 1000, timeout: 10000,
     });
   });
@@ -76,7 +98,7 @@ type State = {
   products: any[];
   snapshots: any[];
   candidates: any[];
-  attempts: any[];
+  attempts: Record<string, unknown>[];
   copies: Record<string, unknown>[];
   dispatches: any[];
 };
@@ -1075,7 +1097,15 @@ describe('PrismaCommercialPromotionRepository', () => {
     snapshotClient.whatsAppDispatch.findMany = vi.fn(async () => [{ productId: 'a' }]);
     snapshotClient.commercialPipelineRun = { findMany: vi.fn(async () => [{ productId: 'a' }]) };
     const outsideRead = vi.fn(() => { throw new Error('read outside snapshot'); });
-    const transact = vi.fn(async (callback: (tx: typeof snapshotClient) => Promise<unknown>) => callback(snapshotClient));
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof snapshotClient) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(snapshotClient);
+      },
+    );
     const repository = new PrismaCommercialPromotionRepository({
       commercialPromotionCandidate: { findMany: outsideRead, count: outsideRead },
       whatsAppDispatch: { findMany: outsideRead }, commercialPipelineRun: { findMany: outsideRead },
@@ -1087,7 +1117,9 @@ describe('PrismaCommercialPromotionRepository', () => {
     expect(result.total).toBe(1);
     expect(state.attempts.length).toBeGreaterThan(0);
     expect(outsideRead).not.toHaveBeenCalled();
-    expect(transact).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'RepeatableRead' });
+    expect(transact).toHaveBeenCalledOnce();
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'RepeatableRead' });
     expect(snapshotClient.commercialPromotionCandidate.findMany).toHaveBeenCalledWith(expect.objectContaining({
       include: { product: true, snapshot: true, generatedCopy: true, copyGenerationAttempts: true },
     }));
@@ -1152,7 +1184,7 @@ describe('PrismaCommercialPromotionRepository', () => {
   it('exclui do sent utilizável o candidato materialmente terminal sem apagar o sent nominal', async () => {
     const capacityRecord = (
       id: string,
-      copyGenerationAttempts: any[] = [],
+      copyGenerationAttempts: Record<string, unknown>[] = [],
     ) => {
       const baseProduct = product(id, {
         productLink: `https://shopee.com.br/product/${id}`,
@@ -1188,13 +1220,17 @@ describe('PrismaCommercialPromotionRepository', () => {
         generatedCopyId: null,
       },
     ]);
-    const candidateFindMany = vi.fn(async ({ include }: any) =>
-      include
-        ? [usable, terminal]
-        : [{ productId: 'usable' }, { productId: 'terminal' }],
+    const candidateFindMany = vi.fn(
+      async ({ include }: { include?: unknown }) =>
+        include
+          ? [usable, terminal]
+          : [{ productId: 'usable' }, { productId: 'terminal' }],
     );
-    const dispatchFindMany = vi.fn(async ({ where }: any) =>
-      where.productId.in.includes('terminal') ? [{ productId: 'terminal' }] : [],
+    const dispatchFindMany = vi.fn(
+      async ({ where }: { where: { productId: { in: string[] } } }) =>
+        where.productId.in.includes('terminal')
+          ? [{ productId: 'terminal' }]
+          : [],
     );
     const runFindMany = vi.fn().mockResolvedValue([]);
     const repository = new PrismaCommercialDeliveryHistoryRepository({

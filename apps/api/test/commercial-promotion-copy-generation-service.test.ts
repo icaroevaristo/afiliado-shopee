@@ -533,7 +533,15 @@ describe('CommercialPromotionCopyGenerationService', () => {
       commercialOfferSnapshot: { findUnique: vi.fn(async () => null) },
       commercialCopyGenerationAttempt: { findFirst, create },
     };
-    const transact = vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction));
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof transaction) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(transaction);
+      },
+    );
     const prismaRepository = new PrismaCommercialPromotionCopyRepository({ $transaction: transact } as never);
     vi.spyOn(repository, 'claim').mockImplementation((input) => prismaRepository.claim(input));
     const provider = validProvider();
@@ -545,7 +553,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(create).not.toHaveBeenCalled();
     expect(provider.generate).not.toHaveBeenCalled();
     expect(prior.status).toBe(status);
-    expect(transact).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'Serializable' });
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'Serializable' });
   });
 
   it('o contrato factual não permite usar fallback para texto inventado, URL ou claim', () => {
@@ -597,7 +606,15 @@ describe('CommercialPromotionCopyGenerationService', () => {
         create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'copy-internal', ...data })),
       },
     };
-    const transact = vi.fn(async (callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction));
+    const transact = vi.fn(
+      async (
+        callback: (tx: typeof transaction) => Promise<unknown>,
+        options?: Record<string, unknown>,
+      ) => {
+        void options;
+        return callback(transaction);
+      },
+    );
     const prismaRepository = new PrismaCommercialPromotionCopyRepository({ $transaction: transact } as never);
     vi.spyOn(repository, 'completeFallback').mockImplementation((input) => prismaRepository.completeFallback(input));
     const provider = { generate: vi.fn().mockRejectedValue(new CommercialAiCopyProviderError(
@@ -612,7 +629,8 @@ describe('CommercialPromotionCopyGenerationService', () => {
     expect(updateCandidate).toHaveBeenCalledWith(expect.objectContaining({ data: {
       status: 'COPY_READY', generatedCopyId: 'copy-internal', blockedReason: null,
     } }));
-    expect(transact).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'Serializable' });
+    expect(typeof transact.mock.calls[0]?.[0]).toBe('function');
+    expect(transact.mock.calls[0]?.[1]).toEqual({ isolationLevel: 'Serializable' });
     expect(provider.generate).toHaveBeenCalledOnce();
   });
   it('T1 usa fallback determinístico quando o budget impede a chamada e preserva a tentativa', async () => {
