@@ -361,6 +361,7 @@ describe('CommercialInventorySupervisor', () => {
            reservationLeaseExpiresAt: null,
            scheduleRevision: input.scheduleRevision ?? 1,
            assignmentRevision: input.assignmentRevision ?? 1,
+           preparationRevision: input.preparationRevision ?? 1,
            expiresAt: new Date(input.now.getTime() + 15 * 60_000),
           offerEndsAt: null,
           invalidatedReason: null,
@@ -428,7 +429,9 @@ describe('CommercialInventorySupervisor', () => {
       { candidateId: 'candidate-c', snapshotId: 'snapshot-c' },
       { candidateId: 'candidate-d', snapshotId: 'snapshot-d' },
     ];
-    const preparedByInstance = new Map<string, string[]>();
+    const preparedByInstance = new Map<string, string[]>([
+      ['instance-b', ['candidate-a']],
+    ]);
     const candidateFlow = {
       listTargets: vi.fn(async () => [multiInstanceTarget]),
       preflight: vi.fn(async (
@@ -491,6 +494,7 @@ describe('CommercialInventorySupervisor', () => {
         reservationLeaseExpiresAt: null,
         scheduleRevision: input.scheduleRevision ?? 1,
         assignmentRevision: input.assignmentRevision ?? 1,
+        preparationRevision: input.preparationRevision ?? 1,
         expiresAt: new Date(input.now.getTime() + 15 * 60_000),
         offerEndsAt: null,
         invalidatedReason: null,
@@ -533,15 +537,14 @@ describe('CommercialInventorySupervisor', () => {
         candidateId: input.candidateId,
       })),
     ).toEqual([
-      { instanceName: 'instance-a', candidateId: 'candidate-a' },
       { instanceName: 'instance-a', candidateId: 'candidate-b' },
-      { instanceName: 'instance-b', candidateId: 'candidate-c' },
+      { instanceName: 'instance-a', candidateId: 'candidate-c' },
       { instanceName: 'instance-b', candidateId: 'candidate-d' },
     ]);
     expect(preparedByInstance).toEqual(
       new Map([
-        ['instance-a', ['candidate-a', 'candidate-b']],
-        ['instance-b', ['candidate-c', 'candidate-d']],
+        ['instance-a', ['candidate-b', 'candidate-c']],
+        ['instance-b', ['candidate-a', 'candidate-d']],
       ]),
     );
   });

@@ -204,7 +204,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         inputFingerprint: `${PREFIX}-${name}-input`,
         titulo: 'Oferta',
         mensagem: 'Mensagem factual',
-        cta: 'Confira',
+        cta: `Confira ${affiliateLink}`,
         hashtags: '#Oferta',
       },
     });
@@ -846,7 +846,7 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         where: { id: expiredFixture.candidateId },
         select: { status: true },
       }),
-    ).toEqual({ status: 'EXPIRED' });
+    ).toEqual({ status: 'COPY_READY' });
     await expect(
       prepared.countReady({
         campaignId: IDS.campaign,
@@ -870,6 +870,112 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
       leaseExpiresAt: new Date(NOW.getTime() + 60_000),
     });
     expect(claimed?.candidateId).toBe(validFixture.candidateId);
+    if (!claimed) throw new Error('valid expiry fixture was not claimed');
+    await expect(
+      prepared.markDispatched({
+        id: claimed.id,
+        ownerId: 'expiry-owner',
+        now: NOW,
+      }),
+    ).resolves.toBe(true);
+
+    const reactivated = await prepared.createReady({
+      campaignId: IDS.campaign,
+      groupDestinationId: IDS.destination,
+      instanceName: IDS.instance,
+      logicalGroupFingerprint: 'persistent-inventory-group',
+      candidateId: expiredFixture.candidateId,
+      generatedCopyId: expiredFixture.copyId,
+      copyPreview: 'Oferta https://example.invalid/affiliate',
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      now: NOW,
+    });
+    expect(reactivated).toMatchObject({
+      status: 'READY',
+      candidateId: expiredFixture.candidateId,
+      preparationRevision: 2,
+    });
+    expect(
+      await prisma.commercialPreparedMessage.count({
+        where: {
+          candidateId: expiredFixture.candidateId,
+          status: 'INVALIDATED',
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.commercialPromotionCandidate.findUnique({
+        where: { id: expiredFixture.candidateId },
+        select: { status: true },
+      }),
+    ).toEqual({ status: 'COPY_READY' });
+  });
+
+  it('avança além de 100 READY válidos para invalidar um registro posterior', async () => {
+    const fixture = await createFixture('invalidation-progress');
+    const preparedRows = Array.from({ length: 101 }, (_, index) => ({
+      id: `${PREFIX}-prepared-progress-valid-${String(index + 1).padStart(3, '0')}`,
+      campaignId: IDS.campaign,
+      groupDestinationId: IDS.destination,
+      instanceName: IDS.instance,
+      logicalGroupFingerprint: 'persistent-inventory-group',
+      candidateId: fixture.candidateId,
+      snapshotId: fixture.snapshotId,
+      generatedCopyId: fixture.copyId,
+      copyPreview: 'Oferta https://example.invalid/affiliate',
+      status: 'READY' as const,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: index + 1,
+      expiresAt: new Date(NOW.getTime() + 60 * 60_000),
+      offerEndsAt: null,
+      createdAt: new Date(NOW.getTime() + index),
+      updatedAt: new Date(NOW.getTime() + index),
+    }));
+    await prisma.commercialPreparedMessage.createMany({ data: preparedRows });
+    const staleId = `${PREFIX}-prepared-progress-stale`;
+    await prisma.commercialPreparedMessage.create({
+      data: {
+        id: staleId,
+        campaignId: IDS.campaign,
+        groupDestinationId: IDS.destination,
+        instanceName: IDS.instance,
+        logicalGroupFingerprint: 'persistent-inventory-group',
+        candidateId: fixture.candidateId,
+        snapshotId: fixture.snapshotId,
+        generatedCopyId: fixture.copyId,
+        copyPreview: 'Oferta https://example.invalid/affiliate',
+        status: 'READY',
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+        preparationRevision: preparedRows.length + 1,
+        expiresAt: NOW,
+        offerEndsAt: null,
+        createdAt: new Date(NOW.getTime() + preparedRows.length),
+        updatedAt: new Date(NOW.getTime() + preparedRows.length),
+      },
+    });
+
+    await expect(prepared.invalidateStale({ now: NOW, limit: 1 })).resolves.toBe(1);
+    await expect(
+      prisma.commercialPreparedMessage.findUnique({
+        where: { id: staleId },
+        select: { status: true, invalidatedReason: true },
+      }),
+    ).resolves.toEqual({
+      status: 'INVALIDATED',
+      invalidatedReason: 'PREPARED_EXPIRED',
+    });
+    await expect(
+      prisma.commercialPreparedMessage.count({
+        where: {
+          campaignId: IDS.campaign,
+          status: 'READY',
+          candidateId: fixture.candidateId,
+        },
+      }),
+    ).resolves.toBe(101);
   });
 
   it('reminera e reprepara automaticamente um candidate após a invalidação do snapshot', async () => {
@@ -1076,18 +1182,24 @@ describeDatabase('persistent commercial inventory PostgreSQL fixture', () => {
         },
       });
       expect(preparedRows).toHaveLength(2);
-      expect(preparedRows[0]).toEqual({
+      const invalidatedPrevious = preparedRows.find(
+        (row) => row.snapshotId === fixture.snapshotId,
+      );
+      const reactivated = preparedRows.find(
+        (row) => row.snapshotId === nextSnapshotId,
+      );
+      expect(invalidatedPrevious).toEqual({
         status: 'INVALIDATED',
         snapshotId: fixture.snapshotId,
         generatedCopyId: fixture.copyId,
         invalidatedReason: 'SNAPSHOT_OR_COPY_STALE',
       });
-      expect(preparedRows[1]).toMatchObject({
+      expect(reactivated).toMatchObject({
         status: 'READY',
         snapshotId: nextSnapshotId,
         invalidatedReason: null,
       });
-      expect(typeof preparedRows[1]?.generatedCopyId).toBe('string');
+      expect(typeof reactivated?.generatedCopyId).toBe('string');
       const candidate = await prisma.commercialPromotionCandidate.findUnique({
         where: { id: fixture.candidateId },
         select: { status: true, snapshotId: true, generatedCopyId: true },

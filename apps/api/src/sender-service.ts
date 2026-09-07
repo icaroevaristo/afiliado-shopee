@@ -36,6 +36,7 @@ export type SenderServiceOptions = {
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   instanceName?: string;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
+  clock?: () => Date;
   /** Bounded window for an Evolution MESSAGES_UPDATE confirmation. */
   confirmationTimeoutMs?: number;
 };
@@ -241,7 +242,11 @@ export class SenderService {
       };
 
       try {
-        const draft = this.options.draftService.createDraft(candidate);
+        const draft = this.options.clock
+          ? this.options.draftService.createDraft(candidate, {
+              now: this.options.clock,
+            })
+          : this.options.draftService.createDraft(candidate);
         if (
           draft.candidateId !== candidateId ||
           draft.generatedCopyId !== dispatch.generatedCopy.id

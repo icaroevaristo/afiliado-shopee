@@ -17,7 +17,7 @@ const CAMPAIGN_ID = `${PREFIX}-campaign`;
 const NICHE_ID = `${PREFIX}-niche`;
 const PRODUCT_PROVIDER_ID = `${PREFIX}-provider`;
 const CATEGORY_ID = `${PREFIX}-category`;
-const NOW = new Date('2026-09-07T12:00:00.000Z');
+const NOW = new Date();
 
 const offer = (price: string, fetchedAt: Date): ShopeeProductOffer => {
   const productLink = `https://shopee.com.br/product/1/${PREFIX}`;

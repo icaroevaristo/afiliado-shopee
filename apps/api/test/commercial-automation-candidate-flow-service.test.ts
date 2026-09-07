@@ -17,6 +17,7 @@ import type {
   CommercialPromotionCandidateRepository,
   CommercialPromotionCandidateRecord,
   CommercialPromotionQueueItem,
+  CommercialNicheRecord,
   GeneratedCopyRecord,
   WhatsAppInstanceRecord,
   WhatsAppGroupRecord,
@@ -156,6 +157,7 @@ const copy = (): GeneratedCopyRecord => ({
 const context = (
   overrides: Partial<CommercialPromotionCopyContext['candidate']> = {},
   productOverrides: Partial<CommercialPromotionCopyContext['product']> = {},
+  nicheOverrides: Partial<CommercialNicheRecord> = {},
 ): CommercialPromotionCopyContext => ({
   candidate: candidateRecord(overrides),
   campaign: campaign(),
@@ -176,6 +178,7 @@ const context = (
     minimumScore: 60,
     createdAt: NOW,
     updatedAt: NOW,
+    ...nicheOverrides,
   },
   product: {
     id: 'product-1',
@@ -282,6 +285,7 @@ const createSubject = (input: {
   candidate?: Partial<CommercialPromotionCandidateRecord>;
   product?: Partial<CommercialPromotionCopyContext['product']>;
   campaign?: Partial<CommercialGroupCampaignRecord>;
+  niche?: Partial<CommercialNicheRecord>;
   group?: Partial<WhatsAppGroupRecord>;
   mining?: CandidateFlowMining;
   useListAll?: boolean;
@@ -290,7 +294,7 @@ const createSubject = (input: {
   const currentCampaign = campaign(input.campaign);
   const currentGroup = group(input.group);
   const currentContext = () =>
-    context(currentCandidate, input.product);
+    context(currentCandidate, input.product, input.niche);
   const copyRecord = copy();
   const queue = queueItem(currentCandidate);
   const listAll = vi.fn(async () => [currentGroup]);
@@ -2016,6 +2020,23 @@ describe('CommercialAutomationCandidateFlowService', () => {
 
     await expect(subject.service.revalidate(prepared)).resolves.toBeUndefined();
     expect(subject.copyGeneration.findCopy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { field: 'maxPrice', niche: { maxPrice: '50' } },
+    { field: 'categoryIds', niche: { categoryIds: ['category-out'] } },
+    { field: 'includeKeywords', niche: { includeKeywords: ['inexistente'] } },
+    { field: 'minimumScore', niche: { minimumScore: 90 } },
+  ])('bloqueia revalidacao quando a politica do nicho muda em $field', async ({ niche }) => {
+    const subject = createSubject({ niche });
+    const prepared = await subject.service.prepare(
+      selection(subject.target),
+      preparationOptions,
+    );
+
+    await expect(subject.service.revalidate(prepared)).rejects.toMatchObject({
+      code: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    });
   });
 
   it('nao segue com candidato expirado ou copy invalida', async () => {

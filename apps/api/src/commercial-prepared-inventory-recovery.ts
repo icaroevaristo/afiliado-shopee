@@ -61,6 +61,8 @@ export type CommercialPreparedMessageMaterialityRecord = {
 };
 
 export type CommercialPreparedMessageInvalidationReason =
+  | 'CANDIDATE_NOT_COPY_READY'
+  | 'OFFER_EXPIRED'
   | 'PREPARED_EXPIRED'
   | 'SNAPSHOT_OR_COPY_STALE';
 
@@ -76,14 +78,21 @@ const isExpired = (date: Date | null, now: Date) =>
 export const commercialPreparedMessageInvalidationReason = (
   record: CommercialPreparedMessageMaterialityRecord,
   now: Date,
-): CommercialPreparedMessageInvalidationReason =>
-  record.expiresAt <= now ||
-  isExpired(record.offerEndsAt, now) ||
-  isExpired(record.candidate.expiresAt, now) ||
-  isExpired(record.candidate.product.offerEndsAt, now) ||
-  isExpired(record.candidate.snapshot.offerEndsAt, now)
-    ? 'PREPARED_EXPIRED'
-    : 'SNAPSHOT_OR_COPY_STALE';
+): CommercialPreparedMessageInvalidationReason => {
+  if (record.candidate.status !== 'COPY_READY') {
+    return 'CANDIDATE_NOT_COPY_READY';
+  }
+  if (
+    isExpired(record.offerEndsAt, now) ||
+    isExpired(record.candidate.expiresAt, now) ||
+    isExpired(record.candidate.product.offerEndsAt, now) ||
+    isExpired(record.candidate.snapshot.offerEndsAt, now)
+  ) {
+    return 'OFFER_EXPIRED';
+  }
+  if (record.expiresAt <= now) return 'PREPARED_EXPIRED';
+  return 'SNAPSHOT_OR_COPY_STALE';
+};
 
 /** The single material content contract shared by every prepared inventory path. */
 export const isCommercialPreparedMessageContentFresh = (
@@ -129,8 +138,14 @@ export const isCommercialPreparedMessageContentFresh = (
   );
 };
 
+/** A reservation can be reopened only while its candidate is still publicable. */
+export const isCommercialPreparedMessageCandidateReady = (
+  record: CommercialPreparedMessageMaterialityRecord,
+  now: Date,
+) => record.candidate.status === 'COPY_READY' && isCommercialPreparedMessageContentFresh(record, now);
+
 /** The single material READY contract shared by every prepared inventory path. */
 export const isCommercialPreparedMessageMateriallyReady = (
   record: CommercialPreparedMessageMaterialityRecord,
   now: Date,
-) => record.status === 'READY' && isCommercialPreparedMessageContentFresh(record, now);
+) => record.status === 'READY' && isCommercialPreparedMessageCandidateReady(record, now);

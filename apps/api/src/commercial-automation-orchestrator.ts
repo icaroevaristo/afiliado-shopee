@@ -1129,7 +1129,16 @@ export class CommercialAutomationOrchestrator {
           'COMMERCIAL_AUTOMATION_CANDIDATE_PREPARATION_MISSING',
         );
       }
-      if (!preparedInventoryClaim) {
+      if (preparedInventoryClaim) {
+        await this.dependencies.candidateFlow!.revalidate({
+          candidateId: preparedInventoryClaim.candidateId,
+          generatedCopyId: preparedInventoryClaim.generatedCopyId,
+          campaignId: preparedInventoryClaim.campaignId,
+          groupId: preparedInventoryClaim.groupDestinationId,
+          logicalGroupFingerprint:
+            preparedInventoryClaim.logicalGroupFingerprint,
+        });
+      } else {
         await this.dependencies.candidateFlow!.revalidate(candidatePreparation!);
         const renewedAt = this.clock();
         const reservationRenewal =

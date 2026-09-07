@@ -148,8 +148,10 @@ import { isCommercialPromotionFallbackCopy, isSafeStoredCommercialPromotionCopy 
 import {
   commercialPreparedMessageInvalidationReason,
   decideCommercialPreparedRecovery,
+  isCommercialPreparedMessageCandidateReady,
   isCommercialPreparedMessageContentFresh,
   isCommercialPreparedMessageMateriallyReady,
+  type CommercialPreparedMessageInvalidationReason,
 } from './commercial-prepared-inventory-recovery';
 import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from './commercial-ai-copy-prompt';
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
@@ -2458,6 +2460,11 @@ const commercialPromotionCopyContextFromRecord = (
       providerProductId: String(product.providerProductId),
       productName: String(product.nome),
       shopName: String(product.loja),
+      categoryIds: Array.isArray(product.categoryIds)
+        ? product.categoryIds.filter(
+            (value: unknown): value is string => typeof value === 'string',
+          )
+        : [],
       productLink: (product.productLink as string | null) ?? null,
       affiliateLink: (product.affiliateLink as string | null) ?? null,
       price: decimalString(product.preco as PrismaDecimalLike) as string,
@@ -6780,6 +6787,7 @@ const mapPreparedMessage = (record: {
    reservationLeaseExpiresAt: Date | null;
    scheduleRevision: number;
    assignmentRevision: number;
+   preparationRevision: number;
    expiresAt: Date;
   offerEndsAt: Date | null;
   invalidatedReason: string | null;
@@ -6929,6 +6937,31 @@ export class PrismaCommercialPreparedMessageRepository
 {
   constructor(private readonly prisma: DatabaseClient) {}
 
+  private static candidateTransitionForInvalidation(
+    reason: CommercialPreparedMessageInvalidationReason,
+  ):
+    | { status: 'EXPIRED'; blockedReason: null }
+    | { status: 'BLOCKED'; blockedReason: 'SNAPSHOT_OR_COPY_STALE' }
+    | null {
+    if (reason === 'OFFER_EXPIRED') {
+      return { status: 'EXPIRED', blockedReason: null };
+    }
+    if (reason === 'SNAPSHOT_OR_COPY_STALE') {
+      return { status: 'BLOCKED', blockedReason: 'SNAPSHOT_OR_COPY_STALE' };
+    }
+    return null;
+  }
+
+  private static candidateTransitionData(
+    reason: CommercialPreparedMessageInvalidationReason,
+    now: Date,
+  ) {
+    const transition = this.candidateTransitionForInvalidation(reason);
+    return transition
+      ? { ...transition, rankPosition: null, lastEvaluatedAt: now }
+      : null;
+  }
+
   private async listMateriallyReady(input: {
     campaignId: string;
     groupDestinationId: string;
@@ -6952,6 +6985,7 @@ export class PrismaCommercialPreparedMessageRepository
           : {}),
         status: 'READY',
         expiresAt: { gt: input.now },
+        candidate: { status: 'COPY_READY' },
       },
       include: {
         candidate: {
@@ -6959,7 +6993,6 @@ export class PrismaCommercialPreparedMessageRepository
         },
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: 100,
     });
     return rows.filter((row) =>
       isCommercialPreparedMessageMateriallyReady(row, input.now),
@@ -7067,6 +7100,15 @@ export class PrismaCommercialPreparedMessageRepository
     try {
       return await this.prisma.$transaction(
         async (transaction) => {
+          const candidateLock = await transaction.$queryRaw<Array<{ id: string }>>(
+            Prisma.sql`
+              SELECT "id"
+              FROM "CommercialPromotionCandidate"
+              WHERE "id" = ${input.candidateId}
+              FOR UPDATE
+            `,
+          );
+          if (candidateLock.length !== 1) return null;
           const candidate =
             await transaction.commercialPromotionCandidate.findUnique({
               where: { id: input.candidateId },
@@ -7173,26 +7215,48 @@ export class PrismaCommercialPreparedMessageRepository
             select: { name: true },
           });
           if (!instance) return null;
-          const where = {
-            campaignId_candidateId_snapshotId_groupDestinationId_instanceName_scheduleRevision_assignmentRevision:
-              {
+          const routeRows =
+            await transaction.commercialPreparedMessage.findMany({
+              where: {
                 campaignId: input.campaignId,
                 candidateId: input.candidateId,
                 snapshotId: candidate.snapshotId,
                 groupDestinationId: input.groupDestinationId,
-                instanceName: input.instanceName,
+                logicalGroupFingerprint: input.logicalGroupFingerprint,
                 scheduleRevision,
                 assignmentRevision,
               },
-          };
-          const existing =
-            await transaction.commercialPreparedMessage.findUnique({ where });
-          if (existing?.status === 'READY') {
-            const current = { ...existing, candidate };
+              include: {
+                candidate: {
+                  include: { product: true, snapshot: true, generatedCopy: true },
+                },
+              },
+              orderBy: [
+                { preparationRevision: 'desc' },
+                { createdAt: 'asc' },
+                { id: 'asc' },
+              ],
+            });
+          let nextPreparationRevision = input.preparationRevision ?? 1;
+          for (const existing of routeRows) {
+            nextPreparationRevision = Math.max(
+              nextPreparationRevision,
+              existing.preparationRevision + 1,
+            );
+            if (
+              existing.status === 'RESERVED' ||
+              existing.status === 'DISPATCHED'
+            ) {
+              return null;
+            }
+            if (existing.status !== 'READY') continue;
+            const current = { ...existing, candidate: existing.candidate };
             if (
               isCommercialPreparedMessageMateriallyReady(current, input.now)
             ) {
-              return mapPreparedMessage(existing);
+              return existing.instanceName === input.instanceName
+                ? mapPreparedMessage(existing)
+                : null;
             }
             const invalidationReason =
               commercialPreparedMessageInvalidationReason(current, input.now);
@@ -7206,34 +7270,28 @@ export class PrismaCommercialPreparedMessageRepository
                   updatedAt: input.now,
                 },
               });
-            if (invalidated.count === 1) {
-              await transaction.commercialPromotionCandidate.updateMany({
-                where: {
-                  id: candidate.id,
-                  status: 'COPY_READY',
-                  generatedCopyId: candidate.generatedCopyId,
-                  snapshotId: candidate.snapshotId,
-                },
-                data: {
-                  status:
-                    invalidationReason === 'PREPARED_EXPIRED'
-                      ? 'EXPIRED'
-                      : 'BLOCKED',
-                  rankPosition: null,
-                  blockedReason:
-                    invalidationReason === 'PREPARED_EXPIRED'
-                      ? null
-                      : 'SNAPSHOT_OR_COPY_STALE',
-                  lastEvaluatedAt: input.now,
-                },
-              });
+            if (invalidated.count !== 1) continue;
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              const transitioned =
+                await transaction.commercialPromotionCandidate.updateMany({
+                  where: {
+                    id: existing.candidateId,
+                    status: 'COPY_READY',
+                    generatedCopyId: existing.generatedCopyId,
+                    snapshotId: existing.snapshotId,
+                  },
+                  data: candidateTransition,
+                });
+              if (transitioned.count === 1) return null;
             }
-            return null;
+            if (invalidationReason !== 'PREPARED_EXPIRED') return null;
           }
-          if (existing?.status === 'DISPATCHED' || existing?.status === 'RESERVED') {
-            return null;
-          }
-          if (existing) return null;
+          const preparationRevision = nextPreparationRevision;
           const created = await transaction.commercialPreparedMessage.create({
             data: {
               campaignId: input.campaignId,
@@ -7248,6 +7306,7 @@ export class PrismaCommercialPreparedMessageRepository
               scheduleRevision,
               assignmentRevision,
               status: 'READY',
+              preparationRevision,
               expiresAt,
               offerEndsAt,
               createdAt: input.now,
@@ -7286,7 +7345,7 @@ export class PrismaCommercialPreparedMessageRepository
           input.assignmentRevision === undefined
             ? Prisma.empty
             : Prisma.sql`AND "assignmentRevision" = ${input.assignmentRevision}`;
-        for (let attempt = 0; attempt < 4; attempt += 1) {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
           const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
             SELECT "id"
             FROM "CommercialPreparedMessage"
@@ -7312,7 +7371,7 @@ export class PrismaCommercialPreparedMessageRepository
               },
             },
           });
-          if (!record || record.candidate.status !== 'COPY_READY') {
+          if (!record) {
             await transaction.commercialPreparedMessage.updateMany({
               where: { id: row.id, status: 'READY' },
               data: {
@@ -7324,11 +7383,9 @@ export class PrismaCommercialPreparedMessageRepository
             });
             continue;
           }
-          if (!isCommercialPreparedMessageMateriallyReady(record, input.now)) {
-            const invalidationReason = commercialPreparedMessageInvalidationReason(
-              record,
-              input.now,
-            );
+          if (!isCommercialPreparedMessageCandidateReady(record, input.now)) {
+            const invalidationReason =
+              commercialPreparedMessageInvalidationReason(record, input.now);
             await transaction.commercialPreparedMessage.updateMany({
               where: { id: row.id, status: 'READY' },
               data: {
@@ -7338,23 +7395,22 @@ export class PrismaCommercialPreparedMessageRepository
                 updatedAt: input.now,
               },
             });
-            await transaction.commercialPromotionCandidate.updateMany({
-              where: {
-                id: record.candidateId,
-                status: 'COPY_READY',
-                generatedCopyId: record.generatedCopyId,
-                snapshotId: record.snapshotId,
-              },
-              data: {
-                status: invalidationReason === 'PREPARED_EXPIRED' ? 'EXPIRED' : 'BLOCKED',
-                rankPosition: null,
-                blockedReason:
-                  invalidationReason === 'PREPARED_EXPIRED'
-                    ? null
-                    : 'SNAPSHOT_OR_COPY_STALE',
-                lastEvaluatedAt: input.now,
-              },
-            });
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              await transaction.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: record.candidateId,
+                  status: 'COPY_READY',
+                  generatedCopyId: record.generatedCopyId,
+                  snapshotId: record.snapshotId,
+                },
+                data: candidateTransition,
+              });
+            }
             continue;
           }
           const updated = await transaction.commercialPreparedMessage.updateMany({
@@ -7798,7 +7854,7 @@ export class PrismaCommercialPreparedMessageRepository
       ) {
         return false;
       }
-      const contentFresh = isCommercialPreparedMessageContentFresh(
+      const contentFresh = isCommercialPreparedMessageCandidateReady(
         { ...current, status: 'RESERVED' },
         input.now,
       );
@@ -7829,23 +7885,23 @@ export class PrismaCommercialPreparedMessageRepository
         },
       });
       if (result.count !== 1 || contentFresh) return result.count === 1;
-      await transaction.commercialPromotionCandidate.updateMany({
-        where: {
-          id: current.candidateId,
-          status: 'COPY_READY',
-          generatedCopyId: current.generatedCopyId,
-          snapshotId: current.snapshotId,
-        },
-        data: {
-          status: invalidationReason === 'PREPARED_EXPIRED' ? 'EXPIRED' : 'BLOCKED',
-          rankPosition: null,
-          blockedReason:
-            invalidationReason === 'PREPARED_EXPIRED'
-              ? null
-              : 'SNAPSHOT_OR_COPY_STALE',
-          lastEvaluatedAt: input.now,
-        },
-      });
+      const candidateTransition = invalidationReason
+        ? PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+            invalidationReason,
+            input.now,
+          )
+        : null;
+      if (candidateTransition) {
+        await transaction.commercialPromotionCandidate.updateMany({
+          where: {
+            id: current.candidateId,
+            status: 'COPY_READY',
+            generatedCopyId: current.generatedCopyId,
+            snapshotId: current.snapshotId,
+          },
+          data: candidateTransition,
+        });
+      }
       return true;
     });
   }
@@ -7927,7 +7983,7 @@ export class PrismaCommercialPreparedMessageRepository
             }
             return terminalized.count;
           }
-          const contentFresh = isCommercialPreparedMessageContentFresh(
+          const contentFresh = isCommercialPreparedMessageCandidateReady(
             { ...current, status: 'RESERVED' },
             input.now,
           );
@@ -7956,27 +8012,23 @@ export class PrismaCommercialPreparedMessageRepository
               updatedAt: input.now,
             },
           });
-          if (!contentFresh && result.count === 1) {
-            await transaction.commercialPromotionCandidate.updateMany({
-              where: {
-                id: current.candidateId,
-                status: 'COPY_READY',
-                generatedCopyId: current.generatedCopyId,
-                snapshotId: current.snapshotId,
-              },
-              data: {
-                status:
-                  invalidationReason === 'PREPARED_EXPIRED'
-                    ? 'EXPIRED'
-                    : 'BLOCKED',
-                rankPosition: null,
-                blockedReason:
-                  invalidationReason === 'PREPARED_EXPIRED'
-                    ? null
-                    : 'SNAPSHOT_OR_COPY_STALE',
-                lastEvaluatedAt: input.now,
-              },
-            });
+          if (!contentFresh && result.count === 1 && invalidationReason) {
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              await transaction.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: current.candidateId,
+                  status: 'COPY_READY',
+                  generatedCopyId: current.generatedCopyId,
+                  snapshotId: current.snapshotId,
+                },
+                data: candidateTransition,
+              });
+            }
           }
           return result.count;
         },
@@ -7988,74 +8040,92 @@ export class PrismaCommercialPreparedMessageRepository
   }
 
   async invalidateStale(input: { now: Date; limit: number }) {
-    const rows = await this.prisma.commercialPreparedMessage.findMany({
-      where: { status: 'READY' },
-      select: { id: true },
-      orderBy: { updatedAt: 'asc' },
-      take: Math.min(Math.max(input.limit, 1), 100),
-    });
+    const limit = Math.min(Math.max(input.limit, 1), 100);
     let invalidated = 0;
-    for (const row of rows) {
-      const invalidatedRow = await this.prisma.$transaction(
-        async (transaction) => {
-          const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-            SELECT "id"
-            FROM "CommercialPreparedMessage"
-            WHERE "id" = ${row.id}
-              AND "status" = 'READY'
-            FOR UPDATE
-          `);
-          if (locked.length !== 1) return 0;
-          const current = await transaction.commercialPreparedMessage.findUnique({
-            where: { id: row.id },
-            include: {
-              candidate: {
-                include: { product: true, snapshot: true, generatedCopy: true },
-              },
-            },
-          });
-          if (!current || isCommercialPreparedMessageMateriallyReady(current, input.now)) {
-            return 0;
-          }
-          const invalidationReason = commercialPreparedMessageInvalidationReason(
-            current,
-            input.now,
-          );
-          const expired = invalidationReason === 'PREPARED_EXPIRED';
-          const result = await transaction.commercialPreparedMessage.updateMany({
-            where: { id: row.id, status: 'READY' },
-            data: {
-              status: 'INVALIDATED',
-              invalidatedReason: expired
-                ? 'PREPARED_EXPIRED'
-                : 'SNAPSHOT_OR_COPY_STALE',
-              invalidatedAt: input.now,
-              reservationOwnerId: null,
-              reservationLeaseExpiresAt: null,
-              updatedAt: input.now,
-            },
-          });
-          if (result.count === 1) {
-            await transaction.commercialPromotionCandidate.updateMany({
-              where: {
-                id: current.candidateId,
-                status: 'COPY_READY',
-                generatedCopyId: current.generatedCopyId,
-                snapshotId: current.snapshotId,
-              },
-              data: {
-                status: expired ? 'EXPIRED' : 'BLOCKED',
-                rankPosition: null,
-                blockedReason: expired ? null : 'SNAPSHOT_OR_COPY_STALE',
-                lastEvaluatedAt: input.now,
+    let cursor: { updatedAt: Date; id: string } | null = null;
+    while (invalidated < limit) {
+      const rows: Array<{ id: string; updatedAt: Date }> =
+        await this.prisma.commercialPreparedMessage.findMany({
+        where: {
+          status: 'READY',
+          ...(cursor
+            ? {
+                OR: [
+                  { updatedAt: { gt: cursor.updatedAt } },
+                  { updatedAt: cursor.updatedAt, id: { gt: cursor.id } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, updatedAt: true },
+        orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+        take: Math.min(limit - invalidated, 100),
+        });
+      if (rows.length === 0) break;
+      const last = rows[rows.length - 1];
+      cursor = { updatedAt: last.updatedAt, id: last.id };
+      for (const row of rows) {
+        const invalidatedRow = await this.prisma.$transaction(
+          async (transaction) => {
+            const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+              SELECT "id"
+              FROM "CommercialPreparedMessage"
+              WHERE "id" = ${row.id}
+                AND "status" = 'READY'
+              FOR UPDATE
+            `);
+            if (locked.length !== 1) return 0;
+            const current = await transaction.commercialPreparedMessage.findUnique({
+              where: { id: row.id },
+              include: {
+                candidate: {
+                  include: { product: true, snapshot: true, generatedCopy: true },
+                },
               },
             });
-          }
-          return result.count;
-        },
-        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
-      );
-      invalidated += invalidatedRow;
+            if (!current || isCommercialPreparedMessageMateriallyReady(current, input.now)) {
+              return 0;
+            }
+            const invalidationReason = commercialPreparedMessageInvalidationReason(
+              current,
+              input.now,
+            );
+            const result = await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: invalidationReason,
+                invalidatedAt: input.now,
+                reservationOwnerId: null,
+                reservationLeaseExpiresAt: null,
+                updatedAt: input.now,
+              },
+            });
+            if (result.count === 1) {
+              const candidateTransition =
+                PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                  invalidationReason,
+                  input.now,
+                );
+              if (candidateTransition) {
+                await transaction.commercialPromotionCandidate.updateMany({
+                  where: {
+                    id: current.candidateId,
+                    status: 'COPY_READY',
+                    generatedCopyId: current.generatedCopyId,
+                    snapshotId: current.snapshotId,
+                  },
+                  data: candidateTransition,
+                });
+              }
+            }
+            return result.count;
+          },
+          { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+        );
+        invalidated += invalidatedRow;
+        if (invalidated >= limit) break;
+      }
     }
     return invalidated;
   }

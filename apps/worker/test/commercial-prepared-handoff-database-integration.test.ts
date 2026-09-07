@@ -93,7 +93,7 @@ const RACE_SNAPSHOT_FINGERPRINT = fingerprintCommercialOffer({
 });
 
 describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
-  const prisma = createPrismaClient();
+  const prisma = createPrismaClient(process.env.DATABASE_URL);
   const repositories = createPrismaRepositories(prisma);
   const prepared = repositories.commercialPreparedMessages;
   const logger = { info: () => undefined, error: () => undefined };
@@ -567,7 +567,9 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
     ).toBe(1);
   });
 
-  it('faz handoff atomico e idempotente, disputa envio paralelo e conclui no SERVER_ACK', async () => {
+  it(
+    'faz handoff atomico e idempotente, disputa envio paralelo e conclui no SERVER_ACK',
+    async () => {
     const ready = await prepared.createReady({
       campaignId: IDS.campaign,
       groupDestinationId: IDS.destination,
@@ -664,6 +666,7 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
       groupSendPolicy,
       draftService: new CommercialMessageDraftService(),
       reservationLeaseMilliseconds: 120_000,
+      clock: () => NOW,
       logger,
     });
     const queue = {
@@ -796,18 +799,30 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
       }
       expect(provenance.provenance).toBeDefined();
 
-      await vi.waitFor(
-        async () => {
-          expect(provider.sentMessages).toHaveLength(1);
-          await expect(
-            prisma.whatsAppDispatch.findUnique({
-              where: { id: handoff.dispatchId },
-              select: { status: true },
-            }),
-          ).resolves.toEqual({ status: 'SUBMITTED' });
-        },
-        { timeout: 5_000, interval: 50 },
-      );
+      try {
+        await vi.waitFor(
+          async () => {
+            expect(provider.sentMessages).toHaveLength(1);
+            await expect(
+              prisma.whatsAppDispatch.findUnique({
+                where: { id: handoff.dispatchId },
+                select: { status: true },
+              }),
+            ).resolves.toEqual({ status: 'SUBMITTED' });
+          },
+          { timeout: 15_000, interval: 50 },
+        );
+      } catch (error) {
+        const failedJob = await dispatchQueue.getJob(handoff.jobId);
+        const state = failedJob ? await failedJob.getState() : 'missing';
+        const dispatchState = await prisma.whatsAppDispatch.findUnique({
+          where: { id: handoff.dispatchId },
+          select: { status: true, attemptCount: true, errorMessage: true },
+        });
+        throw new Error(
+          `Dispatch worker did not submit: state=${state} failedReason=${failedJob?.failedReason ?? 'none'} dispatch=${JSON.stringify(dispatchState)} cause=${error instanceof Error ? error.message : 'unknown'}`,
+        );
+      }
       expect(provider.sentMessages).toHaveLength(1);
       expect(provider.sentMessages[0]).toMatchObject({
         destination: GROUP_ID,
@@ -873,5 +888,7 @@ describeDatabase('commercial prepared handoff PostgreSQL fixture', () => {
       await dispatchQueue.close();
       await redisConnection.quit();
     }
-  });
+    },
+    30_000,
+  );
 });

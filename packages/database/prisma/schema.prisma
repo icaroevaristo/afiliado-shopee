@@ -365,6 +365,7 @@ model CommercialPreparedMessage {
   reservationLeaseExpiresAt DateTime?
   scheduleRevision          Int                             @default(1)
   assignmentRevision        Int                             @default(1)
+  preparationRevision      Int                             @default(1)
   expiresAt                 DateTime
   offerEndsAt               DateTime?
   invalidatedReason         String?
@@ -372,7 +373,7 @@ model CommercialPreparedMessage {
   createdAt                 DateTime                        @default(now())
   updatedAt                 DateTime                        @updatedAt
 
-  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision])
+  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision, preparationRevision])
   @@index([campaignId, status, groupDestinationId, instanceName])
   @@index([status, reservationLeaseExpiresAt])
   @@index([candidateId, snapshotId])

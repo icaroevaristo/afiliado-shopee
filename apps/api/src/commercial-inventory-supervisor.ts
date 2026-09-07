@@ -424,6 +424,38 @@ export class CommercialInventorySupervisor {
     });
     const sharedRouteCandidateIds = new Map<string, Set<string>>();
 
+    const routeKeyFor = (
+      target: CommercialAutomationTarget,
+      revisions: { scheduleRevision: number; assignmentRevision: number },
+    ) =>
+      JSON.stringify([
+        target.campaignId,
+        target.groupId,
+        target.logicalGroupFingerprint,
+        revisions.scheduleRevision,
+        revisions.assignmentRevision,
+      ]);
+
+    // Reserve candidate identity across the complete A-B assignment before
+    // filling each individual instance. This prevents the first instance from
+    // selecting a candidate that is already protected by a later instance.
+    for (const target of preparationTargets) {
+      const revisions = {
+        scheduleRevision: target.scheduleRevision ?? scheduleRevision,
+        assignmentRevision: target.assignmentRevision ?? 1,
+      };
+      const routeKey = routeKeyFor(target, revisions);
+      const routeCandidateIds =
+        sharedRouteCandidateIds.get(routeKey) ?? new Set<string>();
+      sharedRouteCandidateIds.set(routeKey, routeCandidateIds);
+      for (const candidateId of await this.listProtectedCandidateIds(
+        target,
+        revisions,
+      )) {
+        routeCandidateIds.add(candidateId);
+      }
+    }
+
     for (const [targetIndex, target] of preparationTargets.entries()) {
       if (targetIndex >= MAX_TARGETS_PER_HEARTBEAT) {
         report.skipped += preparationTargets.length - targetIndex;
@@ -433,13 +465,7 @@ export class CommercialInventorySupervisor {
         scheduleRevision: target.scheduleRevision ?? scheduleRevision,
         assignmentRevision: target.assignmentRevision ?? 1,
       };
-      const routeKey = JSON.stringify([
-        target.campaignId,
-        target.groupId,
-        target.logicalGroupFingerprint,
-        revisions.scheduleRevision,
-        revisions.assignmentRevision,
-      ]);
+      const routeKey = routeKeyFor(target, revisions);
       const routeCandidateIds =
         sharedRouteCandidateIds.get(routeKey) ?? new Set<string>();
       sharedRouteCandidateIds.set(routeKey, routeCandidateIds);

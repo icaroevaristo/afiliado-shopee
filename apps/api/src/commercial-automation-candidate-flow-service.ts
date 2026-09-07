@@ -36,6 +36,7 @@ import {
   isCommercialInstanceAssigned,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
+import { CommercialNicheMatcher } from './commercial-niche-matcher';
 import type {
   CommercialAutomationTarget,
   CommercialGroupCampaignAttemptReservation,
@@ -51,6 +52,7 @@ import type {
   CommercialPromotionCopyRepository,
   CommercialPromotionQueueItem,
   CommercialPromotionCopyContext,
+  ShopeeOfferRecord,
   GeneratedCopyRecord,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupRecord,
@@ -307,6 +309,7 @@ const incrementReason = (summary: Record<string, number>, code: string) => {
 };
 
 const MAX_PREPARE_CANDIDATE_ATTEMPTS = 4;
+const commercialNicheMatcher = new CommercialNicheMatcher();
 
 export class CommercialAutomationCandidateFlowService {
   private readonly clock: () => Date;
@@ -1303,6 +1306,69 @@ export class CommercialAutomationCandidateFlowService {
     );
   }
 
+  private assertCurrentNichePolicy(context: CommercialPromotionCopyContext) {
+    if (context.product.source !== 'OFFICIAL') {
+      throw appError(
+        'Candidato preparado nao e uma oferta oficial persistida',
+        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      );
+    }
+    const product = context.product;
+    const offer: ShopeeOfferRecord = {
+      id: product.id,
+      source: product.source,
+      providerProductId: product.providerProductId,
+      productName: product.productName,
+      shopName: product.shopName,
+      categoryIds: product.categoryIds ?? [],
+      price: product.price,
+      priceMin: product.priceMin ?? product.price,
+      priceMax: product.priceMax ?? product.price,
+      discountRate: product.discountRate,
+      rating: product.rating,
+      sales: product.sales,
+      commissionRate: product.commissionRate,
+      imageUrl: product.urlImagem ?? '',
+      productLink: product.productLink ?? '',
+      ...(product.affiliateLink
+        ? { affiliateLink: product.affiliateLink }
+        : {}),
+      ...(product.offerStartsAt
+        ? { offerStartsAt: product.offerStartsAt }
+        : {}),
+      ...(product.offerEndsAt ? { offerEndsAt: product.offerEndsAt } : {}),
+      fetchedAt: product.updatedAt,
+      score: context.candidate.commercialScore,
+      scoreUpdatedAt: product.updatedAt,
+      lastSeenAt: product.updatedAt,
+      createdAt: product.updatedAt,
+      updatedAt: product.updatedAt,
+    };
+    const match = (() => {
+      try {
+        return commercialNicheMatcher.match({
+          product: offer,
+          niche: context.niche,
+          finalScore: context.candidate.commercialScore,
+        });
+      } catch {
+        throw appError(
+          'Politica do nicho mudou desde o preparo',
+          'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        );
+      }
+    })();
+    if (
+      !match.matched ||
+      context.candidate.minimumScoreUsed !== context.niche.minimumScore
+    ) {
+      throw appError(
+        'Politica do nicho mudou desde o preparo',
+        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      );
+    }
+  }
+
   async revalidate(input: CommercialAutomationCandidateRevalidation) {
     const groups = await this.listAuthorizedGroups();
     const group = groups.find((candidate) => candidate.id === input.groupId);
@@ -1347,6 +1413,7 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
       );
     }
+    this.assertCurrentNichePolicy(loaded.context);
     this.draft(loaded);
   }
 }

@@ -192,6 +192,7 @@ export const createCommercialPipelineConfirmationService = ({
   maximumCopyLength,
   environment,
   logger,
+  clock,
 }: {
   repositories: Pick<
     ApplicationRepositories,
@@ -208,6 +209,7 @@ export const createCommercialPipelineConfirmationService = ({
   maximumCopyLength: number;
   environment: CommercialConfirmationEnvironment;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
+  clock?: () => Date;
 }) =>
   new CommercialPipelineConfirmationService({
     offers: repositories.shopeeOffers,
@@ -226,6 +228,7 @@ export const createCommercialPipelineConfirmationService = ({
     instanceName,
     environment,
     logger,
+    clock,
   });
 
 export const createCommercialPromotionMiningService = ({
@@ -307,6 +310,7 @@ export const createSenderService = ({
   draftService,
   groupSendPolicy,
   instanceName,
+  clock,
   confirmationTimeoutMs,
 }: {
   repositories: Pick<ApplicationRepositories, 'whatsappDispatches'> &
@@ -321,6 +325,7 @@ export const createSenderService = ({
   draftService?: CommercialMessageDraftService;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   instanceName?: string;
+  clock?: () => Date;
   confirmationTimeoutMs?: number;
 }) =>
   new SenderService({
@@ -330,6 +335,7 @@ export const createSenderService = ({
     logger,
     messageBuilder,
     draftService,
+    clock,
     groupSendPolicy,
     instanceName,
     confirmationTimeoutMs,

@@ -882,6 +882,7 @@ export type CommercialPreparedMessageRecord = {
   reservationLeaseExpiresAt: Date | null;
   scheduleRevision: number;
   assignmentRevision: number;
+  preparationRevision: number;
   expiresAt: Date;
   offerEndsAt: Date | null;
   invalidatedReason: string | null;
@@ -901,6 +902,7 @@ export type CommercialPreparedMessageCreateInput = {
   runId?: string;
   scheduleRevision?: number;
   assignmentRevision?: number;
+  preparationRevision?: number;
   expiresAt?: Date;
   offerEndsAt?: Date | null;
   now: Date;
@@ -1822,6 +1824,7 @@ export type CommercialPromotionCopyContext = {
     providerProductId: string;
     productName: string;
     shopName: string;
+    categoryIds?: string[];
     productLink: string | null;
     affiliateLink: string | null;
     price: string;

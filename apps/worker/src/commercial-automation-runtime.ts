@@ -72,6 +72,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
   options: {
     prisma?: ReturnType<typeof createPrismaClient>;
     logger?: CommercialAutomationRuntimeLogger;
+    clock?: () => Date;
     confirmationQueue?: CommercialDispatchOutboxQueue;
     officialShopeeProviderFactory?: (
       options: ConstructorParameters<
@@ -85,6 +86,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
 ) => {
   const prisma = options.prisma ?? createPrismaClient();
   const logger = options.logger ?? commercialAutomationConsoleLogger;
+  const clock = options.clock;
   const repositories = createPrismaRepositories(prisma);
   const externalBudget = new CommercialExternalProviderBudgetService({
     settings: repositories.commercialAutomationSettings,
@@ -128,6 +130,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     repositories,
     score,
     logger,
+    clock,
   });
   const promotionCopyGeneration =
     createCommercialPromotionCopyGenerationService({
@@ -144,6 +147,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
         maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
       },
       logger,
+      clock,
     });
   const candidateFlow = new CommercialAutomationCandidateFlowService({
     groups: repositories.whatsappGroups,
@@ -158,6 +162,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     pipeline,
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     logger,
+    clock,
   });
   const commercialPolicyConfig = {
     enabled: config.COMMERCIAL_AUTOMATION_ENABLED,
@@ -172,6 +177,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     repositories,
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     config: commercialPolicyConfig,
+    clock,
   });
   const planner = new CommercialAutomationSchedulerPlanner({
     settings: repositories.commercialAutomationSettings,
@@ -181,6 +187,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     history: repositories.commercialAutomationHistory,
     policy,
     config: commercialPolicyConfig,
+    clock,
   });
 
   const officialShopeeProviderFactory =
@@ -222,11 +229,12 @@ export const createCommercialAutomationOrchestratorRuntime = (
         environment: {
           groupSendEnabled: config.WHATSAPP_GROUP_SEND_ENABLED,
           safeMode: config.EVOLUTION_SAFE_MODE,
-          schedulerEnabled: config.SCHEDULER_ENABLED,
-          maximumMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN,
-        },
-        logger,
-      })
+        schedulerEnabled: config.SCHEDULER_ENABLED,
+        maximumMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN,
+      },
+      logger,
+      clock,
+    })
     : {
         async confirm(): Promise<never> {
           throw new Error('Confirmation is unavailable in preview runtime');
@@ -241,6 +249,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     niches: repositories.commercialNiches,
     syncOffers,
     logger,
+    clock,
   });
 
   return {
@@ -255,6 +264,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
       commercialRuns: repositories.commercialRuns,
       executions: repositories.commercialAutomationExecutions,
       logger,
+      clock,
       leaseSeconds: config.COMMERCIAL_EXECUTION_LEASE_SECONDS,
       heartbeatSeconds: config.COMMERCIAL_EXECUTION_HEARTBEAT_SECONDS,
     }),

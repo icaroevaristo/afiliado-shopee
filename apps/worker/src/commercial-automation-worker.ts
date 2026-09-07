@@ -279,6 +279,7 @@ export const createCommercialAutomationWorker = (
   options: {
     connection: ReturnType<typeof createRedisConnection>;
     prisma?: ReturnType<typeof createPrismaClient>;
+    clock?: () => Date;
     confirmationQueue?: CommercialWorkerInfrastructure['confirmationQueue'];
     enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
     enqueueInventoryRefill?: CommercialWorkerInfrastructure['enqueueInventoryRefill'];
@@ -287,6 +288,7 @@ export const createCommercialAutomationWorker = (
 ) => {
   const runtime = createCommercialAutomationOrchestratorRuntime(config, {
     prisma: options.prisma,
+    clock: options.clock,
     confirmationQueue: options.confirmationQueue,
     logger: options.logger,
   });
@@ -303,6 +305,7 @@ export const createCommercialAutomationWorker = (
         getScheduleRevision: () => runtime.planner.getScheduleRevision(),
         provider: config.SHOPEE_AFFILIATE_PROVIDER,
         mode: config.COMMERCIAL_AUTOMATION_MODE,
+        clock: options.clock,
       }),
     {
       connection: options.connection,
