@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotEnv } from '@shopee-auto-affiliate-ai/config';
 
 import { loadLocalSystemEnvironment } from '../src/environment';
-import { installOperationSignalCleanup, parseSystemArgs } from '../src/cli';
+import {
+  installOperationSignalCleanup,
+  installMaintenanceSignalGuard,
+  parseSystemArgs,
+} from '../src/cli';
+import { EventEmitter } from 'node:events';
 import { readState, runtimeDirectory, statePath } from '../src/state-store';
 
 const directories: string[] = [];
@@ -22,6 +27,26 @@ afterEach(() => {
 });
 
 describe('local system environment', () => {
+  it('parses maintenance confirmation exactly and rejects absence or duplicate', () => {
+    expect(() => parseSystemArgs(['migrate'])).toThrowError(
+      expect.objectContaining({
+        code: 'SYSTEM_MIGRATION_CONFIRMATION_REQUIRED',
+      }),
+    );
+    expect(
+      parseSystemArgs(['migrate', '--confirm-operational-migrations']),
+    ).toMatchObject({ command: 'migrate', confirmed: true });
+    expect(() =>
+      parseSystemArgs([
+        'migrate',
+        '--confirm-operational-migrations',
+        '--confirm-operational-migrations',
+      ]),
+    ).toThrow();
+    expect(() =>
+      parseSystemArgs(['migrate', '--confirm-operational-migrations=true']),
+    ).toThrow();
+  });
   it('loads the ignored root env and lets process variables override it', () => {
     const root = temporaryDirectory();
     writeFileSync(
@@ -119,6 +144,19 @@ describe('local system CLI arguments', () => {
 });
 
 describe('local system controlled signals', () => {
+  it('defers repeated maintenance interrupts until the in-flight operation cleans up', () => {
+    const runtime = new EventEmitter();
+    const guard = installMaintenanceSignalGuard(runtime);
+    expect(guard.interrupted()).toBe(false);
+    runtime.emit('SIGINT');
+    runtime.emit('SIGTERM');
+    runtime.emit('SIGINT');
+    expect(guard.interrupted()).toBe(true);
+    expect(runtime.listenerCount('SIGINT')).toBe(1);
+    guard.remove();
+    expect(runtime.listenerCount('SIGINT')).toBe(0);
+    expect(runtime.listenerCount('SIGTERM')).toBe(0);
+  });
   it.each([
     ['SIGINT', 130],
     ['SIGTERM', 143],

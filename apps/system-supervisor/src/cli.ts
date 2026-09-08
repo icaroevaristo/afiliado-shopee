@@ -19,6 +19,7 @@ import {
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 type ParsedCommand =
+  | { command: 'migrate'; confirmed: true; composeProjectName?: string }
   | { command: 'start' | 'stop'; composeProjectName?: string }
   | { command: 'status'; json: boolean; composeProjectName?: string }
   | { command: 'logs'; service?: LogServiceName; lines: number };
@@ -51,6 +52,26 @@ const parseProjectNameFlag = (flags: readonly string[]) => {
 export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
   const normalized = args.filter((argument) => argument !== '--');
   const [command, ...flags] = normalized;
+  if (command === 'migrate') {
+    const parsedFlags = parseProjectNameFlag(flags);
+    if (!parsedFlags.remaining.includes('--confirm-operational-migrations')) {
+      throw new LocalSystemError(
+        'Flag --confirm-operational-migrations obrigatoria',
+        'SYSTEM_MIGRATION_CONFIRMATION_REQUIRED',
+      );
+    }
+    if (parsedFlags.remaining.length !== 1) {
+      throw new LocalSystemError(
+        'Argumentos de maintenance migrate invalidos',
+        'SYSTEM_INVALID_ARGUMENT',
+      );
+    }
+    return {
+      command,
+      confirmed: true,
+      composeProjectName: parsedFlags.composeProjectName,
+    };
+  }
   if (command === 'start' || command === 'stop') {
     const parsedFlags = parseProjectNameFlag(flags);
     if (parsedFlags.remaining.length > 0) {
@@ -125,7 +146,7 @@ export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
     return { command, service, lines };
   }
   throw new LocalSystemError(
-    'Comando esperado: start, status, logs ou stop',
+    'Comando esperado: start, status, logs, stop ou migrate',
     'SYSTEM_COMMAND_REQUIRED',
   );
 };
@@ -199,6 +220,28 @@ export const installOperationSignalCleanup = (
   };
 };
 
+/** Controlled interrupts wait for in-flight DDL and the temporary-container cleanup. */
+export const installMaintenanceSignalGuard = (
+  runtime: {
+    on(event: 'SIGINT' | 'SIGTERM', listener: () => void): void;
+    off(event: 'SIGINT' | 'SIGTERM', listener: () => void): void;
+  } = process,
+) => {
+  let interrupted = false;
+  const handler = () => {
+    interrupted = true;
+  };
+  runtime.on('SIGINT', handler);
+  runtime.on('SIGTERM', handler);
+  return {
+    interrupted: () => interrupted,
+    remove: () => {
+      runtime.off('SIGINT', handler);
+      runtime.off('SIGTERM', handler);
+    },
+  };
+};
+
 export const formatStatus = (status: SystemStatusSnapshot) =>
   [
     `Sistema: ${status.overall}`,
@@ -267,9 +310,23 @@ export const runSystemCli = async (
   }
 
   const release = await acquireLock(operationLockRoot, parsed.command, deps);
-  const removeSignalCleanup = installOperationSignalCleanup(release);
+  const maintenanceSignals =
+    parsed.command === 'migrate' ? installMaintenanceSignalGuard() : undefined;
+  const removeSignalCleanup =
+    maintenanceSignals?.remove ?? installOperationSignalCleanup(release);
+  let retainLock = false;
   try {
-    if (parsed.command === 'start') {
+    if (parsed.command === 'migrate') {
+      console.log(
+        JSON.stringify(
+          await supervisor.migrate(
+            parsed.confirmed,
+            process.env,
+            maintenanceSignals?.interrupted,
+          ),
+        ),
+      );
+    } else if (parsed.command === 'start') {
       const status = await supervisor.start();
       console.log('Sistema local pronto. Nenhum tick ou envio foi disparado.');
       console.log(formatStatus(status));
@@ -285,9 +342,12 @@ export const runSystemCli = async (
         'Sistema local parado. Containers, volumes, dados e agendamentos foram preservados.',
       );
     }
+  } catch (error) {
+    retainLock = error instanceof LocalSystemError && error.retainOperationLock;
+    throw error;
   } finally {
     removeSignalCleanup();
-    release();
+    if (!retainLock) release();
   }
 };
 

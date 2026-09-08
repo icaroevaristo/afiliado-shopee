@@ -869,6 +869,12 @@ Responsabilidade:
 
 - Operar a topologia local atual por `system:start`, `system:status`,
   `system:logs` e `system:stop`.
+- `system:maintenance:migrate -- --confirm-operational-migrations` exige pausa,
+  ownership, PostgreSQL canonico healthy e quiescencia antes de um unico deploy.
+  Para a topologia oficial; migra em PostgreSQL temporario com mesmo volume/imagem e porta loopback efemera. Remove somente o temporario e mantem tudo parado.
+  Compartilha lock com start/stop; lock de migration interrompida exige investigacao
+  humana e nunca e recuperado automaticamente. A URL original nao alcanca o temporario; administradores externos precisam ficar
+  suspensos durante DDL; pg_stat_activity antes/depois nao bloqueia novas conexoes.
 - Iniciar explicitamente API, dashboard e worker comercial; adicionar o worker
   isolado de `whatsapp-dispatch` somente em modo `send`.
 - Manter estado e logs locais sanitizados em `.runtime/local-system/`.

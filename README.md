@@ -1,5 +1,64 @@
 # shopee-auto-affiliate-ai
 
+## Migrations em manutenção, sem iniciar a aplicação
+
+O comando explícito `corepack pnpm system:maintenance:migrate -- --confirm-operational-migrations`
+exige autorização do proprietário e backup restaurável previamente validado.
+A branch R1D2 implementa isolamento de topologia; a aprovação para uso operacional
+permanece separada dos testes descartáveis e da revisão do código.
+
+Antes de alterar a topologia, valida root/config/state/Compose, volume canônico,
+imagem imutável, identidade do cluster, pausa persistida e histórico Prisma.
+Compartilha o lock exclusivo de start/stop. Sem confirmação literal, não para
+processos nem altera Docker ou banco.
+
+A parada usa `system:stop` internamente, incluindo aplicação, PostgreSQL, Redis
+e Evolution quando pertencente ao fluxo oficial. Preserva containers canônicos,
+volumes e agendamentos. Só depois do PostgreSQL canônico parado e da ausência do
+listener original permite um container temporário com a mesma imagem SHA-256 e
+o mesmo volume em `/var/lib/postgresql/data`. Outra montagem RW, identidade
+ambígua ou volume divergente bloqueia antes da criação.
+
+A consulta de portas falha fechada quando indisponível. No Windows usa o inventário nativo de listeners; em POSIX exige `lsof -Q`, que diferencia resultado vazio de erro. Versões sem `-Q` bloqueiam a operação; não há fallback inseguro. Ver [contrato lsof](https://lsof.readthedocs.io/en/stable/manpage/).
+
+O Docker escolhe uma porta host efêmera em `127.0.0.1`, diferente de 5432 e da
+porta original. A URL com as credenciais existentes permanece apenas em memória;
+o container temporário não recebe secrets novos. A URL original da aplicação
+não alcança esse endpoint. `pg_stat_activity` no temporário exclui apenas a
+própria sessão: é um diagnóstico adicional, não a barreira de admissão.
+
+Executa uma vez `pnpm --filter @shopee-auto-affiliate-ai/database db:deploy`,
+seguido por migrate status, schema diff vazio, pausa/history/cluster e comparação
+do fingerprint de todos os campos dos dispatches. Não classifica entrega ou
+não entrega. Em sucesso ou falha, encerra/remove somente o container temporário,
+preserva o volume e mantém toda a topologia canônica parada. Não há retry nem
+start automático. Falhas após a parada mantêm lock para investigação humana.
+
+No Windows permanecem PID+startedAt, handles e Job Object, sem terminação tardia
+por PID numérico. Filhos nativos após adoção ficam contidos. A adoção completa de
+cadeias preexistentes em movimento **não está provada**:
+`PROCESS_TREE_COMPLETE_ADOPTION=NOT_PROVEN` e
+`DDL_SAFETY_DEPENDS_ON_COMPLETE_TREE_ADOPTION=false`. A segurança do DDL depende
+da topologia PostgreSQL desligada no endereço que esses processos conhecem.
+Isso não é isolamento contra um administrador local que inspecione portas ou
+controle Docker; tal escritor não pode operar simultaneamente à manutenção.
+
+SIGINT/SIGTERM solicitam interrupção serializada: um DDL já iniciado deve terminar
+antes do cleanup. Morte forçada do supervisor/daemon pode impedir o cleanup;
+o lock de migration interrompida permanece bloqueado para start/stop e exige
+investigação de Prisma/container/volume/histórico. Não usar reset, resolve ou
+retry automático. A retomada futura exige autorização própria e preserva o
+contrato db:deploy-before-spawn.
+
+Integração opt-in: `RUN_SUPERVISOR_MAINTENANCE_DB_TEST=true`, arquivo
+`apps/system-supervisor/test/maintenance-database-integration.test.ts`.
+Cria projeto/volume exclusivos, PostgreSQL host 55474 e Redis host 55475.
+O órfão real vive na rede descartável e conhece `postgres:5432`; o adaptador de
+portas do teste representa essa porta original por 55474 no host. O teste não
+sonda a porta 5432 operacional do host e não usa o backup R1C.
+`POSTGRES_HOST_PORT` e `REDIS_HOST_PORT` permitem fixtures isoladas; defaults
+operacionais continuam 5432 e 6379. Resultados medidos constam dos artifacts do run.
+
 Monorepo com pnpm workspaces e Turborepo para automatizar um pipeline afiliado modular da Shopee com agentes de IA, filas e dashboard.
 
 ## Documentacao

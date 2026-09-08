@@ -45,12 +45,12 @@ export type OperationLockRecord = {
   acquiredAt: string;
   processStartedAt: string;
   processMarker: OperationProcessMarker;
-  operation: 'start' | 'stop';
+  operation: 'start' | 'stop' | 'migrate';
 };
 
 export type OperationLockSnapshot = {
   operationLock: 'unlocked' | 'active' | 'stale' | 'invalid' | 'unavailable';
-  operation?: 'start' | 'stop';
+  operation?: 'start' | 'stop' | 'migrate';
   pid?: number;
   acquiredAt?: string;
 };
@@ -111,6 +111,7 @@ const isState = (value: unknown): value is LocalSystemState => {
             'mode',
             'ports',
             'processes',
+            ...('maintenance' in state ? ['maintenance'] : []),
           ]
         : ['version', 'startedAt', 'mode', 'ports', 'processes'],
     )
@@ -118,6 +119,7 @@ const isState = (value: unknown): value is LocalSystemState => {
     return false;
   }
   if (
+    ('maintenance' in state && state.maintenance !== true) ||
     state.version !== 1 ||
     !validTimestamp(state.startedAt) ||
     (state.mode !== 'preview' && state.mode !== 'send') ||
@@ -229,7 +231,9 @@ const isOperationLockRecord = (
     isIsoTimestamp(record.processStartedAt) &&
     (record.processMarker === SUPERVISOR_PROCESS_MARKER ||
       record.processMarker === PREVIEW_STABILITY_PROCESS_MARKER) &&
-    (record.operation === 'start' || record.operation === 'stop')
+    (record.operation === 'start' ||
+      record.operation === 'stop' ||
+      record.operation === 'migrate')
   );
 };
 
@@ -392,7 +396,7 @@ const createRelease = (root: string, owner: OperationLockRecord) => {
 
 export const acquireLock = async (
   root: string,
-  operation: 'start' | 'stop',
+  operation: 'start' | 'stop' | 'migrate',
   deps: Pick<SystemDependencies, 'inspectProcessIdentity' | 'now'>,
   options: {
     pid?: number;
@@ -471,6 +475,13 @@ export const acquireLock = async (
       throw new LocalSystemError(
         'Nao foi possivel comprovar a identidade do lock atual',
         'SYSTEM_LOCK_IDENTITY_UNAVAILABLE',
+      );
+    }
+
+    if (current.record.operation === 'migrate') {
+      throw new LocalSystemError(
+        'Migration interrompida: lock preservado; confirme encerramento do Prisma e historico antes de recovery manual',
+        'SYSTEM_MAINTENANCE_INTERRUPTED',
       );
     }
 

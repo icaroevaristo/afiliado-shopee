@@ -6,6 +6,13 @@ import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/provide
 
 import { loadLocalSystemEnvironment } from './environment';
 import { ensureDashboardProductionBuild } from './dashboard-build';
+import { MaintenancePostgres } from './maintenance-postgres';
+import {
+  assertMaintenanceDatabaseUrl,
+  readMaintenanceDatabase,
+  MaintenanceDatabaseReadError,
+  type MaintenanceDatabaseReader,
+} from './maintenance-database';
 import {
   evolutionComposeArguments,
   isValidComposeProjectName,
@@ -408,6 +415,8 @@ const discoverMainInfrastructureContainers = async (
   env: NodeJS.ProcessEnv,
   ports: LocalSystemState['ports'],
   projectName: string,
+  onlyService?: MainInfrastructureService,
+  allowAbsentRedis = false,
 ): Promise<MainInfrastructureContainerDiscovery> => {
   try {
     const configResult = await deps.run(
@@ -459,7 +468,18 @@ const discoverMainInfrastructureContainers = async (
     if (!inspections) return { status: 'unproven' };
     const containers: ResolvedMainInfrastructureContainer[] = [];
     let topologyMismatch = false;
-    for (const service of expected) {
+    for (const service of expected.filter(
+      (item) => !onlyService || item.service === onlyService,
+    )) {
+      if (
+        allowAbsentRedis &&
+        service.service === 'redis' &&
+        !inspections.some(
+          (item) =>
+            item.Config?.Labels?.['com.docker.compose.service'] === 'redis',
+        )
+      )
+        continue;
       const imageInspectResult = await deps.run({
         command: 'docker',
         args: ['image', 'inspect', service.image],
@@ -963,10 +983,7 @@ const expectedServices = (mode: AutomationMode) =>
   );
 
 type ObservedProcessStatus =
-  | 'running'
-  | 'stopped'
-  | 'identity-mismatch'
-  | 'not-required';
+  'running' | 'stopped' | 'identity-mismatch' | 'not-required';
 
 const resolveEffectiveStatusMode = (
   state: LocalSystemState | null,
@@ -982,7 +999,9 @@ const resolveEffectiveStatusMode = (
     (status) => status === 'identity-mismatch',
   );
 
-  return runtimeIsActive || runtimeIdentityIsAmbiguous ? state.mode : loadedMode;
+  return runtimeIsActive || runtimeIdentityIsAmbiguous
+    ? state.mode
+    : loadedMode;
 };
 
 const waitFor = async (
@@ -1150,7 +1169,7 @@ const assertRegisteredServicePortsUnchanged = (
 };
 
 export type SystemStatusSnapshot = OperationLockSnapshot & {
-  overall: 'running' | 'partial' | 'stopped';
+  overall: 'running' | 'partial' | 'stopped' | 'maintenance';
   mode: AutomationMode;
   ports: {
     api: number;
@@ -1299,6 +1318,7 @@ export class LocalSystemSupervisor {
   private readonly loadEnvironmentFiles: boolean;
   private readonly composeProjectName: string;
   private readonly operationLockRoot: string;
+  private readonly maintenanceDatabase: MaintenanceDatabaseReader;
 
   constructor(
     private readonly root: string,
@@ -1309,6 +1329,7 @@ export class LocalSystemSupervisor {
       loadEnvironmentFiles?: boolean;
       composeProjectName?: string;
       operationLockRoot?: string;
+      maintenanceDatabase?: MaintenanceDatabaseReader;
     } = {},
   ) {
     this.specs = specs ?? createServiceSpecs(root);
@@ -1326,12 +1347,340 @@ export class LocalSystemSupervisor {
     }
     this.composeProjectName = composeProjectName;
     this.operationLockRoot = options.operationLockRoot ?? this.root;
+    this.maintenanceDatabase =
+      options.maintenanceDatabase ?? readMaintenanceDatabase;
   }
 
   private loadEnvironment(processEnv: NodeJS.ProcessEnv) {
     return loadLocalSystemEnvironment(this.root, processEnv, {
       loadFiles: this.loadEnvironmentFiles,
     });
+  }
+
+  async migrate(
+    confirmed: boolean,
+    processEnv: NodeJS.ProcessEnv = process.env,
+    interrupted: () => boolean = () => false,
+  ) {
+    if (confirmed !== true) {
+      throw new LocalSystemError(
+        'Confirmacao explicita de migrations obrigatoria',
+        'SYSTEM_MIGRATION_CONFIRMATION_REQUIRED',
+      );
+    }
+    if (!this.validateRoot())
+      throw new LocalSystemError(
+        'Execute na raiz do repositorio',
+        'SYSTEM_ROOT_REQUIRED',
+      );
+    const loaded = this.loadEnvironment(processEnv);
+    try {
+      loadConfig(loaded.env);
+    } catch {
+      throw new LocalSystemError(
+        'Configuracao local invalida',
+        'SYSTEM_CONFIG_INVALID',
+      );
+    }
+    let databaseUrl = assertMaintenanceDatabaseUrl(
+      loaded.env.DATABASE_URL,
+      loaded.ports.postgres,
+    );
+    const runtimeEnv = { ...loaded.env, DATABASE_URL: databaseUrl };
+    const state = readState(this.root);
+    if (!state || state.composeProjectName !== this.composeProjectName) {
+      throw new LocalSystemError(
+        'Estado local com ownership Compose obrigatorio',
+        'SYSTEM_MAINTENANCE_STATE_REQUIRED',
+      );
+    }
+    const assertProcesses = async (mustBeStopped = false) => {
+      const inspected = await inspectRegisteredProcesses(
+        state,
+        this.specs,
+        this.deps,
+      );
+      if (
+        inspected.reused.length ||
+        (mustBeStopped && Object.keys(inspected.valid).length)
+      ) {
+        throw new LocalSystemError(
+          'Identidade ou quiescencia de processo nao comprovada',
+          'SYSTEM_MAINTENANCE_PROCESS_GUARD',
+        );
+      }
+      assertRegisteredServicePortsUnchanged(
+        state,
+        inspected.valid,
+        loaded.ports,
+      );
+      for (const name of ['api', 'dashboard'] as const) {
+        await assertPortAvailable(
+          state.ports[name],
+          mustBeStopped ? undefined : inspected.valid[name]?.pid,
+          this.deps,
+        );
+        if (state.ports[name] !== loaded.ports[name]) {
+          await assertPortAvailable(loaded.ports[name], undefined, this.deps);
+        }
+      }
+      return inspected.valid;
+    };
+    let expectedSystemIdentifier: string | undefined;
+    const assertPostgres = async (expectedId?: string) => {
+      await assertCanonicalPostgresVolume(
+        this.root,
+        this.deps,
+        runtimeEnv,
+        this.composeProjectName,
+        { requireExisting: true },
+      );
+      const discovery = await discoverMainInfrastructureContainers(
+        this.root,
+        this.deps,
+        runtimeEnv,
+        loaded.ports,
+        this.composeProjectName,
+        'postgres',
+      );
+      const postgres =
+        discovery.status === 'resolved' ? discovery.containers[0] : undefined;
+      if (
+        !postgres ||
+        postgres.health !== 'healthy' ||
+        postgres.volumeNames.length !== 1 ||
+        postgres.volumeNames[0] !==
+          postgresVolumeName(this.composeProjectName) ||
+        (expectedId !== undefined && postgres.id !== expectedId)
+      ) {
+        throw new LocalSystemError(
+          'PostgreSQL canonico healthy nao comprovado',
+          'SYSTEM_MAINTENANCE_POSTGRES_GUARD',
+        );
+      }
+      const control = await this.deps.run({
+        command: 'docker',
+        args: [
+          'exec',
+          '-e',
+          'PGOPTIONS=-c default_transaction_read_only=on',
+          postgres.id,
+          'psql',
+          '-X',
+          '-q',
+          '-A',
+          '-t',
+          '-v',
+          'ON_ERROR_STOP=1',
+          '-U',
+          'postgres',
+          '-d',
+          'shopee_auto_affiliate_ai',
+          '-c',
+          'BEGIN READ ONLY; SELECT system_identifier::text FROM pg_control_system(); COMMIT;',
+        ],
+        cwd: this.root,
+        env: runtimeEnv,
+      });
+      const identifier = control.stdout.trim();
+      if (
+        control.code !== 0 ||
+        !/^\d+$/.test(identifier) ||
+        (expectedSystemIdentifier !== undefined &&
+          identifier !== expectedSystemIdentifier)
+      ) {
+        throw new LocalSystemError(
+          'Identidade do cluster PostgreSQL indisponivel/divergente',
+          'SYSTEM_MAINTENANCE_POSTGRES_GUARD',
+        );
+      }
+      expectedSystemIdentifier = identifier;
+      return postgres.id;
+    };
+    const assertDatabase = async (quiescent: boolean, complete = false) => {
+      const snapshot = await this.maintenanceDatabase(this.root, databaseUrl);
+      if (
+        snapshot.database !== 'shopee_auto_affiliate_ai' ||
+        snapshot.schema !== 'public' ||
+        snapshot.systemIdentifier !== expectedSystemIdentifier
+      ) {
+        throw new LocalSystemError(
+          'Banco/schema divergente',
+          'SYSTEM_MAINTENANCE_DATABASE_IDENTITY',
+        );
+      }
+      if (snapshot.paused !== true) {
+        throw new LocalSystemError(
+          'Pausa persistida nao comprovada',
+          'SYSTEM_MAINTENANCE_PAUSED_REQUIRED',
+        );
+      }
+      if (quiescent && snapshot.otherSessions !== 0) {
+        throw new LocalSystemError(
+          'Outra sessao PostgreSQL impede quiescencia',
+          'SYSTEM_MAINTENANCE_DATABASE_BUSY',
+        );
+      }
+      if (complete && snapshot.pending.length) {
+        throw new LocalSystemError(
+          'Migrations permanecem pendentes',
+          'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+        );
+      }
+      return snapshot;
+    };
+    const postgresId = await assertPostgres();
+    const initial = await assertProcesses();
+    const before = await assertDatabase(false);
+    const assertNotInterrupted = () => {
+      if (interrupted())
+        throw new LocalSystemError(
+          'Manutencao interrompida',
+          'SYSTEM_MAINTENANCE_INTERRUPTED',
+        );
+    };
+    const maintenance = new MaintenancePostgres(
+      this.root,
+      this.deps,
+      runtimeEnv,
+      this.composeProjectName,
+      postgresId,
+      postgresVolumeName(this.composeProjectName),
+      loaded.ports.postgres,
+    );
+    await maintenance.prepare();
+    assertNotInterrupted();
+    try {
+      // All errors after initiating topology changes retain maintenance ownership.
+      const stopped = await this.stop(processEnv);
+      if (!stopped.stopped)
+        throw new LocalSystemError(
+          'Topologia nao encerrou; migration bloqueada',
+          'SYSTEM_MAINTENANCE_STOP_FAILED',
+          true,
+        );
+      await assertProcesses(true);
+      writeState(this.root, { ...state, maintenance: true });
+      assertNotInterrupted();
+      const isolated = await maintenance.start(databaseUrl);
+      databaseUrl = isolated.databaseUrl;
+      const migrationEnv = { ...runtimeEnv, DATABASE_URL: databaseUrl };
+      const isolatedBefore = await assertDatabase(true);
+      if (
+        JSON.stringify(isolatedBefore.pending) !==
+          JSON.stringify(before.pending) ||
+        isolatedBefore.dispatchFingerprint !== before.dispatchFingerprint
+      )
+        throw new LocalSystemError(
+          'Estado mudou durante parada',
+          'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+        );
+      await maintenance.verify();
+      assertNotInterrupted();
+      const result = await this.deps
+        .run(
+          pnpmSpec(
+            this.root,
+            ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
+            migrationEnv,
+          ),
+        )
+        .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+      if (result.code !== 0) {
+        // Only safe aggregate readback; never retry or print Prisma stderr/DSN.
+        const evidence = await this.maintenanceDatabase(this.root, databaseUrl)
+          .then((snapshot) => ({
+            pending: snapshot.pending.length,
+            paused: snapshot.paused,
+          }))
+          .catch((error: unknown) =>
+            error instanceof MaintenanceDatabaseReadError
+              ? error.diagnostics
+              : null,
+          );
+        appendSupervisorLog(
+          this.root,
+          `Maintenance deploy failed; sanitizedReadback=${JSON.stringify(evidence)}; no retry`,
+        );
+        throw new LocalSystemError(
+          'Migration falhou; topologia desligada; HUMAN_REQUIRED, sem retry',
+          'SYSTEM_MAINTENANCE_DEPLOY_FAILED',
+        );
+      }
+      const after = await assertDatabase(true, true);
+      if (after.dispatchFingerprint !== before.dispatchFingerprint)
+        throw new LocalSystemError(
+          'Historico dispatch alterado',
+          'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+        );
+      for (const args of [
+        ['migrate', 'status'],
+        [
+          'migrate',
+          'diff',
+          '--from-schema-datasource',
+          'prisma/schema.prisma',
+          '--to-schema-datamodel',
+          'prisma/schema.prisma',
+          '--exit-code',
+        ],
+      ]) {
+        const check = await this.deps.run(
+          pnpmSpec(
+            this.root,
+            [
+              '--filter',
+              '@shopee-auto-affiliate-ai/database',
+              'exec',
+              'prisma',
+              ...args,
+            ],
+            migrationEnv,
+          ),
+        );
+        if (check.code !== 0)
+          throw new LocalSystemError(
+            'Prisma postcheck falhou',
+            'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+          );
+      }
+      await maintenance.verify();
+      await assertProcesses(true);
+      assertNotInterrupted();
+      return {
+        migrationsApplied: true,
+        applicationRunning: false,
+        automationPaused: true,
+        applicationProcessesBefore: Object.keys(initial).length,
+        applicationProcessesAfterQuiesce: 0,
+        pendingBefore: before.pending.length,
+        pendingAfter: 0,
+        migrationExecutionCount: 1,
+        migrationRetryCount: 0,
+        maintenanceHost: isolated.host,
+        maintenancePort: isolated.port,
+        processTreeCompleteAdoption: 'NOT_PROVEN',
+        ddlSafetyDependsOnCompleteTreeAdoption: false,
+      };
+    } catch (error) {
+      throw new LocalSystemError(
+        'Maintenance falhou; HUMAN_REQUIRED; sem retry',
+        error instanceof LocalSystemError
+          ? error.code
+          : 'SYSTEM_MAINTENANCE_FAILED',
+        true,
+      );
+    } finally {
+      try {
+        await maintenance.cleanup();
+      } catch {
+        throw new LocalSystemError(
+          'Cleanup nao comprovado; volume preservado; HUMAN_REQUIRED',
+          'SYSTEM_MAINTENANCE_CLEANUP_FAILED',
+          true,
+        );
+      }
+    }
   }
 
   async start(processEnv: NodeJS.ProcessEnv = process.env) {
@@ -1517,6 +1866,8 @@ export class LocalSystemSupervisor {
       runtimeEnv,
       loaded.ports,
       this.composeProjectName,
+      undefined,
+      previous?.maintenance === true,
     );
     const mainRuntime = runtimeIdentityFromDiscovery(
       this.composeProjectName,
@@ -1771,14 +2122,21 @@ export class LocalSystemSupervisor {
         if (!registered || !spec) continue;
         const inspection = await this.deps
           .inspectProcess(registered.pid, spec.marker, registered.startedAt)
-          .catch(() => ({ running: true, identityMatches: false }));
+          .catch(() => ({
+            running: true,
+            identityMatches: false,
+            startedAt: undefined,
+          }));
         if (!inspection.running) {
           delete state.processes[name];
           continue;
         }
         if (
           !serviceIdentityMatches(spec, inspection, state.ports) ||
-          !(await this.deps.stopProcessTree(registered.pid))
+          !(await this.deps.stopProcessTree(
+            registered.pid,
+            inspection.startedAt,
+          ))
         ) {
           rollbackFailures.push(name);
           continue;
@@ -1786,6 +2144,7 @@ export class LocalSystemSupervisor {
         delete state.processes[name];
       }
       if (Object.keys(state.processes).length > 0) writeState(this.root, state);
+      else if (previous?.maintenance) writeState(this.root, previous);
       else clearState(this.root);
       if (rollbackFailures.length > 0) {
         appendSupervisorLog(
@@ -1901,6 +2260,7 @@ export class LocalSystemSupervisor {
       loaded.env,
       ports,
       this.composeProjectName,
+      state?.maintenance ? 'postgres' : undefined,
     );
     const discoveredRuntime = runtimeIdentityFromDiscovery(
       this.composeProjectName,
@@ -2094,18 +2454,30 @@ export class LocalSystemSupervisor {
               item.health === 'healthy',
           ),
       );
-    const overall = runtimeIdentityIsAmbiguous
-      ? 'partial'
-      : runningCount === required.length &&
-          mainHealthy &&
-          evolutionHealthy &&
-          apiAvailable &&
-          dashboardHealth.ok &&
-          (!controlPlaneRequired || controlPlaneAuthenticated)
-        ? 'running'
-        : runningCount === 0 && !infrastructureRunning
-          ? 'stopped'
-          : 'partial';
+    const overall =
+      state?.maintenance &&
+      state.composeProjectName === this.composeProjectName &&
+      !runtimeIdentityIsAmbiguous &&
+      runningCount === 0 &&
+      runtime.volumeStatus === 'canonical' &&
+      dockerServices.some(
+        (item) => item.service === 'postgres' && item.health === 'healthy',
+      ) &&
+      !apiAvailable &&
+      !dashboardHealth.ok
+        ? 'maintenance'
+        : runtimeIdentityIsAmbiguous
+          ? 'partial'
+          : runningCount === required.length &&
+              mainHealthy &&
+              evolutionHealthy &&
+              apiAvailable &&
+              dashboardHealth.ok &&
+              (!controlPlaneRequired || controlPlaneAuthenticated)
+            ? 'running'
+            : runningCount === 0 && !infrastructureRunning
+              ? 'stopped'
+              : 'partial';
     const operationLock = await operationLockPromise;
     return {
       ...operationLock,
@@ -2225,6 +2597,7 @@ export class LocalSystemSupervisor {
     const validatedProcesses: Array<{
       spec: ServiceSpec;
       registered: RegisteredProcess;
+      inspectedStartedAt: string | undefined;
     }> = [];
     if (state) {
       for (const spec of [...this.specs].reverse()) {
@@ -2242,7 +2615,11 @@ export class LocalSystemSupervisor {
           );
           continue;
         }
-        validatedProcesses.push({ spec, registered });
+        validatedProcesses.push({
+          spec,
+          registered,
+          inspectedStartedAt: inspection.startedAt,
+        });
       }
     }
     const mainRunning = parseComposeStatuses(mainBeforeStop.stdout).some(
@@ -2251,6 +2628,7 @@ export class LocalSystemSupervisor {
     const evolutionRunning = parseComposeStatuses(
       evolutionBeforeStop.stdout,
     ).some((item) => item.state === 'running');
+    let maintenanceStopServices: string[] = [];
     if (mainRunning) {
       const mainDiscovery = await discoverMainInfrastructureContainers(
         this.root,
@@ -2258,6 +2636,8 @@ export class LocalSystemSupervisor {
         loaded.env,
         loaded.ports,
         this.composeProjectName,
+        undefined,
+        state?.maintenance === true,
       );
       const mainRuntime = runtimeIdentityFromDiscovery(
         this.composeProjectName,
@@ -2284,7 +2664,8 @@ export class LocalSystemSupervisor {
           : [];
       if (
         mainDiscovery.status !== 'resolved' ||
-        !hasCompleteMainInfrastructure(discoveredMainServices) ||
+        (!state?.maintenance &&
+          !hasCompleteMainInfrastructure(discoveredMainServices)) ||
         verifiedMainRuntime.volumeStatus !== 'canonical'
       ) {
         return {
@@ -2293,6 +2674,11 @@ export class LocalSystemSupervisor {
             'nao foi possivel confirmar a identidade da infraestrutura principal antes do stop',
           ],
         };
+      }
+      if (state?.maintenance && mainDiscovery.status === 'resolved') {
+        maintenanceStopServices = mainDiscovery.containers.map(
+          (item) => item.service,
+        );
       }
     }
     const validatedPids = new Set(
@@ -2327,16 +2713,22 @@ export class LocalSystemSupervisor {
           if (!occupant.pid) return true;
           if (validatedPids.has(occupant.pid)) return false;
           if (!this.deps.isProcessInTree) return true;
-          const belongsToValidatedProcess = (await Promise.all(
-            validatedProcesses.map(({ registered }) =>
-              this.deps.isProcessInTree!(registered.pid, occupant.pid!),
-            ),
-          )).some(Boolean);
+          const belongsToValidatedProcess = (
+            await Promise.all(
+              validatedProcesses.map(({ registered }) =>
+                this.deps.isProcessInTree!(registered.pid, occupant.pid!),
+              ),
+            )
+          ).some(Boolean);
           return !belongsToValidatedProcess;
         }),
       )
     ).some(Boolean);
-    if ((mainRunning || evolutionRunning) && validatedProcesses.length === 0) {
+    if (
+      (mainRunning || evolutionRunning) &&
+      validatedProcesses.length === 0 &&
+      !(state?.maintenance === true && manualIntervention.length === 0)
+    ) {
       return {
         stopped: false,
         manualIntervention: [
@@ -2354,18 +2746,26 @@ export class LocalSystemSupervisor {
         ],
       };
     }
-    for (const { spec, registered } of validatedProcesses) {
-      if (!(await this.deps.stopProcessTree(registered.pid))) {
+    for (const { spec, registered, inspectedStartedAt } of validatedProcesses) {
+      if (
+        !(await this.deps.stopProcessTree(registered.pid, inspectedStartedAt))
+      ) {
         manualIntervention.push(`${spec.name}: processo nao encerrou`);
       }
     }
-    const mainStop = await this.deps.run(
-      composeSpec(
-        this.root,
-        mainComposeArguments(this.composeProjectName, ['stop']),
-        loaded.env,
-      ),
-    );
+    const mainStop =
+      state?.maintenance && !mainRunning
+        ? { code: 0, stdout: '', stderr: '' }
+        : await this.deps.run(
+            composeSpec(
+              this.root,
+              mainComposeArguments(this.composeProjectName, [
+                'stop',
+                ...maintenanceStopServices,
+              ]),
+              loaded.env,
+            ),
+          );
     const evolutionStop = skipEvolution
       ? { code: 0, stdout: '', stderr: '' }
       : await this.deps.run(

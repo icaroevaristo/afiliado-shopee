@@ -9,6 +9,8 @@ import type {
   SystemDependencies,
 } from './types';
 import { processStartedAtMatches } from './types';
+import { windowsProcessStopScript } from './windows-process-stop';
+import { readPortOccupant } from './port-inspection';
 
 const runCommand = (spec: CommandSpec): Promise<CommandResult> =>
   new Promise((resolve, reject) => {
@@ -65,18 +67,6 @@ const waitUntilStopped = async (pid: number, timeoutMs: number) => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return !processExists(pid);
-};
-
-const waitUntilAllStopped = async (
-  pids: readonly number[],
-  timeoutMs: number,
-) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !processExists(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return pids.every((pid) => !processExists(pid));
 };
 
 const getWindowsProcessTree = async (rootPid: number) => {
@@ -249,24 +239,6 @@ const inspectPosixProcessIdentity = async (
   };
 };
 
-const getWindowsPortOccupant = async (port: number) => {
-  const script = [
-    `$c=Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1`,
-    'if ($null -eq $c) { exit 3 }',
-    '$p=Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue',
-    '[pscustomobject]@{Pid=$c.OwningProcess;Name=if($p){$p.ProcessName}else{\"unknown\"}} | ConvertTo-Json -Compress',
-  ].join('; ');
-  const result = await runCommand({
-    command: 'powershell.exe',
-    args: ['-NoProfile', '-NonInteractive', '-Command', script],
-    cwd: process.cwd(),
-  });
-  if (result.code === 3 || !result.stdout.trim()) return null;
-  if (result.code !== 0) return { processName: 'unknown' };
-  const parsed = JSON.parse(result.stdout) as { Pid?: number; Name?: string };
-  return { pid: parsed.Pid, processName: parsed.Name ?? 'unknown' };
-};
-
 export const createSystemDependencies = (): SystemDependencies => ({
   run: runCommand,
   spawn: (spec) =>
@@ -297,25 +269,21 @@ export const createSystemDependencies = (): SystemDependencies => ({
     process.platform === 'win32'
       ? inspectWindowsProcessIdentity(pid, marker)
       : inspectPosixProcessIdentity(pid, marker),
-  stopProcessTree: async (pid) => {
+  stopProcessTree: async (pid, inspectedStartedAt) => {
     if (!processExists(pid)) return true;
     if (process.platform === 'win32') {
-      const tree = await getWindowsProcessTree(pid);
-      await runCommand({
-        command: 'taskkill.exe',
-        args: ['/PID', String(pid), '/T'],
+      if (!inspectedStartedAt) return false;
+      const result = await runCommand({
+        command: 'powershell.exe',
+        args: [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          windowsProcessStopScript(pid, inspectedStartedAt),
+        ],
         cwd: process.cwd(),
       });
-      if (await waitUntilAllStopped(tree, 5_000)) return true;
-      for (const treePid of [...tree].reverse()) {
-        if (!processExists(treePid)) continue;
-        await runCommand({
-          command: 'taskkill.exe',
-          args: ['/PID', String(treePid), '/F'],
-          cwd: process.cwd(),
-        });
-      }
-      return waitUntilAllStopped(tree, 5_000);
+      return result.code === 0;
     }
     try {
       process.kill(-pid, 'SIGTERM');
@@ -330,18 +298,8 @@ export const createSystemDependencies = (): SystemDependencies => ({
     }
     return waitUntilStopped(pid, 5_000);
   },
-  getPortOccupant: async (port) => {
-    if (process.platform === 'win32') return getWindowsPortOccupant(port);
-    const result = await runCommand({
-      command: 'lsof',
-      args: ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp', '-Fc'],
-      cwd: process.cwd(),
-    }).catch(() => ({ code: 1, stdout: '', stderr: '' }));
-    if (result.code !== 0) return null;
-    const pid = Number(/^p(\d+)$/m.exec(result.stdout)?.[1]);
-    const processName = /^c(.+)$/m.exec(result.stdout)?.[1] ?? 'unknown';
-    return { ...(Number.isInteger(pid) ? { pid } : {}), processName };
-  },
+  getPortOccupant: (port) =>
+    readPortOccupant(port, process.platform, runCommand),
   isProcessInTree: async (rootPid, candidatePid) => {
     const tree =
       process.platform === 'win32'
