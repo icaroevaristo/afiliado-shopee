@@ -1,3 +1,4 @@
+import { createWhatsAppDispatchManualRecoveryQueue } from '../../api/src/whatsapp-dispatch-manual-recovery-queue';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Job, Worker } from 'bullmq';
@@ -26,7 +27,6 @@ import { PrismaWhatsAppDispatchManualRecoveryRepository } from '../../api/src/pr
 import {
   WhatsAppDispatchManualRecoveryService,
   type ManualRecoveryQueue,
-  type ManualRecoveryJobState,
 } from '../../api/src/whatsapp-dispatch-manual-recovery-service';
 import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from '../../api/src/repositories';
 import { WhatsAppDeliveryConfirmationService } from '../../api/src/whatsapp-delivery-confirmation-service';
@@ -47,20 +47,6 @@ const databaseSuite = enabled ? describe : describe.skip;
 const logger = { info: () => undefined, error: () => undefined };
 const delay = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
-const jobState = (state: string): ManualRecoveryJobState => {
-  switch (state) {
-    case 'failed':
-    case 'waiting':
-    case 'active':
-    case 'delayed':
-    case 'completed':
-    case 'paused':
-      return state;
-    default:
-      return 'unknown';
-  }
-};
-
 databaseSuite('R1B disposable PostgreSQL/BullMQ lifecycle', () => {
   const prisma = createPrismaClient(process.env.DATABASE_URL);
   const repositories = createPrismaRepositories(prisma);
@@ -360,36 +346,9 @@ databaseSuite('R1B disposable PostgreSQL/BullMQ lifecycle', () => {
   };
 
   const recoveryQueue: ManualRecoveryQueue = {
-    async getJob(id) {
-      const job = await queue.getJob(id);
-      if (!job) return null;
-      return {
-        id,
-        instanceName: job.data.instanceName,
-        get attemptsMade() {
-          return job.attemptsMade;
-        },
-        getState: async () => {
-          const fresh = await queue.getJob(id);
-          if (fresh) job.attemptsMade = fresh.attemptsMade;
-          return jobState(await job.getState());
-        },
-        retry: () => job.retry(),
-      };
-    },
-    async findEquivalentJobIds(dispatchId) {
-      const jobs = await queue.getJobs([
-        'waiting',
-        'active',
-        'delayed',
-        'completed',
-        'failed',
-        'paused',
-      ]);
-      return jobs
-        .filter((job) => job.data.dispatchId === dispatchId)
-        .map((job) => String(job.id));
-    },
+    getJob: (id) => createWhatsAppDispatchManualRecoveryQueue(queue).getJob(id),
+    findEquivalentJobIds: (id) =>
+      createWhatsAppDispatchManualRecoveryQueue(queue).findEquivalentJobIds(id),
   };
 
   it('orphan stays inert through real worker, paused automation, recovery, expiration and restart', async () => {
@@ -561,6 +520,94 @@ databaseSuite('R1B disposable PostgreSQL/BullMQ lifecycle', () => {
       ).toEqual(before);
     },
   );
+
+  it('CLI queue adapter converges when the active worker completes before the retry readback', async () => {
+    const { id, instance } = await seed(true);
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn<WhatsAppProvider['sendMessage']>(async () => ({
+        status: 'sent',
+        externalMessageId: id + '-fast',
+        sentAt: new Date(),
+      })),
+    };
+    const canonicalQueue = createWhatsAppDispatchManualRecoveryQueue(queue);
+    // Force the real worker to complete between job.retry and the service readback.
+    // State/count observations still use the exact production CLI adapter.
+    const completionBarrier: ManualRecoveryQueue = {
+      findEquivalentJobIds: (id) => canonicalQueue.findEquivalentJobIds(id),
+      async getJob(id) {
+        const job = await canonicalQueue.getJob(id);
+        if (!job) return null;
+        return {
+          id: job.id,
+          instanceName: job.instanceName,
+          get attemptsMade() {
+            return job.attemptsMade;
+          },
+          getState: () => job.getState(),
+          async retry() {
+            await job.retry();
+            await waitState(id, 'completed');
+          },
+        };
+      },
+    };
+    const service = new WhatsAppDispatchManualRecoveryService(
+      new PrismaWhatsAppDispatchManualRecoveryRepository(prisma),
+      completionBarrier,
+      {},
+      {
+        evaluateAutomationReadiness: async () => ({
+          allowed: true,
+          reasons: [],
+        }),
+      },
+    );
+    const input = {
+      dispatchId: id,
+      expectedRunId: id,
+      expectedExecutionId: id,
+      confirmation: WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+    };
+    await service.authorize(input);
+    const retryCount = retries.mock.calls.length;
+    const runtime = createWhatsAppDispatchWorker(redisUrl, {
+      prisma,
+      connection,
+      logger,
+      commercialAutomationMode: 'send',
+      whatsAppProvider: provider,
+      whatsAppProviderResolver: () => provider,
+      reservationLeaseMilliseconds: 120_000,
+      groupSendPolicy: new WhatsAppGroupSendPolicy({
+        enabled: true,
+        safeMode: true,
+        instanceName: instance,
+      }),
+    });
+    try {
+      const result = await service.requeueAuthorizedRetry(input);
+      expect(result).toMatchObject({
+        kind: 'REQUEUED',
+        state: 'completed',
+        attemptsMade: 2,
+      });
+      expect(result.context).toMatchObject({
+        dispatchStatus: 'SUBMITTED',
+        attemptCount: 2,
+        sentAt: null,
+        runFinalStatus: 'AMBIGUOUS',
+        investigationRequired: true,
+      });
+      expect((await service.requeueAuthorizedRetry(input)).kind).toBe(
+        'ALREADY_REQUEUED',
+      );
+      expect(provider.sendMessage).toHaveBeenCalledTimes(1);
+      expect(retries.mock.calls.length - retryCount).toBe(1);
+    } finally {
+      await runtime.close();
+    }
+  }, 30_000);
 
   it.each(['ack', 'timeout'] as const)(
     'authorized second attempt submits, converges after restart, then %s without another retry',
