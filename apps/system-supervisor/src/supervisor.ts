@@ -160,6 +160,47 @@ const arraysEqual = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length &&
   left.every((value, index) => value === right[index]);
 
+const sanitizeMaintenanceStopDiagnostics = (
+  interventions: readonly string[],
+) =>
+  interventions.map((intervention) => {
+    if (
+      intervention ===
+      'infraestrutura em execucao sem estado local pertencente a esta worktree'
+    )
+      return 'INFRASTRUCTURE_WITHOUT_MAINTENANCE_OWNERSHIP';
+    if (
+      intervention ===
+      'nao foi possivel confirmar a identidade da infraestrutura principal antes do stop'
+    )
+      return 'MAIN_INFRASTRUCTURE_IDENTITY_UNCONFIRMED';
+    if (
+      intervention ===
+      'nao foi possivel confirmar a propriedade da infraestrutura antes do stop'
+    )
+      return 'INFRASTRUCTURE_OWNERSHIP_UNCONFIRMED';
+    if (
+      intervention ===
+      'nao foi possivel confirmar a propriedade das portas da aplicacao'
+    )
+      return 'APPLICATION_PORT_OWNERSHIP_UNCONFIRMED';
+    if (
+      intervention ===
+      'processo de aplicacao em execucao sem estado local pertencente a esta worktree'
+    )
+      return 'UNOWNED_APPLICATION_PROCESS';
+    if (intervention === 'compose principal') return 'MAIN_COMPOSE_STOP_FAILED';
+    if (intervention === 'compose Evolution')
+      return 'EVOLUTION_COMPOSE_STOP_FAILED';
+    if (intervention === 'confirmacao do compose principal')
+      return 'MAIN_COMPOSE_STOP_UNCONFIRMED';
+    if (intervention === 'confirmacao do compose Evolution')
+      return 'EVOLUTION_COMPOSE_STOP_UNCONFIRMED';
+    if (SERVICE_NAMES.some((service) => intervention === `${service}: processo nao encerrou`))
+      return 'APPLICATION_PROCESS_DID_NOT_STOP';
+    return 'UNCLASSIFIED_STOP_INTERVENTION';
+  });
+
 const parseExpectedMainInfrastructure = (
   stdout: string,
   ports: LocalSystemState['ports'],
@@ -1552,13 +1593,21 @@ export class LocalSystemSupervisor {
     assertNotInterrupted();
     try {
       // All errors after initiating topology changes retain maintenance ownership.
+      writeState(this.root, { ...state, maintenance: true });
       const stopped = await this.stop(processEnv);
-      if (!stopped.stopped)
+      if (!stopped.stopped) {
+        appendSupervisorLog(
+          this.root,
+          `Maintenance stop failed; diagnostics=${JSON.stringify(
+            sanitizeMaintenanceStopDiagnostics(stopped.manualIntervention),
+          )}; no deploy`,
+        );
         throw new LocalSystemError(
           'Topologia nao encerrou; migration bloqueada',
           'SYSTEM_MAINTENANCE_STOP_FAILED',
           true,
         );
+      }
       await assertProcesses(true);
       writeState(this.root, { ...state, maintenance: true });
       assertNotInterrupted();
