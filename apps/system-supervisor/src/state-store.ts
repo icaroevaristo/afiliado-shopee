@@ -111,6 +111,7 @@ const isState = (value: unknown): value is LocalSystemState => {
             'mode',
             'ports',
             'processes',
+            ...('runtimeProfile' in state ? ['runtimeProfile'] : []),
             ...('maintenance' in state ? ['maintenance'] : []),
           ]
         : ['version', 'startedAt', 'mode', 'ports', 'processes'],
@@ -120,6 +121,7 @@ const isState = (value: unknown): value is LocalSystemState => {
   }
   if (
     ('maintenance' in state && state.maintenance !== true) ||
+    ('runtimeProfile' in state && state.runtimeProfile !== 'safe-certification') ||
     state.version !== 1 ||
     !validTimestamp(state.startedAt) ||
     (state.mode !== 'preview' && state.mode !== 'send') ||

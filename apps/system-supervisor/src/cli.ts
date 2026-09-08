@@ -20,7 +20,12 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 type ParsedCommand =
   | { command: 'migrate'; confirmed: true; composeProjectName?: string }
-  | { command: 'start' | 'stop'; composeProjectName?: string }
+  | {
+      command: 'start';
+      runtimeProfile: 'default' | 'safe-certification';
+      composeProjectName?: string;
+    }
+  | { command: 'stop'; composeProjectName?: string }
   | { command: 'status'; json: boolean; composeProjectName?: string }
   | { command: 'logs'; service?: LogServiceName; lines: number };
 
@@ -72,11 +77,32 @@ export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
       composeProjectName: parsedFlags.composeProjectName,
     };
   }
-  if (command === 'start' || command === 'stop') {
+  if (command === 'start') {
+    const parsedFlags = parseProjectNameFlag(flags);
+    const safeFlags = parsedFlags.remaining.filter(
+      (flag) => flag === '--safe-certification',
+    );
+    if (
+      safeFlags.length > 1 ||
+      parsedFlags.remaining.length !== safeFlags.length
+    ) {
+      throw new LocalSystemError(
+        'O comando start aceita somente --safe-certification',
+        'SYSTEM_INVALID_ARGUMENT',
+      );
+    }
+    return {
+      command,
+      runtimeProfile:
+        safeFlags.length === 1 ? 'safe-certification' : 'default',
+      composeProjectName: parsedFlags.composeProjectName,
+    };
+  }
+  if (command === 'stop') {
     const parsedFlags = parseProjectNameFlag(flags);
     if (parsedFlags.remaining.length > 0) {
       throw new LocalSystemError(
-        `O comando ${command} nao aceita argumentos`,
+        'O comando stop nao aceita argumentos',
         'SYSTEM_INVALID_ARGUMENT',
       );
     }
@@ -327,7 +353,7 @@ export const runSystemCli = async (
         ),
       );
     } else if (parsed.command === 'start') {
-      const status = await supervisor.start();
+      const status = await supervisor.start(process.env, parsed.runtimeProfile);
       console.log('Sistema local pronto. Nenhum tick ou envio foi disparado.');
       console.log(formatStatus(status));
     } else {

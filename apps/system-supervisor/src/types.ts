@@ -12,6 +12,7 @@ export const PREVIEW_STABILITY_PRISMA_VALIDATION =
 export type ServiceName = (typeof SERVICE_NAMES)[number];
 export type LogServiceName = (typeof LOG_SERVICE_NAMES)[number];
 export type AutomationMode = 'preview' | 'send';
+export type RuntimeProfile = 'default' | 'safe-certification';
 
 export type RegisteredProcess = {
   pid: number;
@@ -27,6 +28,8 @@ export type LocalSystemState = {
    * legacy state is rejected before any stop/start mutation.
    */
   composeProjectName?: string;
+  /** Explicit safe topology; absent states retain the legacy/default profile. */
+  runtimeProfile?: 'safe-certification';
   /** Maintenance ownership retained; infrastructure may be stopped or legacy PG-only. */
   maintenance?: true;
   startedAt: string;

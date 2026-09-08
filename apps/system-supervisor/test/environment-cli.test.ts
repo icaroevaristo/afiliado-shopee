@@ -12,6 +12,10 @@ import {
 } from '../src/cli';
 import { EventEmitter } from 'node:events';
 import { readState, runtimeDirectory, statePath } from '../src/state-store';
+import {
+  applyRuntimeProfile,
+  SAFE_CERTIFICATION_ENVIRONMENT,
+} from '../src/safe-certification-profile';
 
 const directories: string[] = [];
 const temporaryDirectory = () => {
@@ -109,6 +113,19 @@ describe('local system environment', () => {
 });
 
 describe('local system CLI arguments', () => {
+  it('accepts only one explicit safe-certification start flag', () => {
+    expect(parseSystemArgs(['start', '--safe-certification'])).toEqual({
+      command: 'start',
+      runtimeProfile: 'safe-certification',
+    });
+    expect(parseSystemArgs(['start'])).toEqual({
+      command: 'start',
+      runtimeProfile: 'default',
+    });
+    expect(() =>
+      parseSystemArgs(['start', '--safe-certification', '--safe-certification']),
+    ).toThrowError(expect.objectContaining({ code: 'SYSTEM_INVALID_ARGUMENT' }));
+  });
   it('accepts only the documented status and log options', () => {
     expect(parseSystemArgs(['status', '--', '--json'])).toEqual({
       command: 'status',
@@ -140,6 +157,38 @@ describe('local system CLI arguments', () => {
     ['status', '--compose-project-name='],
   ])('rejects unsafe or undocumented arguments: %s', (...args) => {
     expect(() => parseSystemArgs(args)).toThrow();
+  });
+});
+
+describe('safe certification environment', () => {
+  it('overrides a dangerous inherited profile and removes external credentials', () => {
+    const effective = applyRuntimeProfile(
+      {
+        COMMERCIAL_AUTOMATION_MODE: 'send',
+        SHOPEE_AFFILIATE_PROVIDER: 'official',
+        SHOPEE_AFFILIATE_API_ENABLED: 'true',
+        COMMERCIAL_AI_COPY_ENABLED: 'true',
+        WHATSAPP_PROVIDER: 'evolution',
+        WHATSAPP_GROUP_SEND_ENABLED: 'true',
+        OPENAI_API_KEY: 'must-not-reach-children',
+        SHOPEE_AFFILIATE_SECRET: 'must-not-reach-children',
+        SHOPEE_PARTNER_ID: 'must-not-reach-children',
+        SHOPEE_PARTNER_KEY: 'must-not-reach-children',
+        EVOLUTION_API_KEY: 'must-not-reach-children',
+        WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'must-not-reach-children',
+        LOCAL_API_AUTH_TOKEN: 'local-control-plane-token',
+      },
+      'safe-certification',
+    );
+
+    expect(effective).toMatchObject(SAFE_CERTIFICATION_ENVIRONMENT);
+    expect(effective.OPENAI_API_KEY).toBeUndefined();
+    expect(effective.SHOPEE_AFFILIATE_SECRET).toBeUndefined();
+    expect(effective.SHOPEE_PARTNER_ID).toBeUndefined();
+    expect(effective.SHOPEE_PARTNER_KEY).toBeUndefined();
+    expect(effective.EVOLUTION_API_KEY).toBeUndefined();
+    expect(effective.WHATSAPP_DELIVERY_WEBHOOK_TOKEN).toBeUndefined();
+    expect(effective.LOCAL_API_AUTH_TOKEN).toBe('local-control-plane-token');
   });
 });
 
