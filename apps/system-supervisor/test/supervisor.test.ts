@@ -21,7 +21,8 @@ import {
   composeProjectRuntimeRoot,
   evolutionComposeArguments,
 } from '../src/runtime-identity';
-import { LocalSystemSupervisor } from '../src/supervisor';
+import { LocalSystemSupervisor, expectedServices } from '../src/supervisor';
+import { formatStatus } from '../src/cli';
 import type {
   CommandSpec,
   LocalSystemState,
@@ -530,6 +531,30 @@ const environment = (mode: 'preview' | 'send' = 'preview') => ({
 
 const createSupervisor = (root: string, deps: SystemDependencies) =>
   new LocalSystemSupervisor(root, deps, specs, { validateRoot: () => true });
+
+const certificationSnapshot = (overrides: Partial<{
+  paused: boolean | null;
+  pending: string[];
+}> = {}) => ({
+  systemIdentifier: 'test-system-identifier',
+  database: 'shopee_auto_affiliate_ai',
+  schema: 'public',
+  paused: true,
+  otherSessions: 0,
+  pending: [],
+  dispatchFingerprint: 'historic-dispatch-fingerprint',
+  ...overrides,
+});
+
+const createSafeCertificationSupervisor = (
+  root: string,
+  deps: SystemDependencies,
+  snapshot = certificationSnapshot(),
+) =>
+  new LocalSystemSupervisor(root, deps, specs, {
+    validateRoot: () => true,
+    maintenanceDatabase: async () => snapshot,
+  });
 describe('maintenance migrate', () => {
   const setup = (options: Parameters<typeof harness>[0] = {}) => {
     const root = createRoot();
@@ -1035,6 +1060,181 @@ const registeredProcessFixture = (name: ServiceName, pid: number) => ({
 });
 
 describe('LocalSystemSupervisor', () => {
+  it('selects services by profile while preserving default preview and SEND', () => {
+    expect(expectedServices('preview', 'safe-certification')).toEqual(['api', 'dashboard']);
+    expect(expectedServices('send', 'safe-certification')).toEqual(['api', 'dashboard']);
+    expect(expectedServices('preview')).toEqual(['api', 'dashboard', 'commercial-worker']);
+    expect(expectedServices('send')).toEqual(['api', 'dashboard', 'commercial-worker', 'whatsapp-dispatch-worker']);
+  });
+
+  it.each([2, 1])('blocks drift or unavailable diff (%s) before app spawn', async (code) => {
+    const root = createRoot();
+    const state = harness();
+    const run = state.deps.run;
+    state.deps.run = async (command) => command.args.includes('--from-schema-datasource')
+      ? { code, stdout: '', stderr: 'sensitive diagnostics must not be logged' }
+      : run(command);
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+    await expect(supervisor.start({
+      ...dailySendReadyEnvironment(),
+      DATABASE_URL: 'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    }, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_SCHEMA_DRIFT' });
+    expect(state.spawned).toEqual([]);
+    expect(state.commands.some((command) => command.args.includes('db:deploy'))).toBe(false);
+  });
+
+  it.each([
+    { paused: null, pending: [] },
+    { paused: true, pending: ['pending'] },
+  ])('blocks a missing pause or a pending migration independently: %j', async (snapshot) => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(root, state.deps, certificationSnapshot(snapshot));
+    await expect(supervisor.start({
+      ...dailySendReadyEnvironment(),
+      DATABASE_URL: 'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    }, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+    expect(state.spawned).toEqual([]);
+  });
+
+  it('starts a dangerous inherited SEND environment only with the safe profile', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+    const dangerous = {
+      ...dailySendReadyEnvironment('local-token'),
+      DATABASE_URL:
+        'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+      COMMERCIAL_AI_COPY_ENABLED: 'true',
+      OPENAI_API_KEY: 'openai-secret-must-not-reach-child',
+    };
+
+    await supervisor.start(dangerous, 'safe-certification');
+
+    expect(state.spawned).toEqual(['api', 'dashboard']);
+    expect(
+      state.commands.some((command) => command.args.includes('evolution:up')),
+    ).toBe(false);
+    expect(
+      state.commands.some((command) => command.args.includes('db:deploy')),
+    ).toBe(false);
+    expect(
+      state.commands.map((command) => JSON.stringify(command.env)).join('\n'),
+    ).not.toContain('openai-secret-must-not-reach-child');
+    expect(readState(root)?.runtimeProfile).toBe('safe-certification');
+  });
+
+  it('requires a known paused database before spawning an application process', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(
+      root,
+      state.deps,
+      certificationSnapshot({ paused: false }),
+    );
+
+    await expect(
+      supervisor.start(
+        {
+          ...dailySendReadyEnvironment(),
+          DATABASE_URL:
+            'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+        },
+        'safe-certification',
+      ),
+    ).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+    expect(state.spawned).toEqual([]);
+    expect(readState(root)?.runtimeProfile).toBe('safe-certification');
+  });
+
+  it('fails closed for unknown pause or pending migrations without db deploy', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(
+      root,
+      state.deps,
+      certificationSnapshot({ paused: null, pending: ['pending'] }),
+    );
+
+    await expect(
+      supervisor.start(
+        {
+          ...dailySendReadyEnvironment(),
+          DATABASE_URL:
+            'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+        },
+        'safe-certification',
+      ),
+    ).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+    expect(state.spawned).toEqual([]);
+    expect(
+      state.commands.some((command) => command.args.includes('db:deploy')),
+    ).toBe(false);
+  });
+
+  it('uses persisted safe state for status and stop despite a SEND process environment', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+    const env = {
+      ...dailySendReadyEnvironment(),
+      DATABASE_URL:
+        'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+    await supervisor.start(env, 'safe-certification');
+    const status = await supervisor.status(env);
+    expect(status.runtimeProfile).toBe('safe-certification');
+    expect(formatStatus(status)).toContain('Perfil de runtime: safe-certification');
+    expect(vi.mocked(state.deps.request).mock.calls.map(([url]) => url).filter(
+      (url) => /scheduler|commercial-automation/.test(url),
+    )).toEqual([]);
+    await expect(supervisor.stop(env)).resolves.toMatchObject({ stopped: true });
+
+    expect(
+      state.commands.some((command) => command.args.includes('evolution:up')),
+    ).toBe(false);
+    expect(
+      state.commands.some((command) => command.args.includes('evolution:down')),
+    ).toBe(false);
+  });
+
+  it('does not start Evolution during a safe-profile application rollback', async () => {
+    const root = createRoot();
+    const state = harness({ healthFails: true });
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+
+    await expect(
+      supervisor.start(
+        {
+          ...dailySendReadyEnvironment(),
+          DATABASE_URL:
+            'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+        },
+        'safe-certification',
+      ),
+    ).rejects.toMatchObject({ code: 'API_UNHEALTHY' });
+    expect(
+      state.commands.some((command) => command.args.includes('evolution:up')),
+    ).toBe(false);
+    expect(readState(root)?.runtimeProfile).toBe('safe-certification');
+  });
+
+  it('does not spawn commercial consumers on repeated safe start', async () => {
+    const root = createRoot();
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+    const env = {
+      ...dailySendReadyEnvironment(),
+      DATABASE_URL:
+        'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+
+    await supervisor.start(env, 'safe-certification');
+    await supervisor.start(env, 'safe-certification');
+
+    expect(state.spawned).toEqual(['api', 'dashboard']);
+  });
+
   it('pins Evolution package commands to the canonical Compose project', () => {
     const packageJson = JSON.parse(
       readFileSync(

@@ -11,8 +11,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createConnection } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { createConnection, createServer } from 'node:net';
+import { randomUUID, createHash } from 'node:crypto';
+import { createRedisConnection, createCommercialAutomationQueue, createCommercialInventoryRefillQueue, createWhatsAppDispatchQueue, JOB_NAMES, DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID } from '@shopee-auto-affiliate-ai/queue';
 import { expect, it } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { LocalSystemSupervisor } from '../src/supervisor';
@@ -39,6 +41,445 @@ const listening = (port: number) =>
     socket.once('error', () => finish(false));
     socket.setTimeout(1000, () => finish(false));
   });
+
+const availablePort = () =>
+  new Promise<number>((resolvePort, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('Unable to allocate a disposable port'));
+        return;
+      }
+      server.close((error) => (error ? reject(error) : resolvePort(address.port)));
+    });
+  });
+
+it.skipIf(!enabled)(
+  'R1F safe certification uses disposable PostgreSQL and Redis without deploy or providers',
+  async () => {
+    const source = resolve(import.meta.dirname, '../../..');
+    const root = mkdtempSync(join(tmpdir(), 'r1f-safe-certification-'));
+    const project = `r1f-${randomUUID().slice(0, 8)}`;
+    const postgresPort = await availablePort();
+    const redisPort = await availablePort();
+    const apiPort = await availablePort();
+    const dashboardPort = await availablePort();
+    const docker = process.env.R1F_DOCKER_PATH ?? 'docker';
+    const databaseUrl = `postgresql://postgres@127.0.0.1:${postgresPort}/shopee_auto_affiliate_ai?schema=public`;
+    const redisUrl = `redis://127.0.0.1:${redisPort}`;
+    const commands: CommandSpec[] = [];
+    const spawned: string[] = [];
+    const processes = new Map<
+      number,
+      { marker: string; startedAt: string; running: boolean }
+    >();
+    let nextPid = 700;
+    const apiChildren = new Map<number, ReturnType<typeof spawn>>();
+    let apiErrors = '';
+    const requestedUrls: string[] = [];
+    const childEnvironments: NodeJS.ProcessEnv[] = [];
+    let connection: ReturnType<typeof createRedisConnection> | undefined;
+    const queues: Array<{ close(): Promise<void> }> = [];
+    let infrastructure = false;
+    let client: ReturnType<typeof createPrismaClient> | undefined;
+    const command = (
+      executable: string,
+      args: string[],
+      cwd = root,
+      overrides: NodeJS.ProcessEnv = {},
+    ) => {
+      const result = spawnSync(executable, args, {
+        cwd,
+        env: {
+          SystemRoot: process.env.SystemRoot,
+          WINDIR: process.env.WINDIR,
+          COMSPEC: process.env.COMSPEC,
+          TEMP: process.env.TEMP,
+          TMP: process.env.TMP,
+          PATHEXT: process.env.PATHEXT,
+          PATH: process.env.PATH ?? process.env.Path,
+          ...overrides,
+        },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 120_000,
+      });
+      return {
+        code: result.status ?? 1,
+        stdout: result.stdout ?? '',
+        stderr: result.stderr ?? '',
+      };
+    };
+    try {
+      mkdirSync(join(root, 'packages/database/prisma'), { recursive: true });
+      for (const file of [
+        '.env',
+        'package.json',
+        'pnpm-lock.yaml',
+        'infra/evolution/docker-compose.yml',
+        'apps/api/src/server.ts',
+        'apps/dashboard/package.json',
+        'apps/worker/src/commercial-automation-worker.ts',
+        'apps/worker/src/whatsapp-dispatch-runtime.ts',
+      ]) {
+        const target = join(root, file);
+        mkdirSync(resolve(target, '..'), { recursive: true });
+        writeFileSync(target, file === '.env' ? '' : '{}');
+      }
+      writeFileSync(
+        join(root, 'docker-compose.yml'),
+        `services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shopee_auto_affiliate_ai
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ['127.0.0.1:${postgresPort}:5432']
+    volumes: ['postgres_data:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d shopee_auto_affiliate_ai']
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    ports: ['127.0.0.1:${redisPort}:6379']
+    tmpfs: ['/data']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 1s
+      timeout: 3s
+      retries: 30
+volumes:
+  postgres_data:
+`,
+      );
+      cpSync(
+        join(source, 'packages/database/prisma/schema.prisma'),
+        join(root, 'packages/database/prisma/schema.prisma'),
+      );
+      cpSync(
+        join(source, 'packages/database/prisma/migrations'),
+        join(root, 'packages/database/prisma/migrations'),
+        { recursive: true },
+      );
+      symlinkSync(join(source, 'node_modules'), join(root, 'node_modules'), 'junction');
+      symlinkSync(
+        join(source, 'packages/database/node_modules'),
+        join(root, 'packages/database/node_modules'),
+        'junction',
+      );
+      expect(command(docker, ['volume', 'inspect', `${project}_postgres_data`]).code).not.toBe(0);
+      infrastructure = true;
+      const composeUp = command(docker, [
+        'compose',
+        '--project-name',
+        project,
+        'up',
+        '-d',
+        '--pull',
+        'never',
+        '--wait',
+      ]);
+      if (composeUp.code !== 0)
+        throw new Error(`Disposable compose failed: ${composeUp.stderr.slice(-1000)}`);
+      infrastructure = true;
+      const prismaPath = join(source, 'packages/database/node_modules/prisma/build/index.js');
+      const migrationDeploy = command(process.execPath, [
+        prismaPath,
+        'migrate',
+        'deploy',
+        '--schema',
+        join(root, 'packages/database/prisma/schema.prisma'),
+      ], root, { DATABASE_URL: databaseUrl });
+      if (migrationDeploy.code !== 0)
+        throw new Error(`Disposable migration failed: ${migrationDeploy.stderr.slice(-1600)}`);
+      expect(command(docker, ['compose', '--project-name', project, 'exec', '-T', 'redis', 'redis-cli', 'ping']).stdout.trim()).toBe('PONG');
+
+      client = createPrismaClient(databaseUrl);
+      await client.commercialAutomationSettings.upsert({
+        where: { id: 'commercial-automation' },
+        update: { paused: true },
+        create: { id: 'commercial-automation', paused: true },
+      });
+      const id = 'r1f-recovery-sensitive';
+      await client.whatsAppInstance.create({ data: { name: 'fixture', active: false, paused: true } });
+      await client.productLead.create({ data: {
+        id, providerProductId: id, nome: 'fixture', categoria: 'fixture',
+        preco: '10', desconto: 0, nota: 5, vendidos: 1, comissao: 1,
+        loja: 'fixture', urlImagem: 'https://example.invalid/image', title: 'fixture',
+      } });
+      await client.generatedCopy.create({ data: {
+        id, productId: id, titulo: 'fixture', mensagem: 'fixture', cta: 'fixture', hashtags: '',
+      } });
+      await client.whatsAppDestination.create({ data: {
+        id, name: 'fixture', destination: 'fixture.invalid', active: false,
+      } });
+      await client.whatsAppDispatch.create({ data: {
+        id, productId: id, generatedCopyId: id, destinationId: id,
+        status: 'PROCESSING', attemptCount: 1, instanceName: 'fixture',
+      } });
+      await client.commercialAutomationExecution.create({ data: {
+        id, schedulerJobId: id, bullMqJobId: id, mode: 'SEND',
+        status: 'STARTED', externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+        reasons: [], startedAt: new Date('2020-01-01'), leaseExpiresAt: new Date('2020-01-01'),
+        heartbeatAt: new Date('2020-01-01'), ownerId: 'stale-owner',
+      } });
+      await client.commercialPipelineRun.create({ data: {
+        id, executionId: id, instanceName: 'fixture', mode: 'CONFIRMED',
+        status: 'FAILED', finalStatus: 'AMBIGUOUS', investigationRequired: true,
+        dispatchId: id, jobId: id, productId: id, groupDestinationId: id,
+        groupFingerprint: 'a'.repeat(64), rejectionSummary: {}, selectionReasons: [], plannedSubIds: [],
+      } });
+      await client.commercialDispatchOutbox.create({ data: {
+        id, commercialRunId: id, dispatchId: id, jobId: id, instanceName: 'fixture',
+        status: 'PUBLISHED', publishedAt: new Date('2020-01-01'),
+      } });
+      const databaseFingerprint = async () => {
+        if (!client) throw new Error('Fixture DB unavailable');
+        return client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+          const tables = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+            "SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename");
+          const hashes: string[] = [];
+          for (const { name } of tables) {
+            const identifier = '"' + name.replaceAll('"', '""') + '"';
+            const rows = await tx.$queryRawUnsafe<Array<{ row: string }>>(
+              'SELECT row_to_json(t)::text AS row FROM public.' + identifier + ' t ORDER BY row_to_json(t)::text',
+            );
+            hashes.push(name, JSON.stringify(rows));
+          }
+          return createHash('sha256').update(hashes.join('\n')).digest('hex');
+        });
+      };
+      connection = createRedisConnection(redisUrl);
+      const automation = createCommercialAutomationQueue(connection);
+      const inventory = createCommercialInventoryRefillQueue(connection);
+      const whatsapp = createWhatsAppDispatchQueue(connection);
+      queues.push(automation, inventory, whatsapp);
+      await Promise.all([automation.waitUntilReady(), inventory.waitUntilReady(), whatsapp.waitUntilReady()]);
+      await automation.upsertJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+        { pattern: '0 0 1 1 *', tz: 'UTC' },
+        { name: JOB_NAMES.commercialAutomationTick, data: { mode: 'send' } });
+      await automation.add(JOB_NAMES.commercialAutomationTick, { mode: 'send' }, { jobId: 'existing-send' });
+      await inventory.add(JOB_NAMES.commercialInventoryRefill, { mode: 'send', provider: 'official' }, { jobId: 'existing-refill-send' });
+      await whatsapp.add(JOB_NAMES.whatsappDispatch, { dispatchId: id }, { jobId: 'existing-whatsapp' });
+      const redisFingerprint = async () => {
+        if (!connection) throw new Error('Fixture Redis unavailable');
+        const keys = (await connection.keys('bull:*')).sort();
+        const hash = createHash('sha256');
+        for (const key of keys) {
+          hash.update(key);
+          const dump = await connection.dumpBuffer(key);
+          if (!dump) throw new Error('Fixture key disappeared');
+          hash.update(dump);
+        }
+        return hash.digest('hex');
+      };
+      const redisBefore = await redisFingerprint();
+      const postgresBefore = await databaseFingerprint();
+      const schedulerBefore = await automation.getJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID);
+      const safeSnapshot = await readMaintenanceDatabase(root, databaseUrl);
+      expect(safeSnapshot.paused).toBe(true);
+      expect(safeSnapshot.pending).toEqual([]);
+
+      const deps: SystemDependencies = {
+        run: async (spec) => {
+          commands.push(spec);
+          if (spec.args.includes('db:deploy'))
+            return { code: 1, stdout: '', stderr: 'safe profile must not deploy' };
+          if (
+            spec.args.includes('--version') ||
+            spec.args.includes('@shopee-auto-affiliate-ai/dashboard')
+          ) {
+            if (spec.args.includes('@shopee-auto-affiliate-ai/dashboard')) {
+              mkdirSync(join(root, 'apps/dashboard/.next'), { recursive: true });
+              writeFileSync(join(root, 'apps/dashboard/.next/BUILD_ID'), 'r1f\n');
+            }
+            return { code: 0, stdout: '', stderr: '' };
+          }
+          if (spec.command === 'git')
+            return {
+              code: 0,
+              stdout: spec.args[0] === 'status' ? '' : `${'a'.repeat(40)}\n`,
+              stderr: '',
+            };
+          if (spec.args.includes('--from-schema-datasource')) {
+            expect(spec.env?.PGOPTIONS).toBe('-c default_transaction_read_only=on');
+            return command(spec.command, spec.args, spec.cwd, spec.env);
+          }
+          if (spec.command === 'docker') {
+            if (spec.args[0] === 'compose') expect(spec.args).toContain(project);
+            expect(spec.args.join(' ')).not.toContain('evolution');
+            return command(docker, spec.args, spec.cwd);
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        spawn: async (spec) => {
+          const startedAt = new Date().toISOString();
+          let pid = nextPid++;
+          childEnvironments.push(spec.env ?? {});
+          if (spec.args[0] === 'r1f-api') {
+            const child = spawn(process.execPath, [
+              '--import', pathToFileURL(join(source, 'node_modules/tsx/dist/loader.mjs')).href,
+              join(source, 'apps/api/src/server.ts'),
+            ], {
+              cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'],
+              env: { ...spec.env, TSX_TSCONFIG_PATH: join(source, 'tsconfig.runtime.json'), HOST: '127.0.0.1' },
+            });
+            child.stderr?.on('data', (chunk: Buffer) => { apiErrors += chunk.toString(); });
+            if (!child.pid) throw new Error('API fixture spawn failed');
+            pid = child.pid;
+            apiChildren.set(pid, child);
+          }
+          processes.set(pid, { marker: spec.args[0], startedAt, running: true });
+          spawned.push(spec.args[0]);
+          return { pid, startedAt };
+        },
+        inspectProcess: async (pid, marker) => {
+          const process = processes.get(pid);
+          return {
+            running: process?.running ?? false,
+            identityMatches: process?.marker === marker,
+            startedAt: process?.startedAt,
+          };
+        },
+        inspectProcessIdentity: async (pid, marker) => {
+          const process = processes.get(pid);
+          return { running: process?.running ?? false, markerMatches: process?.marker === marker, startedAt: process?.startedAt };
+        },
+        stopProcessTree: async (pid) => {
+          const process = processes.get(pid);
+          const child = apiChildren.get(pid);
+          if (child && child.exitCode === null && child.signalCode === null) {
+            await new Promise<void>((done) => { child.once('exit', () => done()); child.kill(); });
+          }
+          if (process) process.running = false;
+          return true;
+        },
+        getPortOccupant: async () => null,
+        request: async (url) => {
+          requestedUrls.push(url);
+          if (url === 'http://r1f/dashboard' || url === 'http://127.0.0.1:3000')
+            return { ok: true, status: 200, body: { status: 'ok' } };
+          if (url !== 'http://127.0.0.1:' + apiPort + '/health')
+            throw new Error('Unexpected control-plane or provider request');
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        },
+        sleep: async (ms) => new Promise((done) => setTimeout(done, ms)),
+        now: () => new Date(),
+      };
+      const specs = [
+        { name: 'api' as const, command: 'node', args: ['r1f-api'], marker: 'r1f-api', healthUrl: () => 'http://127.0.0.1:' + apiPort + '/health' },
+        { name: 'dashboard' as const, command: 'node', args: ['r1f-dashboard'], marker: 'r1f-dashboard', healthUrl: () => 'http://r1f/dashboard' },
+        { name: 'commercial-worker' as const, command: 'node', args: ['r1f-commercial'], marker: 'r1f-commercial' },
+        { name: 'whatsapp-dispatch-worker' as const, command: 'node', args: ['r1f-dispatch'], marker: 'r1f-dispatch' },
+      ];
+      const supervisor = new LocalSystemSupervisor(root, deps, specs, {
+        validateRoot: () => true,
+        loadEnvironmentFiles: false,
+        composeProjectName: project,
+        maintenanceDatabase: readMaintenanceDatabase,
+      });
+      const dangerousEnv = {
+        DATABASE_URL: databaseUrl,
+        REDIS_URL: redisUrl,
+        POSTGRES_HOST_PORT: String(postgresPort),
+        REDIS_HOST_PORT: String(redisPort),
+        PORT: String(apiPort),
+        DASHBOARD_PORT: String(dashboardPort),
+        COMMERCIAL_AUTOMATION_MODE: 'send',
+        COMMERCIAL_AUTOMATION_ENABLED: 'true',
+        COMMERCIAL_SCHEDULER_ENABLED: 'true',
+        SHOPEE_AFFILIATE_PROVIDER: 'official',
+        SHOPEE_AFFILIATE_API_ENABLED: 'true',
+        SHOPEE_AFFILIATE_APP_ID: 'must-not-reach-safe-runtime',
+        SHOPEE_AFFILIATE_SECRET: 'must-not-reach-safe-runtime',
+        COMMERCIAL_AI_COPY_ENABLED: 'true',
+        OPENAI_API_KEY: 'must-not-reach-safe-runtime',
+        WHATSAPP_PROVIDER: 'evolution',
+        WHATSAPP_GROUP_SEND_ENABLED: 'true',
+        EVOLUTION_API_URL: 'http://must-not-be-contacted.invalid',
+        EVOLUTION_API_KEY: 'must-not-reach-safe-runtime',
+        EVOLUTION_INSTANCE_NAME: 'must-not-reach-safe-runtime',
+        SCHEDULER_ENABLED: 'false',
+        LOCAL_API_AUTH_TOKEN: 'local-test-token',
+      };
+
+      await supervisor.start(dangerousEnv, 'safe-certification');
+      expect(spawned).toEqual(['r1f-api', 'r1f-dashboard']);
+      expect(commands.some((spec) => spec.args.includes('db:deploy'))).toBe(false);
+      expect(commands.some((spec) => spec.args.includes('evolution:up'))).toBe(false);
+      expect(readFileSync(join(root, '.runtime/local-system/state.json'), 'utf8')).toContain('safe-certification');
+      expect((await supervisor.status(dangerousEnv)).runtimeProfile).toBe('safe-certification');
+      await supervisor.stop(dangerousEnv);
+      expect(commands.some((spec) => spec.args.includes('evolution:down'))).toBe(false);
+      await supervisor.start(dangerousEnv, 'safe-certification');
+      await supervisor.stop(dangerousEnv);
+      expect(spawned).toEqual(['r1f-api', 'r1f-dashboard', 'r1f-api', 'r1f-dashboard']);
+      expect(await automation.getJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID)).toEqual(schedulerBefore);
+      const redisAfter = await redisFingerprint();
+      const postgresAfter = await databaseFingerprint();
+      expect(redisAfter).toBe(redisBefore);
+      expect(postgresAfter).toBe(postgresBefore);
+      expect(requestedUrls.some((url) => /scheduler|commercial-automation|evolution/.test(url))).toBe(false);
+      for (const env of childEnvironments) {
+        expect(env.COMMERCIAL_AUTOMATION_ENABLED).toBe('false');
+        expect(env.COMMERCIAL_SCHEDULER_ENABLED).toBe('false');
+        expect(env.OPENAI_API_KEY).toBeUndefined();
+        expect(env.SHOPEE_AFFILIATE_SECRET).toBeUndefined();
+        expect(env.EVOLUTION_API_KEY).toBeUndefined();
+      }
+      console.log(JSON.stringify({ project, postgresPort, redisPort, redisBefore, redisAfter, postgresBefore, postgresAfter, api: 'real', dashboard: 'test-double' }));
+
+      const beforeDriftSpawn = spawned.length;
+      await client.$executeRawUnsafe('ALTER TABLE public."ProductLead" ADD COLUMN r1f_drift_probe TEXT');
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_SCHEMA_DRIFT' });
+      expect(spawned).toHaveLength(beforeDriftSpawn);
+      await client.$executeRawUnsafe('ALTER TABLE public."ProductLead" DROP COLUMN r1f_drift_probe');
+
+      const pending = join(root, 'packages/database/prisma/migrations/99999999999999_r1f_pending');
+      mkdirSync(pending);
+      writeFileSync(join(pending, 'migration.sql'), 'SELECT 1;');
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+      expect(spawned).toHaveLength(beforeDriftSpawn);
+      rmSync(pending, { recursive: true });
+
+
+      await client.commercialAutomationSettings.update({
+        where: { id: 'commercial-automation' },
+        data: { paused: false },
+      });
+      await supervisor.stop(dangerousEnv);
+      const beforeBlockedSpawn = spawned.length;
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+      expect(spawned).toHaveLength(beforeBlockedSpawn);
+      await client.commercialAutomationSettings.delete({ where: { id: 'commercial-automation' } });
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+      expect(spawned).toHaveLength(beforeBlockedSpawn);
+      expect(commands.some((spec) => spec.args.some((arg) => ['db:deploy', 'deploy', 'generate', 'resolve', 'push'].includes(arg)))).toBe(false);
+    } finally {
+      if (apiErrors) console.log(apiErrors.replace(/postgres(?:ql)?:\/\/\S+/g, '[DISPOSABLE_URL]').slice(-2200));
+      for (const child of apiChildren.values()) {
+        if (child.exitCode === null && child.signalCode === null) {
+          await new Promise<void>((done) => { child.once('exit', () => done()); child.kill(); });
+        }
+      }
+      await Promise.all(queues.map((queue) => queue.close()));
+      await connection?.quit();
+      await client?.$disconnect();
+      if (infrastructure) {
+        expect(command(docker, ['compose', '--project-name', project, 'down', '--volumes', '--remove-orphans']).code).toBe(0);
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  240_000,
+);
 it.skipIf(!enabled).each(['healthy', 'orphan', 'failure', 'mount'] as const)(
   'R1D2 isolated real PostgreSQL: %s',
   async (scenario) => {
@@ -246,6 +687,12 @@ volumes:
           join(root, 'packages/database/prisma/migrations', name),
           { recursive: true },
         );
+      if (scenario === 'orphan') {
+        // The real deploy must outlast two host connection timeouts. Extend only
+        // this disposable SQL copy; keep the live-attempt assertions unchanged.
+        const fixtureMigration = join(root, 'packages/database/prisma/migrations', names[names.length - 1], 'migration.sql');
+        writeFileSync(fixtureMigration, readFileSync(fixtureMigration, 'utf8') + '\nSELECT pg_sleep(5);\n');
+      }
       const product = await client.productLead.create({
         data: {
           providerProductId: 'fixture',

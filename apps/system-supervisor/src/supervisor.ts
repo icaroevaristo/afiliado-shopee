@@ -5,6 +5,11 @@ import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/providers';
 
 import { loadLocalSystemEnvironment } from './environment';
+import {
+  applyRuntimeProfile,
+  isSafeCertificationProfile,
+  runtimeProfileFromState,
+} from './safe-certification-profile';
 import { ensureDashboardProductionBuild } from './dashboard-build';
 import { MaintenancePostgres } from './maintenance-postgres';
 import {
@@ -48,6 +53,7 @@ import type {
   RegisteredProcess,
   ServiceName,
   SystemDependencies,
+  RuntimeProfile,
 } from './types';
 
 import {
@@ -1018,9 +1024,11 @@ const isDailySendReadyProfile = (
   env.SHOPEE_AFFILIATE_PROVIDER === 'official' &&
   env.WHATSAPP_PROVIDER === 'evolution' &&
   env.WHATSAPP_GROUP_SEND_ENABLED === 'true';
-const expectedServices = (mode: AutomationMode) =>
-  SERVICE_NAMES.filter(
-    (name) => name !== 'whatsapp-dispatch-worker' || mode === 'send',
+export const expectedServices = (mode: AutomationMode, profile: RuntimeProfile = 'default') =>
+  SERVICE_NAMES.filter((name) =>
+    isSafeCertificationProfile(profile)
+      ? name === 'api' || name === 'dashboard'
+      : name !== 'whatsapp-dispatch-worker' || mode === 'send',
   );
 
 type ObservedProcessStatus =
@@ -1210,6 +1218,7 @@ const assertRegisteredServicePortsUnchanged = (
 };
 
 export type SystemStatusSnapshot = OperationLockSnapshot & {
+  runtimeProfile: RuntimeProfile;
   overall: 'running' | 'partial' | 'stopped' | 'maintenance';
   mode: AutomationMode;
   ports: {
@@ -1396,6 +1405,60 @@ export class LocalSystemSupervisor {
     return loadLocalSystemEnvironment(this.root, processEnv, {
       loadFiles: this.loadEnvironmentFiles,
     });
+  }
+
+  private loadEnvironmentForProfile(
+    processEnv: NodeJS.ProcessEnv,
+    runtimeProfile: RuntimeProfile,
+  ) {
+    const loaded = this.loadEnvironment(processEnv);
+    if (!isSafeCertificationProfile(runtimeProfile)) return loaded;
+    return {
+      ...loaded,
+      env: applyRuntimeProfile(loaded.env, runtimeProfile),
+      mode: 'preview' as const,
+    };
+  }
+
+  private async assertSafeCertificationPrestart(
+    runtimeEnv: NodeJS.ProcessEnv,
+    postgresPort: number,
+  ) {
+    const snapshot = await this.maintenanceDatabase(
+      this.root,
+      assertMaintenanceDatabaseUrl(runtimeEnv.DATABASE_URL, postgresPort),
+    );
+    if (
+      snapshot.database !== 'shopee_auto_affiliate_ai' ||
+      snapshot.schema !== 'public' ||
+      snapshot.paused !== true ||
+      snapshot.pending.length !== 0
+    ) {
+      throw new LocalSystemError(
+        'Perfil de certificacao exige banco sem pendencias e automacao pausada',
+        'SAFE_CERTIFICATION_PRESTART_REQUIRED',
+      );
+    }
+    const schema = resolve(this.root, 'packages/database/prisma/schema.prisma');
+    // Read-only introspection, with no deploy/resolve/push/generate fallback.
+    const diff = await this.deps.run({
+      command: process.execPath,
+      args: [
+        resolve(this.root, 'packages/database/node_modules/prisma/build/index.js'),
+        'migrate', 'diff',
+        '--from-schema-datasource', schema,
+        '--to-schema-datamodel', schema,
+        '--exit-code',
+      ],
+      cwd: this.root,
+      env: { ...runtimeEnv, PGOPTIONS: '-c default_transaction_read_only=on' },
+    }).catch(() => ({ code: 1 }));
+    if (diff.code !== 0) {
+      throw new LocalSystemError(
+        'Schema fisico divergente ou verificacao indisponivel; certificacao bloqueada',
+        'SAFE_CERTIFICATION_SCHEMA_DRIFT',
+      );
+    }
   }
 
   async migrate(
@@ -1732,7 +1795,10 @@ export class LocalSystemSupervisor {
     }
   }
 
-  async start(processEnv: NodeJS.ProcessEnv = process.env) {
+  async start(
+    processEnv: NodeJS.ProcessEnv = process.env,
+    runtimeProfile: RuntimeProfile = 'default',
+  ) {
     if (!this.validateRoot()) {
       throw new LocalSystemError(
         'Execute o comando a partir da raiz do repositorio',
@@ -1756,7 +1822,7 @@ export class LocalSystemSupervisor {
       );
     }
 
-    const loaded = this.loadEnvironment(processEnv);
+    const loaded = this.loadEnvironmentForProfile(processEnv, runtimeProfile);
     const runtimeEnv = loaded.env;
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(runtimeEnv);
     if (
@@ -1784,6 +1850,16 @@ export class LocalSystemSupervisor {
     }
     const previous = readState(this.root);
     if (
+      previous &&
+      runtimeProfileFromState(previous.runtimeProfile) !== runtimeProfile &&
+      Object.keys(previous.processes).length > 0
+    ) {
+      throw new LocalSystemError(
+        'Pare o sistema antes de alterar o perfil de runtime',
+        'SYSTEM_RUNTIME_PROFILE_CONFLICT',
+      );
+    }
+    if (
       previous?.composeProjectName !== undefined &&
       previous.composeProjectName !== this.composeProjectName
     ) {
@@ -1794,6 +1870,7 @@ export class LocalSystemSupervisor {
       this.specs,
       this.deps,
     );
+    let safeCertificationState: LocalSystemState | undefined;
     if (
       previous &&
       previous.composeProjectName === undefined &&
@@ -1812,7 +1889,7 @@ export class LocalSystemSupervisor {
       );
     }
     const unexpectedProcesses = Object.keys(inspected.valid).filter(
-      (name) => !expectedServices(loaded.mode).includes(name as ServiceName),
+      (name) => !expectedServices(loaded.mode, runtimeProfile).includes(name as ServiceName),
     );
     if (unexpectedProcesses.length > 0) {
       throw new LocalSystemError(
@@ -1825,6 +1902,21 @@ export class LocalSystemSupervisor {
       inspected.valid,
       loaded.ports,
     );
+    if (isSafeCertificationProfile(runtimeProfile)) {
+      safeCertificationState = {
+        version: 1,
+        composeProjectName: this.composeProjectName,
+        ...(previous?.maintenance ? { maintenance: true as const } : {}),
+        runtimeProfile: 'safe-certification',
+        startedAt: previous?.startedAt ?? this.deps.now().toISOString(),
+        mode: 'preview',
+        ports: loaded.ports,
+        processes: { ...inspected.valid },
+      };
+      // Persist before changing Docker topology so a later ordinary stop uses
+      // this profile rather than a SEND .env after an interrupted startup.
+      writeState(this.root, safeCertificationState);
+    }
     if (inspected.reused.length > 0) {
       appendSupervisorLog(
         this.root,
@@ -1980,7 +2072,7 @@ export class LocalSystemSupervisor {
       if (!managed) await assertPortAvailable(port, undefined, this.deps);
     }
 
-    if (!reuseMainInfrastructure) {
+    if (!reuseMainInfrastructure && !(isSafeCertificationProfile(runtimeProfile) && currentMainHealthy)) {
       await runRequired(
         this.deps,
         composeSpec(
@@ -2072,7 +2164,7 @@ export class LocalSystemSupervisor {
       !inspected.valid.api &&
       Object.keys(inspected.valid).length === 0
     ) {
-      await runRequired(
+      if (!isSafeCertificationProfile(runtimeProfile)) await runRequired(
         this.deps,
         pnpmSpec(
           this.root,
@@ -2084,17 +2176,21 @@ export class LocalSystemSupervisor {
         this.root,
       );
     }
-    await runRequired(
-      this.deps,
-      pnpmSpec(
+    if (isSafeCertificationProfile(runtimeProfile)) {
+      await this.assertSafeCertificationPrestart(runtimeEnv, loaded.ports.postgres);
+    } else {
+      await runRequired(
+        this.deps,
+        pnpmSpec(
+          this.root,
+          ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
+          runtimeEnv,
+        ),
+        'PRISMA_MIGRATE_DEPLOY_FAILED',
+        'Falha no Prisma migrate deploy',
         this.root,
-        ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
-        runtimeEnv,
-      ),
-      'PRISMA_MIGRATE_DEPLOY_FAILED',
-      'Falha no Prisma migrate deploy',
-      this.root,
-    );
+      );
+    }
 
     const state: LocalSystemState = {
       version: 1,
@@ -2104,12 +2200,15 @@ export class LocalSystemSupervisor {
           ? previous.startedAt
           : this.deps.now().toISOString(),
       mode: loaded.mode,
+      ...(isSafeCertificationProfile(runtimeProfile)
+        ? { runtimeProfile: 'safe-certification' as const }
+        : {}),
       ports: loaded.ports,
       processes: { ...inspected.valid },
     };
     const startedThisAttempt: ServiceName[] = [];
     try {
-      for (const name of expectedServices(loaded.mode)) {
+      for (const name of expectedServices(loaded.mode, runtimeProfile)) {
         const spec = this.specs.find((item) => item.name === name);
         if (!spec) throw new Error(`Service spec ausente: ${name}`);
         if (!state.processes[name]) {
@@ -2193,6 +2292,7 @@ export class LocalSystemSupervisor {
         delete state.processes[name];
       }
       if (Object.keys(state.processes).length > 0) writeState(this.root, state);
+      else if (safeCertificationState) writeState(this.root, safeCertificationState);
       else if (previous?.maintenance) writeState(this.root, previous);
       else clearState(this.root);
       if (rollbackFailures.length > 0) {
@@ -2212,7 +2312,12 @@ export class LocalSystemSupervisor {
   async status(
     processEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<SystemStatusSnapshot> {
-    const loaded = this.loadEnvironment(processEnv);
+    const state = readState(this.root);
+    const runtimeProfile = runtimeProfileFromState(state?.runtimeProfile);
+    const loaded = this.loadEnvironmentForProfile(
+      processEnv,
+      runtimeProfile,
+    );
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     if (
       this.composeProjectName !== OPERATIONAL_COMPOSE_PROJECT_NAME &&
@@ -2220,7 +2325,6 @@ export class LocalSystemSupervisor {
     ) {
       throw isolatedEvolutionError();
     }
-    const state = readState(this.root);
     if (
       state?.composeProjectName !== undefined &&
       state.composeProjectName !== this.composeProjectName
@@ -2261,6 +2365,11 @@ export class LocalSystemSupervisor {
     const runtimeIdentityIsAmbiguous = Object.values(processStatuses).some(
       (status) => status === 'identity-mismatch',
     );
+    if (isSafeCertificationProfile(runtimeProfile)) {
+      for (const name of ['commercial-worker', 'whatsapp-dispatch-worker'] as const) {
+        if (processStatuses[name] === 'stopped') processStatuses[name] = 'not-required';
+      }
+    }
     if (
       effectiveStatusMode === 'preview' &&
       processStatuses['whatsapp-dispatch-worker'] !== 'identity-mismatch'
@@ -2357,7 +2466,7 @@ export class LocalSystemSupervisor {
     ]);
     const apiAvailable = processStatuses.api === 'running' && apiHealth.ok;
     const apiAuthHeaders = localApiAuthHeaders(loaded.env);
-    const [legacyBody, commercialBody, automationBody] = apiAvailable
+    const [legacyBody, commercialBody, automationBody] = apiAvailable && !isSafeCertificationProfile(runtimeProfile)
       ? await Promise.all([
           safeRequestBody(this.deps, `${apiBase}/scheduler`, apiAuthHeaders),
           safeRequestBody(
@@ -2475,7 +2584,7 @@ export class LocalSystemSupervisor {
         externalPortOccupants.push({ port, ...occupant });
       }
     }
-    const required = expectedServices(effectiveStatusMode);
+    const required = expectedServices(effectiveStatusMode, runtimeProfile);
     const runningCount = required.filter(
       (name) => processStatuses[name] === 'running',
     ).length;
@@ -2530,6 +2639,7 @@ export class LocalSystemSupervisor {
     const operationLock = await operationLockPromise;
     return {
       ...operationLock,
+      runtimeProfile,
       overall,
       mode: effectiveStatusMode,
       ports: {
@@ -2573,7 +2683,11 @@ export class LocalSystemSupervisor {
   }
 
   async stop(processEnv: NodeJS.ProcessEnv = process.env) {
-    const loaded = this.loadEnvironment(processEnv);
+    const state = readState(this.root);
+    const loaded = this.loadEnvironmentForProfile(
+      processEnv,
+      runtimeProfileFromState(state?.runtimeProfile),
+    );
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     if (
       this.composeProjectName !== OPERATIONAL_COMPOSE_PROJECT_NAME &&
@@ -2584,7 +2698,6 @@ export class LocalSystemSupervisor {
         manualIntervention: [isolatedEvolutionError().message],
       };
     }
-    const state = readState(this.root);
     const manualIntervention: string[] = [];
     if (
       state?.composeProjectName !== undefined &&
@@ -2776,7 +2889,7 @@ export class LocalSystemSupervisor {
     if (
       (mainRunning || evolutionRunning) &&
       validatedProcesses.length === 0 &&
-      !(state?.maintenance === true && manualIntervention.length === 0)
+      !((state?.maintenance === true || state?.runtimeProfile === 'safe-certification') && manualIntervention.length === 0)
     ) {
       return {
         stopped: false,
@@ -2801,6 +2914,13 @@ export class LocalSystemSupervisor {
       ) {
         manualIntervention.push(`${spec.name}: processo nao encerrou`);
       }
+    }
+    if (state?.runtimeProfile === 'safe-certification') {
+      // Only application processes belong to SAFE; shared DB/Redis remain intact.
+      if (manualIntervention.length === 0) {
+        writeState(this.root, { ...state, processes: {} });
+      }
+      return { stopped: manualIntervention.length === 0, manualIntervention };
     }
     const mainStop =
       state?.maintenance && !mainRunning
