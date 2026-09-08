@@ -390,6 +390,9 @@ export class CommercialAutomationOrchestrator {
       | 'PRECOMMIT_REJECTED'
       | 'HANDOFF_COMMITTED'
       | 'OUTCOME_UNKNOWN' = 'NOT_ATTEMPTED';
+    const preparedClaimFinalizationState: {
+      value: 'NOT_ATTEMPTED' | 'FINALIZED' | 'UNKNOWN';
+    } = { value: 'NOT_ATTEMPTED' };
     const releaseReservationBeforeConfirmation = async () => {
       if (
         !reservationAcquired ||
@@ -428,6 +431,7 @@ export class CommercialAutomationOrchestrator {
         !confirmationAttempted &&
         preparedHandoffState !== 'HANDOFF_COMMITTED' &&
         preparedHandoffState !== 'OUTCOME_UNKNOWN' &&
+        preparedClaimFinalizationState.value !== 'UNKNOWN' &&
         !preparedClaimFinalized
       ) {
         preparedClaimFinalized = true;
@@ -1176,22 +1180,26 @@ export class CommercialAutomationOrchestrator {
                 now: this.clock(),
               });
         } catch {
-          preparedHandoffState = 'OUTCOME_UNKNOWN';
+          preparedClaimFinalizationState.value = 'UNKNOWN';
           throw new AppError(
             'Finalizacao do claim preparado ficou incerta',
             COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN,
           );
         }
+        if (!finalized) {
+          preparedClaimFinalizationState.value = 'UNKNOWN';
+          preparedInventoryClaim = undefined;
+          preparedNichePolicyFence = undefined;
+          commercialRunId = undefined;
+          policyReplacementFailure =
+            'COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_CONFLICT';
+          return false;
+        }
+        preparedClaimFinalizationState.value = 'FINALIZED';
         preparedClaimFinalized = true;
         preparedInventoryClaim = undefined;
         preparedNichePolicyFence = undefined;
         commercialRunId = undefined;
-        if (!finalized) {
-          policyReplacementFailure = releaseOnly
-            ? 'COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_CONFLICT'
-            : 'COMMERCIAL_AUTOMATION_POLICY_INVALIDATION_CONFLICT';
-          return false;
-        }
         if (input.reason !== COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED) {
           policyReplacementFailure = input.reason;
           return false;
@@ -1224,7 +1232,7 @@ export class CommercialAutomationOrchestrator {
             ),
           });
         } catch {
-          preparedHandoffState = 'OUTCOME_UNKNOWN';
+          preparedClaimFinalizationState.value = 'UNKNOWN';
           throw new AppError(
             'Substituicao do claim preparado ficou incerta',
             COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN,
@@ -1237,6 +1245,7 @@ export class CommercialAutomationOrchestrator {
         }
         preparedInventoryClaim = replacement;
         preparedClaimFinalized = false;
+        preparedClaimFinalizationState.value = 'NOT_ATTEMPTED';
         preparedHandoffState = 'NOT_ATTEMPTED';
         selectedCandidateSelection = {
           target: selectedTarget!,
@@ -1434,8 +1443,10 @@ export class CommercialAutomationOrchestrator {
           }),
         );
       }
-      let status: 'FAILED' | 'AMBIGUOUS' = 'FAILED';
-      if (
+      let status: 'FAILED' | 'BLOCKED' | 'AMBIGUOUS' = 'FAILED';
+      if (preparedClaimFinalizationState.value === 'UNKNOWN') {
+        status = 'BLOCKED';
+      } else if (
         preparedHandoffState === 'HANDOFF_COMMITTED' ||
         preparedHandoffState === 'OUTCOME_UNKNOWN'
       ) {
@@ -1468,6 +1479,7 @@ export class CommercialAutomationOrchestrator {
       return publicResult(
         await finish({
           status,
+          reasons: status === 'BLOCKED' ? [failureCode] : undefined,
           commercialRunId,
           failureCode,
           completedAt: this.clock(),

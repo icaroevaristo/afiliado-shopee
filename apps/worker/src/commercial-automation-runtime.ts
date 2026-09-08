@@ -82,6 +82,9 @@ export const createCommercialAutomationOrchestratorRuntime = (
     openAiCommercialAiCopyProviderFactory?: (
       options: ConstructorParameters<typeof OpenAiCommercialAiCopyProvider>[0],
     ) => InstanceType<typeof OpenAiCommercialAiCopyProvider>;
+    preparedInventory?: ConstructorParameters<
+      typeof CommercialAutomationOrchestrator
+    >[0]['preparedInventory'];
   } = {},
 ) => {
   const prisma = options.prisma ?? createPrismaClient();
@@ -257,7 +260,8 @@ export const createCommercialAutomationOrchestratorRuntime = (
     inventorySupervisor,
     orchestrator: new CommercialAutomationOrchestrator({
       policy,
-      preparedInventory: repositories.commercialPreparedMessages,
+      preparedInventory:
+        options.preparedInventory ?? repositories.commercialPreparedMessages,
       pipeline,
       candidateFlow,
       confirmation,

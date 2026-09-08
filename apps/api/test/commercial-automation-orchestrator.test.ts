@@ -46,7 +46,8 @@ type TestPreparedConfirmationOutcome =
   | {
       outcome: 'HANDOFF_COMMITTED';
       handoff: { runId: string };
-      publication: 'PUBLISHED';
+      publication: 'PUBLISHED' | 'UNKNOWN';
+      failureCode?: string;
       result?: { runId: string };
     };
 
@@ -1290,7 +1291,26 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(preparedInventory.release).not.toHaveBeenCalled();
   });
 
-  it('preserva handoff com resultado desconhecido como AMBIGUOUS sem liberar o claim', async () => {
+  it.each([
+    {
+      scenario: 'handoff com resultado desconhecido',
+      outcome: {
+        outcome: 'OUTCOME_UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+      } satisfies TestPreparedConfirmationOutcome,
+      expectedRunId: null,
+    },
+    {
+      scenario: 'handoff confirmado com publicacao desconhecida',
+      outcome: {
+        outcome: 'HANDOFF_COMMITTED',
+        handoff: { runId: 'persisted-prepared-run' },
+        publication: 'UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_PUBLICATION_UNKNOWN',
+      } satisfies TestPreparedConfirmationOutcome,
+      expectedRunId: 'persisted-prepared-run',
+    },
+  ])('preserva $scenario como AMBIGUOUS sem liberar o claim', async ({ outcome, expectedRunId }) => {
     const preparedMessage = {
       id: 'prepared-message-unknown',
       campaignId: 'campaign-1',
@@ -1323,12 +1343,7 @@ describe('CommercialAutomationOrchestrator', () => {
     };
     const subject = createSubject({
       preparedInventoryOverride: preparedInventory,
-      preparedConfirmationOutcomes: [
-        {
-          outcome: 'OUTCOME_UNKNOWN',
-          failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
-        },
-      ],
+      preparedConfirmationOutcomes: [outcome],
     });
 
     const result = await subject.orchestrator.executeTick({
@@ -1340,18 +1355,122 @@ describe('CommercialAutomationOrchestrator', () => {
 
     expect(result).toMatchObject({
       status: 'ambiguous',
-      commercialRunId: null,
+      commercialRunId: expectedRunId,
     });
     expect(subject.executions.records[0]).toMatchObject({
       status: 'AMBIGUOUS',
-      failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+      commercialRunId: expectedRunId,
+      failureCode: outcome.failureCode,
     });
     expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
     expect(subject.confirmation.confirm).not.toHaveBeenCalled();
     expect(subject.commercialRuns.findById).not.toHaveBeenCalled();
     expect(preparedInventory.release).not.toHaveBeenCalled();
     expect(preparedInventory.invalidateReserved).not.toHaveBeenCalled();
+    expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+    expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      finalization: 'invalidateReserved' as const,
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    },
+    {
+      finalization: 'release' as const,
+      reason: 'COMMERCIAL_PREPARED_HANDOFF_TRANSACTION_CONFLICT',
+    },
+  ])(
+    'localiza falha de $finalization depois de rejeicao pre-commit sem ambiguidade comercial',
+    async ({ finalization, reason }) => {
+      const preparedMessage = {
+        id: `prepared-message-finalization-${finalization}`,
+        campaignId: 'campaign-1',
+        groupDestinationId: 'group-1',
+        instanceName: 'affiliate-bot',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        candidateId: `candidate-finalization-${finalization}`,
+        snapshotId: `snapshot-finalization-${finalization}`,
+        generatedCopyId: `copy-finalization-${finalization}`,
+        copyPreview: 'copy finalization failure',
+        runId: null,
+        status: 'READY' as const,
+        reservationOwnerId: null,
+        reservationLeaseExpiresAt: null,
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+        preparationRevision: 1,
+        expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+        offerEndsAt: null,
+        invalidatedReason: null,
+        invalidatedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const preparedInventory = {
+        claimReady: vi.fn(async () => preparedMessage),
+        markDispatched: vi.fn(async () => true),
+        release:
+          finalization === 'release'
+            ? vi.fn(async () => {
+                throw new Error('local release outcome unknown');
+              })
+            : vi.fn(async () => true),
+        invalidateReserved:
+          finalization === 'invalidateReserved'
+            ? vi.fn(async () => {
+                throw new Error('local invalidation outcome unknown');
+              })
+            : vi.fn(async () => true),
+      };
+      const subject = createSubject({
+        preparedInventoryOverride: preparedInventory,
+        preparedConfirmationOutcomes: [
+          {
+            outcome: 'PRECOMMIT_REJECTED',
+            reason,
+            rollbackConfirmed: true,
+          },
+        ],
+      });
+
+      const result = await subject.orchestrator.executeTick({
+        schedulerJobId: `scheduled-finalization-${finalization}`,
+        bullMqJobId: `finalization-${finalization}`,
+        mode: 'send',
+        provider: 'official',
+      });
+
+      expect(result).toMatchObject({
+        status: 'blocked',
+        commercialRunId: null,
+        reasons: ['COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN'],
+      });
+      expect(subject.executions.records[0]).toMatchObject({
+        status: 'BLOCKED',
+        commercialRunId: null,
+        externalStage: 'NOT_REACHED',
+        failureCode: 'COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN',
+        reasons: ['COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN'],
+      });
+      expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+      expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+      expect(subject.commercialRuns.findById).not.toHaveBeenCalled();
+      expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+      expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
+      expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+      expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+      if (finalization === 'release') {
+        expect(preparedInventory.release).toHaveBeenCalledOnce();
+        expect(preparedInventory.invalidateReserved).not.toHaveBeenCalled();
+      } else {
+        expect(preparedInventory.invalidateReserved).toHaveBeenCalledOnce();
+        expect(preparedInventory.release).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('invalida prepared incompatível e substitui pelo próximo READY no mesmo slot', async () => {
     const preparedMessage = (suffix: string) => ({
