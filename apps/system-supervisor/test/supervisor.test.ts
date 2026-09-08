@@ -712,6 +712,53 @@ describe('maintenance migrate', () => {
     expect((await s.supervisor.status(s.env)).overall).toBe('maintenance');
     expect((await s.supervisor.stop(s.env)).stopped).toBe(true);
   });
+  it.each(['image', 'mount'])(
+    'refuses maintenance stop with divergent Redis %s',
+    async (difference) => {
+      const discovery = equivalentDockerDiscovery();
+      const s = setup({ dockerDiscovery: discovery });
+      await s.supervisor.migrate(true, s.env);
+      const redis = dockerInspection('redis');
+      if (difference === 'image') redis.Config.Image = 'unowned:latest';
+      else
+        redis.Mounts = [
+          { Type: 'volume', Name: 'unowned', Destination: '/data' },
+        ];
+      discovery.inspect = {
+        code: 0,
+        stdout: JSON.stringify([dockerInspection('postgres'), redis]),
+      };
+      s.h.commands.splice(0);
+      expect((await s.supervisor.stop(s.env)).stopped).toBe(false);
+      expect(s.h.commands.filter((c) => c.args.includes('stop'))).toEqual([]);
+    },
+  );
+  it('starts from PG-only maintenance after proving Redis when compose brings it up', async () => {
+    const discovery = equivalentDockerDiscovery();
+    discovery.list = { code: 0, stdout: 'aaaaaaaaaaaa\n' };
+    discovery.inspect = {
+      code: 0,
+      stdout: JSON.stringify([dockerInspection('postgres')]),
+    };
+    const s = setup({ dockerDiscovery: discovery });
+    await s.supervisor.migrate(true, s.env);
+    const run = s.h.deps.run;
+    s.h.deps.run = async (command) => {
+      if (command.args.includes('up'))
+        Object.assign(discovery, equivalentDockerDiscovery());
+      return run(command);
+    };
+    s.h.commands.splice(0);
+    await s.supervisor.start(s.env);
+    const deployment = s.h.commands.findIndex((c) =>
+      c.args.includes('db:deploy'),
+    );
+    expect(deployment).toBeGreaterThanOrEqual(0);
+    expect(s.h.spawnCommandIndexes.every((index) => index > deployment)).toBe(
+      true,
+    );
+    expect(readState(s.root)?.maintenance).toBeUndefined();
+  });
   it('preserves start deploy-before-spawn after maintenance', async () => {
     const s = setup();
     await s.supervisor.migrate(true, s.env);

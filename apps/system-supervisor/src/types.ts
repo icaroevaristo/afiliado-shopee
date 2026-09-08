@@ -106,7 +106,7 @@ export type SystemDependencies = {
     pid: number,
     expectedMarker: string,
   ): Promise<ProcessIdentityInspection>;
-  stopProcessTree(pid: number): Promise<boolean>;
+  stopProcessTree(pid: number, inspectedStartedAt?: string): Promise<boolean>;
   getPortOccupant(port: number): Promise<PortOccupant | null>;
   isProcessInTree?(rootPid: number, candidatePid: number): Promise<boolean>;
   request(

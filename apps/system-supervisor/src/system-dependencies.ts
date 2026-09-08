@@ -9,6 +9,7 @@ import type {
   SystemDependencies,
 } from './types';
 import { processStartedAtMatches } from './types';
+import { windowsProcessStopScript } from './windows-process-stop';
 
 const runCommand = (spec: CommandSpec): Promise<CommandResult> =>
   new Promise((resolve, reject) => {
@@ -65,18 +66,6 @@ const waitUntilStopped = async (pid: number, timeoutMs: number) => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return !processExists(pid);
-};
-
-const waitUntilAllStopped = async (
-  pids: readonly number[],
-  timeoutMs: number,
-) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !processExists(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return pids.every((pid) => !processExists(pid));
 };
 
 const getWindowsProcessTree = async (rootPid: number) => {
@@ -297,25 +286,21 @@ export const createSystemDependencies = (): SystemDependencies => ({
     process.platform === 'win32'
       ? inspectWindowsProcessIdentity(pid, marker)
       : inspectPosixProcessIdentity(pid, marker),
-  stopProcessTree: async (pid) => {
+  stopProcessTree: async (pid, inspectedStartedAt) => {
     if (!processExists(pid)) return true;
     if (process.platform === 'win32') {
-      const tree = await getWindowsProcessTree(pid);
-      await runCommand({
-        command: 'taskkill.exe',
-        args: ['/PID', String(pid), '/T'],
+      if (!inspectedStartedAt) return false;
+      const result = await runCommand({
+        command: 'powershell.exe',
+        args: [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          windowsProcessStopScript(pid, inspectedStartedAt),
+        ],
         cwd: process.cwd(),
       });
-      if (await waitUntilAllStopped(tree, 5_000)) return true;
-      for (const treePid of [...tree].reverse()) {
-        if (!processExists(treePid)) continue;
-        await runCommand({
-          command: 'taskkill.exe',
-          args: ['/PID', String(treePid), '/F'],
-          cwd: process.cwd(),
-        });
-      }
-      return waitUntilAllStopped(tree, 5_000);
+      return result.code === 0;
     }
     try {
       process.kill(-pid, 'SIGTERM');

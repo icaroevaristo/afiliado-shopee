@@ -414,6 +414,7 @@ const discoverMainInfrastructureContainers = async (
   ports: LocalSystemState['ports'],
   projectName: string,
   onlyService?: MainInfrastructureService,
+  allowAbsentRedis = false,
 ): Promise<MainInfrastructureContainerDiscovery> => {
   try {
     const configResult = await deps.run(
@@ -468,6 +469,15 @@ const discoverMainInfrastructureContainers = async (
     for (const service of expected.filter(
       (item) => !onlyService || item.service === onlyService,
     )) {
+      if (
+        allowAbsentRedis &&
+        service.service === 'redis' &&
+        !inspections.some(
+          (item) =>
+            item.Config?.Labels?.['com.docker.compose.service'] === 'redis',
+        )
+      )
+        continue;
       const imageInspectResult = await deps.run({
         command: 'docker',
         args: ['image', 'inspect', service.image],
@@ -1535,7 +1545,9 @@ export class LocalSystemSupervisor {
           'SYSTEM_MAINTENANCE_PROCESS_GUARD',
         );
       }
-      if (!(await this.deps.stopProcessTree(registered.pid))) {
+      if (
+        !(await this.deps.stopProcessTree(registered.pid, current.startedAt))
+      ) {
         throw new LocalSystemError(
           'Processo nao encerrou; migration bloqueada',
           'SYSTEM_MAINTENANCE_STOP_FAILED',
@@ -1770,6 +1782,8 @@ export class LocalSystemSupervisor {
       runtimeEnv,
       loaded.ports,
       this.composeProjectName,
+      undefined,
+      previous?.maintenance === true,
     );
     const mainRuntime = runtimeIdentityFromDiscovery(
       this.composeProjectName,
@@ -2024,14 +2038,21 @@ export class LocalSystemSupervisor {
         if (!registered || !spec) continue;
         const inspection = await this.deps
           .inspectProcess(registered.pid, spec.marker, registered.startedAt)
-          .catch(() => ({ running: true, identityMatches: false }));
+          .catch(() => ({
+            running: true,
+            identityMatches: false,
+            startedAt: undefined,
+          }));
         if (!inspection.running) {
           delete state.processes[name];
           continue;
         }
         if (
           !serviceIdentityMatches(spec, inspection, state.ports) ||
-          !(await this.deps.stopProcessTree(registered.pid))
+          !(await this.deps.stopProcessTree(
+            registered.pid,
+            inspection.startedAt,
+          ))
         ) {
           rollbackFailures.push(name);
           continue;
@@ -2491,6 +2512,7 @@ export class LocalSystemSupervisor {
     const validatedProcesses: Array<{
       spec: ServiceSpec;
       registered: RegisteredProcess;
+      inspectedStartedAt: string | undefined;
     }> = [];
     if (state) {
       for (const spec of [...this.specs].reverse()) {
@@ -2508,7 +2530,11 @@ export class LocalSystemSupervisor {
           );
           continue;
         }
-        validatedProcesses.push({ spec, registered });
+        validatedProcesses.push({
+          spec,
+          registered,
+          inspectedStartedAt: inspection.startedAt,
+        });
       }
     }
     const mainRunning = parseComposeStatuses(mainBeforeStop.stdout).some(
@@ -2517,6 +2543,7 @@ export class LocalSystemSupervisor {
     const evolutionRunning = parseComposeStatuses(
       evolutionBeforeStop.stdout,
     ).some((item) => item.state === 'running');
+    let maintenanceStopServices: string[] = [];
     if (mainRunning) {
       const mainDiscovery = await discoverMainInfrastructureContainers(
         this.root,
@@ -2524,7 +2551,8 @@ export class LocalSystemSupervisor {
         loaded.env,
         loaded.ports,
         this.composeProjectName,
-        state?.maintenance ? 'postgres' : undefined,
+        undefined,
+        state?.maintenance === true,
       );
       const mainRuntime = runtimeIdentityFromDiscovery(
         this.composeProjectName,
@@ -2561,6 +2589,11 @@ export class LocalSystemSupervisor {
             'nao foi possivel confirmar a identidade da infraestrutura principal antes do stop',
           ],
         };
+      }
+      if (state?.maintenance && mainDiscovery.status === 'resolved') {
+        maintenanceStopServices = mainDiscovery.containers.map(
+          (item) => item.service,
+        );
       }
     }
     const validatedPids = new Set(
@@ -2628,18 +2661,26 @@ export class LocalSystemSupervisor {
         ],
       };
     }
-    for (const { spec, registered } of validatedProcesses) {
-      if (!(await this.deps.stopProcessTree(registered.pid))) {
+    for (const { spec, registered, inspectedStartedAt } of validatedProcesses) {
+      if (
+        !(await this.deps.stopProcessTree(registered.pid, inspectedStartedAt))
+      ) {
         manualIntervention.push(`${spec.name}: processo nao encerrou`);
       }
     }
-    const mainStop = await this.deps.run(
-      composeSpec(
-        this.root,
-        mainComposeArguments(this.composeProjectName, ['stop']),
-        loaded.env,
-      ),
-    );
+    const mainStop =
+      state?.maintenance && !mainRunning
+        ? { code: 0, stdout: '', stderr: '' }
+        : await this.deps.run(
+            composeSpec(
+              this.root,
+              mainComposeArguments(this.composeProjectName, [
+                'stop',
+                ...maintenanceStopServices,
+              ]),
+              loaded.env,
+            ),
+          );
     const evolutionStop = skipEvolution
       ? { code: 0, stdout: '', stderr: '' }
       : await this.deps.run(

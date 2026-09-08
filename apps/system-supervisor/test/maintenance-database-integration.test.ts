@@ -19,9 +19,9 @@ import { readMaintenanceDatabase } from '../src/maintenance-database';
 import type { CommandSpec, SystemDependencies } from '../src/types';
 
 const enabled = process.env.RUN_SUPERVISOR_MAINTENANCE_DB_TEST === 'true';
-it.skipIf(!enabled)(
-  'R1D real PostgreSQL: refuses concurrent session, quiesces writer, migrates four once without restart',
-  async () => {
+it.skipIf(!enabled).each([false, true])(
+  'R1D real PostgreSQL: pre-existing session refused; late external session counterexample=%s',
+  async (lateExternalSession) => {
     const source = resolve(import.meta.dirname, '../../..');
     const root = mkdtempSync(join(tmpdir(), 'r1d-maintenance-'));
     const project = 'r1d-maintenance-proof';
@@ -88,6 +88,7 @@ it.skipIf(!enabled)(
     let deployCount = 0,
       restarts = 0,
       requests = 0;
+    let lateSessionsAtDeploy = 0;
     let infrastructureCreated = false;
     const startWriter = async () => {
       writer = spawn(process.execPath, [join(root, 'writer.cjs')], {
@@ -246,7 +247,18 @@ const p=new PrismaClient({datasources:{db:{url:process.env.DATABASE_URL}}});
         run: async (spec: CommandSpec) => {
           if (spec.args.includes('db:deploy')) {
             deployCount++;
-            return run(spec.command, spec.args);
+            if (!lateExternalSession) return run(spec.command, spec.args);
+            // Deliberate counterexample: an unmanaged writer arrives AFTER the
+            // supervisor's last activity snapshot and remains connected through DDL.
+            // This is evidence of an OPEN safety gap, not continuous quiescence proof.
+            await concurrent.$executeRaw`UPDATE public."CommercialAutomationSettings" SET paused=true WHERE id='commercial-automation'`;
+            lateSessionsAtDeploy = (await readMaintenanceDatabase(root, url))
+              .otherSessions;
+            try {
+              return run(spec.command, spec.args);
+            } finally {
+              await concurrent.$disconnect();
+            }
           }
           if (spec.command !== 'docker') throw new Error('Unexpected command');
           // Limit volume inventory to this fixture; no operational-volume inventory.
@@ -340,6 +352,7 @@ const p=new PrismaClient({datasources:{db:{url:process.env.DATABASE_URL}}});
       expect(deployCount).toBe(1);
       expect(restarts).toBe(0);
       expect(requests).toBe(0);
+      expect(lateSessionsAtDeploy).toBe(lateExternalSession ? 1 : 0);
       expect(alive).toBe(false);
       const after = await readMaintenanceDatabase(root, url);
       expect(after.pending).toHaveLength(0);
@@ -358,7 +371,13 @@ const p=new PrismaClient({datasources:{db:{url:process.env.DATABASE_URL}}});
       await database.$disconnect();
       expect((await supervisor.stop(env)).stopped).toBe(true);
       const evidence = {
-        status: 'PASS',
+        status: lateExternalSession
+          ? 'COUNTEREXAMPLE_REPRODUCED_OPEN_P1'
+          : 'PASS',
+        continuousQuiescence: lateExternalSession
+          ? 'NOT_ENFORCED'
+          : 'NOT_PROVEN_BY_SNAPSHOTS',
+        lateSessionsAtDeploy,
         officialStopAfterMaintenance: 'PASS_POSTGRES_ONLY',
         applicationProcessesBefore: 1,
         applicationProcessesAfterQuiesce: 0,
@@ -378,7 +397,12 @@ const p=new PrismaClient({datasources:{db:{url:process.env.DATABASE_URL}}});
       };
       if (process.env.R1D_EVIDENCE_PATH)
         writeFileSync(
-          process.env.R1D_EVIDENCE_PATH,
+          lateExternalSession
+            ? process.env.R1D_EVIDENCE_PATH.replace(
+                /\.json$/,
+                '-late-session.json',
+              )
+            : process.env.R1D_EVIDENCE_PATH,
           JSON.stringify(evidence, null, 2),
         );
     } finally {

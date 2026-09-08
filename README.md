@@ -2,6 +2,12 @@
 
 ## Migrations em manutenção, sem iniciar a aplicação
 
+**Candidato R1D ainda bloqueado para uso operacional.** Existe um P1 aberto:
+uma conexão externa pode entrar depois da última inspeção, permanecer durante o
+DDL e sair antes do postcheck. O teste descartável inclui esse contraexemplo;
+sucesso do comando nesse cenário não certifica quiescência contínua. A exclusão
+de novas conexões exige um contrato de manutenção adicional, ainda não aprovado.
+
 `corepack pnpm system:maintenance:migrate -- --confirm-operational-migrations`
 é uma operação explícita de escrita, sujeita à autorização do proprietário e
 backup restaurável previamente validado. Sem a flag literal, falha com
@@ -29,6 +35,12 @@ para parar infraestrutura sem remover dados. Um `system:start` posteriormente
 autorizado preserva seu `db:deploy` antes de spawn. Falha de migration não tem retry,
 mantém aplicação offline e retorna `SYSTEM_MAINTENANCE_DEPLOY_FAILED`. Nenhum
 dispatch histórico é alterado ou reenfileirado.
+
+Em manutenção, stop valida também Redis quando presente e limita o comando aos
+serviços comprovados; start aceita PostgreSQL isolado e valida a infraestrutura
+completa após compose up. No Windows, a parada vincula handles ao instante de
+criação inspecionado antes da espera e usa esses mesmos handles na terminação;
+não há fallback de terminação por PID numérico após a espera.
 
 SIGINT/SIGTERM durante manutenção preservam o lock: o processo Prisma filho pode
 continuar após a morte do supervisor. `SYSTEM_MAINTENANCE_INTERRUPTED` exige
