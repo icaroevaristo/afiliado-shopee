@@ -19,6 +19,7 @@ import {
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 type ParsedCommand =
+  | { command: 'migrate'; confirmed: true; composeProjectName?: string }
   | { command: 'start' | 'stop'; composeProjectName?: string }
   | { command: 'status'; json: boolean; composeProjectName?: string }
   | { command: 'logs'; service?: LogServiceName; lines: number };
@@ -51,6 +52,26 @@ const parseProjectNameFlag = (flags: readonly string[]) => {
 export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
   const normalized = args.filter((argument) => argument !== '--');
   const [command, ...flags] = normalized;
+  if (command === 'migrate') {
+    const parsedFlags = parseProjectNameFlag(flags);
+    if (!parsedFlags.remaining.includes('--confirm-operational-migrations')) {
+      throw new LocalSystemError(
+        'Flag --confirm-operational-migrations obrigatoria',
+        'SYSTEM_MIGRATION_CONFIRMATION_REQUIRED',
+      );
+    }
+    if (parsedFlags.remaining.length !== 1) {
+      throw new LocalSystemError(
+        'Argumentos de maintenance migrate invalidos',
+        'SYSTEM_INVALID_ARGUMENT',
+      );
+    }
+    return {
+      command,
+      confirmed: true,
+      composeProjectName: parsedFlags.composeProjectName,
+    };
+  }
   if (command === 'start' || command === 'stop') {
     const parsedFlags = parseProjectNameFlag(flags);
     if (parsedFlags.remaining.length > 0) {
@@ -125,7 +146,7 @@ export const parseSystemArgs = (args: readonly string[]): ParsedCommand => {
     return { command, service, lines };
   }
   throw new LocalSystemError(
-    'Comando esperado: start, status, logs ou stop',
+    'Comando esperado: start, status, logs, stop ou migrate',
     'SYSTEM_COMMAND_REQUIRED',
   );
 };
@@ -267,9 +288,15 @@ export const runSystemCli = async (
   }
 
   const release = await acquireLock(operationLockRoot, parsed.command, deps);
-  const removeSignalCleanup = installOperationSignalCleanup(release);
+  // A terminated parent cannot prove its migration child stopped. Keep this lock
+  // for manual investigation; start/stop must not recover it automatically.
+  const removeSignalCleanup = installOperationSignalCleanup(
+    parsed.command === 'migrate' ? () => undefined : release,
+  );
   try {
-    if (parsed.command === 'start') {
+    if (parsed.command === 'migrate') {
+      console.log(JSON.stringify(await supervisor.migrate(parsed.confirmed)));
+    } else if (parsed.command === 'start') {
       const status = await supervisor.start();
       console.log('Sistema local pronto. Nenhum tick ou envio foi disparado.');
       console.log(formatStatus(status));

@@ -1,5 +1,50 @@
 # shopee-auto-affiliate-ai
 
+## Migrations em manutenção, sem iniciar a aplicação
+
+`corepack pnpm system:maintenance:migrate -- --confirm-operational-migrations`
+é uma operação explícita de escrita, sujeita à autorização do proprietário e
+backup restaurável previamente validado. Sem a flag literal, falha com
+`SYSTEM_MIGRATION_CONFIRMATION_REQUIRED` antes de parar processos ou alterar Compose/banco.
+
+O comando exige PostgreSQL já healthy, volume `${composeProjectName}_postgres_data`
+canônico, state-store da mesma identidade Compose, URL local do banco
+`shopee_auto_affiliate_ai/public`, pausa persistida, histórico Prisma consistente,
+e o mesmo `pg_control_system().system_identifier` via container e datasource,
+PIDs pertencentes e portas sem ocupante externo. Reutiliza o lock de start/stop.
+Encerra somente árvores registradas e revalida processos, portas, identidade do
+banco e `pg_stat_activity` antes de executar uma vez o contrato do pacote database
+`db:deploy`. Não inicia infraestrutura, API, dashboard, workers ou providers.
+
+A leitura da pausa seleciona somente a coluna existente no schema anterior às
+migrations. Nenhuma sessão do banco além da própria inspeção é excluída da
+contagem. Escritores externos ao supervisor devem permanecer administrativamente
+suspensos durante todo o DDL: as leituras de atividade antes/depois não constituem
+um bloqueio PostgreSQL contra novas conexões externas. O lock impede os comandos
+gerenciados concorrentes. Uma sessão inexplicada bloqueia o deploy ou seu postcheck.
+
+Ao concluir, o estado local fica `maintenance`, com aplicação desligada e
+PostgreSQL disponível; Redis não é necessário. `system:stop` continua disponível
+para parar infraestrutura sem remover dados. Um `system:start` posteriormente
+autorizado preserva seu `db:deploy` antes de spawn. Falha de migration não tem retry,
+mantém aplicação offline e retorna `SYSTEM_MAINTENANCE_DEPLOY_FAILED`. Nenhum
+dispatch histórico é alterado ou reenfileirado.
+
+SIGINT/SIGTERM durante manutenção preservam o lock: o processo Prisma filho pode
+continuar após a morte do supervisor. `SYSTEM_MAINTENANCE_INTERRUPTED` exige
+investigação humana do filho, sessões e `_prisma_migrations` antes de liberar o
+lock local em recovery explicitamente autorizado. Não usar reset/resolve/retry
+automático nem tratar ausência do PID pai como prova de DDL encerrado.
+
+Testes isolados podem selecionar `--compose-project-name=<projeto>` e
+`POSTGRES_HOST_PORT` (default 5432); o Compose e a URL devem provar exatamente a
+mesma porta/volume. Isso não autoriza operar a identidade canônica em testes.
+
+Integração descartável opt-in: `RUN_SUPERVISOR_MAINTENANCE_DB_TEST=true`, arquivo
+`apps/system-supervisor/test/maintenance-database-integration.test.ts`. Usa somente
+o projeto exclusivo `r1d-maintenance-proof`, porta 55474, fixture sintética e um
+subprocesso escritor controlado; não usa o backup operacional.
+
 Monorepo com pnpm workspaces e Turborepo para automatizar um pipeline afiliado modular da Shopee com agentes de IA, filas e dashboard.
 
 ## Documentacao

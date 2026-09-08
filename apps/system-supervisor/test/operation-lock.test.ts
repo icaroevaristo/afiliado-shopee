@@ -61,6 +61,50 @@ const record = (
 const writeLock = (root: string, value: unknown) =>
   writeFileSync(operationLockPath(root), JSON.stringify(value));
 
+it.each(['start', 'stop', 'migrate'] as const)(
+  'does not recover interrupted migration lock for %s',
+  async (operation) => {
+    const root = createRoot();
+    const interrupted = record({ operation: 'migrate' });
+    writeLock(root, interrupted);
+    const deps = dependencies(
+      new Map([
+        [11, { running: true, markerMatches: true, startedAt: STARTED_AT }],
+      ]),
+    );
+    await expect(
+      acquireLock(root, operation, deps, { pid: 11 }),
+    ).rejects.toMatchObject({ code: 'SYSTEM_MAINTENANCE_INTERRUPTED' });
+    expect(JSON.parse(readFileSync(operationLockPath(root), 'utf8'))).toEqual(
+      interrupted,
+    );
+  },
+);
+
+it.each(['start', 'stop', 'migrate'] as const)(
+  'maintenance lock excludes %s',
+  async (operation) => {
+    const root = createRoot();
+    const deps = dependencies(
+      new Map([
+        [10, { running: true, markerMatches: true, startedAt: STARTED_AT }],
+        [11, { running: true, markerMatches: true, startedAt: STARTED_AT }],
+      ]),
+    );
+    const release = await acquireLock(root, 'migrate', deps, { pid: 10 });
+    try {
+      await expect(
+        acquireLock(root, operation, deps, { pid: 11 }),
+      ).rejects.toThrow();
+      expect((await inspectOperationLock(root, deps)).operation).toBe(
+        'migrate',
+      );
+    } finally {
+      release();
+    }
+  },
+);
+
 const runContender = (root: string) =>
   new Promise<string>((resolve, reject) => {
     const child = spawn(

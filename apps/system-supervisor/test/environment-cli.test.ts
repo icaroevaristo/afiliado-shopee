@@ -22,6 +22,26 @@ afterEach(() => {
 });
 
 describe('local system environment', () => {
+  it('parses maintenance confirmation exactly and rejects absence or duplicate', () => {
+    expect(() => parseSystemArgs(['migrate'])).toThrowError(
+      expect.objectContaining({
+        code: 'SYSTEM_MIGRATION_CONFIRMATION_REQUIRED',
+      }),
+    );
+    expect(
+      parseSystemArgs(['migrate', '--confirm-operational-migrations']),
+    ).toMatchObject({ command: 'migrate', confirmed: true });
+    expect(() =>
+      parseSystemArgs([
+        'migrate',
+        '--confirm-operational-migrations',
+        '--confirm-operational-migrations',
+      ]),
+    ).toThrow();
+    expect(() =>
+      parseSystemArgs(['migrate', '--confirm-operational-migrations=true']),
+    ).toThrow();
+  });
   it('loads the ignored root env and lets process variables override it', () => {
     const root = temporaryDirectory();
     writeFileSync(

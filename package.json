@@ -48,6 +48,7 @@
     "system:status": "tsx --tsconfig tsconfig.runtime.json apps/system-supervisor/src/cli.ts status",
     "system:logs": "tsx --tsconfig tsconfig.runtime.json apps/system-supervisor/src/cli.ts logs",
     "system:stop": "tsx --tsconfig tsconfig.runtime.json apps/system-supervisor/src/cli.ts stop",
+    "system:maintenance:migrate": "tsx --tsconfig tsconfig.runtime.json apps/system-supervisor/src/cli.ts migrate",
     "system:stability:preview": "tsx --tsconfig tsconfig.runtime.json apps/system-supervisor/src/preview-stability-cli.ts",
     "db:deploy": "corepack pnpm --filter @shopee-auto-affiliate-ai/database db:deploy",
     "db:baseline:status": "tsx --tsconfig tsconfig.runtime.json packages/database/src/migration-baseline-cli.ts status",

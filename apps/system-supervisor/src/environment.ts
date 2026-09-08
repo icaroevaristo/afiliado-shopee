@@ -47,7 +47,7 @@ export const loadLocalSystemEnvironment = (
     ports: {
       api: integerPort(env.PORT, 3333),
       dashboard: 3000,
-      postgres: 5432,
+      postgres: integerPort(env.POSTGRES_HOST_PORT, 5432),
       redis: 6379,
       evolution: integerPort(env.EVOLUTION_HOST_PORT, 8080),
     },

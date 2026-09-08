@@ -27,6 +27,8 @@ export type LocalSystemState = {
    * legacy state is rejected before any stop/start mutation.
    */
   composeProjectName?: string;
+  /** Application stopped; infrastructure retained by the maintenance command. */
+  maintenance?: true;
   startedAt: string;
   mode: AutomationMode;
   ports: {
