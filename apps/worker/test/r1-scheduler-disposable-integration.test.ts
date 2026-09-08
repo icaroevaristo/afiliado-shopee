@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import {
+  COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
+  COMMERCIAL_AUTOMATION_JOB_OPTIONS,
   createCommercialAutomationQueue,
   createRedisConnection,
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+  JOB_NAMES,
 } from '@shopee-auto-affiliate-ai/queue';
 
 import { startCommercialAutomationWorker } from '../src/commercial-automation-worker';
@@ -11,17 +14,44 @@ import { startCommercialAutomationWorker } from '../src/commercial-automation-wo
 const enabled = process.env.RUN_R1_SCHEDULER_DB_REDIS_TEST === 'true';
 
 describe.skipIf(!enabled)('R1 scheduler singleton on disposable Redis', () => {
-  const redisUrl = process.env.REDIS_URL ?? '';
-  const databaseUrl = process.env.DATABASE_URL ?? '';
-  const connection = createRedisConnection(redisUrl);
-  const queue = createCommercialAutomationQueue(connection);
+  let connection: ReturnType<typeof createRedisConnection> | undefined;
+  let queue: ReturnType<typeof createCommercialAutomationQueue> | undefined;
+  const runtimes: Array<{ close: () => Promise<void> }> = [];
 
-  afterEach(async () => {
-    await queue.removeJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID);
+  beforeAll(async () => {
+    const redisUrl = process.env.REDIS_URL ?? '';
+    const observerConnection = createRedisConnection(redisUrl);
+    const observerQueue = createCommercialAutomationQueue(observerConnection);
+    try {
+      await observerQueue.waitUntilReady();
+      connection = observerConnection;
+      queue = observerQueue;
+    } catch (error) {
+      await observerQueue.close().catch(() => undefined);
+      await observerConnection.quit().catch(() => undefined);
+      throw error;
+    }
+  });
+
+  afterAll(async () => {
+    await Promise.allSettled(runtimes.map((runtime) => runtime.close()));
+    if (queue) {
+      await queue.removeJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID).catch(
+        () => undefined,
+      );
+      await queue.close().catch(() => undefined);
+    }
+    await connection?.quit().catch(() => undefined);
   });
 
   it('converges bootstrap, restart and concurrent registration to one logical scheduler', async () => {
-    await queue.waitUntilReady();
+    const observerQueue = queue;
+    if (!observerQueue) {
+      throw new Error('R1 scheduler observer queue was not initialized');
+    }
+
+    const redisUrl = process.env.REDIS_URL ?? '';
+    const databaseUrl = process.env.DATABASE_URL ?? '';
     const config = loadConfig({
       NODE_ENV: 'test',
       DATABASE_URL: databaseUrl,
@@ -43,34 +73,51 @@ describe.skipIf(!enabled)('R1 scheduler singleton on disposable Redis', () => {
       workerFactory: workerFactory as never,
       logger: { info: () => undefined, error: () => undefined },
     };
-    const list = async () =>
-      (await queue.getJobSchedulers(0, -1, true)).filter(
-        (scheduler) => scheduler.key === DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
-      );
+    const listAll = () => observerQueue.getJobSchedulers(0, -1, true);
+    const assertSingleExpectedScheduler = (schedulers: Awaited<ReturnType<typeof listAll>>) => {
+      expect(schedulers).toHaveLength(1);
+      expect(schedulers[0]).toMatchObject({
+        key: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+        name: JOB_NAMES.commercialAutomationTick,
+        pattern: COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
+        tz: config.COMMERCIAL_SCHEDULER_TIMEZONE,
+        template: {
+          data: { mode: 'preview' },
+          opts: COMMERCIAL_AUTOMATION_JOB_OPTIONS,
+        },
+      });
+    };
 
-    expect(await list()).toHaveLength(0);
+    const baseline = await listAll();
+    expect(baseline).toHaveLength(0);
     const first = await startCommercialAutomationWorker(config, options);
-    const afterFirst = await list();
+    runtimes.push(first);
+    const afterFirst = await listAll();
+    assertSingleExpectedScheduler(afterFirst);
     await first.close();
     const second = await startCommercialAutomationWorker(config, options);
-    const afterRestart = await list();
+    runtimes.push(second);
+    const afterRestart = await listAll();
+    assertSingleExpectedScheduler(afterRestart);
     await second.close();
     const concurrent = await Promise.all([
       startCommercialAutomationWorker(config, options),
       startCommercialAutomationWorker(config, options),
     ]);
-    const afterConcurrent = await list();
-    await Promise.all(concurrent.map((runtime) => runtime.close()));
+    runtimes.push(...concurrent);
+    const afterConcurrent = await listAll();
+    assertSingleExpectedScheduler(afterConcurrent);
 
-    expect(afterFirst).toHaveLength(1);
-    expect(afterRestart).toHaveLength(1);
-    expect(afterConcurrent).toHaveLength(1);
-    expect(afterRestart[0]).toMatchObject({
-      key: DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
-      name: afterFirst[0]?.name,
-      pattern: afterFirst[0]?.pattern,
-      tz: afterFirst[0]?.tz,
-      template: { data: { mode: 'preview' } },
-    });
+    console.info(
+      JSON.stringify({
+        event: 'r1-scheduler-singleton-evidence',
+        allSchedulersBaselineCount: baseline.length,
+        allSchedulersAfterStartCount: afterFirst.length,
+        allSchedulersAfterRestartCount: afterRestart.length,
+        allSchedulersAfterConcurrentCount: afterConcurrent.length,
+        duplicateLogicalSchedulers: Math.max(afterConcurrent.length - 1, 0),
+        scheduler: afterConcurrent[0],
+      }),
+    );
   });
 });
