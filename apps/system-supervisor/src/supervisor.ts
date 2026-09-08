@@ -82,8 +82,7 @@ type ComposeServiceStatus = {
   health: string;
 };
 
-const requiredFiles = [
-  '.env',
+const commonRequiredFiles = [
   'package.json',
   'pnpm-lock.yaml',
   'docker-compose.yml',
@@ -93,6 +92,11 @@ const requiredFiles = [
   'apps/worker/src/commercial-automation-worker.ts',
   'apps/worker/src/whatsapp-dispatch-runtime.ts',
 ] as const;
+
+const requiredFilesForProfile = (runtimeProfile: RuntimeProfile) =>
+  isSafeCertificationProfile(runtimeProfile)
+    ? commonRequiredFiles
+    : (['.env', ...commonRequiredFiles] as const);
 
 export const parseComposeStatuses = (stdout: string): ComposeServiceStatus[] =>
   stdout
@@ -1805,7 +1809,7 @@ export class LocalSystemSupervisor {
         'SYSTEM_ROOT_REQUIRED',
       );
     }
-    for (const file of requiredFiles) {
+    for (const file of requiredFilesForProfile(runtimeProfile)) {
       if (!existsSync(resolve(this.root, file))) {
         throw new LocalSystemError(
           `Arquivo obrigatorio ausente: ${file}`,

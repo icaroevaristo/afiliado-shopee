@@ -34,8 +34,7 @@ import { PREVIEW_STABILITY_PRISMA_VALIDATION } from '../src/types';
 import { maintenanceDockerFixture } from './maintenance-docker-fixture';
 
 const directories: string[] = [];
-const requiredFiles = [
-  '.env',
+const commonRequiredFiles = [
   'package.json',
   'pnpm-lock.yaml',
   'docker-compose.yml',
@@ -46,10 +45,13 @@ const requiredFiles = [
   'apps/worker/src/whatsapp-dispatch-runtime.ts',
 ];
 
-const createRoot = () => {
+const createRoot = ({ includeDotEnv = true }: { includeDotEnv?: boolean } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'local-system-supervisor-'));
   directories.push(root);
-  for (const file of requiredFiles) {
+  for (const file of [
+    ...commonRequiredFiles,
+    ...(includeDotEnv ? ['.env'] : []),
+  ]) {
     const target = join(root, file);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, '{}');
@@ -2791,8 +2793,7 @@ describe('LocalSystemSupervisor', () => {
   });
 
   it('requires the ignored root env before starting anything', async () => {
-    const root = createRoot();
-    rmSync(join(root, '.env'));
+    const root = createRoot({ includeDotEnv: false });
     const state = harness();
 
     await expect(
@@ -2801,6 +2802,47 @@ describe('LocalSystemSupervisor', () => {
     expect(state.commands).toEqual([]);
     expect(state.spawned).toEqual([]);
   });
+
+  it('allows safe certification without dotenv when process environment is complete', async () => {
+    const root = createRoot({ includeDotEnv: false });
+    const state = harness();
+    const supervisor = createSafeCertificationSupervisor(root, state.deps);
+    const runtimeEnv = {
+      ...dailySendReadyEnvironment(),
+      DATABASE_URL:
+        'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+
+    await expect(
+      supervisor.start(runtimeEnv, 'safe-certification'),
+    ).resolves.toMatchObject({ overall: 'running' });
+
+    expect(state.spawned).toEqual(['api', 'dashboard']);
+    expect(state.commands.some((command) => command.args.includes('db:deploy'))).toBe(false);
+    expect(state.commands.some((command) => command.args.includes('evolution:up'))).toBe(false);
+  });
+
+  it.each(['DATABASE_URL', 'REDIS_URL'] as const)(
+    'fails safe certification without dotenv or %s before Docker mutation',
+    async (missing) => {
+      const root = createRoot({ includeDotEnv: false });
+      const state = harness();
+      const supervisor = createSafeCertificationSupervisor(root, state.deps);
+      const runtimeEnv = {
+        ...dailySendReadyEnvironment(),
+        DATABASE_URL:
+          'postgresql://postgres:postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+      };
+      delete runtimeEnv[missing];
+
+      await expect(
+        supervisor.start(runtimeEnv, 'safe-certification'),
+      ).rejects.toMatchObject({ code: 'SYSTEM_CONFIG_INVALID' });
+
+      expect(state.commands).toEqual([]);
+      expect(state.spawned).toEqual([]);
+    },
+  );
 
   it('preserves MAIN_COMPOSE_START_FAILED when local Compose start is genuinely required and fails', async () => {
     const root = createRoot();
