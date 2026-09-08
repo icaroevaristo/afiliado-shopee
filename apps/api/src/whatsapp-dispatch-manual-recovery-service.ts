@@ -57,7 +57,13 @@ const assertRetryProgressIsProven = (
   attemptsMade: number,
   inspection: WhatsAppDispatchManualRecoveryInspection,
 ) => {
-  if (!inspection.recovery.rearmedAt) return false;
+  if (
+    !inspection.recovery.rearmedAt ||
+    !Number.isInteger(attemptsMade) ||
+    attemptsMade < 1 ||
+    attemptsMade > 2
+  )
+    return false;
   if (state === 'waiting' || state === 'delayed') {
     return (
       attemptsMade === 1 &&
@@ -77,6 +83,22 @@ const assertRetryProgressIsProven = (
     return dispatchMatches && isAmbiguousRun(inspection);
   }
   if (state === 'completed') {
+    if (attemptsMade !== 2) return false;
+    // Queue completion proves the authorized retry ran, not delivery. Rearm
+    // preserves the ambiguous run until the delivery consumer finalizes it.
+    if (inspection.dispatchStatus === 'SUBMITTED') {
+      const { submittedAt, confirmationDeadlineAt } = inspection;
+      return (
+        inspection.attemptCount === 2 &&
+        Boolean(inspection.externalMessageId?.trim()) &&
+        !inspection.sentAt &&
+        submittedAt !== null &&
+        confirmationDeadlineAt !== null &&
+        submittedAt.getTime() >= inspection.recovery.rearmedAt.getTime() &&
+        confirmationDeadlineAt.getTime() > submittedAt.getTime() &&
+        isAmbiguousRun(inspection)
+      );
+    }
     return (
       ['SENT', 'DELIVERED', 'READ'].includes(inspection.dispatchStatus) &&
       inspection.attemptCount === 2 &&

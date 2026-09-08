@@ -373,8 +373,9 @@ model CommercialPreparedMessage {
   createdAt                 DateTime                        @default(now())
   updatedAt                 DateTime                        @updatedAt
 
-  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision, preparationRevision])
-  @@index([campaignId, status, groupDestinationId, instanceName])
+  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision, preparationRevision], map: "CommercialPreparedMessage_campaignId_candidateId_snapshotId_gro")
+  @@index([campaignId, status, groupDestinationId, instanceName], map: "CommercialPreparedMessage_campaignId_status_groupDestinationId_")
+  @@index([status, expiresAt])
   @@index([status, reservationLeaseExpiresAt])
   @@index([candidateId, snapshotId])
 }

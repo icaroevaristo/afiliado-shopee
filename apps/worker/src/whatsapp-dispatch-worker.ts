@@ -23,6 +23,7 @@ import {
   type ManualPublicationLifecycleFinalizerPort,
 } from '../../api/src/manual-publication-lifecycle-finalizer';
 import { CommercialMessageDraftService } from '../../api/src/commercial-message-draft-service';
+import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from '../../api/src/repositories';
 import type { ApplicationRepositories } from '../../api/src/application-services';
 import { WhatsAppDeliveryConfirmationService } from '../../api/src/whatsapp-delivery-confirmation-service';
 import { createWhatsAppDeliveryExpirationInvoker } from './whatsapp-delivery-expiration-invoker';
@@ -38,7 +39,7 @@ export type WhatsAppDispatchWorkerLogger = {
 
 export type WhatsAppDispatchProcessorRepositories = Pick<
   ApplicationRepositories,
-  'whatsappDispatches' | 'commercialRuns'
+  'whatsappDispatches' | 'commercialRuns' | 'whatsappDispatchManualRecoveries'
 > & {
   commercialPromotions?: Pick<
     ApplicationRepositories['commercialPromotions'],
@@ -82,7 +83,8 @@ export const createManualPublicationLifecycleFinalizer = (input: {
 }): ManualPublicationLifecycleFinalizerPort | undefined => {
   if (input.provided) return input.provided;
   if (input.transactionsSupported === false) return undefined;
-  const manualPublicationRequests = input.repositories.manualPublicationRequests;
+  const manualPublicationRequests =
+    input.repositories.manualPublicationRequests;
   const finalizeAfterCommercialDispatch =
     manualPublicationRequests?.finalizeAfterCommercialDispatch;
   if (!manualPublicationRequests || !finalizeAfterCommercialDispatch) {
@@ -90,8 +92,9 @@ export const createManualPublicationLifecycleFinalizer = (input: {
   }
   return new ManualPublicationLifecycleFinalizer(
     {
-      finalizeAfterCommercialDispatch:
-        finalizeAfterCommercialDispatch.bind(manualPublicationRequests),
+      finalizeAfterCommercialDispatch: finalizeAfterCommercialDispatch.bind(
+        manualPublicationRequests,
+      ),
     },
     { clock: input.clock, logger: input.logger },
   );
@@ -137,6 +140,7 @@ type WhatsAppDispatchJobInput = Pick<
   'id' | 'name' | 'data'
 > & {
   opts?: Pick<Job<WhatsAppDispatchJob>['opts'], 'attempts'>;
+  attemptsMade?: number;
 };
 
 type CreateWhatsAppDispatchWorkerOptions = {
@@ -189,6 +193,8 @@ const reservationHandoffError = (message: string, code: string) =>
 
 const renewCommercialReservationForDispatch = async (input: {
   dispatchId: string;
+  jobId: string | undefined;
+  jobAttemptsMade: number | undefined;
   repositories: WhatsAppDispatchProcessorRepositories;
   clock: () => Date;
   reservationLeaseMilliseconds?: number;
@@ -208,12 +214,47 @@ const renewCommercialReservationForDispatch = async (input: {
       'COMMERCIAL_DISPATCH_RESERVATION_CONTEXT_UNAVAILABLE',
     );
   }
+  const now = input.clock();
+  const firstAttempt =
+    run.status === 'STARTED' &&
+    run.finalStatus === 'PENDING' &&
+    dispatch.attemptCount === 0;
+  let authorizedRetry = false;
+  if (
+    dispatch.status === 'PENDING' &&
+    dispatch.attemptCount === 1 &&
+    input.jobAttemptsMade === 1 &&
+    run.status === 'FAILED' &&
+    run.finalStatus === 'AMBIGUOUS' &&
+    run.investigationRequired &&
+    input.repositories.whatsappDispatchManualRecoveries
+  ) {
+    // Read the existing human authorization; this worker never authorizes or
+    // rearms a retry. The original job and all reservation guards still apply.
+    const inspection =
+      await input.repositories.whatsappDispatchManualRecoveries.inspectAuthorizedRecovery(
+        {
+          dispatchId: dispatch.id,
+          expectedRunId: run.id,
+          expectedExecutionId: run.executionId,
+          confirmation: WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+        },
+      );
+    authorizedRetry =
+      inspection.jobId === input.jobId &&
+      inspection.dispatchStatus === 'PENDING' &&
+      inspection.attemptCount === 1 &&
+      inspection.externalMessageId === null &&
+      inspection.sentAt === null &&
+      inspection.submittedAt === null &&
+      inspection.confirmationDeadlineAt === null &&
+      inspection.recovery.rearmedAt !== null &&
+      inspection.recovery.rearmedAt <= now;
+  }
   if (
     run.mode !== 'CONFIRMED' ||
-    run.status !== 'STARTED' ||
-    run.finalStatus !== 'PENDING' ||
+    (!firstAttempt && !authorizedRetry) ||
     dispatch.status !== 'PENDING' ||
-    dispatch.attemptCount !== 0 ||
     dispatch.externalMessageId !== null
   ) {
     throw reservationHandoffError(
@@ -248,7 +289,6 @@ const renewCommercialReservationForDispatch = async (input: {
       'COMMERCIAL_DISPATCH_RESERVATION_LEASE_INVALID',
     );
   }
-  const now = input.clock();
   const execution = await executions.findById(run.executionId);
   if (
     !execution ||
@@ -505,6 +545,8 @@ export const processWhatsAppDispatchJob = async (
   });
   await renewCommercialReservationForDispatch({
     dispatchId: job.data.dispatchId,
+    jobId: job.id,
+    jobAttemptsMade: job.attemptsMade,
     repositories,
     clock,
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
@@ -649,7 +691,8 @@ export const createWhatsAppDispatchWorker = (
             );
           })();
   const expirationInvoker =
-    expirationService && options.deliveryConfirmationExpiryIntervalMs !== undefined
+    expirationService &&
+    options.deliveryConfirmationExpiryIntervalMs !== undefined
       ? createWhatsAppDeliveryExpirationInvoker({
           expireDue: () => expirationService.expireDue(),
           intervalMs: options.deliveryConfirmationExpiryIntervalMs,

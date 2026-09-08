@@ -7,6 +7,8 @@ import type {
 } from '@shopee-auto-affiliate-ai/providers';
 import { MockShopeeAffiliateOfferProvider } from '@shopee-auto-affiliate-ai/providers';
 import type { WhatsAppDispatchJob } from '@shopee-auto-affiliate-ai/queue';
+import { PrismaWhatsAppDispatchManualRecoveryRepository } from './prisma-whatsapp-dispatch-manual-recovery-repository';
+import type { WhatsAppDispatchManualRecoveryRepository } from './repositories';
 import { HunterService } from './hunter-service';
 import { ScoreService } from './score-service';
 import { CopyService } from './copy-service';
@@ -111,6 +113,10 @@ export type ApplicationRepositories = {
   whatsappDestinations: WhatsAppDestinationRepository;
   whatsappInstances: WhatsAppInstanceRepository;
   whatsappDispatches: WhatsAppDispatchRepository;
+  whatsappDispatchManualRecoveries?: Pick<
+    WhatsAppDispatchManualRecoveryRepository,
+    'inspectAuthorizedRecovery'
+  >;
   whatsappDeliveryEvents?: WhatsAppDeliveryEventInboxRepository;
   whatsappGroups: WhatsAppGroupDirectoryRepository;
   shopeeOffers: ShopeeOfferRepository & OperationalCatalogRepository;
@@ -352,6 +358,8 @@ export const createPrismaRepositories = (
     whatsappDestinations: new PrismaWhatsAppDestinationRepository(prisma),
     whatsappInstances: new PrismaWhatsAppInstanceRepository(prisma),
     whatsappDispatches: new PrismaWhatsAppDispatchRepository(prisma),
+    whatsappDispatchManualRecoveries:
+      new PrismaWhatsAppDispatchManualRecoveryRepository(prisma),
     whatsappDeliveryEvents: new PrismaWhatsAppDeliveryEventInboxRepository(
       prisma,
     ),

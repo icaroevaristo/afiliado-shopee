@@ -259,21 +259,24 @@ const loadLifecycle = async (
       'WHATSAPP_DISPATCH_MANUAL_RECOVERY_OUTBOX_INVALID',
     );
   }
-  const stickyInstanceName = assertCommercialStickyIdentity({
-    runInstanceName: run.instanceName,
-    dispatchInstanceName: dispatch.instanceName,
-    outboxInstanceName: outboxes[0]?.instanceName,
-    destinationAssignedInstanceName: dispatch.destination?.instanceAssignments
-      ?.length
-      ? undefined
-      : (dispatch.destination?.assignedInstanceName ?? null),
-    destinationAssignedInstanceNames: dispatch.destination?.instanceAssignments
-      ?.length
-      ? dispatch.destination.instanceAssignments.map(
-          ({ instanceName }) => instanceName,
-        )
-      : undefined,
-  });
+  const stickyInstanceName = assertCommercialStickyIdentity(
+    {
+      runInstanceName: run.instanceName,
+      dispatchInstanceName: dispatch.instanceName,
+      outboxInstanceName: outboxes[0]?.instanceName,
+      destinationAssignedInstanceName: dispatch.destination?.instanceAssignments
+        ?.length
+        ? undefined
+        : (dispatch.destination?.assignedInstanceName ?? null),
+      destinationAssignedInstanceNames: dispatch.destination
+        ?.instanceAssignments?.length
+        ? dispatch.destination.instanceAssignments.map(
+            ({ instanceName }) => instanceName,
+          )
+        : undefined,
+    },
+    { allowMissingJob: true },
+  );
   if (stickyInstanceName) {
     const instance = await db.whatsAppInstance.findUnique({
       where: { name: stickyInstanceName },
@@ -552,6 +555,8 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         attemptCount: true,
         externalMessageId: true,
         sentAt: true,
+        submittedAt: true,
+        confirmationDeadlineAt: true,
         generatedCopyId: true,
         productId: true,
         destinationId: true,
@@ -624,21 +629,24 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_OUTBOX_INVALID',
       );
     }
-    const stickyInstanceName = assertCommercialStickyIdentity({
-      runInstanceName: run.instanceName,
-      dispatchInstanceName: dispatch!.instanceName,
-      outboxInstanceName: outboxes[0]?.instanceName,
-      destinationAssignedInstanceName: dispatch!.destination
-        ?.instanceAssignments?.length
-        ? undefined
-        : (dispatch!.destination?.assignedInstanceName ?? null),
-      destinationAssignedInstanceNames: dispatch!.destination
-        ?.instanceAssignments?.length
-        ? dispatch!.destination.instanceAssignments.map(
-            ({ instanceName }) => instanceName,
-          )
-        : undefined,
-    });
+    const stickyInstanceName = assertCommercialStickyIdentity(
+      {
+        runInstanceName: run.instanceName,
+        dispatchInstanceName: dispatch!.instanceName,
+        outboxInstanceName: outboxes[0]?.instanceName,
+        destinationAssignedInstanceName: dispatch!.destination
+          ?.instanceAssignments?.length
+          ? undefined
+          : (dispatch!.destination?.assignedInstanceName ?? null),
+        destinationAssignedInstanceNames: dispatch!.destination
+          ?.instanceAssignments?.length
+          ? dispatch!.destination.instanceAssignments.map(
+              ({ instanceName }) => instanceName,
+            )
+          : undefined,
+      },
+      { allowMissingJob: true },
+    );
     if (stickyInstanceName) {
       const instance = await this.prisma.whatsAppInstance.findUnique({
         where: { name: stickyInstanceName },
@@ -744,6 +752,8 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
       attemptCount: dispatch!.attemptCount,
       externalMessageId: dispatch!.externalMessageId,
       sentAt: dispatch!.sentAt,
+      submittedAt: dispatch!.submittedAt,
+      confirmationDeadlineAt: dispatch!.confirmationDeadlineAt,
       runStatus: run.status,
       runFinalStatus: run.finalStatus,
       investigationRequired: run.investigationRequired,
@@ -845,6 +855,8 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
           attemptCount: 1,
           externalMessageId: null,
           sentAt: null,
+          submittedAt: null,
+          confirmationDeadlineAt: null,
           runStatus: lifecycle.run.status,
           runFinalStatus: lifecycle.run.finalStatus,
           investigationRequired: lifecycle.run.investigationRequired,

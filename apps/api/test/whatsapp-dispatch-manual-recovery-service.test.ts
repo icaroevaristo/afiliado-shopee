@@ -27,7 +27,7 @@ const inspection = (
 ): WhatsAppDispatchManualRecoveryInspection => ({
   recovery: recovery(), jobId: 'job-1', campaignId: 'campaign-1', candidateId: 'candidate-1',
   dispatchId: 'dispatch-1', runId: 'run-1', executionId: 'execution-1', dispatchStatus: 'PROCESSING',
-  attemptCount: 1, externalMessageId: null, sentAt: null, runStatus: 'FAILED', runFinalStatus: 'AMBIGUOUS',
+  attemptCount: 1, externalMessageId: null, sentAt: null, submittedAt: null, confirmationDeadlineAt: null, runStatus: 'FAILED', runFinalStatus: 'AMBIGUOUS',
   investigationRequired: true, instanceName: 'instance-a',
   target: { groupId: 'destination-1', groupName: 'Group 1', logicalGroupFingerprint: 'group-fp-1', campaignId: 'campaign-1', nicheId: 'niche-1', dailyLimit: 10, failureCount: 0, nextEligibleAt: null },
   ...overrides,
@@ -352,4 +352,50 @@ describe('WhatsAppDispatchManualRecoveryService review boundaries', () => {
     },
   );
 
+});
+
+
+describe('authorized retry submission convergence', () => {
+  const submitted = (overrides: Partial<WhatsAppDispatchManualRecoveryInspection> = {}) => inspection({
+    recovery: recovery({ rearmedAt: now }),
+    dispatchStatus: 'SUBMITTED', attemptCount: 2, externalMessageId: 'fixture-submission',
+    submittedAt: new Date(now.getTime() + 1_000),
+    confirmationDeadlineAt: new Date(now.getTime() + 61_000),
+    ...overrides,
+  });
+
+  it('converges completed submission and repeated recovery without delivery or another retry', async () => {
+    const repo = repository(submitted());
+    const job = queueJob('completed', 2);
+    const service = () => new WhatsAppDispatchManualRecoveryService(repo, queue(job), { clock: () => now }, policy());
+    expect((await service().requeueAuthorizedRetry(input)).kind).toBe('CONVERGED_AFTER_RESTART');
+    expect((await service().requeueAuthorizedRetry(input)).kind).toBe('ALREADY_REQUEUED');
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(repo.rearmAuthorizedRetry).not.toHaveBeenCalled();
+    expect(await repo.inspectAuthorizedRecovery()).toMatchObject({
+      dispatchStatus: 'SUBMITTED', sentAt: null, runStatus: 'FAILED', runFinalStatus: 'AMBIGUOUS', investigationRequired: true,
+    });
+  });
+
+  it.each<Partial<WhatsAppDispatchManualRecoveryInspection>>([
+    { externalMessageId: null }, { submittedAt: null }, { confirmationDeadlineAt: null },
+    { submittedAt: new Date(now.getTime() - 1) },
+    { confirmationDeadlineAt: now }, { sentAt: now }, { attemptCount: 3 },
+    { runStatus: 'COMPLETED', runFinalStatus: 'SENT', investigationRequired: false },
+  ])('rejects an incoherent completed submission %j', async (overrides) => {
+    const repo = repository(submitted(overrides));
+    const job = queueJob('completed', 2);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue(job), { clock: () => now }, policy());
+    await expect(service.requeueAuthorizedRetry(input)).rejects.toMatchObject({ code: 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_JOB_NOT_RETRYABLE' });
+    expect(job.retry).not.toHaveBeenCalled();
+    expect(repo.markManualRecoveryRequeued).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 3])('rejects completed submission with queue attemptsMade=%s', async (attemptsMade) => {
+    const repo = repository(submitted());
+    const job = queueJob('completed', attemptsMade);
+    const service = new WhatsAppDispatchManualRecoveryService(repo, queue(job), { clock: () => now }, policy());
+    await expect(service.requeueAuthorizedRetry(input)).rejects.toMatchObject({ code: 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_JOB_NOT_RETRYABLE' });
+    expect(job.retry).not.toHaveBeenCalled();
+  });
 });
