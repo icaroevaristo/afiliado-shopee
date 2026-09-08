@@ -14,7 +14,14 @@ const evidencePath = join(manifestRoot, 'EVIDENCE_INDEX.json');
 if (!existsSync(evidencePath)) throw new Error('Missing canonical EVIDENCE_INDEX.json');
 mkdirSync(join(artifactRoot, 'commands'), { recursive: true });
 const startedAt = new Date().toISOString();
-const result = spawnSync(command[0], command.slice(1), { cwd: root, encoding: 'utf8', shell: false });
+const executable = process.platform === 'win32' && !command[0].includes('.')
+  ? `${command[0]}.cmd`
+  : command[0];
+const result = spawnSync(executable, command.slice(1), {
+  cwd: root,
+  encoding: 'utf8',
+  shell: false,
+});
 const finishedAt = new Date().toISOString();
 const sanitize = (value) => value.replaceAll(/postgres(?:ql)?:\/\/[^\s"']+/gi, '[REDACTED_DATABASE_URL]').replaceAll(/(Bearer\s+)[^\s"']+/gi, '$1[REDACTED]');
 const stdout = sanitize(result.stdout ?? '');
