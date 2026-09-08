@@ -11,8 +11,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createConnection, createServer } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { createRedisConnection, createCommercialAutomationQueue, createCommercialInventoryRefillQueue, createWhatsAppDispatchQueue, JOB_NAMES, DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID } from '@shopee-auto-affiliate-ai/queue';
 import { expect, it } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { LocalSystemSupervisor } from '../src/supervisor';
@@ -75,6 +77,12 @@ it.skipIf(!enabled)(
       { marker: string; startedAt: string; running: boolean }
     >();
     let nextPid = 700;
+    const apiChildren = new Map<number, ReturnType<typeof spawn>>();
+    let apiErrors = '';
+    const requestedUrls: string[] = [];
+    const childEnvironments: NodeJS.ProcessEnv[] = [];
+    let connection: ReturnType<typeof createRedisConnection> | undefined;
+    const queues: Array<{ close(): Promise<void> }> = [];
     let infrastructure = false;
     let client: ReturnType<typeof createPrismaClient> | undefined;
     const command = (
@@ -165,6 +173,7 @@ volumes:
         'junction',
       );
       expect(command(docker, ['volume', 'inspect', `${project}_postgres_data`]).code).not.toBe(0);
+      infrastructure = true;
       const composeUp = command(docker, [
         'compose',
         '--project-name',
@@ -196,6 +205,83 @@ volumes:
         update: { paused: true },
         create: { id: 'commercial-automation', paused: true },
       });
+      const id = 'r1f-recovery-sensitive';
+      await client.whatsAppInstance.create({ data: { name: 'fixture', active: false, paused: true } });
+      await client.productLead.create({ data: {
+        id, providerProductId: id, nome: 'fixture', categoria: 'fixture',
+        preco: '10', desconto: 0, nota: 5, vendidos: 1, comissao: 1,
+        loja: 'fixture', urlImagem: 'https://example.invalid/image', title: 'fixture',
+      } });
+      await client.generatedCopy.create({ data: {
+        id, productId: id, titulo: 'fixture', mensagem: 'fixture', cta: 'fixture', hashtags: '',
+      } });
+      await client.whatsAppDestination.create({ data: {
+        id, name: 'fixture', destination: 'fixture.invalid', active: false,
+      } });
+      await client.whatsAppDispatch.create({ data: {
+        id, productId: id, generatedCopyId: id, destinationId: id,
+        status: 'PROCESSING', attemptCount: 1, instanceName: 'fixture',
+      } });
+      await client.commercialAutomationExecution.create({ data: {
+        id, schedulerJobId: id, bullMqJobId: id, mode: 'SEND',
+        status: 'STARTED', externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+        reasons: [], startedAt: new Date('2020-01-01'), leaseExpiresAt: new Date('2020-01-01'),
+        heartbeatAt: new Date('2020-01-01'), ownerId: 'stale-owner',
+      } });
+      await client.commercialPipelineRun.create({ data: {
+        id, executionId: id, instanceName: 'fixture', mode: 'CONFIRMED',
+        status: 'FAILED', finalStatus: 'AMBIGUOUS', investigationRequired: true,
+        dispatchId: id, jobId: id, productId: id, groupDestinationId: id,
+        groupFingerprint: 'a'.repeat(64), rejectionSummary: {}, selectionReasons: [], plannedSubIds: [],
+      } });
+      await client.commercialDispatchOutbox.create({ data: {
+        id, commercialRunId: id, dispatchId: id, jobId: id, instanceName: 'fixture',
+        status: 'PUBLISHED', publishedAt: new Date('2020-01-01'),
+      } });
+      const databaseFingerprint = async () => {
+        if (!client) throw new Error('Fixture DB unavailable');
+        return client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+          const tables = await tx.$queryRawUnsafe<Array<{ name: string }>>(
+            "SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename");
+          const hashes: string[] = [];
+          for (const { name } of tables) {
+            const identifier = '"' + name.replaceAll('"', '""') + '"';
+            const rows = await tx.$queryRawUnsafe<Array<{ row: string }>>(
+              'SELECT row_to_json(t)::text AS row FROM public.' + identifier + ' t ORDER BY row_to_json(t)::text',
+            );
+            hashes.push(name, JSON.stringify(rows));
+          }
+          return createHash('sha256').update(hashes.join('\n')).digest('hex');
+        });
+      };
+      connection = createRedisConnection(redisUrl);
+      const automation = createCommercialAutomationQueue(connection);
+      const inventory = createCommercialInventoryRefillQueue(connection);
+      const whatsapp = createWhatsAppDispatchQueue(connection);
+      queues.push(automation, inventory, whatsapp);
+      await Promise.all([automation.waitUntilReady(), inventory.waitUntilReady(), whatsapp.waitUntilReady()]);
+      await automation.upsertJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
+        { pattern: '0 0 1 1 *', tz: 'UTC' },
+        { name: JOB_NAMES.commercialAutomationTick, data: { mode: 'send' } });
+      await automation.add(JOB_NAMES.commercialAutomationTick, { mode: 'send' }, { jobId: 'existing-send' });
+      await inventory.add(JOB_NAMES.commercialInventoryRefill, { mode: 'send', provider: 'official' }, { jobId: 'existing-refill-send' });
+      await whatsapp.add(JOB_NAMES.whatsappDispatch, { dispatchId: id }, { jobId: 'existing-whatsapp' });
+      const redisFingerprint = async () => {
+        if (!connection) throw new Error('Fixture Redis unavailable');
+        const keys = (await connection.keys('bull:*')).sort();
+        const hash = createHash('sha256');
+        for (const key of keys) {
+          hash.update(key);
+          const dump = await connection.dumpBuffer(key);
+          if (!dump) throw new Error('Fixture key disappeared');
+          hash.update(dump);
+        }
+        return hash.digest('hex');
+      };
+      const redisBefore = await redisFingerprint();
+      const postgresBefore = await databaseFingerprint();
+      const schedulerBefore = await automation.getJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID);
       const safeSnapshot = await readMaintenanceDatabase(root, databaseUrl);
       expect(safeSnapshot.paused).toBe(true);
       expect(safeSnapshot.pending).toEqual([]);
@@ -221,12 +307,34 @@ volumes:
               stdout: spec.args[0] === 'status' ? '' : `${'a'.repeat(40)}\n`,
               stderr: '',
             };
-          if (spec.command === 'docker') return command('docker', spec.args, spec.cwd);
+          if (spec.args.includes('--from-schema-datasource')) {
+            expect(spec.env?.PGOPTIONS).toBe('-c default_transaction_read_only=on');
+            return command(spec.command, spec.args, spec.cwd, spec.env);
+          }
+          if (spec.command === 'docker') {
+            if (spec.args[0] === 'compose') expect(spec.args).toContain(project);
+            expect(spec.args.join(' ')).not.toContain('evolution');
+            return command(docker, spec.args, spec.cwd);
+          }
           return { code: 0, stdout: '', stderr: '' };
         },
         spawn: async (spec) => {
-          const pid = nextPid++;
           const startedAt = new Date().toISOString();
+          let pid = nextPid++;
+          childEnvironments.push(spec.env ?? {});
+          if (spec.args[0] === 'r1f-api') {
+            const child = spawn(process.execPath, [
+              '--import', pathToFileURL(join(source, 'node_modules/tsx/dist/loader.mjs')).href,
+              join(source, 'apps/api/src/server.ts'),
+            ], {
+              cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'],
+              env: { ...spec.env, TSX_TSCONFIG_PATH: join(source, 'tsconfig.runtime.json'), HOST: '127.0.0.1' },
+            });
+            child.stderr?.on('data', (chunk: Buffer) => { apiErrors += chunk.toString(); });
+            if (!child.pid) throw new Error('API fixture spawn failed');
+            pid = child.pid;
+            apiChildren.set(pid, child);
+          }
           processes.set(pid, { marker: spec.args[0], startedAt, running: true });
           spawned.push(spec.args[0]);
           return { pid, startedAt };
@@ -245,16 +353,28 @@ volumes:
         },
         stopProcessTree: async (pid) => {
           const process = processes.get(pid);
+          const child = apiChildren.get(pid);
+          if (child && child.exitCode === null && child.signalCode === null) {
+            await new Promise<void>((done) => { child.once('exit', () => done()); child.kill(); });
+          }
           if (process) process.running = false;
           return true;
         },
         getPortOccupant: async () => null,
-        request: async () => ({ ok: true, status: 200, body: { status: 'ok' } }),
-        sleep: async () => undefined,
+        request: async (url) => {
+          requestedUrls.push(url);
+          if (url === 'http://r1f/dashboard' || url === 'http://127.0.0.1:3000')
+            return { ok: true, status: 200, body: { status: 'ok' } };
+          if (url !== 'http://127.0.0.1:' + apiPort + '/health')
+            throw new Error('Unexpected control-plane or provider request');
+          const response = await fetch(url);
+          return { ok: response.ok, status: response.status, body: await response.json() };
+        },
+        sleep: async (ms) => new Promise((done) => setTimeout(done, ms)),
         now: () => new Date(),
       };
       const specs = [
-        { name: 'api' as const, command: 'node', args: ['r1f-api'], marker: 'r1f-api', healthUrl: () => 'http://r1f/api' },
+        { name: 'api' as const, command: 'node', args: ['r1f-api'], marker: 'r1f-api', healthUrl: () => 'http://127.0.0.1:' + apiPort + '/health' },
         { name: 'dashboard' as const, command: 'node', args: ['r1f-dashboard'], marker: 'r1f-dashboard', healthUrl: () => 'http://r1f/dashboard' },
         { name: 'commercial-worker' as const, command: 'node', args: ['r1f-commercial'], marker: 'r1f-commercial' },
         { name: 'whatsapp-dispatch-worker' as const, command: 'node', args: ['r1f-dispatch'], marker: 'r1f-dispatch' },
@@ -291,15 +411,44 @@ volumes:
       };
 
       await supervisor.start(dangerousEnv, 'safe-certification');
-      expect(spawned).toEqual(['r1f-api', 'r1f-dashboard', 'r1f-commercial']);
+      expect(spawned).toEqual(['r1f-api', 'r1f-dashboard']);
       expect(commands.some((spec) => spec.args.includes('db:deploy'))).toBe(false);
       expect(commands.some((spec) => spec.args.includes('evolution:up'))).toBe(false);
       expect(readFileSync(join(root, '.runtime/local-system/state.json'), 'utf8')).toContain('safe-certification');
-      await supervisor.status(dangerousEnv);
+      expect((await supervisor.status(dangerousEnv)).runtimeProfile).toBe('safe-certification');
       await supervisor.stop(dangerousEnv);
       expect(commands.some((spec) => spec.args.includes('evolution:down'))).toBe(false);
       await supervisor.start(dangerousEnv, 'safe-certification');
-      expect(spawned.filter((marker) => marker === 'r1f-commercial')).toHaveLength(2);
+      await supervisor.stop(dangerousEnv);
+      expect(spawned).toEqual(['r1f-api', 'r1f-dashboard', 'r1f-api', 'r1f-dashboard']);
+      expect(await automation.getJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID)).toEqual(schedulerBefore);
+      const redisAfter = await redisFingerprint();
+      const postgresAfter = await databaseFingerprint();
+      expect(redisAfter).toBe(redisBefore);
+      expect(postgresAfter).toBe(postgresBefore);
+      expect(requestedUrls.some((url) => /scheduler|commercial-automation|evolution/.test(url))).toBe(false);
+      for (const env of childEnvironments) {
+        expect(env.COMMERCIAL_AUTOMATION_ENABLED).toBe('false');
+        expect(env.COMMERCIAL_SCHEDULER_ENABLED).toBe('false');
+        expect(env.OPENAI_API_KEY).toBeUndefined();
+        expect(env.SHOPEE_AFFILIATE_SECRET).toBeUndefined();
+        expect(env.EVOLUTION_API_KEY).toBeUndefined();
+      }
+      console.log(JSON.stringify({ project, postgresPort, redisPort, redisBefore, redisAfter, postgresBefore, postgresAfter, api: 'real', dashboard: 'test-double' }));
+
+      const beforeDriftSpawn = spawned.length;
+      await client.$executeRawUnsafe('ALTER TABLE public."ProductLead" ADD COLUMN r1f_drift_probe TEXT');
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_SCHEMA_DRIFT' });
+      expect(spawned).toHaveLength(beforeDriftSpawn);
+      await client.$executeRawUnsafe('ALTER TABLE public."ProductLead" DROP COLUMN r1f_drift_probe');
+
+      const pending = join(root, 'packages/database/prisma/migrations/99999999999999_r1f_pending');
+      mkdirSync(pending);
+      writeFileSync(join(pending, 'migration.sql'), 'SELECT 1;');
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+      expect(spawned).toHaveLength(beforeDriftSpawn);
+      rmSync(pending, { recursive: true });
+
 
       await client.commercialAutomationSettings.update({
         where: { id: 'commercial-automation' },
@@ -309,13 +458,27 @@ volumes:
       const beforeBlockedSpawn = spawned.length;
       await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
       expect(spawned).toHaveLength(beforeBlockedSpawn);
+      await client.commercialAutomationSettings.delete({ where: { id: 'commercial-automation' } });
+      await expect(supervisor.start(dangerousEnv, 'safe-certification')).rejects.toMatchObject({ code: 'SAFE_CERTIFICATION_PRESTART_REQUIRED' });
+      expect(spawned).toHaveLength(beforeBlockedSpawn);
+      expect(commands.some((spec) => spec.args.some((arg) => ['db:deploy', 'deploy', 'generate', 'resolve', 'push'].includes(arg)))).toBe(false);
     } finally {
+      if (apiErrors) console.log(apiErrors.replace(/postgres(?:ql)?:\/\/\S+/g, '[DISPOSABLE_URL]').slice(-2200));
+      for (const child of apiChildren.values()) {
+        if (child.exitCode === null && child.signalCode === null) {
+          await new Promise<void>((done) => { child.once('exit', () => done()); child.kill(); });
+        }
+      }
+      await Promise.all(queues.map((queue) => queue.close()));
+      await connection?.quit();
       await client?.$disconnect();
-      if (infrastructure) command(docker, ['compose', '--project-name', project, 'down', '--volumes', '--remove-orphans']);
+      if (infrastructure) {
+        expect(command(docker, ['compose', '--project-name', project, 'down', '--volumes', '--remove-orphans']).code).toBe(0);
+      }
       rmSync(root, { recursive: true, force: true });
     }
   },
-  180_000,
+  240_000,
 );
 it.skipIf(!enabled).each(['healthy', 'orphan', 'failure', 'mount'] as const)(
   'R1D2 isolated real PostgreSQL: %s',
@@ -524,6 +687,12 @@ volumes:
           join(root, 'packages/database/prisma/migrations', name),
           { recursive: true },
         );
+      if (scenario === 'orphan') {
+        // The real deploy must outlast two host connection timeouts. Extend only
+        // this disposable SQL copy; keep the live-attempt assertions unchanged.
+        const fixtureMigration = join(root, 'packages/database/prisma/migrations', names[names.length - 1], 'migration.sql');
+        writeFileSync(fixtureMigration, readFileSync(fixtureMigration, 'utf8') + '\nSELECT pg_sleep(5);\n');
+      }
       const product = await client.productLead.create({
         data: {
           providerProductId: 'fixture',

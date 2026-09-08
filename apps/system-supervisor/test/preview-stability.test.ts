@@ -124,6 +124,7 @@ const status = (
   overall: SystemStatusSnapshot['overall'] = 'stopped',
   operationLock: SystemStatusSnapshot['operationLock'] = 'unlocked',
 ): SystemStatusSnapshot => ({
+  runtimeProfile: 'default',
   overall,
   operationLock,
   mode: 'preview',

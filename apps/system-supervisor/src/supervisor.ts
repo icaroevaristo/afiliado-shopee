@@ -1024,9 +1024,11 @@ const isDailySendReadyProfile = (
   env.SHOPEE_AFFILIATE_PROVIDER === 'official' &&
   env.WHATSAPP_PROVIDER === 'evolution' &&
   env.WHATSAPP_GROUP_SEND_ENABLED === 'true';
-const expectedServices = (mode: AutomationMode) =>
-  SERVICE_NAMES.filter(
-    (name) => name !== 'whatsapp-dispatch-worker' || mode === 'send',
+export const expectedServices = (mode: AutomationMode, profile: RuntimeProfile = 'default') =>
+  SERVICE_NAMES.filter((name) =>
+    isSafeCertificationProfile(profile)
+      ? name === 'api' || name === 'dashboard'
+      : name !== 'whatsapp-dispatch-worker' || mode === 'send',
   );
 
 type ObservedProcessStatus =
@@ -1216,6 +1218,7 @@ const assertRegisteredServicePortsUnchanged = (
 };
 
 export type SystemStatusSnapshot = OperationLockSnapshot & {
+  runtimeProfile: RuntimeProfile;
   overall: 'running' | 'partial' | 'stopped' | 'maintenance';
   mode: AutomationMode;
   ports: {
@@ -1434,6 +1437,26 @@ export class LocalSystemSupervisor {
       throw new LocalSystemError(
         'Perfil de certificacao exige banco sem pendencias e automacao pausada',
         'SAFE_CERTIFICATION_PRESTART_REQUIRED',
+      );
+    }
+    const schema = resolve(this.root, 'packages/database/prisma/schema.prisma');
+    // Read-only introspection, with no deploy/resolve/push/generate fallback.
+    const diff = await this.deps.run({
+      command: process.execPath,
+      args: [
+        resolve(this.root, 'packages/database/node_modules/prisma/build/index.js'),
+        'migrate', 'diff',
+        '--from-schema-datasource', schema,
+        '--to-schema-datamodel', schema,
+        '--exit-code',
+      ],
+      cwd: this.root,
+      env: { ...runtimeEnv, PGOPTIONS: '-c default_transaction_read_only=on' },
+    }).catch(() => ({ code: 1 }));
+    if (diff.code !== 0) {
+      throw new LocalSystemError(
+        'Schema fisico divergente ou verificacao indisponivel; certificacao bloqueada',
+        'SAFE_CERTIFICATION_SCHEMA_DRIFT',
       );
     }
   }
@@ -1866,7 +1889,7 @@ export class LocalSystemSupervisor {
       );
     }
     const unexpectedProcesses = Object.keys(inspected.valid).filter(
-      (name) => !expectedServices(loaded.mode).includes(name as ServiceName),
+      (name) => !expectedServices(loaded.mode, runtimeProfile).includes(name as ServiceName),
     );
     if (unexpectedProcesses.length > 0) {
       throw new LocalSystemError(
@@ -2049,7 +2072,7 @@ export class LocalSystemSupervisor {
       if (!managed) await assertPortAvailable(port, undefined, this.deps);
     }
 
-    if (!reuseMainInfrastructure) {
+    if (!reuseMainInfrastructure && !(isSafeCertificationProfile(runtimeProfile) && currentMainHealthy)) {
       await runRequired(
         this.deps,
         composeSpec(
@@ -2185,7 +2208,7 @@ export class LocalSystemSupervisor {
     };
     const startedThisAttempt: ServiceName[] = [];
     try {
-      for (const name of expectedServices(loaded.mode)) {
+      for (const name of expectedServices(loaded.mode, runtimeProfile)) {
         const spec = this.specs.find((item) => item.name === name);
         if (!spec) throw new Error(`Service spec ausente: ${name}`);
         if (!state.processes[name]) {
@@ -2290,9 +2313,10 @@ export class LocalSystemSupervisor {
     processEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<SystemStatusSnapshot> {
     const state = readState(this.root);
+    const runtimeProfile = runtimeProfileFromState(state?.runtimeProfile);
     const loaded = this.loadEnvironmentForProfile(
       processEnv,
-      runtimeProfileFromState(state?.runtimeProfile),
+      runtimeProfile,
     );
     const skipEvolution = shouldSkipEvolutionForExplicitSafePreview(loaded.env);
     if (
@@ -2341,6 +2365,11 @@ export class LocalSystemSupervisor {
     const runtimeIdentityIsAmbiguous = Object.values(processStatuses).some(
       (status) => status === 'identity-mismatch',
     );
+    if (isSafeCertificationProfile(runtimeProfile)) {
+      for (const name of ['commercial-worker', 'whatsapp-dispatch-worker'] as const) {
+        if (processStatuses[name] === 'stopped') processStatuses[name] = 'not-required';
+      }
+    }
     if (
       effectiveStatusMode === 'preview' &&
       processStatuses['whatsapp-dispatch-worker'] !== 'identity-mismatch'
@@ -2437,7 +2466,7 @@ export class LocalSystemSupervisor {
     ]);
     const apiAvailable = processStatuses.api === 'running' && apiHealth.ok;
     const apiAuthHeaders = localApiAuthHeaders(loaded.env);
-    const [legacyBody, commercialBody, automationBody] = apiAvailable
+    const [legacyBody, commercialBody, automationBody] = apiAvailable && !isSafeCertificationProfile(runtimeProfile)
       ? await Promise.all([
           safeRequestBody(this.deps, `${apiBase}/scheduler`, apiAuthHeaders),
           safeRequestBody(
@@ -2555,7 +2584,7 @@ export class LocalSystemSupervisor {
         externalPortOccupants.push({ port, ...occupant });
       }
     }
-    const required = expectedServices(effectiveStatusMode);
+    const required = expectedServices(effectiveStatusMode, runtimeProfile);
     const runningCount = required.filter(
       (name) => processStatuses[name] === 'running',
     ).length;
@@ -2610,6 +2639,7 @@ export class LocalSystemSupervisor {
     const operationLock = await operationLockPromise;
     return {
       ...operationLock,
+      runtimeProfile,
       overall,
       mode: effectiveStatusMode,
       ports: {
@@ -2859,7 +2889,7 @@ export class LocalSystemSupervisor {
     if (
       (mainRunning || evolutionRunning) &&
       validatedProcesses.length === 0 &&
-      !(state?.maintenance === true && manualIntervention.length === 0)
+      !((state?.maintenance === true || state?.runtimeProfile === 'safe-certification') && manualIntervention.length === 0)
     ) {
       return {
         stopped: false,
@@ -2884,6 +2914,13 @@ export class LocalSystemSupervisor {
       ) {
         manualIntervention.push(`${spec.name}: processo nao encerrou`);
       }
+    }
+    if (state?.runtimeProfile === 'safe-certification') {
+      // Only application processes belong to SAFE; shared DB/Redis remain intact.
+      if (manualIntervention.length === 0) {
+        writeState(this.root, { ...state, processes: {} });
+      }
+      return { stopped: manualIntervention.length === 0, manualIntervention };
     }
     const mainStop =
       state?.maintenance && !mainRunning

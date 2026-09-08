@@ -280,6 +280,7 @@ export const formatStatus = (status: SystemStatusSnapshot) =>
         ]
       : []),
     `Modo comercial: ${status.mode}`,
+    `Perfil de runtime: ${status.runtimeProfile}`,
     `Docker: ${status.docker.daemon}`,
     `PostgreSQL: ${composeServiceDisplay(status.docker.services, 'postgres')}`,
     `Redis: ${composeServiceDisplay(status.docker.services, 'redis')}`,
