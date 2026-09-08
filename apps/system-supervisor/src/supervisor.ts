@@ -886,6 +886,29 @@ const dashboardProcessIdentity = (
   );
 };
 
+const tsxProcessIdentity = (
+  inspection: ProcessInspection,
+  nodePath: string,
+  tsxPath: string,
+  runtimeTsconfig: string,
+  entrypoint: string,
+) => {
+  const command = inspection.command?.replaceAll('\\', '/');
+  if (!command) return false;
+  const args = processArguments(command);
+  const expected = [nodePath, tsxPath, '--tsconfig', runtimeTsconfig, entrypoint];
+  return (
+    args.length === expected.length &&
+    args.every((argument, index) => {
+      const expectedArgument = expected[index];
+      if (index === 0 || index === 1 || index === 3 || index === 4) {
+        return normalizedPath(argument) === normalizedPath(expectedArgument);
+      }
+      return argument.toLowerCase() === expectedArgument.toLowerCase();
+    })
+  );
+};
+
 const serviceIdentityMatches = (
   spec: ServiceSpec,
   inspection: ProcessInspection,
@@ -929,6 +952,14 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, api],
       marker: processMarker(api),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          api,
+        ),
       healthUrl: (ports) => `http://127.0.0.1:${ports.api}/health`,
     },
     {
@@ -961,12 +992,28 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, commercialWorker],
       marker: processMarker(commercialWorker),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          commercialWorker,
+        ),
     },
     {
       name: 'whatsapp-dispatch-worker',
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, dispatchWorker],
       marker: processMarker(dispatchWorker),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          dispatchWorker,
+        ),
     },
   ];
 };
@@ -1183,6 +1230,12 @@ const legacyComposeProjectIdentityError = () =>
   new LocalSystemError(
     'O estado local ativo nao informa a identidade Compose; nenhuma infraestrutura sera alterada',
     'SYSTEM_COMPOSE_PROJECT_IDENTITY_UNAVAILABLE',
+  );
+
+const processOwnershipUnprovenError = (services: ServiceName[]) =>
+  new LocalSystemError(
+    `A origem dos processos registrados nao pode ser comprovada: ${services.join(', ')}`,
+    'SYSTEM_PROCESS_OWNERSHIP_UNPROVEN',
   );
 
 const assertPortAvailable = async (
@@ -1881,6 +1934,9 @@ export class LocalSystemSupervisor {
       this.specs,
       this.deps,
     );
+    if (inspected.reused.length > 0) {
+      throw processOwnershipUnprovenError(inspected.reused);
+    }
     let safeCertificationState: LocalSystemState | undefined;
     if (
       previous &&
@@ -1927,12 +1983,6 @@ export class LocalSystemSupervisor {
       // Persist before changing Docker topology so a later ordinary stop uses
       // this profile rather than a SEND .env after an interrupted startup.
       writeState(this.stateRoot, safeCertificationState);
-    }
-    if (inspected.reused.length > 0) {
-      appendSupervisorLog(
-        this.root,
-        `PIDs reutilizados ignorados: ${inspected.reused.join(', ')}`,
-      );
     }
     await runRequired(
       this.deps,

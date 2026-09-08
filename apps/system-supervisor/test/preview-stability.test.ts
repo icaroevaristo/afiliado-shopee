@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -27,7 +27,10 @@ import {
   parseDatabaseHelperFailureDiagnostic,
   stopValidatedManagedProcess,
 } from '../src/preview-stability-runtime';
+import { composeProjectStateRoot } from '../src/runtime-identity';
+import { statePath, writeState } from '../src/state-store';
 import type { SystemStatusSnapshot } from '../src/supervisor';
+import { createServiceSpecs, resolveServiceArgs } from '../src/supervisor';
 import {
   LocalSystemError,
   type LocalSystemState,
@@ -452,6 +455,36 @@ const createInfrastructureRuntimeDependencies = (
   sleep: async () => undefined,
   now: () => new Date('2026-08-15T12:00:00.000-03:00'),
 });
+
+const createManagedProcessRoot = () => {
+  const root = mkdtempSync(join(tmpdir(), 'preview-stability-process-'));
+  const files = [
+    'package.json',
+    'tsconfig.runtime.json',
+    'apps/api/src/server.ts',
+    'apps/dashboard/package.json',
+    'apps/worker/src/commercial-automation-worker.ts',
+    'apps/worker/src/whatsapp-dispatch-runtime.ts',
+    'node_modules/tsx/package.json',
+    'node_modules/tsx/cli.js',
+    'apps/dashboard/node_modules/next/package.json',
+    'apps/dashboard/node_modules/next/dist/bin/next.js',
+  ];
+  for (const file of files) {
+    const target = join(root, file);
+    mkdirSync(resolve(target, '..'), { recursive: true });
+    writeFileSync(target, '{}');
+  }
+  writeFileSync(
+    join(root, 'node_modules/tsx/package.json'),
+    JSON.stringify({ name: 'tsx', exports: { './cli': './cli.js' } }),
+  );
+  writeFileSync(
+    join(root, 'apps/dashboard/node_modules/next/package.json'),
+    JSON.stringify({ name: 'next', exports: { './dist/bin/next': './dist/bin/next.js' } }),
+  );
+  return root;
+};
 
 const mainInfrastructureCapture = JSON.stringify({
   Service: 'postgres',
@@ -1541,6 +1574,82 @@ describe('preview operational stability', () => {
       code: 'PREVIEW_STABILITY_MANAGED_PROCESS_IDENTITY_MISMATCH',
     });
     expect(stopProcessTree).not.toHaveBeenCalled();
+  });
+
+  it('uses only the requested Compose project state to stop a managed process', async () => {
+    const root = createManagedProcessRoot();
+    const project = `isolated-kill-${Date.now()}`;
+    const isolatedStateRoot = composeProjectStateRoot(root, project);
+    const stopped: number[] = [];
+    const dependencies = createInfrastructureRuntimeDependencies(vi.fn());
+    const api = createServiceSpecs(root).find((spec) => spec.name === 'api');
+    if (!api) throw new Error('API spec missing');
+    const ports = {
+      api: 3333,
+      dashboard: 3000,
+      postgres: 5432,
+      redis: 6379,
+      evolution: 8080,
+    };
+    const command = [api.command, ...resolveServiceArgs(api, ports)]
+      .map((value) => `"${value}"`)
+      .join(' ');
+    dependencies.inspectProcess = async (pid, marker, startedAt) => ({
+      running: pid === 1111 || pid === 2222,
+      identityMatches: marker === api.marker,
+      startedAt,
+      command,
+    });
+    dependencies.stopProcessTree = async (pid) => {
+      stopped.push(pid);
+      return true;
+    };
+    const state = (composeProjectName: string, pid: number): LocalSystemState => ({
+      version: 1,
+      composeProjectName,
+      startedAt: '2026-09-08T12:00:00.000Z',
+      mode: 'preview',
+      ports,
+      processes: {
+        api: {
+          pid,
+          startedAt: '2026-09-08T12:00:00.000Z',
+          log: '.runtime/local-system/api.log',
+        },
+      },
+    });
+    try {
+      writeState(root, state('afiliado-shopee', 1111));
+      writeState(isolatedStateRoot, state(project, 2222));
+      const isolated = createPreviewStabilityDependencies(root, dependencies, {
+        loadEnvironmentFiles: false,
+        composeProjectName: project,
+      });
+
+      await isolated.killManagedProcess('api');
+      expect(stopped).toEqual([2222]);
+
+      rmSync(statePath(isolatedStateRoot), { force: true });
+      await expect(isolated.killManagedProcess('api')).rejects.toMatchObject({
+        code: 'PREVIEW_STABILITY_MANAGED_PROCESS_NOT_FOUND',
+      });
+      expect(stopped).toEqual([2222]);
+
+      writeState(isolatedStateRoot, state('another-project', 2222));
+      await expect(isolated.killManagedProcess('api')).rejects.toMatchObject({
+        code: 'SYSTEM_COMPOSE_PROJECT_MISMATCH',
+      });
+      expect(stopped).toEqual([2222]);
+
+      const canonical = createPreviewStabilityDependencies(root, dependencies, {
+        loadEnvironmentFiles: false,
+      });
+      await canonical.killManagedProcess('api');
+      expect(stopped).toEqual([2222, 1111]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(isolatedStateRoot, { recursive: true, force: true });
+    }
   });
 
   it.each(['redis', 'postgres'] as const)(

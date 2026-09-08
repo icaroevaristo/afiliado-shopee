@@ -758,7 +758,7 @@ volumes:
       await client.$disconnect();
       const before = await readMaintenanceDatabase(root, url);
       expect(before.pending).toEqual(names.slice(-4));
-      writeState(root, {
+      writeState(composeProjectStateRoot(root, project), {
         version: 1,
         composeProjectName: project,
         maintenance: true,
