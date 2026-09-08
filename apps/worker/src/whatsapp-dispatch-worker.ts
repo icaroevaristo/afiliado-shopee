@@ -148,6 +148,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   whatsAppProviderResolver?: (
     instanceName: string,
   ) => WhatsAppProvider | Promise<WhatsAppProvider>;
+  clock?: () => Date;
   messageBuilder?: WhatsAppDispatchProcessorOptions['messageBuilder'];
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   draftService?: Pick<CommercialMessageDraftService, 'createDraft'>;
@@ -253,7 +254,10 @@ const renewCommercialReservationForDispatch = async (input: {
     !execution ||
     execution.id !== run.executionId ||
     execution.mode !== 'SEND' ||
-    execution.status !== 'QUEUED' ||
+    (execution.status !== 'QUEUED' &&
+      (execution.status !== 'STARTED' ||
+        !execution.leaseExpiresAt ||
+        execution.leaseExpiresAt <= now)) ||
     execution.commercialRunId !== run.id
   ) {
     throw reservationHandoffError(
@@ -513,6 +517,7 @@ export const processWhatsAppDispatchJob = async (
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService ?? new CommercialMessageDraftService(),
+    clock,
     confirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
   });
   await revalidateCommercialDispatchBeforeSend({
@@ -657,6 +662,7 @@ export const createWhatsAppDispatchWorker = (
     commercialAutomationMode: options.commercialAutomationMode,
     whatsAppProvider: options.whatsAppProvider,
     whatsAppProviderResolver: options.whatsAppProviderResolver,
+    clock: options.clock,
     messageBuilder: options.messageBuilder,
     groupSendPolicy: options.groupSendPolicy,
     draftService: options.draftService,

@@ -21,6 +21,7 @@ import type { CommercialDispatchOutboxQueue } from '../../api/src/commercial-dis
 import { ScoreService } from '../../api/src/score-service';
 import { ShopeeOfferSyncService } from '../../api/src/shopee-offer-sync-service';
 import { CommercialAutomationSchedulerPlanner } from '../../api/src/commercial-automation-scheduler-planner';
+import { CommercialInventorySupervisor } from '../../api/src/commercial-inventory-supervisor';
 import {
   CommercialExternalProviderBudgetService,
   withOpenAiDailyBudget,
@@ -71,6 +72,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
   options: {
     prisma?: ReturnType<typeof createPrismaClient>;
     logger?: CommercialAutomationRuntimeLogger;
+    clock?: () => Date;
     confirmationQueue?: CommercialDispatchOutboxQueue;
     officialShopeeProviderFactory?: (
       options: ConstructorParameters<
@@ -80,10 +82,14 @@ export const createCommercialAutomationOrchestratorRuntime = (
     openAiCommercialAiCopyProviderFactory?: (
       options: ConstructorParameters<typeof OpenAiCommercialAiCopyProvider>[0],
     ) => InstanceType<typeof OpenAiCommercialAiCopyProvider>;
+    preparedInventory?: ConstructorParameters<
+      typeof CommercialAutomationOrchestrator
+    >[0]['preparedInventory'];
   } = {},
 ) => {
   const prisma = options.prisma ?? createPrismaClient();
   const logger = options.logger ?? commercialAutomationConsoleLogger;
+  const clock = options.clock;
   const repositories = createPrismaRepositories(prisma);
   const externalBudget = new CommercialExternalProviderBudgetService({
     settings: repositories.commercialAutomationSettings,
@@ -127,6 +133,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     repositories,
     score,
     logger,
+    clock,
   });
   const promotionCopyGeneration =
     createCommercialPromotionCopyGenerationService({
@@ -143,6 +150,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
         maximumCopyLength: config.COMMERCIAL_COPY_MAX_LENGTH,
       },
       logger,
+      clock,
     });
   const candidateFlow = new CommercialAutomationCandidateFlowService({
     groups: repositories.whatsappGroups,
@@ -157,6 +165,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     pipeline,
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     logger,
+    clock,
   });
   const commercialPolicyConfig = {
     enabled: config.COMMERCIAL_AUTOMATION_ENABLED,
@@ -171,6 +180,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     repositories,
     instanceName: config.EVOLUTION_INSTANCE_NAME ?? 'affiliate-bot',
     config: commercialPolicyConfig,
+    clock,
   });
   const planner = new CommercialAutomationSchedulerPlanner({
     settings: repositories.commercialAutomationSettings,
@@ -180,6 +190,7 @@ export const createCommercialAutomationOrchestratorRuntime = (
     history: repositories.commercialAutomationHistory,
     policy,
     config: commercialPolicyConfig,
+    clock,
   });
 
   const officialShopeeProviderFactory =
@@ -221,28 +232,43 @@ export const createCommercialAutomationOrchestratorRuntime = (
         environment: {
           groupSendEnabled: config.WHATSAPP_GROUP_SEND_ENABLED,
           safeMode: config.EVOLUTION_SAFE_MODE,
-          schedulerEnabled: config.SCHEDULER_ENABLED,
-          maximumMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN,
-        },
-        logger,
-      })
+        schedulerEnabled: config.SCHEDULER_ENABLED,
+        maximumMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN,
+      },
+      logger,
+      clock,
+    })
     : {
         async confirm(): Promise<never> {
           throw new Error('Confirmation is unavailable in preview runtime');
         },
       };
 
+  const inventorySupervisor = new CommercialInventorySupervisor({
+    candidateFlow,
+    preparedMessages: repositories.commercialPreparedMessages,
+    checkpoints: repositories.commercialDiscoveryCheckpoints,
+    settings: repositories.commercialAutomationSettings,
+    niches: repositories.commercialNiches,
+    syncOffers,
+    logger,
+    clock,
+  });
+
   return {
     planner,
+    inventorySupervisor,
     orchestrator: new CommercialAutomationOrchestrator({
       policy,
-      syncOffers,
+      preparedInventory:
+        options.preparedInventory ?? repositories.commercialPreparedMessages,
       pipeline,
       candidateFlow,
       confirmation,
       commercialRuns: repositories.commercialRuns,
       executions: repositories.commercialAutomationExecutions,
       logger,
+      clock,
       leaseSeconds: config.COMMERCIAL_EXECUTION_LEASE_SECONDS,
       heartbeatSeconds: config.COMMERCIAL_EXECUTION_HEARTBEAT_SECONDS,
     }),

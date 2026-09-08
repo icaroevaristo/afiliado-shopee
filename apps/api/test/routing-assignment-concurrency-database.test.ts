@@ -349,7 +349,7 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
       ),
     ).resolves.toBeDefined();
     releaseProvider.resolve();
-    await expect(sending).resolves.toMatchObject({ status: 'SENT' });
+    await expect(sending).resolves.toMatchObject({ status: 'SUBMITTED' });
     expect(provider.sendMessage).toHaveBeenCalledOnce();
   });
 });

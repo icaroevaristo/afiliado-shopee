@@ -5,6 +5,7 @@ import {
   COMMERCIAL_AUTOMATION_CATALOG_EXHAUSTED,
   COMMERCIAL_AUTOMATION_CANDIDATE_FLOW_REQUIRED,
   COMMERCIAL_AUTOMATION_OFFICIAL_PROVIDER_REQUIRED,
+  COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE,
   COMMERCIAL_AUTOMATION_REPLENISHMENT_LIMIT_REACHED,
   CommercialAutomationOrchestrator,
 } from '../src/commercial-automation-orchestrator';
@@ -15,6 +16,7 @@ import {
   type CommercialAutomationCandidateAttemptReservationResult,
   type CommercialAutomationCandidateSelection,
   type CommercialAutomationCandidatePreflight,
+  type CommercialAutomationCandidatePolicyFence,
 } from '../src/commercial-automation-candidate-flow-service';
 import { CommercialMessageDraftService } from '../src/commercial-message-draft-service';
 import { fingerprintCommercialOffer } from '../src/commercial-offer-snapshot';
@@ -30,6 +32,24 @@ import type {
   CommercialAutomationExecutionStatus,
   CommercialAutomationTarget,
 } from '../src/repositories';
+
+type TestPreparedConfirmationOutcome =
+  | {
+      outcome: 'PRECOMMIT_REJECTED';
+      reason: string;
+      rollbackConfirmed: true;
+    }
+  | {
+      outcome: 'OUTCOME_UNKNOWN';
+      failureCode: string;
+    }
+  | {
+      outcome: 'HANDOFF_COMMITTED';
+      handoff: { runId: string };
+      publication: 'PUBLISHED' | 'UNKNOWN';
+      failureCode?: string;
+      result?: { runId: string };
+    };
 
 const NOW = new Date('2026-07-26T15:00:00.000Z');
 
@@ -244,19 +264,25 @@ const createSubject = ({
   withCandidateFlow = true,
   targets,
   candidateFlowOverride,
+  preparedInventoryOverride,
   policyOverride,
   clock,
+  preparedConfirmationOutcomes,
 }: {
   withCandidateFlow?: boolean;
   targets?: CommercialAutomationTarget[];
   candidateFlowOverride?: ConstructorParameters<
     typeof CommercialAutomationOrchestrator
   >[0]['candidateFlow'];
+  preparedInventoryOverride?: ConstructorParameters<
+    typeof CommercialAutomationOrchestrator
+  >[0]['preparedInventory'];
   policyOverride?: Pick<
     CommercialAutomationPolicyService,
     'evaluateAutomationReadiness'
   >;
   clock?: () => Date;
+  preparedConfirmationOutcomes?: TestPreparedConfirmationOutcome[];
 } = {}) => {
   const resolvedTargets: CommercialAutomationTarget[] = targets ?? [
     {
@@ -335,7 +361,16 @@ const createSubject = ({
         nicheId: target.nicheId,
       };
     }),
-    revalidate: vi.fn(async () => undefined),
+    revalidate: vi.fn<
+      (input: {
+        candidateId: string;
+        generatedCopyId: string;
+        campaignId: string;
+        groupId: string;
+        logicalGroupFingerprint?: string;
+        nicheId?: string;
+      }) => Promise<CommercialAutomationCandidatePolicyFence>
+    >(async () => ({ nicheId: 'niche-1', nicheUpdatedAt: NOW })),
     reserveAttempt: vi.fn<
       (
         target: CommercialAutomationTarget,
@@ -386,7 +421,22 @@ const createSubject = ({
       renewed: true,
     })),
   };
-  const confirmation = { confirm: vi.fn(async () => ({ status: 'queued' })) };
+  const confirmation = {
+    confirm: vi.fn(async () => ({ status: 'queued' })),
+    confirmPrepared: vi.fn(async (input: { preparedId: string }) => {
+      const configuredOutcome = preparedConfirmationOutcomes?.shift();
+      return (
+        configuredOutcome ?? {
+          outcome: 'HANDOFF_COMMITTED' as const,
+          handoff: {
+            runId: `commercial-prepared-${input.preparedId}-run`,
+          },
+          publication: 'PUBLISHED' as const,
+          result: { runId: `commercial-prepared-${input.preparedId}-run` },
+        }
+      );
+    }),
+  };
   const commercialRuns = {
     findById: vi.fn(
       async (): Promise<{
@@ -405,6 +455,9 @@ const createSubject = ({
     pipeline: pipeline as never,
     ...(withCandidateFlow
       ? { candidateFlow: candidateFlowOverride ?? candidateFlow }
+      : {}),
+    ...(preparedInventoryOverride
+      ? { preparedInventory: preparedInventoryOverride }
       : {}),
     confirmation: confirmation as never,
     commercialRuns: commercialRuns as never,
@@ -498,6 +551,24 @@ const createRealCandidateFlowForIntegration = () => {
         scoreBreakdown: { policyVersion: 'official-v2' },
       },
       campaign: campaignFor(group),
+      niche: {
+        id: `niche-${group.id.slice(-1)}`,
+        name: 'Nicho de teste',
+        slug: 'nicho-de-teste',
+        active: true,
+        categoryIds: [],
+        includeKeywords: [],
+        excludeKeywords: [],
+        minPrice: null,
+        maxPrice: null,
+        minDiscountRate: 0,
+        minRating: 0,
+        minSales: 0,
+        minCommissionRate: 0,
+        minimumScore: 60,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
       product: {
         id: productId,
         source: 'OFFICIAL',
@@ -765,6 +836,24 @@ const createStatefulCrossTickCandidateFlow = () => {
         scoreBreakdown: { policyVersion: 'official-v2' },
       },
       campaign: campaignFor(state.group),
+      niche: {
+        id: `niche-${state.group.id.slice(-1)}`,
+        name: 'Nicho de teste',
+        slug: 'nicho-de-teste',
+        active: true,
+        categoryIds: [],
+        includeKeywords: [],
+        excludeKeywords: [],
+        minPrice: null,
+        maxPrice: null,
+        minDiscountRate: 0,
+        minRating: 0,
+        minSales: 0,
+        minCommissionRate: 0,
+        minimumScore: 60,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
       product: {
         id: productId,
         source: 'OFFICIAL',
@@ -1031,6 +1120,515 @@ const tick = {
 };
 
 describe('CommercialAutomationOrchestrator', () => {
+  it('bloqueia com READY vazio sem Shopee, OpenAI ou preparacao de copy no slot', async () => {
+    const preparedInventory = {
+      claimReady: vi.fn(async () => null),
+      markDispatched: vi.fn(async () => false),
+      release: vi.fn(async () => false),
+      invalidateReserved: vi.fn(async () => false),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'commercial-target-ready-empty',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result.status).toBe('blocked');
+    expect(result.reasons).toContain('COMMERCIAL_READY_INVENTORY_EMPTY');
+    expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it('consome READY persistido sem reexecutar Shopee ou OpenAI no slot', async () => {
+    const preparedMessage = {
+      id: 'prepared-message-1',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-ready',
+      snapshotId: 'snapshot-1',
+      generatedCopyId: 'copy-ready-1',
+      copyPreview: 'copy preview https://example.invalid/affiliate',
+      runId: null,
+      status: 'READY' as const,
+       reservationOwnerId: null,
+       reservationLeaseExpiresAt: null,
+       scheduleRevision: 1,
+       assignmentRevision: 1,
+       preparationRevision: 1,
+       expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const preparedInventory = {
+      claimReady: vi.fn(async () => preparedMessage),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => false),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'commercial-target-ready',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result.status).toBe('queued');
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparedId: 'prepared-message-1',
+        executionId: 'execution-1',
+        ownerId: 'execution-1',
+        campaignId: 'campaign-1',
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+      }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
+  it('invalida rejeicao pre-commit do handoff e tenta o proximo READY no mesmo slot', async () => {
+    const preparedMessage = (suffix: string) => ({
+      id: `prepared-message-${suffix}`,
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: `candidate-${suffix}`,
+      snapshotId: `snapshot-${suffix}`,
+      generatedCopyId: `copy-${suffix}`,
+      copyPreview: `copy ${suffix}`,
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const candidateX = preparedMessage('x');
+    const candidateY = preparedMessage('y');
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async () => [candidateX, candidateY][claimIndex++] ?? null),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      preparedConfirmationOutcomes: [
+        {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+          rollbackConfirmed: true,
+        },
+        {
+          outcome: 'HANDOFF_COMMITTED',
+          handoff: { runId: `commercial-prepared-${candidateY.id}-run` },
+          publication: 'PUBLISHED',
+          result: { runId: `commercial-prepared-${candidateY.id}-run` },
+        },
+      ],
+    });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'precommit-rejection-replacement',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result).toMatchObject({
+      status: 'queued',
+      commercialRunId: `commercial-prepared-${candidateY.id}-run`,
+    });
+    expect(preparedInventory.claimReady).toHaveBeenCalledTimes(2);
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledWith({
+      id: candidateX.id,
+      ownerId: 'execution-1',
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      now: NOW,
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledTimes(2);
+    expect(subject.confirmation.confirmPrepared).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ preparedId: candidateX.id }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.confirmation.confirmPrepared).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ preparedId: candidateY.id }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.executions.records[0]).toMatchObject({
+      status: 'QUEUED',
+      commercialRunId: `commercial-prepared-${candidateY.id}-run`,
+    });
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      scenario: 'handoff com resultado desconhecido',
+      outcome: {
+        outcome: 'OUTCOME_UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+      } satisfies TestPreparedConfirmationOutcome,
+      expectedRunId: null,
+    },
+    {
+      scenario: 'handoff confirmado com publicacao desconhecida',
+      outcome: {
+        outcome: 'HANDOFF_COMMITTED',
+        handoff: { runId: 'persisted-prepared-run' },
+        publication: 'UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_PUBLICATION_UNKNOWN',
+      } satisfies TestPreparedConfirmationOutcome,
+      expectedRunId: 'persisted-prepared-run',
+    },
+  ])('preserva $scenario como AMBIGUOUS sem liberar o claim', async ({ outcome, expectedRunId }) => {
+    const preparedMessage = {
+      id: 'prepared-message-unknown',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-unknown',
+      snapshotId: 'snapshot-unknown',
+      generatedCopyId: 'copy-unknown',
+      copyPreview: 'copy unknown',
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const preparedInventory = {
+      claimReady: vi.fn(async () => preparedMessage),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      preparedConfirmationOutcomes: [outcome],
+    });
+
+    const result = await subject.orchestrator.executeTick({
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'unknown-handoff-outcome',
+      mode: 'send',
+      provider: 'official',
+    });
+
+    expect(result).toMatchObject({
+      status: 'ambiguous',
+      commercialRunId: expectedRunId,
+    });
+    expect(subject.executions.records[0]).toMatchObject({
+      status: 'AMBIGUOUS',
+      commercialRunId: expectedRunId,
+      failureCode: outcome.failureCode,
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+    expect(subject.commercialRuns.findById).not.toHaveBeenCalled();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(preparedInventory.invalidateReserved).not.toHaveBeenCalled();
+    expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+    expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      finalization: 'invalidateReserved' as const,
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+    },
+    {
+      finalization: 'release' as const,
+      reason: 'COMMERCIAL_PREPARED_HANDOFF_TRANSACTION_CONFLICT',
+    },
+  ])(
+    'localiza falha de $finalization depois de rejeicao pre-commit sem ambiguidade comercial',
+    async ({ finalization, reason }) => {
+      const preparedMessage = {
+        id: `prepared-message-finalization-${finalization}`,
+        campaignId: 'campaign-1',
+        groupDestinationId: 'group-1',
+        instanceName: 'affiliate-bot',
+        logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+        candidateId: `candidate-finalization-${finalization}`,
+        snapshotId: `snapshot-finalization-${finalization}`,
+        generatedCopyId: `copy-finalization-${finalization}`,
+        copyPreview: 'copy finalization failure',
+        runId: null,
+        status: 'READY' as const,
+        reservationOwnerId: null,
+        reservationLeaseExpiresAt: null,
+        scheduleRevision: 1,
+        assignmentRevision: 1,
+        preparationRevision: 1,
+        expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+        offerEndsAt: null,
+        invalidatedReason: null,
+        invalidatedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const preparedInventory = {
+        claimReady: vi.fn(async () => preparedMessage),
+        markDispatched: vi.fn(async () => true),
+        release:
+          finalization === 'release'
+            ? vi.fn(async () => {
+                throw new Error('local release outcome unknown');
+              })
+            : vi.fn(async () => true),
+        invalidateReserved:
+          finalization === 'invalidateReserved'
+            ? vi.fn(async () => {
+                throw new Error('local invalidation outcome unknown');
+              })
+            : vi.fn(async () => true),
+      };
+      const subject = createSubject({
+        preparedInventoryOverride: preparedInventory,
+        preparedConfirmationOutcomes: [
+          {
+            outcome: 'PRECOMMIT_REJECTED',
+            reason,
+            rollbackConfirmed: true,
+          },
+        ],
+      });
+
+      const result = await subject.orchestrator.executeTick({
+        schedulerJobId: `scheduled-finalization-${finalization}`,
+        bullMqJobId: `finalization-${finalization}`,
+        mode: 'send',
+        provider: 'official',
+      });
+
+      expect(result).toMatchObject({
+        status: 'blocked',
+        commercialRunId: null,
+        reasons: ['COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN'],
+      });
+      expect(subject.executions.records[0]).toMatchObject({
+        status: 'BLOCKED',
+        commercialRunId: null,
+        externalStage: 'NOT_REACHED',
+        failureCode: 'COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN',
+        reasons: ['COMMERCIAL_AUTOMATION_PREPARED_CLAIM_FINALIZATION_UNKNOWN'],
+      });
+      expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+      expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+      expect(subject.commercialRuns.findById).not.toHaveBeenCalled();
+      expect(preparedInventory.claimReady).toHaveBeenCalledOnce();
+      expect(preparedInventory.markDispatched).not.toHaveBeenCalled();
+      expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+      expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+      if (finalization === 'release') {
+        expect(preparedInventory.release).toHaveBeenCalledOnce();
+        expect(preparedInventory.invalidateReserved).not.toHaveBeenCalled();
+      } else {
+        expect(preparedInventory.invalidateReserved).toHaveBeenCalledOnce();
+        expect(preparedInventory.release).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('invalida prepared incompatível e substitui pelo próximo READY no mesmo slot', async () => {
+    const preparedMessage = (suffix: string) => ({
+      id: `prepared-message-${suffix}`,
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: `candidate-${suffix}`,
+      snapshotId: `snapshot-${suffix}`,
+      generatedCopyId: `copy-${suffix}`,
+      copyPreview: `copy ${suffix}`,
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const candidateX = preparedMessage('x');
+    const candidateY = preparedMessage('y');
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async (input: { ownerId: string; instanceName: string }) => {
+        expect(input.ownerId).toBe('execution-1');
+        expect(input.instanceName).toBe('affiliate-bot');
+        const claimed = [candidateX, candidateY][claimIndex];
+        claimIndex += 1;
+        return claimed;
+      }),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({
+      preparedInventoryOverride: preparedInventory,
+      targets: [
+        {
+          groupId: 'group-1',
+          groupName: 'Grupo 1',
+          logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+          campaignId: 'campaign-1',
+          nicheId: 'niche-1',
+          instanceName: 'affiliate-bot',
+          dailyLimit: 60,
+        },
+      ],
+    });
+    subject.candidateFlow.revalidate.mockImplementation(async (input) => {
+      if (input.candidateId === candidateX.candidateId) {
+        throw new AppError(
+          'Politica mudou',
+          'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+        );
+      }
+      return { nicheId: 'niche-1', nicheUpdatedAt: NOW };
+    });
+
+    const policyReplacementResult = await subject.orchestrator.executeTick({
+        schedulerJobId: 'scheduled-commercial-automation',
+        bullMqJobId: 'policy-replacement-slot',
+        mode: 'send',
+        provider: 'official',
+      });
+    expect(policyReplacementResult).toMatchObject({ status: 'queued' });
+
+    expect(preparedInventory.claimReady).toHaveBeenCalledTimes(2);
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledWith({
+      id: candidateX.id,
+      ownerId: 'execution-1',
+      reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      now: NOW,
+    });
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparedId: candidateY.id,
+        executionId: 'execution-1',
+        instanceName: 'affiliate-bot',
+      }),
+      expect.stringMatching(/.+/),
+    );
+    expect(subject.confirmation.confirmPrepared).toHaveBeenCalledOnce();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+  });
+
+  it('encerra com motivo explícito quando não existe READY compatível para substituir', async () => {
+    const preparedMessage = {
+      id: 'prepared-message-only',
+      campaignId: 'campaign-1',
+      groupDestinationId: 'group-1',
+      instanceName: 'affiliate-bot',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      candidateId: 'candidate-only',
+      snapshotId: 'snapshot-only',
+      generatedCopyId: 'copy-only',
+      copyPreview: 'copy',
+      runId: null,
+      status: 'READY' as const,
+      reservationOwnerId: null,
+      reservationLeaseExpiresAt: null,
+      scheduleRevision: 1,
+      assignmentRevision: 1,
+      preparationRevision: 1,
+      expiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      offerEndsAt: null,
+      invalidatedReason: null,
+      invalidatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    let claimIndex = 0;
+    const preparedInventory = {
+      claimReady: vi.fn(async () => {
+        claimIndex += 1;
+        return claimIndex === 1 ? preparedMessage : null;
+      }),
+      markDispatched: vi.fn(async () => true),
+      release: vi.fn(async () => true),
+      invalidateReserved: vi.fn(async () => true),
+    };
+    const subject = createSubject({ preparedInventoryOverride: preparedInventory });
+    subject.candidateFlow.revalidate.mockRejectedValue(
+      new AppError(
+        'Politica mudou',
+        'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+      ),
+    );
+
+    await expect(
+      subject.orchestrator.executeTick({
+        schedulerJobId: 'scheduled-commercial-automation',
+        bullMqJobId: 'policy-replacement-empty',
+        mode: 'send',
+        provider: 'official',
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: [COMMERCIAL_AUTOMATION_POLICY_REPLACEMENT_UNAVAILABLE],
+    });
+
+    expect(preparedInventory.invalidateReserved).toHaveBeenCalledOnce();
+    expect(subject.confirmation.confirmPrepared).not.toHaveBeenCalled();
+    expect(preparedInventory.release).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.replenish).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it('cria ownership, lease e encerra o timer depois do tick', async () => {
@@ -1395,6 +1993,7 @@ describe('CommercialAutomationOrchestrator', () => {
     const order: string[] = [];
     subject.candidateFlow.revalidate.mockImplementation(async () => {
       order.push('revalidate');
+      return { nicheId: 'niche-1', nicheUpdatedAt: NOW };
     });
     subject.candidateFlow.renewAttempt.mockImplementation(async (input) => {
       order.push('renew');
@@ -1636,7 +2235,11 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.syncOffers.run).not.toHaveBeenCalled();
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...targets[1],
+      }),
+    );
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ target: targets[1] }),
@@ -1693,9 +2296,19 @@ describe('CommercialAutomationOrchestrator', () => {
     ).resolves.toMatchObject({ status: 'queued' });
 
     expect(subject.candidateFlow.preflight).toHaveBeenCalledOnce();
-    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(targets[1]);
+    expect(subject.candidateFlow.preflight).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...targets[1],
+        scheduleRevision: 1,
+      }),
+    );
     expect(subject.candidateFlow.prepare).toHaveBeenCalledWith(
-      expect.objectContaining({ target: targets[1] }),
+      expect.objectContaining({
+        target: expect.objectContaining({
+          ...targets[1],
+          scheduleRevision: 1,
+        }),
+      }),
       expect.any(Object),
     );
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalledWith(

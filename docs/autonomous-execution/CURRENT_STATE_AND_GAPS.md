@@ -66,13 +66,20 @@ esta tabela não converte documento antigo em verdade atual.
 | GAP-04 | `PARTIALLY_FIXED` | `E30-CODE-004`, `E30-OP-001` | código deriva blockers; causa dos dados operacionais ainda precisa de leitura e correlação; R3 |
 | GAP-05 | `REJECTED` como risco de falso online | `E30-CODE-004` | `UNKNOWN` é honesto sem heartbeat; não declarar conectado por registro DB. Um contrato de heartbeat futuro é melhoria separada |
 | GAP-06 | `PARTIALLY_FIXED` | `E30-CODE-002` | um número pode ter muitos grupos via assignments, mas falta certificação operacional específica; R4 |
-| GAP-07 | `OPEN` | `E30-CODE-002` | multi-instância no mesmo grupo por rotação de slot não é representado; R5 obrigatório |
+| GAP-07 | `PARTIALLY_FIXED` | `E30-CODE-002`, `E141-DB-004` | branch atual representa assignment ordenada, revision e binding por slot; revisão independente e readiness operacional continuam pendentes |
 | GAP-08 | `OPEN` | `E30-CODE-002` | UI atual expressa um número responsável, não ordem/estratégia N-sender; R6 |
 | GAP-09 | `OPEN` | `E30-OP-001` | browser/Playwright não foi executado nesta missão; R7 deve produzir screenshots/traces ou BLOCKED |
 | GAP-10 | `OPEN` | `E30-OP-001` | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8 |
 | GAP-11 | `HUMAN_REQUIRED` | `E30-DOC-001` | retirar pause/ativar operação real jamais é inferido por um agente; R9 |
 
-## 4. Invariantes do GAP-07
+## 4. Invariantes e estado atual do GAP-07
+
+Na branch atual, o modelo de assignment ordenada e o binding de instância por
+slot estão implementados com revisão persistida. A certificação disposable de
+100 slots cobre rotação A/B derivada de ACK persistido, concorrência de claim,
+handoff, refill e múltiplas expirações. O status documental permanece
+`PARTIALLY_FIXED` até a revisão independente do candidate final e os gates
+operacionais que não pertencem a esta task.
 
 O futuro R5 só pode ser aprovado se demonstrar:
 
@@ -103,3 +110,22 @@ Os nomes de status acima seguem exclusivamente o vocabulário de
 `HUMAN_DECISION_REQUIRED` como estados alternativos. O ledger inicial não
 afirma que gaps foram corrigidos; fases futuras devem copiar os registros
 relevantes para o manifesto da execução e acrescentar evidência nova.
+
+## 6. Delta do motor de inventory persistente
+
+O estado corrente desta branch adiciona `CommercialDiscoveryCheckpoint` e
+`CommercialPreparedMessage`. Discovery, mining e preparação de copy pertencem
+ao supervisor do heartbeat, com checkpoint/lease/replay persistentes. O target
+agendado apenas valida o target sticky e faz claim transacional de uma mensagem
+`READY`; fila vazia termina em `COMMERCIAL_READY_INVENTORY_EMPTY`.
+
+```text
+SHOPEE_IN_SLOT_PATH=false
+OPENAI_IN_SLOT_PATH=false
+```
+
+Recovery de reserva consulta run, outbox e dispatch antes de reabrir uma linha.
+Qualquer evidência lógica de confirmação fecha a linha como `DISPATCHED`.
+Testes unitários cobrem replay de duas páginas, READY vazio e crash antes/depois
+do outbox. PostgreSQL e Redis disposable permanecem gates separados da
+infraestrutura operacional.

@@ -297,6 +297,10 @@ export class CommercialPipelineService {
     this.scorePolicies = new CommercialOfferScorePolicyResolver(options.score);
   }
 
+  findRunByExecutionId(executionId: string) {
+    return this.options.runs.findByExecutionId(executionId);
+  }
+
   async dryRun(
     rawInput: CommercialPipelineInput = {},
   ): Promise<CommercialPipelineDryRunResult> {
@@ -719,17 +723,25 @@ export class CommercialPipelineService {
           createdAt: startedAt,
           completedAt: null,
         });
+    const recoverableCompletedRun =
+      Boolean(input.existingRunId) && run?.status === 'COMPLETED';
     if (
       !run ||
       run.id !== (input.existingRunId ?? run.id) ||
       run.mode !== 'DRY_RUN' ||
-      !['STARTED', 'FAILED'].includes(run.status) ||
+      (!recoverableCompletedRun && !['STARTED', 'FAILED'].includes(run.status)) ||
       run.executionId !== input.executionId ||
       run.confirmedAt ||
       run.dispatchId ||
       run.jobId ||
       run.finalStatus ||
-      run.investigationRequired
+      run.investigationRequired ||
+      (recoverableCompletedRun &&
+        (run.productId !== input.candidate.productId ||
+          run.groupDestinationId !== input.group.id ||
+          run.instanceName !== assignedInstanceName ||
+          run.groupFingerprint !== input.group.fingerprint ||
+          run.copyPreview !== input.copyPreview))
     ) {
       throw new AppError(
         'Run comercial existente nao pode ser recuperado com seguranca',
@@ -738,29 +750,31 @@ export class CommercialPipelineService {
     }
 
     try {
-      await this.options.runs.update(run.id, {
-        status: 'COMPLETED',
-        productId: input.candidate.productId,
-        groupDestinationId: input.group.id,
-        productName: input.candidate.productName,
-        productPrice: input.candidate.price,
-        groupName: input.group.name,
-        groupFingerprint: input.group.fingerprint,
-        score: input.candidate.commercialScore,
-        scorePolicyVersion: input.candidate.scorePolicyVersion,
-        minimumScoreUsed: input.candidate.minimumScoreUsed,
-        maximumScoreObserved: input.candidate.commercialScore,
-        selectedScoreBreakdown: input.candidate.scoreBreakdown,
-        candidateCount: input.candidateCount,
-        eligibleCount: input.eligibleCount,
-        rejectedCount: input.rejectedCount,
-        rejectionSummary: input.rejectionSummary,
-        selectionReasons,
-        copyPreview: input.copyPreview,
-        plannedSubIds,
-        failureCode: null,
-        completedAt: this.clock(),
-      });
+      if (!recoverableCompletedRun) {
+        await this.options.runs.update(run.id, {
+          status: 'COMPLETED',
+          productId: input.candidate.productId,
+          groupDestinationId: input.group.id,
+          productName: input.candidate.productName,
+          productPrice: input.candidate.price,
+          groupName: input.group.name,
+          groupFingerprint: input.group.fingerprint,
+          score: input.candidate.commercialScore,
+          scorePolicyVersion: input.candidate.scorePolicyVersion,
+          minimumScoreUsed: input.candidate.minimumScoreUsed,
+          maximumScoreObserved: input.candidate.commercialScore,
+          selectedScoreBreakdown: input.candidate.scoreBreakdown,
+          candidateCount: input.candidateCount,
+          eligibleCount: input.eligibleCount,
+          rejectedCount: input.rejectedCount,
+          rejectionSummary: input.rejectionSummary,
+          selectionReasons,
+          copyPreview: input.copyPreview,
+          plannedSubIds,
+          failureCode: null,
+          completedAt: this.clock(),
+        });
+      }
       this.options.logger.info(
         {
           event: 'commercial-pipeline.candidate-dry-run.completed',
@@ -798,11 +812,13 @@ export class CommercialPipelineService {
         messageWillBeSent: false,
       };
     } catch (error) {
-      await this.options.runs.update(run.id, {
-        status: 'FAILED',
-        failureCode: 'COMMERCIAL_PIPELINE_FAILED',
-        completedAt: this.clock(),
-      });
+      if (!recoverableCompletedRun) {
+        await this.options.runs.update(run.id, {
+          status: 'FAILED',
+          failureCode: 'COMMERCIAL_PIPELINE_FAILED',
+          completedAt: this.clock(),
+        });
+      }
       this.options.logger.error(
         {
           event: 'commercial-pipeline.candidate-dry-run.failed',

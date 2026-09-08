@@ -36,6 +36,7 @@ import {
   isCommercialInstanceAssigned,
   requireAssignedInstanceName,
 } from './commercial-instance-stickiness';
+import { CommercialNicheMatcher } from './commercial-niche-matcher';
 import type {
   CommercialAutomationTarget,
   CommercialGroupCampaignAttemptReservation,
@@ -51,6 +52,7 @@ import type {
   CommercialPromotionCopyRepository,
   CommercialPromotionQueueItem,
   CommercialPromotionCopyContext,
+  ShopeeOfferRecord,
   GeneratedCopyRecord,
   WhatsAppGroupDirectoryRepository,
   WhatsAppGroupRecord,
@@ -80,9 +82,28 @@ export type CommercialAutomationCandidateFlowResult = {
   pipeline: CommercialPipelineDryRunResult;
 };
 
+export type CommercialAutomationInventoryPreparation = {
+  candidateId: string;
+  snapshotId: string;
+  generatedCopyId: string;
+  campaignId: string;
+  groupId: string;
+  logicalGroupFingerprint: string;
+  nicheId: string;
+  copyPreview: string;
+  offerEndsAt: Date | null;
+};
+
 export type CommercialAutomationCandidatePreparationOptions = {
   executionId: string;
   existingRunId?: string;
+  resolveExecution?: (input: {
+    candidateId: string;
+    snapshotId: string;
+  }) => Promise<{
+    executionId: string;
+    existingRunId?: string;
+  }>;
   manualSelection?: boolean;
   beforeExternalCopyGeneration?: () => Promise<void>;
   miningReport?: Pick<
@@ -99,10 +120,19 @@ export type CommercialAutomationCandidateRevalidation = Pick<
   nicheId?: string;
 };
 
+export type CommercialAutomationCandidatePolicyFence = {
+  nicheId: string;
+  nicheUpdatedAt: Date;
+};
+
+export const COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED =
+  'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED';
+
 export type CommercialAutomationCandidatePreflight =
   | {
       outcome: 'READY';
       candidateId: string;
+      snapshotId?: string;
       candidateStatus: 'COPY_READY' | 'QUEUED';
       queue?: {
         candidateCount: number;
@@ -134,6 +164,7 @@ export type CommercialAutomationCandidatePreflight =
 export type CommercialAutomationCandidateSelection = {
   target: CommercialAutomationTarget;
   candidateId: string;
+  snapshotId?: string;
   candidateStatus: 'COPY_READY' | 'QUEUED';
   queue: {
     candidateCount: number;
@@ -175,6 +206,7 @@ export const COMMERCIAL_AUTOMATION_BENIGN_NO_CANDIDATE_CODES = [
   COMMERCIAL_AI_COPY_TERMINAL_OUTPUT_REJECTED,
   COMMERCIAL_AI_COPY_TERMINAL_ATTEMPT_REJECTED,
   COMMERCIAL_IMAGE_REQUIRED,
+  COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
 ] as const;
 
 export type CommercialAutomationBenignNoCandidateCode =
@@ -212,7 +244,8 @@ type CandidateFlowOptions = {
     'preview' | 'generate' | 'findCopy'
   >;
   draft: Pick<CommercialMessageDraftService, 'createDraft'>;
-  pipeline: Pick<CommercialPipelineService, 'dryRunFromPromotionCandidate'>;
+  pipeline: Pick<CommercialPipelineService, 'dryRunFromPromotionCandidate'> &
+    Partial<Pick<CommercialPipelineService, 'findRunByExecutionId'>>;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   instanceName: string;
   logger?: CandidateFlowLogger;
@@ -285,12 +318,20 @@ const incrementReason = (summary: Record<string, number>, code: string) => {
 };
 
 const MAX_PREPARE_CANDIDATE_ATTEMPTS = 4;
+const commercialNicheMatcher = new CommercialNicheMatcher();
 
 export class CommercialAutomationCandidateFlowService {
   private readonly clock: () => Date;
 
   constructor(private readonly options: CandidateFlowOptions) {
     this.clock = options.clock ?? (() => new Date());
+  }
+
+  findRunByExecutionId(executionId: string) {
+    return (
+      this.options.pipeline.findRunByExecutionId?.(executionId) ??
+      Promise.resolve(null)
+    );
   }
 
   private async listAuthorizedGroups(): Promise<WhatsAppGroupRecord[]> {
@@ -682,6 +723,7 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
+        this.assertCurrentNichePolicy(loaded.context);
         this.assertAffiliateLinkEligible(loaded.context, {
           candidateId: item.id,
           campaignId: campaign.id,
@@ -739,6 +781,7 @@ export class CommercialAutomationCandidateFlowService {
             'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
           );
         }
+        this.assertCurrentNichePolicy(context);
         this.assertAffiliateLinkEligible(context, {
           candidateId: item.id,
           campaignId: campaign.id,
@@ -807,6 +850,7 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
       );
     }
+    this.assertCurrentNichePolicy(context);
     try {
       this.assertAffiliateLinkEligible(context, {
         candidateId: selection.candidateId,
@@ -855,6 +899,7 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_NO_ELIGIBLE_CANDIDATE',
       );
     }
+    this.assertCurrentNichePolicy(loaded.context);
     try {
       this.assertAffiliateLinkEligible(loaded.context, {
         candidateId: selection.candidateId,
@@ -939,6 +984,7 @@ export class CommercialAutomationCandidateFlowService {
     const rejectionSummary: Record<string, number> = {};
     const terminalCandidateIds = new Set<string>();
     const alreadySentCandidateIds = new Set<string>();
+    const policyRejectedCandidateIds = new Set<string>();
     const excluded = new Set(options.excludeCandidateIds ?? []);
     const onRejected = async (
       _item: CommercialPromotionQueueItem,
@@ -951,6 +997,9 @@ export class CommercialAutomationCandidateFlowService {
       if (code === 'ALREADY_SENT_TO_GROUP') {
         alreadySentCandidateIds.add(_item.id);
       }
+      if (code === COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED) {
+        policyRejectedCandidateIds.add(_item.id);
+      }
     };
     const orderedCandidates = queue.items
       .filter(
@@ -960,7 +1009,11 @@ export class CommercialAutomationCandidateFlowService {
       )
       .sort(queueOrder);
     let selected:
-      | { candidateId: string; candidateStatus: 'COPY_READY' | 'QUEUED' }
+      | {
+          candidateId: string;
+          snapshotId: string;
+          candidateStatus: 'COPY_READY' | 'QUEUED';
+        }
       | undefined;
     for (const item of orderedCandidates) {
       if (item.status === 'COPY_READY') {
@@ -973,6 +1026,7 @@ export class CommercialAutomationCandidateFlowService {
         if (ready) {
           selected ??= {
             candidateId: ready.context.candidate.id,
+            snapshotId: ready.context.snapshot.id,
             candidateStatus: 'COPY_READY',
           };
         }
@@ -987,6 +1041,7 @@ export class CommercialAutomationCandidateFlowService {
       if (queued) {
         selected ??= {
           candidateId: queued.candidate.id,
+          snapshotId: queued.snapshot.id,
           candidateStatus: 'QUEUED',
         };
       }
@@ -1000,7 +1055,9 @@ export class CommercialAutomationCandidateFlowService {
     );
     const usableAlreadySentCount = aggregateUsableAlreadySentCount;
     const usableCount = Math.max(
-      usableBeforeDelivery - (queue.health?.alreadySentCount !== undefined ? 0 : usableAlreadySentCount),
+      usableBeforeDelivery -
+        policyRejectedCandidateIds.size -
+        (queue.health?.alreadySentCount !== undefined ? 0 : usableAlreadySentCount),
       0,
     );
     const queueSummary = {
@@ -1010,9 +1067,15 @@ export class CommercialAutomationCandidateFlowService {
       rejectionSummary,
       nominalCount,
       usableCount,
-      copyReadyCount:
-        queue.health?.copyReadyCount ??
-        orderedCandidates.filter(({ status }) => status === 'COPY_READY').length,
+      copyReadyCount: Math.max(
+        (queue.health?.copyReadyCount ??
+          orderedCandidates.filter(({ status }) => status === 'COPY_READY').length) -
+          orderedCandidates.filter(
+            ({ id, status }) =>
+              status === 'COPY_READY' && policyRejectedCandidateIds.has(id),
+          ).length,
+        0,
+      ),
       terminalCount:
         queue.health?.terminalCount ?? terminalCandidateIds.size,
       alreadySentCount,
@@ -1030,10 +1093,13 @@ export class CommercialAutomationCandidateFlowService {
     });
   }
 
-  async prepare(
+  private async loadForPreparation(
     selection: CommercialAutomationCandidateSelection,
-    options: CommercialAutomationCandidatePreparationOptions,
-  ): Promise<CommercialAutomationCandidateFlowResult> {
+    options: Pick<
+      CommercialAutomationCandidatePreparationOptions,
+      'beforeExternalCopyGeneration'
+    > = {},
+  ) {
     const { group, campaign } = await this.resolveTarget(selection.target);
     let currentSelection = selection;
     const terminalCandidateIds = new Set<string>();
@@ -1045,7 +1111,11 @@ export class CommercialAutomationCandidateFlowService {
     ) {
       try {
         if (currentSelection.candidateStatus === 'QUEUED') {
-          await this.loadSelectedQueuedCandidate(currentSelection, campaign, group);
+          await this.loadSelectedQueuedCandidate(
+            currentSelection,
+            campaign,
+            group,
+          );
           await options.beforeExternalCopyGeneration?.();
           await this.options.copyGeneration.generate(
             currentSelection.candidateId,
@@ -1092,6 +1162,7 @@ export class CommercialAutomationCandidateFlowService {
         currentSelection = {
           target: selection.target,
           candidateId: next.candidateId,
+          snapshotId: next.snapshotId,
           candidateStatus: next.candidateStatus,
           queue: next.queue ?? {
             candidateCount: 0,
@@ -1107,6 +1178,15 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_CANDIDATE_FALLBACK_EXHAUSTED',
       );
     }
+    return { loaded, group, campaign, currentSelection };
+  }
+
+  async prepare(
+    selection: CommercialAutomationCandidateSelection,
+    options: CommercialAutomationCandidatePreparationOptions,
+  ): Promise<CommercialAutomationCandidateFlowResult> {
+    const { group, campaign, currentSelection, loaded } =
+      await this.loadForPreparation(selection, options);
     if (
       loaded.context.campaign.id !== campaign.id ||
       loaded.context.campaign.logicalGroupFingerprint !==
@@ -1117,6 +1197,17 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_GROUP_CAMPAIGN_FINGERPRINT_MISMATCH',
       );
     }
+    const resolvedExecution = options.resolveExecution
+      ? await options.resolveExecution({
+          candidateId: loaded.context.candidate.id,
+          snapshotId: loaded.context.snapshot.id,
+        })
+      : {
+          executionId: options.executionId,
+          ...(options.existingRunId
+            ? { existingRunId: options.existingRunId }
+            : {}),
+        };
     const draft = this.draft(loaded);
     const pipeline = await this.options.pipeline.dryRunFromPromotionCandidate({
       candidate: {
@@ -1131,8 +1222,8 @@ export class CommercialAutomationCandidateFlowService {
         scoreBreakdown: loaded.context.candidate.scoreBreakdown,
       },
       group,
-      executionId: options.executionId,
-      existingRunId: options.existingRunId,
+      executionId: resolvedExecution.executionId,
+      existingRunId: resolvedExecution.existingRunId,
       instanceName:
         currentSelection.target.instanceName ?? requireAssignedInstanceName(group),
       campaign: 'commercial-automation',
@@ -1168,6 +1259,34 @@ export class CommercialAutomationCandidateFlowService {
       deliveryMode: 'IMAGE',
       copyPreview: draft.caption,
       pipeline,
+    };
+  }
+
+  /** Prepare copy and snapshot identity without creating a pipeline run. */
+  async prepareInventory(
+    selection: CommercialAutomationCandidateSelection,
+  ): Promise<CommercialAutomationInventoryPreparation> {
+    const { group, campaign, loaded } = await this.loadForPreparation(selection);
+    const draft = this.draft(loaded);
+    this.options.logger?.info(
+      {
+        event: 'commercial-automation.candidate-flow.inventory-prepared',
+        campaignId: campaign.id,
+        candidateId: loaded.context.candidate.id,
+        generatedCopyId: loaded.copy.id,
+      },
+      'Commercial automation inventory prepared without a pipeline run',
+    );
+    return {
+      candidateId: loaded.context.candidate.id,
+      snapshotId: loaded.context.snapshot.id,
+      generatedCopyId: loaded.copy.id,
+      campaignId: campaign.id,
+      groupId: group.id,
+      logicalGroupFingerprint: group.fingerprint,
+      nicheId: campaign.nicheId,
+      copyPreview: draft.caption,
+      offerEndsAt: loaded.context.snapshot.offerEndsAt,
     };
   }
 
@@ -1212,7 +1331,69 @@ export class CommercialAutomationCandidateFlowService {
     );
   }
 
-  async revalidate(input: CommercialAutomationCandidateRevalidation) {
+  private assertCurrentNichePolicy(context: CommercialPromotionCopyContext) {
+    if (context.product.source !== 'OFFICIAL') {
+      throw appError(
+        'Candidato preparado nao e uma oferta oficial persistida',
+        COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
+      );
+    }
+    const product = context.product;
+    const offer: ShopeeOfferRecord = {
+      id: product.id,
+      source: product.source,
+      providerProductId: product.providerProductId,
+      productName: product.productName,
+      shopName: product.shopName,
+      categoryIds: product.categoryIds ?? [],
+      price: product.price,
+      priceMin: product.priceMin ?? product.price,
+      priceMax: product.priceMax ?? product.price,
+      discountRate: product.discountRate,
+      rating: product.rating,
+      sales: product.sales,
+      commissionRate: product.commissionRate,
+      imageUrl: product.urlImagem ?? '',
+      productLink: product.productLink ?? '',
+      ...(product.affiliateLink
+        ? { affiliateLink: product.affiliateLink }
+        : {}),
+      ...(product.offerStartsAt
+        ? { offerStartsAt: product.offerStartsAt }
+        : {}),
+      ...(product.offerEndsAt ? { offerEndsAt: product.offerEndsAt } : {}),
+      fetchedAt: product.updatedAt,
+      score: context.candidate.commercialScore,
+      scoreUpdatedAt: product.updatedAt,
+      lastSeenAt: product.updatedAt,
+      createdAt: product.updatedAt,
+      updatedAt: product.updatedAt,
+    };
+    const match = (() => {
+      try {
+        return commercialNicheMatcher.match({
+          product: offer,
+          niche: context.niche,
+          finalScore: context.candidate.commercialScore,
+        });
+      } catch {
+        throw appError(
+          'Politica do nicho mudou desde o preparo',
+          COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
+        );
+      }
+    })();
+    if (!match.matched) {
+      throw appError(
+        'Politica do nicho mudou desde o preparo',
+        COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED,
+      );
+    }
+  }
+
+  async revalidate(
+    input: CommercialAutomationCandidateRevalidation,
+  ): Promise<CommercialAutomationCandidatePolicyFence> {
     const groups = await this.listAuthorizedGroups();
     const group = groups.find((candidate) => candidate.id === input.groupId);
     if (
@@ -1256,6 +1437,11 @@ export class CommercialAutomationCandidateFlowService {
         'COMMERCIAL_AUTOMATION_CANDIDATE_CHANGED',
       );
     }
+    this.assertCurrentNichePolicy(loaded.context);
     this.draft(loaded);
+    return {
+      nicheId: loaded.context.niche.id,
+      nicheUpdatedAt: loaded.context.niche.updatedAt,
+    };
   }
 }

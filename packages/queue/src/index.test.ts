@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   COMMERCIAL_AUTOMATION_JOB_OPTIONS,
   enqueueCommercialAutomationTarget,
+  enqueueCommercialInventoryRefill,
   JOB_NAMES,
 } from './index';
 
@@ -218,5 +219,51 @@ describe('commercial target queue contract', () => {
       'add:campaign-winner',
       'add:campaign-loser',
     ]);
+  });
+
+  it('valida payload e identidade do refill persistido', async () => {
+    const data = { mode: 'send' as const, provider: 'official' as const };
+    const persistedJob = {
+      id: 'commercial-inventory-refill-tick-1',
+      name: JOB_NAMES.commercialInventoryRefill,
+      data,
+    };
+    const add = vi.fn().mockResolvedValue(persistedJob);
+    const getJob = vi.fn().mockResolvedValue(persistedJob);
+
+    await expect(
+      enqueueCommercialInventoryRefill(
+        { add, getJob } as never,
+        data,
+        persistedJob.id,
+      ),
+    ).resolves.toBe(persistedJob);
+    expect(add).toHaveBeenCalledWith(
+      JOB_NAMES.commercialInventoryRefill,
+      data,
+      expect.objectContaining({ jobId: persistedJob.id }),
+    );
+  });
+
+  it('rejeita payload divergente do refill que venceu pelo mesmo jobId', async () => {
+    const data = { mode: 'send' as const, provider: 'official' as const };
+    const persistedJob = {
+      id: 'commercial-inventory-refill-tick-1',
+      name: JOB_NAMES.commercialInventoryRefill,
+      data: { mode: 'preview' as const, provider: 'official' as const },
+    };
+
+    await expect(
+      enqueueCommercialInventoryRefill(
+        {
+          add: vi.fn().mockResolvedValue(persistedJob),
+          getJob: vi.fn().mockResolvedValue(persistedJob),
+        } as never,
+        data,
+        persistedJob.id,
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_INVENTORY_REFILL_JOB_PAYLOAD_CONFLICT',
+    });
   });
 });

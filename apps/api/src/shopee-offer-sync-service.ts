@@ -5,7 +5,10 @@ import type {
   ShopeeProductOfferListInput,
 } from '@shopee-auto-affiliate-ai/providers';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
-import type { ShopeeOfferRepository } from './repositories';
+import type {
+  CommercialDiscoveryWriteFence,
+  ShopeeOfferRepository,
+} from './repositories';
 import {
   assertCompatibleShopeeProductIdentity,
   assertCompleteShopeeProductIdentity,
@@ -91,6 +94,7 @@ export class ShopeeOfferSyncService {
 
   async run(
     input: ShopeeProductOfferListInput = {},
+    options?: { writeFence?: CommercialDiscoveryWriteFence },
   ): Promise<ShopeeOfferSyncReport> {
     const limit = Math.min(
       Math.max(input.limit ?? this.options.maxOffersPerSync, 1),
@@ -177,7 +181,10 @@ export class ShopeeOfferSyncService {
 
         if (offer.source === 'OFFICIAL') {
           const outcome =
-            await this.options.offers.upsertOfficialOfferWithSnapshot(offer);
+            await this.options.offers.upsertOfficialOfferWithSnapshot(
+              offer,
+              options?.writeFence,
+            );
           report[outcome.productAction] += 1;
           if (outcome.snapshotCreated) report.snapshotsCreated += 1;
           else report.snapshotsUnchanged += 1;

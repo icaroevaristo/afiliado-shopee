@@ -16,6 +16,9 @@ import { commercialProductRejections } from './commercial-offer-eligibility';
 import type {
   CommercialDeliveryHistoryRepository,
   CommercialDispatchOutboxRepository,
+  CommercialPreparedMessageHandoffInput,
+  CommercialPreparedMessageHandoffOutcome,
+  CommercialPreparedMessageRepository,
   CommercialPipelineRunRecord,
   CommercialPipelineRunRepository,
   WhatsAppInstanceRepository,
@@ -57,6 +60,23 @@ export type CommercialPipelineConfirmationResult = {
   investigationRequired: false;
 };
 
+export type CommercialPreparedPipelineConfirmationResult =
+  CommercialPipelineConfirmationResult & { outboxId: string };
+
+export type CommercialPreparedPipelineConfirmationOutcome =
+  | Extract<CommercialPreparedMessageHandoffOutcome, { outcome: 'PRECOMMIT_REJECTED' }>
+  | Extract<CommercialPreparedMessageHandoffOutcome, { outcome: 'OUTCOME_UNKNOWN' }>
+  | {
+      outcome: 'HANDOFF_COMMITTED';
+      handoff: Extract<
+        CommercialPreparedMessageHandoffOutcome,
+        { outcome: 'HANDOFF_COMMITTED' }
+      >['handoff'];
+      publication: 'NOT_ATTEMPTED' | 'PUBLISHED' | 'UNKNOWN';
+      result?: CommercialPreparedPipelineConfirmationResult;
+      failureCode?: string;
+    };
+
 export type CommercialPipelineConfirmationOptions = {
   existingGeneratedCopyId?: string;
   manual?: boolean;
@@ -73,6 +93,7 @@ export type CommercialPipelineConfirmationServiceOptions = {
   groups: WhatsAppGroupDirectoryRepository;
   instances?: Pick<WhatsAppInstanceRepository, 'findByName'>;
   outboxes: CommercialDispatchOutboxRepository;
+  preparedMessages?: Pick<CommercialPreparedMessageRepository, 'handoff'>;
   deliveryHistory: CommercialDeliveryHistoryRepository;
   copy: CommercialCopyGenerator;
   publisher: Pick<CommercialDispatchOutboxPublisher, 'publish'>;
@@ -85,6 +106,11 @@ export type CommercialPipelineConfirmationServiceOptions = {
 const changed = (message: string, code: string): never => {
   throw new AppError(message, code);
 };
+
+const preparedOutcomeFailureCode = (error: unknown) =>
+  error instanceof AppError
+    ? error.code
+    : 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN';
 
 const assertEnvironment = (
   environment: CommercialConfirmationEnvironment,
@@ -415,6 +441,141 @@ export class CommercialPipelineConfirmationService {
         'COMMERCIAL_DISPATCH_FAILED',
       );
     }
+  }
+
+  async confirmPrepared(
+    input: CommercialPreparedMessageHandoffInput,
+    confirmation: string,
+    options: Pick<CommercialPipelineConfirmationOptions, 'deferPublication'> = {},
+  ): Promise<CommercialPreparedPipelineConfirmationOutcome> {
+    try {
+      if (confirmation !== COMMERCIAL_CONFIRMATION_TOKEN) {
+        changed(
+          'Confirmacao comercial invalida',
+          'COMMERCIAL_CONFIRMATION_INVALID',
+        );
+      }
+      assertEnvironment(this.options.environment);
+    } catch (error) {
+      return {
+        outcome: 'PRECOMMIT_REJECTED',
+        reason: preparedOutcomeFailureCode(error),
+        rollbackConfirmed: true,
+      };
+    }
+    const preparedMessages = this.options.preparedMessages;
+    if (!preparedMessages?.handoff) {
+      return {
+        outcome: 'PRECOMMIT_REJECTED',
+        reason: 'COMMERCIAL_PREPARED_HANDOFF_UNAVAILABLE',
+        rollbackConfirmed: true,
+      };
+    }
+    let handoff: Extract<
+      CommercialPreparedMessageHandoffOutcome,
+      { outcome: 'HANDOFF_COMMITTED' }
+    >['handoff'];
+    try {
+      const handoffOutcome = await preparedMessages.handoff(input);
+      if (handoffOutcome.outcome !== 'HANDOFF_COMMITTED') {
+        return handoffOutcome;
+      }
+      handoff = handoffOutcome.handoff;
+    } catch (error) {
+      return {
+        outcome: 'OUTCOME_UNKNOWN',
+        failureCode: preparedOutcomeFailureCode(error),
+      };
+    }
+    let publication: 'NOT_ATTEMPTED' | 'PUBLISHED' | 'UNKNOWN' =
+      'NOT_ATTEMPTED';
+    if (!options.deferPublication) {
+      try {
+        await this.options.publisher.publish(handoff.outbox.id);
+        publication = 'PUBLISHED';
+      } catch (error) {
+        const failureCode = preparedOutcomeFailureCode(error);
+        this.options.logger.error(
+          {
+            event: 'commercial-pipeline.prepared.publication-unknown',
+            runId: handoff.runId,
+            code: failureCode,
+          },
+          'Prepared commercial pipeline publication outcome is unknown',
+        );
+        return {
+          outcome: 'HANDOFF_COMMITTED',
+          handoff,
+          publication: 'UNKNOWN',
+          failureCode,
+        };
+      }
+    }
+    let run: CommercialPipelineRunRecord | null;
+    try {
+      run = await this.options.runs.findById(handoff.runId);
+    } catch (error) {
+      return {
+        outcome: 'HANDOFF_COMMITTED',
+        handoff,
+        publication,
+        failureCode: preparedOutcomeFailureCode(error),
+      };
+    }
+    if (
+      !run ||
+      run.id !== handoff.runId ||
+      run.mode !== 'CONFIRMED' ||
+      run.dispatchId !== handoff.dispatchId ||
+      !run.productName ||
+      !run.productPrice ||
+      !run.groupName ||
+      !run.groupFingerprint ||
+      !run.copyPreview
+    ) {
+      return {
+        outcome: 'HANDOFF_COMMITTED',
+        handoff,
+        publication,
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
+      };
+    }
+    this.options.logger.info(
+      {
+        event: options.deferPublication
+          ? 'commercial-pipeline.prepared.pending-publication'
+          : 'commercial-pipeline.prepared.queued',
+        runId: run.id,
+        preparedId: input.preparedId,
+      },
+      options.deferPublication
+        ? 'Prepared commercial pipeline awaiting publication'
+        : 'Prepared commercial pipeline queued',
+    );
+    return {
+      outcome: 'HANDOFF_COMMITTED',
+      handoff,
+      publication,
+      result: {
+        outboxId: handoff.outbox.id,
+        runId: run.id,
+        mode: 'confirmed',
+        status: 'queued',
+        selectedProduct: { name: run.productName, price: run.productPrice },
+        selectedGroup: {
+          name: run.groupName,
+          fingerprint: run.groupFingerprint,
+        },
+        copyPreview: run.copyPreview,
+        dispatchWasCreated: true,
+        jobWasCreated: true,
+        messageWasSent: false,
+        dispatchStatus: 'pending',
+        attemptCount: 0,
+        externalMessageIdRecorded: false,
+        investigationRequired: false,
+      },
+    };
   }
 
   async markInvestigationRequired(runId: string) {

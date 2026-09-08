@@ -60,6 +60,17 @@ import type {
   CommercialPromotionSnapshotRecord,
   CommercialPromotionSignal,
   CommercialManualCandidateMaterializationInput,
+  CommercialDiscoveryCheckpointAcquireInput,
+  CommercialDiscoveryCheckpointAdvanceInput,
+  CommercialDiscoveryCheckpointRecord,
+  CommercialDiscoveryCheckpointRepository,
+  CommercialDiscoveryWriteFence,
+  CommercialPreparedMessageClaimInput,
+  CommercialPreparedMessageCreateInput,
+  CommercialPreparedMessageHandoffInput,
+  CommercialPreparedMessageHandoffOutcome,
+  CommercialPreparedMessageRecord,
+  CommercialPreparedMessageRepository,
   ManualPublicationAcceptance,
   ManualPublicationQuotaReservation,
   ManualPublicationQuotaReservationInput,
@@ -134,6 +145,14 @@ import {
   type CommercialPromotionTerminalCandidateBlockReason,
 } from './commercial-promotion-candidate-terminal';
 import { isCommercialPromotionFallbackCopy, isSafeStoredCommercialPromotionCopy } from './commercial-promotion-copy-fallback';
+import {
+  commercialPreparedMessageInvalidationReason,
+  decideCommercialPreparedRecovery,
+  isCommercialPreparedMessageCandidateReady,
+  isCommercialPreparedMessageContentFresh,
+  isCommercialPreparedMessageMateriallyReady,
+  type CommercialPreparedMessageInvalidationReason,
+} from './commercial-prepared-inventory-recovery';
 import { COMMERCIAL_AI_COPY_PROMPT_VERSION, COMMERCIAL_AI_COPY_VALIDATION_VERSION } from './commercial-ai-copy-prompt';
 import { validateCommercialAffiliateLinkProvenance } from './commercial-affiliate-link-provenance';
 import {
@@ -170,16 +189,17 @@ const isUniqueConstraintError = (error: unknown) =>
 const isRecordNotFoundError = (error: unknown) =>
   prismaErrorCode(error) === 'P2025';
 
-const isTransactionConflictError = (error: unknown) =>
-  prismaErrorCode(error) === 'P2034';
-
-const isPrismaKnownError = (error: unknown) =>
-  /^P\d{4}$/.test(prismaErrorCode(error) ?? '');
-
 const databaseErrorCode = (error: unknown) =>
   typeof error === 'object' && error !== null && 'meta' in error
     ? String((error as { meta?: { code?: unknown } }).meta?.code ?? '')
     : '';
+
+const isTransactionConflictError = (error: unknown) =>
+  prismaErrorCode(error) === 'P2034' ||
+  (prismaErrorCode(error) === 'P2010' && databaseErrorCode(error) === '40001');
+
+const isPrismaKnownError = (error: unknown) =>
+  /^P\d{4}$/.test(prismaErrorCode(error) ?? '');
 
 class CommercialConfirmationNotClaimedError extends Error {}
 class CommercialOutboxStateConflictError extends Error {}
@@ -1062,6 +1082,28 @@ export class PrismaProductRepository implements ProductRepository {
   }
 }
 
+const assertCommercialDiscoveryWriteFence = async (
+  transaction: Pick<DatabaseClient, '$queryRaw'>,
+  fence: CommercialDiscoveryWriteFence | undefined,
+) => {
+  if (!fence) return;
+  const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "CommercialDiscoveryCheckpoint"
+    WHERE "id" = ${fence.checkpointId}
+      AND "leaseOwnerId" = ${fence.ownerId}
+      AND "leaseRevision" = ${fence.leaseRevision}
+      AND "leaseExpiresAt" > GREATEST(clock_timestamp(), ${fence.now})
+    FOR SHARE
+  `);
+  if (rows.length !== 1) {
+    throw new AppError(
+      'A escrita do catalogo perdeu o lease do checkpoint de discovery',
+      'COMMERCIAL_DISCOVERY_CHECKPOINT_FENCE_LOST',
+    );
+  }
+};
+
 export class PrismaShopeeOfferRepository
   implements
     ShopeeOfferRepository,
@@ -1099,7 +1141,10 @@ export class PrismaShopeeOfferRepository
     return mapShopeeOffer(record as unknown as Record<string, unknown>);
   }
 
-  async upsertOfficialOfferWithSnapshot(offer: ShopeeProductOffer) {
+  async upsertOfficialOfferWithSnapshot(
+    offer: ShopeeProductOffer,
+    writeFence?: CommercialDiscoveryWriteFence,
+  ) {
     if (offer.source !== 'OFFICIAL') {
       throw new AppError(
         'Snapshot comercial exige oferta oficial',
@@ -1112,6 +1157,7 @@ export class PrismaShopeeOfferRepository
     try {
       return await this.prisma.$transaction(
         async (transaction) => {
+          await assertCommercialDiscoveryWriteFence(transaction, writeFence);
           const current = await transaction.productLead.findUnique({
             where: {
               source_providerProductId: {
@@ -1136,6 +1182,7 @@ export class PrismaShopeeOfferRepository
               offer.categoryIds,
               offer.fetchedAt,
             );
+            await assertCommercialDiscoveryWriteFence(transaction, writeFence);
             return {
               product: mapShopeeOffer(
                 product as unknown as Record<string, unknown>,
@@ -1170,6 +1217,21 @@ export class PrismaShopeeOfferRepository
                 lastSnapshot?.revision === currentRevision &&
                 lastSnapshot.fingerprint === currentFingerprint;
           if (!coherent) throw new OfficialOfferSnapshotConflictError();
+          // fetchedAt is the provider observation time carried by the offer.
+          // It is the only ordering signal available across independent
+          // checkpoint leases; receipt time is deliberately not used as a
+          // provider version. Older observations are acknowledged as a
+          // no-op, so a late response cannot roll the catalog back.
+          if (offer.fetchedAt.getTime() < current.fetchedAt.getTime()) {
+            await assertCommercialDiscoveryWriteFence(transaction, writeFence);
+            return {
+              product: mapShopeeOffer(current),
+              productAction: 'updated' as const,
+              commercialStateChanged: false,
+              snapshotCreated: false,
+              snapshotRevision: currentRevision,
+            };
+          }
 
           const commercialStateChanged = currentFingerprint !== fingerprint;
           const snapshotRevision = commercialStateChanged
@@ -1205,6 +1267,7 @@ export class PrismaShopeeOfferRepository
             offer.categoryIds,
             offer.fetchedAt,
           );
+          await assertCommercialDiscoveryWriteFence(transaction, writeFence);
           return {
             product: mapShopeeOffer(
               product as unknown as Record<string, unknown>,
@@ -2412,6 +2475,11 @@ const commercialPromotionCopyContextFromRecord = (
       providerProductId: String(product.providerProductId),
       productName: String(product.nome),
       shopName: String(product.loja),
+      categoryIds: Array.isArray(product.categoryIds)
+        ? product.categoryIds.filter(
+            (value: unknown): value is string => typeof value === 'string',
+          )
+        : [],
       productLink: (product.productLink as string | null) ?? null,
       affiliateLink: (product.affiliateLink as string | null) ?? null,
       price: decimalString(product.preco as PrismaDecimalLike) as string,
@@ -3209,6 +3277,9 @@ export class PrismaCommercialPromotionRepository
             const current = currentByProduct.get(candidate.productId);
             const data = {
               snapshotId: candidate.snapshotId,
+              // A reativacao pertence a um snapshot novo; a copy antiga fica
+              // apenas como evidencia historica.
+              generatedCopyId: null,
               status: 'QUEUED' as const,
               rankPosition: index + 1,
               commercialScore: candidate.commercialScore,
@@ -6657,6 +6728,1574 @@ export class PrismaManualPublicationRequestRepository implements ManualPublicati
         'RECOVERY_CAS_CONFLICT',
       );
     }
+  }
+}
+
+const mapDiscoveryCheckpoint = (
+  record: {
+    id: string;
+    identityFingerprint: string;
+    source: 'MOCK' | 'MANUAL' | 'OFFICIAL';
+    campaignId: string;
+    nicheId: string;
+    query: Prisma.JsonValue;
+    page: number;
+    cursor: string | null;
+    status: 'ACTIVE' | 'EXHAUSTED';
+    nextRefreshAt: Date | null;
+    leaseOwnerId: string | null;
+    leaseExpiresAt: Date | null;
+    leaseRevision: number;
+    lastRequestAt: Date | null;
+    lastSuccessAt: Date | null;
+    lastErrorCode: string | null;
+    fetchedPages: number;
+    fetchedProducts: number;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+): CommercialDiscoveryCheckpointRecord | null => {
+  if (typeof record.query !== 'object' || record.query === null || Array.isArray(record.query)) {
+    return null;
+  }
+  const query: CommercialDiscoveryCheckpointRecord['query'] = {};
+  for (const [key, value] of Object.entries(record.query)) {
+    if (key === 'keyword' && typeof value === 'string') query.keyword = value;
+    if (key === 'categoryId' && typeof value === 'string') query.categoryId = value;
+    if (key === 'minPrice' && typeof value === 'string') query.minPrice = value;
+    if (key === 'maxPrice' && typeof value === 'string') query.maxPrice = value;
+    if (key === 'minCommissionRate' && typeof value === 'number') query.minCommissionRate = value;
+    if (key === 'minDiscountRate' && typeof value === 'number') query.minDiscountRate = value;
+    if (key === 'minRating' && typeof value === 'number') query.minRating = value;
+    if (key === 'sort' && typeof value === 'string') {
+      if (
+        value === 'relevance' ||
+        value === 'price_asc' ||
+        value === 'price_desc' ||
+        value === 'commission_desc' ||
+        value === 'sales_desc'
+      ) {
+        query.sort = value;
+      }
+    }
+  }
+  return {
+    ...record,
+    source: record.source,
+    query,
+  };
+};
+
+const mapPreparedMessage = (record: {
+  id: string;
+  campaignId: string;
+  groupDestinationId: string;
+  instanceName: string;
+  logicalGroupFingerprint: string;
+  candidateId: string;
+  snapshotId: string;
+  generatedCopyId: string;
+  copyPreview: string;
+  runId: string | null;
+   status: 'READY' | 'RESERVED' | 'DISPATCHED' | 'INVALIDATED';
+   reservationOwnerId: string | null;
+   reservationLeaseExpiresAt: Date | null;
+   scheduleRevision: number;
+   assignmentRevision: number;
+   preparationRevision: number;
+   expiresAt: Date;
+  offerEndsAt: Date | null;
+  invalidatedReason: string | null;
+  invalidatedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): CommercialPreparedMessageRecord => ({ ...record });
+
+export class PrismaCommercialDiscoveryCheckpointRepository
+  implements CommercialDiscoveryCheckpointRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  async acquire(input: CommercialDiscoveryCheckpointAcquireInput) {
+    const query: Prisma.InputJsonValue = { ...input.query };
+    const existing = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { identityFingerprint: input.identityFingerprint },
+    });
+    if (!existing) {
+      try {
+        const created = await this.prisma.commercialDiscoveryCheckpoint.create({
+          data: {
+            identityFingerprint: input.identityFingerprint,
+            source: input.source,
+            campaignId: input.campaignId,
+            nicheId: input.nicheId,
+            query,
+            leaseOwnerId: input.ownerId,
+            leaseExpiresAt: input.leaseExpiresAt,
+            leaseRevision: 1,
+            lastRequestAt: input.now,
+          },
+        });
+        return mapDiscoveryCheckpoint(created);
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+      }
+    }
+    const current = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { identityFingerprint: input.identityFingerprint },
+    });
+    if (!current) return null;
+    if (
+      current.leaseExpiresAt !== null &&
+      current.leaseExpiresAt > input.now
+    ) {
+      return null;
+    }
+    if (
+      current.status === 'EXHAUSTED' &&
+      current.nextRefreshAt !== null &&
+      current.nextRefreshAt > input.now
+    ) {
+      return null;
+    }
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+        id: current.id,
+        status: current.status,
+        nextRefreshAt: current.nextRefreshAt,
+        leaseRevision: current.leaseRevision,
+        OR: [
+          { leaseExpiresAt: null },
+          { leaseExpiresAt: { lte: input.now } },
+        ],
+      },
+      data: {
+        source: input.source,
+        campaignId: input.campaignId,
+        nicheId: input.nicheId,
+        query,
+        leaseOwnerId: input.ownerId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        leaseRevision: { increment: 1 },
+        lastRequestAt: input.now,
+        lastErrorCode: null,
+        ...(current.status === 'EXHAUSTED'
+          ? { status: 'ACTIVE' as const, page: 1, cursor: null, fetchedPages: 0, fetchedProducts: 0 }
+          : {}),
+      },
+    });
+    if (result.count !== 1) return null;
+    const acquired = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { id: current.id },
+    });
+    return acquired ? mapDiscoveryCheckpoint(acquired) : null;
+  }
+
+  async advance(input: CommercialDiscoveryCheckpointAdvanceInput) {
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+      id: input.id,
+      leaseOwnerId: input.ownerId,
+      leaseRevision: input.leaseRevision,
+      leaseExpiresAt: { gt: input.now },
+        page: { lte: input.page },
+      },
+      data: {
+        page: input.page,
+        cursor: input.cursor,
+        status: input.hasNextPage ? 'ACTIVE' : 'EXHAUSTED',
+        nextRefreshAt: input.nextRefreshAt,
+        lastSuccessAt: input.now,
+        lastErrorCode: null,
+        leaseOwnerId: input.hasNextPage ? input.ownerId : null,
+        leaseExpiresAt: input.hasNextPage ? input.leaseExpiresAt : null,
+        fetchedPages: { increment: 1 },
+        fetchedProducts: { increment: input.fetchedProducts },
+      },
+    });
+    if (result.count !== 1) return null;
+    const updated = await this.prisma.commercialDiscoveryCheckpoint.findUnique({
+      where: { id: input.id },
+    });
+    return updated ? mapDiscoveryCheckpoint(updated) : null;
+  }
+
+  async fail(input: {
+    id: string;
+    ownerId: string;
+    leaseRevision?: number;
+    now: Date;
+    errorCode: string;
+  }) {
+    const result = await this.prisma.commercialDiscoveryCheckpoint.updateMany({
+      where: {
+        id: input.id,
+        leaseOwnerId: input.ownerId,
+        ...(input.leaseRevision !== undefined
+          ? { leaseRevision: input.leaseRevision }
+          : {}),
+        leaseExpiresAt: { gt: input.now },
+      },
+      data: {
+        lastErrorCode: input.errorCode,
+        leaseOwnerId: null,
+        leaseExpiresAt: null,
+        updatedAt: input.now,
+      },
+    });
+    return result.count === 1;
+  }
+}
+
+export class PrismaCommercialPreparedMessageRepository
+  implements CommercialPreparedMessageRepository
+{
+  constructor(private readonly prisma: DatabaseClient) {}
+
+  private static candidateTransitionForInvalidation(
+    reason: CommercialPreparedMessageInvalidationReason,
+  ):
+    | { status: 'EXPIRED'; blockedReason: null }
+    | { status: 'BLOCKED'; blockedReason: 'SNAPSHOT_OR_COPY_STALE' }
+    | null {
+    if (reason === 'OFFER_EXPIRED') {
+      return { status: 'EXPIRED', blockedReason: null };
+    }
+    if (reason === 'SNAPSHOT_OR_COPY_STALE') {
+      return { status: 'BLOCKED', blockedReason: 'SNAPSHOT_OR_COPY_STALE' };
+    }
+    return null;
+  }
+
+  private static candidateTransitionData(
+    reason: CommercialPreparedMessageInvalidationReason,
+    now: Date,
+  ) {
+    const transition = this.candidateTransitionForInvalidation(reason);
+    return transition
+      ? { ...transition, rankPosition: null, lastEvaluatedAt: now }
+      : null;
+  }
+
+  private async listMateriallyReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now: Date;
+  }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: {
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        ...(input.scheduleRevision !== undefined
+          ? { scheduleRevision: input.scheduleRevision }
+          : {}),
+        ...(input.assignmentRevision !== undefined
+          ? { assignmentRevision: input.assignmentRevision }
+          : {}),
+        status: 'READY',
+        expiresAt: { gt: input.now },
+        candidate: { status: 'COPY_READY' },
+      },
+      include: {
+        candidate: {
+          include: { product: true, snapshot: true, generatedCopy: true },
+        },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return rows.filter((row) =>
+      isCommercialPreparedMessageMateriallyReady(row, input.now),
+    );
+  }
+
+  async countReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
+  }) {
+    return (
+      await this.listMateriallyReady({
+        ...input,
+        now: input.now ?? new Date(),
+      })
+    ).length;
+  }
+
+  async listReady(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
+  }) {
+    const rows = await this.listMateriallyReady({
+      ...input,
+      now: input.now ?? new Date(),
+    });
+    return rows.map(mapPreparedMessage);
+  }
+
+  async listProtectedCandidateIds(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+    now?: Date;
+  }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: {
+        campaignId: input.campaignId,
+        groupDestinationId: input.groupDestinationId,
+        instanceName: input.instanceName,
+        logicalGroupFingerprint: input.logicalGroupFingerprint,
+        ...(input.scheduleRevision !== undefined
+          ? { scheduleRevision: input.scheduleRevision }
+          : {}),
+        ...(input.assignmentRevision !== undefined
+          ? { assignmentRevision: input.assignmentRevision }
+          : {}),
+        status: { in: ['READY', 'RESERVED', 'DISPATCHED'] },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: {
+        candidate: {
+          include: { product: true, snapshot: true, generatedCopy: true },
+        },
+        run: {
+          select: {
+            mode: true,
+            finalStatus: true,
+            investigationRequired: true,
+            dispatch: { select: { status: true } },
+            dispatchOutbox: { select: { status: true } },
+          },
+        },
+      },
+    });
+    const now = input.now ?? new Date();
+    return rows
+      .filter(
+        (row) =>
+          row.status === 'READY'
+            ? isCommercialPreparedMessageMateriallyReady(row, now)
+            : row.status === 'RESERVED'
+              ? row.reservationLeaseExpiresAt === null ||
+                row.reservationLeaseExpiresAt > now
+              : row.run?.mode === 'CONFIRMED' &&
+                (row.run.investigationRequired ||
+                  row.run.finalStatus === 'SENT' ||
+                  row.run.finalStatus === 'AMBIGUOUS' ||
+                  row.run.finalStatus === 'PENDING' ||
+                  ['PENDING', 'PROCESSING', 'SUBMITTED', 'SENT', 'DELIVERED', 'READ', 'AMBIGUOUS'].includes(
+                    row.run.dispatch?.status ?? '',
+                  ) ||
+                  ['PENDING', 'AMBIGUOUS'].includes(
+                    row.run.dispatchOutbox?.status ?? '',
+                  )),
+      )
+      .map(({ candidateId }) => candidateId);
+  }
+
+  async listReadyCandidateIds(input: {
+    campaignId: string;
+    groupDestinationId: string;
+    instanceName: string;
+    logicalGroupFingerprint: string;
+    scheduleRevision?: number;
+    assignmentRevision?: number;
+  }) {
+    const rows = await this.listMateriallyReady({
+      ...input,
+      now: new Date(),
+    });
+    return rows.map(({ candidateId }) => candidateId);
+  }
+
+  async createReady(input: CommercialPreparedMessageCreateInput) {
+    const scheduleRevision = input.scheduleRevision ?? 1;
+    const assignmentRevision = input.assignmentRevision ?? 1;
+    try {
+      return await this.prisma.$transaction(
+        async (transaction) => {
+          const candidateLock = await transaction.$queryRaw<Array<{ id: string }>>(
+            Prisma.sql`
+              SELECT "id"
+              FROM "CommercialPromotionCandidate"
+              WHERE "id" = ${input.candidateId}
+              FOR UPDATE
+            `,
+          );
+          if (candidateLock.length !== 1) return null;
+          const candidate =
+            await transaction.commercialPromotionCandidate.findUnique({
+              where: { id: input.candidateId },
+              include: { product: true, snapshot: true, generatedCopy: true },
+            });
+          const run = input.runId
+            ? await transaction.commercialPipelineRun.findUnique({
+                where: { id: input.runId },
+                select: {
+                  mode: true,
+                  status: true,
+                  productId: true,
+                  groupDestinationId: true,
+                  instanceName: true,
+                  groupFingerprint: true,
+                },
+              })
+            : null;
+          const offerEndsAt =
+            input.offerEndsAt !== undefined
+              ? input.offerEndsAt
+              : candidate?.snapshot.offerEndsAt ?? null;
+          const expiresAt =
+            input.expiresAt ??
+            new Date(
+              Math.min(
+                input.now.getTime() + 15 * 60_000,
+                offerEndsAt?.getTime() ?? input.now.getTime() + 15 * 60_000,
+              ),
+            );
+          const copyPreview = input.copyPreview?.trim() ?? '';
+          const affiliateLink = candidate?.product.affiliateLink?.trim() ?? '';
+          const candidateMaterial = candidate
+            ? {
+                status: 'READY' as const,
+                generatedCopyId: input.generatedCopyId,
+                snapshotId: candidate.snapshotId,
+                expiresAt,
+                offerEndsAt,
+                candidate,
+              }
+            : null;
+          if (
+            !candidate ||
+            (input.runId &&
+              (!run ||
+                run.mode !== 'DRY_RUN' ||
+                run.status !== 'COMPLETED' ||
+                run.productId !== candidate.productId ||
+                run.groupDestinationId !== input.groupDestinationId ||
+                run.instanceName !== input.instanceName ||
+                run.groupFingerprint !== input.logicalGroupFingerprint)) ||
+            candidate.status !== 'COPY_READY' ||
+            candidate.campaignId !== input.campaignId ||
+            candidate.generatedCopyId !== input.generatedCopyId ||
+            !candidate.generatedCopy ||
+            candidate.generatedCopy.productId !== candidate.productId ||
+            candidate.generatedCopy.snapshotId !== candidate.snapshotId ||
+            candidate.product.commercialSnapshotRevision !==
+              candidate.snapshot.revision ||
+            candidate.product.commercialSnapshotFingerprint !==
+              candidate.snapshot.fingerprint ||
+            copyPreview.length === 0 ||
+            affiliateLink.length === 0 ||
+            copyPreview.split(affiliateLink).length - 1 !== 1 ||
+            !candidateMaterial ||
+            !isCommercialPreparedMessageContentFresh(candidateMaterial, input.now)
+          ) {
+            return null;
+          }
+          const group = await transaction.whatsAppDestination.findFirst({
+            where: {
+              id: input.groupDestinationId,
+              type: 'GROUP',
+              active: true,
+              available: true,
+              fingerprint: input.logicalGroupFingerprint,
+            },
+            select: {
+              id: true,
+              assignmentRevision: true,
+              assignedInstanceName: true,
+              sourceInstanceName: true,
+              instanceAssignments: { select: { instanceName: true } },
+            },
+          });
+          const assignedInstanceNames =
+            group?.instanceAssignments.map(({ instanceName }) => instanceName) ??
+            [];
+          const assigned =
+            assignedInstanceNames.length > 0
+              ? assignedInstanceNames.includes(input.instanceName)
+              : (group?.assignedInstanceName ?? group?.sourceInstanceName) ===
+                input.instanceName;
+          if (
+            !group ||
+            group.assignmentRevision !== assignmentRevision ||
+            !assigned
+          ) {
+            return null;
+          }
+          const instance = await transaction.whatsAppInstance.findFirst({
+            where: { name: input.instanceName, active: true, paused: false },
+            select: { name: true },
+          });
+          if (!instance) return null;
+          const routeRows =
+            await transaction.commercialPreparedMessage.findMany({
+              where: {
+                campaignId: input.campaignId,
+                candidateId: input.candidateId,
+                snapshotId: candidate.snapshotId,
+                groupDestinationId: input.groupDestinationId,
+                logicalGroupFingerprint: input.logicalGroupFingerprint,
+                scheduleRevision,
+                assignmentRevision,
+              },
+              include: {
+                candidate: {
+                  include: { product: true, snapshot: true, generatedCopy: true },
+                },
+              },
+              orderBy: [
+                { preparationRevision: 'desc' },
+                { createdAt: 'asc' },
+                { id: 'asc' },
+              ],
+            });
+          let nextPreparationRevision = input.preparationRevision ?? 1;
+          for (const existing of routeRows) {
+            nextPreparationRevision = Math.max(
+              nextPreparationRevision,
+              existing.preparationRevision + 1,
+            );
+            if (
+              existing.status === 'RESERVED' ||
+              existing.status === 'DISPATCHED'
+            ) {
+              return null;
+            }
+            if (existing.status !== 'READY') continue;
+            const current = { ...existing, candidate: existing.candidate };
+            if (
+              isCommercialPreparedMessageMateriallyReady(current, input.now)
+            ) {
+              return existing.instanceName === input.instanceName
+                ? mapPreparedMessage(existing)
+                : null;
+            }
+            const invalidationReason =
+              commercialPreparedMessageInvalidationReason(current, input.now);
+            const invalidated =
+              await transaction.commercialPreparedMessage.updateMany({
+                where: { id: existing.id, status: 'READY' },
+                data: {
+                  status: 'INVALIDATED',
+                  invalidatedReason: invalidationReason,
+                  invalidatedAt: input.now,
+                  updatedAt: input.now,
+                },
+              });
+            if (invalidated.count !== 1) continue;
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              const transitioned =
+                await transaction.commercialPromotionCandidate.updateMany({
+                  where: {
+                    id: existing.candidateId,
+                    status: 'COPY_READY',
+                    generatedCopyId: existing.generatedCopyId,
+                    snapshotId: existing.snapshotId,
+                  },
+                  data: candidateTransition,
+                });
+              if (transitioned.count === 1) return null;
+            }
+            if (invalidationReason !== 'PREPARED_EXPIRED') return null;
+          }
+          const preparationRevision = nextPreparationRevision;
+          const created = await transaction.commercialPreparedMessage.create({
+            data: {
+              campaignId: input.campaignId,
+              groupDestinationId: input.groupDestinationId,
+              instanceName: input.instanceName,
+              logicalGroupFingerprint: input.logicalGroupFingerprint,
+              candidateId: input.candidateId,
+              snapshotId: candidate.snapshotId,
+              generatedCopyId: input.generatedCopyId,
+              copyPreview,
+              ...(input.runId ? { runId: input.runId } : {}),
+              scheduleRevision,
+              assignmentRevision,
+              status: 'READY',
+              preparationRevision,
+              expiresAt,
+              offerEndsAt,
+              createdAt: input.now,
+            },
+          });
+          return mapPreparedMessage(created);
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      const raced = await this.prisma.commercialPreparedMessage.findFirst({
+        where: {
+          campaignId: input.campaignId,
+          candidateId: input.candidateId,
+          groupDestinationId: input.groupDestinationId,
+          instanceName: input.instanceName,
+          scheduleRevision,
+          assignmentRevision,
+          status: 'READY',
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      return raced?.status === 'READY' ? mapPreparedMessage(raced) : null;
+    }
+  }
+
+  async claimReady(input: CommercialPreparedMessageClaimInput) {
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        const scheduleRevisionClause =
+          input.scheduleRevision === undefined
+            ? Prisma.empty
+            : Prisma.sql`AND "scheduleRevision" = ${input.scheduleRevision}`;
+        const assignmentRevisionClause =
+          input.assignmentRevision === undefined
+            ? Prisma.empty
+            : Prisma.sql`AND "assignmentRevision" = ${input.assignmentRevision}`;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id"
+            FROM "CommercialPreparedMessage"
+            WHERE "campaignId" = ${input.campaignId}
+              AND "groupDestinationId" = ${input.groupDestinationId}
+              AND "instanceName" = ${input.instanceName}
+              AND "logicalGroupFingerprint" = ${input.logicalGroupFingerprint}
+              ${scheduleRevisionClause}
+              ${assignmentRevisionClause}
+              AND "status" = 'READY'
+              AND "expiresAt" > ${input.now}
+            ORDER BY "createdAt" ASC, "id" ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+          `);
+          const row = rows[0];
+          if (!row) return null;
+          const record = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: row.id },
+            include: {
+              candidate: {
+                include: { product: true, snapshot: true, generatedCopy: true },
+              },
+            },
+          });
+          if (!record) {
+            await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: 'CANDIDATE_NOT_COPY_READY',
+                invalidatedAt: input.now,
+                updatedAt: input.now,
+              },
+            });
+            continue;
+          }
+          if (!isCommercialPreparedMessageCandidateReady(record, input.now)) {
+            const invalidationReason =
+              commercialPreparedMessageInvalidationReason(record, input.now);
+            await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: invalidationReason,
+                invalidatedAt: input.now,
+                updatedAt: input.now,
+              },
+            });
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              await transaction.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: record.candidateId,
+                  status: 'COPY_READY',
+                  generatedCopyId: record.generatedCopyId,
+                  snapshotId: record.snapshotId,
+                },
+                data: candidateTransition,
+              });
+            }
+            continue;
+          }
+          const updated = await transaction.commercialPreparedMessage.updateMany({
+            where: { id: row.id, status: 'READY' },
+            data: {
+              status: 'RESERVED',
+              reservationOwnerId: input.ownerId,
+              reservationLeaseExpiresAt: input.leaseExpiresAt,
+              updatedAt: input.now,
+            },
+          });
+          if (updated.count !== 1) continue;
+          const claimed = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: row.id },
+          });
+          return claimed ? mapPreparedMessage(claimed) : null;
+        }
+        return null;
+      }, { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 });
+    } catch (error) {
+      if (isTransactionConflictError(error)) return null;
+      throw error;
+    }
+  }
+
+  async handoff(
+    input: CommercialPreparedMessageHandoffInput,
+  ): Promise<CommercialPreparedMessageHandoffOutcome> {
+    if (input.leaseExpiresAt.getTime() <= input.now.getTime()) {
+      return {
+        outcome: 'PRECOMMIT_REJECTED',
+        reason: 'COMMERCIAL_PREPARED_HANDOFF_LEASE_INVALID',
+        rollbackConfirmed: true,
+      };
+    }
+    const runId = `commercial-prepared-${input.preparedId}-run`;
+    const dispatchId = `commercial-prepared-${input.preparedId}-dispatch`;
+    const jobId = `commercial-prepared-${input.preparedId}-job`;
+    const outboxId = `commercial-prepared-${input.preparedId}-outbox`;
+
+    try {
+      const committed = await this.prisma.$transaction(
+        async (transaction) => {
+          const campaignLock = await transaction.$queryRaw<Array<{ id: string }>>(
+            Prisma.sql`
+              SELECT "id"
+              FROM "CommercialGroupCampaign"
+              WHERE "id" = ${input.campaignId}
+              FOR UPDATE
+            `,
+          );
+          if (campaignLock.length !== 1) {
+            throw new AppError(
+              'Campaign do handoff preparado nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
+
+          const preparedLock = await transaction.$queryRaw<Array<{ id: string }>>(
+            Prisma.sql`
+              SELECT "id"
+              FROM "CommercialPreparedMessage"
+              WHERE "id" = ${input.preparedId}
+              FOR UPDATE
+            `,
+          );
+          if (preparedLock.length !== 1) {
+            throw new AppError(
+              'Mensagem preparada nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
+
+          const prepared = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: input.preparedId },
+            include: {
+              candidate: {
+                include: { product: true, snapshot: true, generatedCopy: true },
+              },
+              campaign: { include: { niche: true } },
+              groupDestination: { include: { instanceAssignments: true } },
+              instance: true,
+            },
+          });
+          if (!prepared) {
+            throw new AppError(
+              'Mensagem preparada nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
+
+          const expectedScheduleRevision =
+            input.scheduleRevision ?? prepared.scheduleRevision;
+          const expectedAssignmentRevision =
+            input.assignmentRevision ?? prepared.assignmentRevision;
+          if (
+            prepared.campaignId !== input.campaignId ||
+            prepared.groupDestinationId !== input.groupDestinationId ||
+            prepared.instanceName !== input.instanceName ||
+            prepared.logicalGroupFingerprint !== input.logicalGroupFingerprint ||
+            prepared.scheduleRevision !== expectedScheduleRevision ||
+            prepared.assignmentRevision !== expectedAssignmentRevision
+          ) {
+            throw new AppError(
+              'Mensagem preparada divergiu da identidade do slot',
+              'COMMERCIAL_PREPARED_HANDOFF_IDENTITY_CONFLICT',
+            );
+          }
+
+          const nicheLock = await transaction.$queryRaw<
+            Array<{ id: string; updatedAt: Date }>
+          >(Prisma.sql`
+            SELECT "id", "updatedAt"
+            FROM "CommercialNiche"
+            WHERE "id" = ${prepared.campaign.nicheId}
+            FOR UPDATE
+          `);
+          const lockedNiche = nicheLock[0];
+          if (
+            !lockedNiche ||
+            lockedNiche.id !== input.expectedNicheId ||
+            prepared.campaign.nicheId !== input.expectedNicheId ||
+            lockedNiche.updatedAt.getTime() !==
+              input.expectedNicheUpdatedAt.getTime()
+          ) {
+            throw new AppError(
+              'Politica do nicho mudou antes do handoff preparado',
+              'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED',
+            );
+          }
+
+          const assignedInstances = prepared.groupDestination.instanceAssignments
+            .sort((left, right) => left.position - right.position)
+            .map((assignment) => assignment.instanceName);
+          const effectiveAssignedInstances =
+            assignedInstances.length > 0
+              ? assignedInstances
+              : [
+                  prepared.groupDestination.assignedInstanceName ??
+                    prepared.groupDestination.sourceInstanceName,
+                ].filter((name): name is string => name !== null);
+          if (
+            prepared.groupDestination.type !== 'GROUP' ||
+            !prepared.groupDestination.active ||
+            !prepared.groupDestination.available ||
+            prepared.groupDestination.fingerprint !== input.logicalGroupFingerprint ||
+            prepared.groupDestination.assignmentRevision !== expectedAssignmentRevision ||
+            !effectiveAssignedInstances.includes(input.instanceName) ||
+            !prepared.campaign.active ||
+            !prepared.campaign.niche.active ||
+            !prepared.instance.active ||
+            prepared.instance.paused
+          ) {
+            throw new AppError(
+              'Mensagem preparada perdeu a assignment do slot',
+              'COMMERCIAL_PREPARED_HANDOFF_ASSIGNMENT_CONFLICT',
+            );
+          }
+
+          const execution = await transaction.commercialAutomationExecution.findUnique({
+            where: { id: input.executionId },
+          });
+          if (
+            !execution ||
+            execution.mode !== 'SEND' ||
+            (execution.status !== 'STARTED' && execution.status !== 'QUEUED') ||
+            (execution.commercialRunId !== null && execution.commercialRunId !== runId)
+          ) {
+            throw new AppError(
+              'Execution comercial nao esta disponivel para o handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_EXECUTION_CONFLICT',
+            );
+          }
+
+          const existingRun = await transaction.commercialPipelineRun.findUnique({
+            where: { id: runId },
+          });
+          const existingOutbox = await transaction.commercialDispatchOutbox.findUnique({
+            where: { id: outboxId },
+          });
+          const existingDispatch = await transaction.whatsAppDispatch.findUnique({
+            where: { id: dispatchId },
+          });
+          if (
+            !existingRun &&
+            (execution.status !== 'STARTED' ||
+              !execution.leaseExpiresAt ||
+              execution.leaseExpiresAt <= input.now)
+          ) {
+            throw new AppError(
+              'Execution comercial perdeu o lease antes do handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_EXECUTION_CONFLICT',
+            );
+          }
+          if (existingRun || existingOutbox) {
+            if (
+              prepared.status !== 'DISPATCHED' ||
+              prepared.runId !== runId ||
+              !existingRun ||
+              !existingDispatch ||
+              !existingOutbox ||
+              existingRun.executionId !== input.executionId ||
+              existingRun.mode !== 'CONFIRMED' ||
+              existingRun.dispatchId !== dispatchId ||
+              existingDispatch.productId !== prepared.candidate.productId ||
+              existingDispatch.generatedCopyId !== prepared.generatedCopyId ||
+              existingDispatch.destinationId !== prepared.groupDestinationId ||
+              existingDispatch.instanceName !== input.instanceName ||
+              existingOutbox.commercialRunId !== runId ||
+              existingOutbox.dispatchId !== dispatchId ||
+              existingOutbox.jobId !== jobId
+            ) {
+              throw new AppError(
+                'Handoff preparado possui registros divergentes',
+                'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
+              );
+            }
+            return {
+              outbox: mapCommercialDispatchOutbox({ ...existingOutbox }),
+              runId,
+              dispatchId,
+              jobId,
+              candidateId: prepared.candidateId,
+              generatedCopyId: prepared.generatedCopyId,
+            };
+          }
+
+          // A prepared slot must also dispute an independently-created
+          // dispatch for the same product/group. The generated-copy unique
+          // constraint alone cannot detect a manual send made with another
+          // copy, so check every active, confirmed or ambiguous lifecycle
+          // while the campaign row is locked.
+          const competingDispatch =
+            await transaction.whatsAppDispatch.findFirst({
+              where: {
+                productId: prepared.candidate.productId,
+                destinationId: prepared.groupDestinationId,
+                id: { not: dispatchId },
+                status: {
+                  in: [
+                    'PENDING',
+                    'PROCESSING',
+                    'SUBMITTED',
+                    'SENT',
+                    'DELIVERED',
+                    'READ',
+                    'AMBIGUOUS',
+                  ],
+                },
+              },
+              select: { id: true, status: true },
+            });
+          if (competingDispatch) {
+            throw new AppError(
+              'Produto ja possui dispatch ativo ou confirmado para o grupo',
+              'COMMERCIAL_PREPARED_HANDOFF_PRODUCT_ALREADY_SENT',
+            );
+          }
+
+          const generatedCopy = prepared.candidate.generatedCopy;
+          if (
+            prepared.status !== 'RESERVED' ||
+            prepared.reservationOwnerId !== input.ownerId ||
+            !prepared.reservationLeaseExpiresAt ||
+            prepared.reservationLeaseExpiresAt <= input.now ||
+            prepared.runId !== null ||
+            prepared.candidate.status !== 'COPY_READY' ||
+            !generatedCopy ||
+            !isCommercialPreparedMessageContentFresh(
+              { ...prepared, status: 'RESERVED' },
+              input.now,
+            ) ||
+            !prepared.copyPreview.trim() ||
+            !prepared.candidate.product.affiliateLink ||
+            prepared.copyPreview.split(prepared.candidate.product.affiliateLink).length - 1 !== 1
+          ) {
+            throw new AppError(
+              'Mensagem preparada nao esta pronta para handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
+
+          const campaign = await transaction.commercialGroupCampaign.findUnique({
+            where: { id: input.campaignId },
+            select: {
+              attemptExecutionId: true,
+              attemptReservedAt: true,
+              attemptLeaseExpiresAt: true,
+            },
+          });
+          if (!campaign) {
+            throw new AppError(
+              'Campaign do handoff preparado nao foi encontrada',
+              'COMMERCIAL_PREPARED_HANDOFF_NOT_READY',
+            );
+          }
+          if (
+            campaign.attemptExecutionId &&
+            campaign.attemptExecutionId !== input.executionId
+          ) {
+            throw new AppError(
+              'Campaign attempt pertence a outra execution',
+              'COMMERCIAL_PREPARED_HANDOFF_CAMPAIGN_CONFLICT',
+            );
+          }
+          const reservedCampaign = await transaction.commercialGroupCampaign.updateMany({
+            where: {
+              id: input.campaignId,
+              OR: [
+                { attemptExecutionId: null },
+                {
+                  attemptExecutionId: input.executionId,
+                  attemptReservedAt: campaign.attemptReservedAt,
+                  attemptLeaseExpiresAt: campaign.attemptLeaseExpiresAt,
+                },
+              ],
+            },
+            data: {
+              attemptExecutionId: input.executionId,
+              attemptReservedAt: campaign.attemptReservedAt ?? input.now,
+              attemptLeaseExpiresAt: input.leaseExpiresAt,
+            },
+          });
+          if (reservedCampaign.count !== 1) {
+            throw new AppError(
+              'Campaign attempt mudou durante o handoff preparado',
+              'COMMERCIAL_PREPARED_HANDOFF_CAMPAIGN_CONFLICT',
+            );
+          }
+
+          const reservedCandidate = await transaction.commercialPromotionCandidate.updateMany({
+            where: {
+              id: prepared.candidateId,
+              campaignId: input.campaignId,
+              productId: prepared.candidate.productId,
+              snapshotId: prepared.snapshotId,
+              generatedCopyId: prepared.generatedCopyId,
+              status: 'COPY_READY',
+            },
+            data: { status: 'RESERVED' },
+          });
+          if (reservedCandidate.count !== 1) {
+            throw new AppError(
+              'Candidate preparado mudou durante o handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_CANDIDATE_CONFLICT',
+            );
+          }
+
+          await transaction.commercialPipelineRun.create({
+            data: {
+              id: runId,
+              executionId: input.executionId,
+              instanceName: input.instanceName,
+              mode: 'CONFIRMED',
+              status: 'STARTED',
+              productId: prepared.candidate.productId,
+              groupDestinationId: prepared.groupDestinationId,
+              productName: prepared.candidate.product.nome,
+              productPrice: prepared.candidate.product.preco,
+              groupName: prepared.groupDestination.name,
+              groupFingerprint: prepared.logicalGroupFingerprint,
+              score: prepared.candidate.commercialScore,
+              scorePolicyVersion: prepared.candidate.scorePolicyVersion,
+              minimumScoreUsed: prepared.candidate.minimumScoreUsed,
+              maximumScoreObserved: prepared.candidate.commercialScore,
+              candidateCount: 1,
+              eligibleCount: 1,
+              rejectedCount: 0,
+              rejectionSummary: {},
+              selectionReasons: ['Mensagem preparada entregue ao slot comercial'],
+              copyPreview: prepared.copyPreview,
+              plannedSubIds: [],
+              confirmedAt: input.now,
+              finalStatus: 'PENDING',
+              investigationRequired: false,
+            },
+          });
+          await transaction.whatsAppDispatch.create({
+            data: {
+              id: dispatchId,
+              productId: prepared.candidate.productId,
+              generatedCopyId: prepared.generatedCopyId,
+              destinationId: prepared.groupDestinationId,
+              instanceName: input.instanceName,
+              status: 'PENDING',
+              attemptCount: 0,
+            },
+          });
+          const outbox = await transaction.commercialDispatchOutbox.create({
+            data: {
+              id: outboxId,
+              commercialRunId: runId,
+              dispatchId,
+              jobId,
+              instanceName: input.instanceName,
+              status: 'PENDING',
+            },
+          });
+          await transaction.commercialPipelineRun.update({
+            where: { id: runId },
+            data: { dispatchId },
+          });
+          const linkedExecution = await transaction.commercialAutomationExecution.updateMany({
+            where: {
+              id: input.executionId,
+              mode: 'SEND',
+              status: { in: ['STARTED', 'QUEUED'] },
+              OR: [{ commercialRunId: null }, { commercialRunId: runId }],
+            },
+            data: { commercialRunId: runId },
+          });
+          if (linkedExecution.count !== 1) {
+            throw new AppError(
+              'Execution comercial mudou durante o handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_EXECUTION_CONFLICT',
+            );
+          }
+          const dispatched = await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: input.preparedId,
+              status: 'RESERVED',
+              reservationOwnerId: input.ownerId,
+              runId: null,
+            },
+            data: {
+              runId,
+              status: 'DISPATCHED',
+              reservationOwnerId: null,
+              reservationLeaseExpiresAt: null,
+              updatedAt: input.now,
+            },
+          });
+          if (dispatched.count !== 1) {
+            throw new AppError(
+              'Mensagem preparada mudou durante o handoff',
+              'COMMERCIAL_PREPARED_HANDOFF_STATE_CONFLICT',
+            );
+          }
+          return {
+            outbox: mapCommercialDispatchOutbox({ ...outbox }),
+            runId,
+            dispatchId,
+            jobId,
+            candidateId: prepared.candidateId,
+            generatedCopyId: prepared.generatedCopyId,
+          };
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      return { outcome: 'HANDOFF_COMMITTED', handoff: committed };
+    } catch (error) {
+      if (error instanceof AppError) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: error.code,
+          rollbackConfirmed: true,
+        };
+      }
+      if (isTransactionConflictError(error)) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_PREPARED_HANDOFF_TRANSACTION_CONFLICT',
+          rollbackConfirmed: true,
+        };
+      }
+      if (isUniqueConstraintError(error)) {
+        return {
+          outcome: 'PRECOMMIT_REJECTED',
+          reason: 'COMMERCIAL_PREPARED_HANDOFF_INCONSISTENT',
+          rollbackConfirmed: true,
+        };
+      }
+      return {
+        outcome: 'OUTCOME_UNKNOWN',
+        failureCode: 'COMMERCIAL_PREPARED_HANDOFF_OUTCOME_UNKNOWN',
+      };
+    }
+  }
+
+  async markDispatched(input: { id: string; ownerId: string; now: Date }) {
+    const result = await this.prisma.commercialPreparedMessage.updateMany({
+      where: { id: input.id, status: 'RESERVED', reservationOwnerId: input.ownerId },
+      data: { status: 'DISPATCHED', reservationOwnerId: null, reservationLeaseExpiresAt: null, updatedAt: input.now },
+    });
+    return result.count === 1;
+  }
+
+  async invalidateReserved(input: {
+    id: string;
+    ownerId: string;
+    reason: string;
+    now: Date;
+  }) {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const current =
+          await transaction.commercialPreparedMessage.findUnique({
+            where: { id: input.id },
+            select: {
+              status: true,
+              reservationOwnerId: true,
+              runId: true,
+            },
+          });
+        if (
+          !current ||
+          current.status !== 'RESERVED' ||
+          current.reservationOwnerId !== input.ownerId ||
+          current.runId !== null
+        ) {
+          return false;
+        }
+        const result =
+          await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: input.id,
+              status: 'RESERVED',
+              reservationOwnerId: input.ownerId,
+              runId: null,
+            },
+            data: {
+              status: 'INVALIDATED',
+              reservationOwnerId: null,
+              reservationLeaseExpiresAt: null,
+              invalidatedReason: input.reason,
+              invalidatedAt: input.now,
+              updatedAt: input.now,
+            },
+          });
+        return result.count === 1;
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
+  }
+
+  async invalidateReadyForPolicy(input: {
+    id: string;
+    reason: 'COMMERCIAL_AUTOMATION_NICHE_POLICY_CHANGED';
+    now: Date;
+  }) {
+    return this.prisma.$transaction(
+      async (transaction) => {
+        const result =
+          await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: input.id,
+              status: 'READY',
+              runId: null,
+              candidate: { status: 'COPY_READY' },
+            },
+            data: {
+              status: 'INVALIDATED',
+              invalidatedReason: input.reason,
+              invalidatedAt: input.now,
+              updatedAt: input.now,
+            },
+          });
+        return result.count === 1;
+      },
+      { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+    );
+  }
+
+  async release(input: { id: string; ownerId: string; now: Date }) {
+    return this.prisma.$transaction(async (transaction) => {
+      const current = await transaction.commercialPreparedMessage.findUnique({
+        where: { id: input.id },
+        include: {
+          candidate: {
+            include: { product: true, snapshot: true, generatedCopy: true },
+          },
+        },
+      });
+      if (
+        !current ||
+        current.status !== 'RESERVED' ||
+        current.reservationOwnerId !== input.ownerId
+      ) {
+        return false;
+      }
+      const contentFresh = isCommercialPreparedMessageCandidateReady(
+        { ...current, status: 'RESERVED' },
+        input.now,
+      );
+      const invalidationReason = contentFresh
+        ? null
+        : commercialPreparedMessageInvalidationReason(
+            { ...current, status: 'RESERVED' },
+            input.now,
+          );
+      const nextStatus = contentFresh ? 'READY' : 'INVALIDATED';
+      const result = await transaction.commercialPreparedMessage.updateMany({
+        where: {
+          id: input.id,
+          status: 'RESERVED',
+          reservationOwnerId: input.ownerId,
+        },
+        data: {
+          status: nextStatus,
+          reservationOwnerId: null,
+          reservationLeaseExpiresAt: null,
+          ...(contentFresh
+            ? {}
+            : {
+                invalidatedReason: invalidationReason,
+                invalidatedAt: input.now,
+              }),
+          updatedAt: input.now,
+        },
+      });
+      if (result.count !== 1 || contentFresh) return result.count === 1;
+      const candidateTransition = invalidationReason
+        ? PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+            invalidationReason,
+            input.now,
+          )
+        : null;
+      if (candidateTransition) {
+        await transaction.commercialPromotionCandidate.updateMany({
+          where: {
+            id: current.candidateId,
+            status: 'COPY_READY',
+            generatedCopyId: current.generatedCopyId,
+            snapshotId: current.snapshotId,
+          },
+          data: candidateTransition,
+        });
+      }
+      return true;
+    });
+  }
+
+  async recoverExpired(input: { now: Date; limit: number }) {
+    const rows = await this.prisma.commercialPreparedMessage.findMany({
+      where: { status: 'RESERVED', reservationLeaseExpiresAt: { lte: input.now } },
+      select: { id: true },
+      orderBy: { reservationLeaseExpiresAt: 'asc' },
+      take: Math.min(Math.max(input.limit, 1), 100),
+    });
+    let recovered = 0;
+    for (const row of rows) {
+      const recoveredRow = await this.prisma.$transaction(
+        async (transaction) => {
+          const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id"
+            FROM "CommercialPreparedMessage"
+            WHERE "id" = ${row.id}
+              AND "status" = 'RESERVED'
+              AND "reservationLeaseExpiresAt" <= ${input.now}
+            FOR UPDATE
+          `);
+          if (locked.length !== 1) return 0;
+          const current = await transaction.commercialPreparedMessage.findUnique({
+            where: { id: row.id },
+            include: {
+              candidate: {
+                include: { product: true, snapshot: true, generatedCopy: true },
+              },
+              run: {
+                select: {
+                  mode: true,
+                  dispatchId: true,
+                  dispatch: { select: { id: true } },
+                  dispatchOutbox: { select: { id: true } },
+                },
+              },
+            },
+          });
+          if (!current) return 0;
+          const recoveryDecision = decideCommercialPreparedRecovery({
+            runMode: current.run?.mode ?? 'DRY_RUN',
+            dispatchId: current.run?.dispatchId ?? null,
+            dispatchExists: Boolean(current.run?.dispatch),
+            outboxExists: Boolean(current.run?.dispatchOutbox),
+          });
+          if (recoveryDecision === 'CLOSE_DISPATCHED') {
+            const terminalized =
+              await transaction.commercialPreparedMessage.updateMany({
+                where: {
+                  id: row.id,
+                  status: 'RESERVED',
+                  reservationLeaseExpiresAt: { lte: input.now },
+                },
+                data: {
+                  status: 'DISPATCHED',
+                  reservationOwnerId: null,
+                  reservationLeaseExpiresAt: null,
+                  invalidatedReason:
+                    'CONFIRMATION_EFFECT_OBSERVED_DURING_RECOVERY',
+                  updatedAt: input.now,
+                },
+              });
+            if (terminalized.count === 1) {
+              await transaction.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: current.candidateId,
+                  status: { in: ['COPY_READY', 'RESERVED'] },
+                  generatedCopyId: current.generatedCopyId,
+                  snapshotId: current.snapshotId,
+                },
+                data: {
+                  status: 'DISPATCHED',
+                  rankPosition: null,
+                  lastEvaluatedAt: input.now,
+                },
+              });
+            }
+            return terminalized.count;
+          }
+          const contentFresh = isCommercialPreparedMessageCandidateReady(
+            { ...current, status: 'RESERVED' },
+            input.now,
+          );
+          const invalidationReason = contentFresh
+            ? null
+            : commercialPreparedMessageInvalidationReason(
+                { ...current, status: 'RESERVED' },
+                input.now,
+              );
+          const result = await transaction.commercialPreparedMessage.updateMany({
+            where: {
+              id: row.id,
+              status: 'RESERVED',
+              reservationLeaseExpiresAt: { lte: input.now },
+            },
+            data: {
+              status: contentFresh ? 'READY' : 'INVALIDATED',
+              reservationOwnerId: null,
+              reservationLeaseExpiresAt: null,
+              ...(contentFresh
+                ? {}
+                : {
+                    invalidatedReason: invalidationReason,
+                    invalidatedAt: input.now,
+                  }),
+              updatedAt: input.now,
+            },
+          });
+          if (!contentFresh && result.count === 1 && invalidationReason) {
+            const candidateTransition =
+              PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                invalidationReason,
+                input.now,
+              );
+            if (candidateTransition) {
+              await transaction.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: current.candidateId,
+                  status: 'COPY_READY',
+                  generatedCopyId: current.generatedCopyId,
+                  snapshotId: current.snapshotId,
+                },
+                data: candidateTransition,
+              });
+            }
+          }
+          return result.count;
+        },
+        { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+      );
+      recovered += recoveredRow;
+    }
+    return recovered;
+  }
+
+  async invalidateStale(input: { now: Date; limit: number }) {
+    const limit = Math.min(Math.max(input.limit, 1), 100);
+    let invalidated = 0;
+    let cursor: { updatedAt: Date; id: string } | null = null;
+    while (invalidated < limit) {
+      const rows: Array<{ id: string; updatedAt: Date }> =
+        await this.prisma.commercialPreparedMessage.findMany({
+        where: {
+          status: 'READY',
+          ...(cursor
+            ? {
+                OR: [
+                  { updatedAt: { gt: cursor.updatedAt } },
+                  { updatedAt: cursor.updatedAt, id: { gt: cursor.id } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, updatedAt: true },
+        orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+        take: Math.min(limit - invalidated, 100),
+        });
+      if (rows.length === 0) break;
+      const last = rows[rows.length - 1];
+      cursor = { updatedAt: last.updatedAt, id: last.id };
+      for (const row of rows) {
+        const invalidatedRow = await this.prisma.$transaction(
+          async (transaction) => {
+            const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+              SELECT "id"
+              FROM "CommercialPreparedMessage"
+              WHERE "id" = ${row.id}
+                AND "status" = 'READY'
+              FOR UPDATE
+            `);
+            if (locked.length !== 1) return 0;
+            const current = await transaction.commercialPreparedMessage.findUnique({
+              where: { id: row.id },
+              include: {
+                candidate: {
+                  include: { product: true, snapshot: true, generatedCopy: true },
+                },
+              },
+            });
+            if (!current || isCommercialPreparedMessageMateriallyReady(current, input.now)) {
+              return 0;
+            }
+            const invalidationReason = commercialPreparedMessageInvalidationReason(
+              current,
+              input.now,
+            );
+            const result = await transaction.commercialPreparedMessage.updateMany({
+              where: { id: row.id, status: 'READY' },
+              data: {
+                status: 'INVALIDATED',
+                invalidatedReason: invalidationReason,
+                invalidatedAt: input.now,
+                reservationOwnerId: null,
+                reservationLeaseExpiresAt: null,
+                updatedAt: input.now,
+              },
+            });
+            if (result.count === 1) {
+              const candidateTransition =
+                PrismaCommercialPreparedMessageRepository.candidateTransitionData(
+                  invalidationReason,
+                  input.now,
+                );
+              if (candidateTransition) {
+                await transaction.commercialPromotionCandidate.updateMany({
+                  where: {
+                    id: current.candidateId,
+                    status: 'COPY_READY',
+                    generatedCopyId: current.generatedCopyId,
+                    snapshotId: current.snapshotId,
+                  },
+                  data: candidateTransition,
+                });
+              }
+            }
+            return result.count;
+          },
+          { isolationLevel: 'Serializable', maxWait: 1_000, timeout: 10_000 },
+        );
+        invalidated += invalidatedRow;
+        if (invalidated >= limit) break;
+      }
+    }
+    return invalidated;
   }
 }
 

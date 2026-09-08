@@ -6,16 +6,20 @@ import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
   COMMERCIAL_AUTOMATION_JOB_OPTIONS,
   COMMERCIAL_AUTOMATION_HEARTBEAT_CRON,
+  COMMERCIAL_INVENTORY_REFILL_JOB_OPTIONS,
   createBullMqCommercialAutomationScheduler,
   createCommercialAutomationQueue,
+  createCommercialInventoryRefillQueue,
   createRedisConnection,
   createWhatsAppDispatchQueue,
   DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID,
   enqueueControlledWhatsAppDispatch,
+  enqueueCommercialInventoryRefill,
   enqueueCommercialAutomationTarget,
   JOB_NAMES,
   QUEUE_NAMES,
   type CommercialAutomationJob,
+  type CommercialInventoryRefillJob,
   type CommercialAutomationScheduler,
   isCommercialAutomationTargetConstraint,
 } from '@shopee-auto-affiliate-ai/queue';
@@ -52,6 +56,10 @@ type CommercialWorkerInfrastructure = {
     jobId: string,
     delayMs: number,
   ) => Promise<void>;
+  enqueueInventoryRefill?: (
+    data: CommercialInventoryRefillJob,
+    jobId: string,
+  ) => Promise<void>;
   close(): Promise<void>;
 };
 
@@ -67,6 +75,7 @@ type CommercialWorkerOptions = {
 };
 
 export const COMMERCIAL_AUTOMATION_WORKER_CONCURRENCY = 1;
+export const COMMERCIAL_INVENTORY_REFILL_WORKER_CONCURRENCY = 1;
 
 const closeResources = async (cleanups: Array<() => Promise<unknown>>) => {
   let firstError: unknown;
@@ -103,7 +112,15 @@ export const processCommercialAutomationJob = async (
         ) => Promise<void>;
       }): Promise<unknown>;
     };
+    inventorySupervisor?: {
+      run(input: {
+        mode: 'preview' | 'send';
+        provider: 'mock' | 'manual' | 'official';
+      }): Promise<unknown>;
+    };
+    logger?: CommercialAutomationRuntimeLogger;
     enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
+    enqueueInventoryRefill?: CommercialWorkerInfrastructure['enqueueInventoryRefill'];
     getScheduleRevision?: () => Promise<number>;
     clock?: () => Date;
   },
@@ -187,6 +204,28 @@ export const processCommercialAutomationJob = async (
         'COMMERCIAL_AUTOMATION_TARGET_ENQUEUE_REQUIRED',
       );
     }
+    if (options.mode === 'send' && options.provider === 'official') {
+      if (!options.enqueueInventoryRefill) {
+        throw new AppError(
+          'Planner comercial sem fila duravel de refill de inventario',
+          'COMMERCIAL_INVENTORY_REFILL_ENQUEUE_REQUIRED',
+        );
+      }
+      void options
+        .enqueueInventoryRefill(
+          { mode: 'send', provider: 'official' },
+          `commercial-inventory-refill-${job.id}`,
+        )
+        .catch((error: unknown) => {
+          options.logger?.error(
+            {
+              event: 'commercial-inventory.refill.enqueue-failed',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            },
+            'Commercial inventory refill enqueue failed; planner continues',
+          );
+        });
+    }
     return options.planner.plan({
       now: options.clock?.() ?? new Date(),
       mode: options.mode,
@@ -201,18 +240,55 @@ export const processCommercialAutomationJob = async (
   });
 };
 
+export const processCommercialInventoryRefillJob = async (
+  job: Pick<Job<CommercialInventoryRefillJob>, 'id' | 'name' | 'data'>,
+  options: {
+    inventorySupervisor: {
+      run(input: {
+        mode: 'preview' | 'send';
+        provider: 'mock' | 'manual' | 'official';
+      }): Promise<unknown>;
+    };
+    mode: 'preview' | 'send';
+  },
+) => {
+  if (job.name !== JOB_NAMES.commercialInventoryRefill) {
+    return { skipped: true };
+  }
+  if (!job.id) {
+    throw new AppError(
+      'Job de refill de inventario comercial sem identidade BullMQ',
+      'COMMERCIAL_INVENTORY_REFILL_JOB_ID_REQUIRED',
+    );
+  }
+  if (
+    job.data.mode !== options.mode ||
+    job.data.mode !== 'send' ||
+    job.data.provider !== 'official'
+  ) {
+    throw new AppError(
+      'Payload do refill de inventario comercial invalido',
+      'COMMERCIAL_INVENTORY_REFILL_JOB_INVALID',
+    );
+  }
+  return options.inventorySupervisor.run({ mode: 'send', provider: 'official' });
+};
+
 export const createCommercialAutomationWorker = (
   config: AppEnv,
   options: {
     connection: ReturnType<typeof createRedisConnection>;
     prisma?: ReturnType<typeof createPrismaClient>;
+    clock?: () => Date;
     confirmationQueue?: CommercialWorkerInfrastructure['confirmationQueue'];
     enqueueTarget?: CommercialWorkerInfrastructure['enqueueTarget'];
+    enqueueInventoryRefill?: CommercialWorkerInfrastructure['enqueueInventoryRefill'];
     logger: CommercialAutomationRuntimeLogger;
   },
 ) => {
   const runtime = createCommercialAutomationOrchestratorRuntime(config, {
     prisma: options.prisma,
+    clock: options.clock,
     confirmationQueue: options.confirmationQueue,
     logger: options.logger,
   });
@@ -222,14 +298,30 @@ export const createCommercialAutomationWorker = (
       processCommercialAutomationJob(job, {
         orchestrator: runtime.orchestrator,
         planner: runtime.planner,
+        inventorySupervisor: runtime.inventorySupervisor,
+        logger: options.logger,
         enqueueTarget: options.enqueueTarget,
+        enqueueInventoryRefill: options.enqueueInventoryRefill,
         getScheduleRevision: () => runtime.planner.getScheduleRevision(),
         provider: config.SHOPEE_AFFILIATE_PROVIDER,
         mode: config.COMMERCIAL_AUTOMATION_MODE,
+        clock: options.clock,
       }),
     {
       connection: options.connection,
       concurrency: COMMERCIAL_AUTOMATION_WORKER_CONCURRENCY,
+    },
+  );
+  const inventoryWorker = new Worker<CommercialInventoryRefillJob>(
+    QUEUE_NAMES.commercialInventoryRefill,
+    (job) =>
+      processCommercialInventoryRefillJob(job, {
+        inventorySupervisor: runtime.inventorySupervisor,
+        mode: config.COMMERCIAL_AUTOMATION_MODE,
+      }),
+    {
+      connection: options.connection,
+      concurrency: COMMERCIAL_INVENTORY_REFILL_WORKER_CONCURRENCY,
     },
   );
   let closePromise: Promise<void> | undefined;
@@ -238,6 +330,7 @@ export const createCommercialAutomationWorker = (
     close: () => {
       closePromise ??= closeResources([
         () => worker.close(),
+        () => inventoryWorker.close(),
         ...(runtime.ownsPrisma ? [() => runtime.prisma.$disconnect()] : []),
       ]);
       return closePromise;
@@ -251,6 +344,7 @@ export const createCommercialWorkerInfrastructure = (
 ): CommercialWorkerInfrastructure => {
   const connection = createRedisConnection(redisUrl);
   const commercialQueue = createCommercialAutomationQueue(connection);
+  const inventoryQueue = createCommercialInventoryRefillQueue(connection);
   const whatsappQueue =
     mode === 'send' ? createWhatsAppDispatchQueue(connection) : undefined;
   const scheduler = createBullMqCommercialAutomationScheduler(commercialQueue);
@@ -300,9 +394,13 @@ export const createCommercialWorkerInfrastructure = (
         delayMs,
       );
     },
+    enqueueInventoryRefill: async (data, jobId) => {
+      await enqueueCommercialInventoryRefill(inventoryQueue, data, jobId);
+    },
     close: () => {
       closePromise ??= closeResources([
         () => commercialQueue.close(),
+        () => inventoryQueue.close(),
         ...(whatsappQueue ? [() => whatsappQueue.close()] : []),
         () => connection.quit().then(() => undefined),
       ]);
@@ -383,6 +481,7 @@ export const startCommercialAutomationWorker = async (
       prisma,
       confirmationQueue: infrastructure.confirmationQueue,
       enqueueTarget: infrastructure.enqueueTarget,
+      enqueueInventoryRefill: infrastructure.enqueueInventoryRefill,
       logger,
     });
   } catch (error) {
@@ -397,6 +496,8 @@ export const startCommercialAutomationWorker = async (
       job: JOB_NAMES.commercialAutomationTick,
       concurrency: COMMERCIAL_AUTOMATION_WORKER_CONCURRENCY,
       jobOptions: COMMERCIAL_AUTOMATION_JOB_OPTIONS,
+      inventoryQueue: QUEUE_NAMES.commercialInventoryRefill,
+      inventoryJobOptions: COMMERCIAL_INVENTORY_REFILL_JOB_OPTIONS,
     },
     'Commercial automation worker started',
   );

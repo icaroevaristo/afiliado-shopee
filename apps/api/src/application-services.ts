@@ -41,6 +41,8 @@ import {
   PrismaCommercialPipelineRunRepository,
   PrismaCommercialPromotionRepository,
   PrismaCommercialPromotionCopyRepository,
+  PrismaCommercialDiscoveryCheckpointRepository,
+  PrismaCommercialPreparedMessageRepository,
   PrismaCouponRepository,
   PrismaGeneratedCopyRepository,
   PrismaProductRepository,
@@ -68,6 +70,8 @@ import type {
   CommercialPromotionCandidateRepository,
   CommercialPromotionCatalogRepository,
   CommercialPromotionCopyRepository,
+  CommercialDiscoveryCheckpointRepository,
+  CommercialPreparedMessageRepository,
   CouponRepository,
   GeneratedCopyRepository,
   ProductRepository,
@@ -120,6 +124,8 @@ export type ApplicationRepositories = {
   commercialPromotions: CommercialPromotionCatalogRepository &
     CommercialPromotionCandidateRepository;
   commercialPromotionCopies: CommercialPromotionCopyRepository;
+  commercialDiscoveryCheckpoints: CommercialDiscoveryCheckpointRepository;
+  commercialPreparedMessages: CommercialPreparedMessageRepository;
   commercialAutomationSettings: CommercialAutomationSettingsRepository;
   commercialExternalProviderUsage: CommercialExternalProviderUsageRepository;
   commercialAutomationHistory: CommercialAutomationHistoryRepository;
@@ -186,6 +192,7 @@ export const createCommercialPipelineConfirmationService = ({
   maximumCopyLength,
   environment,
   logger,
+  clock,
 }: {
   repositories: Pick<
     ApplicationRepositories,
@@ -195,18 +202,21 @@ export const createCommercialPipelineConfirmationService = ({
     | 'commercialDeliveryHistory'
     | 'whatsappInstances'
     | 'commercialDispatchOutboxes'
+    | 'commercialPreparedMessages'
   >;
   queue: CommercialDispatchOutboxQueue;
   instanceName: string;
   maximumCopyLength: number;
   environment: CommercialConfirmationEnvironment;
   logger: Pick<FastifyBaseLogger, 'info' | 'error'>;
+  clock?: () => Date;
 }) =>
   new CommercialPipelineConfirmationService({
     offers: repositories.shopeeOffers,
     groups: repositories.whatsappGroups,
     instances: repositories.whatsappInstances,
     outboxes: repositories.commercialDispatchOutboxes,
+    preparedMessages: repositories.commercialPreparedMessages,
     runs: repositories.commercialRuns,
     deliveryHistory: repositories.commercialDeliveryHistory,
     copy: new CommercialCopyService(maximumCopyLength),
@@ -218,6 +228,7 @@ export const createCommercialPipelineConfirmationService = ({
     instanceName,
     environment,
     logger,
+    clock,
   });
 
 export const createCommercialPromotionMiningService = ({
@@ -299,6 +310,7 @@ export const createSenderService = ({
   draftService,
   groupSendPolicy,
   instanceName,
+  clock,
   confirmationTimeoutMs,
 }: {
   repositories: Pick<ApplicationRepositories, 'whatsappDispatches'> &
@@ -313,6 +325,7 @@ export const createSenderService = ({
   draftService?: CommercialMessageDraftService;
   groupSendPolicy?: WhatsAppGroupSendPolicy;
   instanceName?: string;
+  clock?: () => Date;
   confirmationTimeoutMs?: number;
 }) =>
   new SenderService({
@@ -322,6 +335,7 @@ export const createSenderService = ({
     logger,
     messageBuilder,
     draftService,
+    clock,
     groupSendPolicy,
     instanceName,
     confirmationTimeoutMs,
@@ -357,6 +371,11 @@ export const createPrismaRepositories = (
     ),
     commercialPromotions,
     commercialPromotionCopies: new PrismaCommercialPromotionCopyRepository(
+      prisma,
+    ),
+    commercialDiscoveryCheckpoints:
+      new PrismaCommercialDiscoveryCheckpointRepository(prisma),
+    commercialPreparedMessages: new PrismaCommercialPreparedMessageRepository(
       prisma,
     ),
     commercialAutomationSettings:

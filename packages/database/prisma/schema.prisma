@@ -89,6 +89,7 @@ model CommercialOfferSnapshot {
   generatedCopies GeneratedCopy[]
   copyGenerationAttempts CommercialCopyGenerationAttempt[]
   manualPublicationRequests ManualPublicationRequest[] @relation("ManualPublicationRequestSnapshot")
+  commercialPreparedMessages CommercialPreparedMessage[]
 
   @@unique([productId, revision])
   @@index([productId, revision])
@@ -115,6 +116,7 @@ model GeneratedCopy {
   usageTotalTokens   Int?
   promotionCandidates CommercialPromotionCandidate[]
   generationAttempts CommercialCopyGenerationAttempt[]
+  commercialPreparedMessages CommercialPreparedMessage[]
   titulo             String
   mensagem           String
   cta                String
@@ -147,6 +149,7 @@ model WhatsAppDestination {
   commercialPipelineRuns CommercialPipelineRun[]
   anchoredCampaigns      CommercialGroupCampaign[]
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetDestination")
+  commercialPreparedMessages CommercialPreparedMessage[]
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
 
@@ -164,6 +167,7 @@ model WhatsAppInstance {
   whatsappDispatches        WhatsAppDispatch[]
   commercialDispatchOutboxes CommercialDispatchOutbox[]
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetInstance")
+  commercialPreparedMessages CommercialPreparedMessage[]
   groupInstanceAssignments WhatsAppGroupInstanceAssignment[]
   createdAt                 DateTime                     @default(now())
   updatedAt                 DateTime                     @updatedAt
@@ -229,6 +233,7 @@ model CommercialGroupCampaign {
   dedupeDays              Int                  @default(30)
   promotionCandidates     CommercialPromotionCandidate[]
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetCampaign")
+  commercialPreparedMessages CommercialPreparedMessage[]
   createdAt               DateTime             @default(now())
   updatedAt               DateTime             @updatedAt
 
@@ -264,6 +269,7 @@ model CommercialPromotionCandidate {
   createdAt        DateTime                           @default(now())
   updatedAt        DateTime                           @updatedAt
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetCandidate")
+  commercialPreparedMessages CommercialPreparedMessage[]
 
   @@unique([campaignId, productId])
   @@index([campaignId, status, rankPosition])
@@ -307,6 +313,70 @@ model CommercialCopyGenerationAttempt {
   @@index([snapshotId])
   @@index([status, createdAt])
   @@index([generatedCopyId])
+}
+
+model CommercialDiscoveryCheckpoint {
+  id                    String                              @id @default(cuid())
+  identityFingerprint   String                              @unique
+  source                ShopeeOfferSource
+  campaignId            String
+  nicheId               String
+  query                 Json
+  page                  Int                                 @default(1)
+  cursor                String?
+  status                CommercialDiscoveryCheckpointStatus @default(ACTIVE)
+  nextRefreshAt         DateTime?
+  leaseOwnerId         String?
+  leaseExpiresAt        DateTime?
+  leaseRevision        Int                                 @default(0)
+  lastRequestAt         DateTime?
+  lastSuccessAt         DateTime?
+  lastErrorCode         String?
+  fetchedPages          Int                                 @default(0)
+  fetchedProducts       Int                                 @default(0)
+  createdAt             DateTime                            @default(now())
+  updatedAt             DateTime                            @updatedAt
+
+  @@index([status, nextRefreshAt])
+  @@index([campaignId, nicheId, status])
+  @@index([leaseExpiresAt])
+}
+
+model CommercialPreparedMessage {
+  id                        String                          @id @default(cuid())
+  campaignId                String
+  campaign                  CommercialGroupCampaign         @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  groupDestinationId        String
+  groupDestination          WhatsAppDestination             @relation(fields: [groupDestinationId], references: [id], onDelete: Restrict)
+  instanceName              String
+  instance                  WhatsAppInstance                @relation(fields: [instanceName], references: [name], onDelete: Restrict)
+  logicalGroupFingerprint   String
+  candidateId               String
+  candidate                 CommercialPromotionCandidate    @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  snapshotId                String
+  snapshot                  CommercialOfferSnapshot         @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  generatedCopyId           String
+  generatedCopy             GeneratedCopy                   @relation(fields: [generatedCopyId], references: [id], onDelete: Restrict)
+  copyPreview               String                          @default("")
+  runId                     String?                         @unique
+  run                       CommercialPipelineRun?          @relation(fields: [runId], references: [id], onDelete: Restrict)
+  status                    CommercialPreparedMessageStatus @default(READY)
+  reservationOwnerId        String?
+  reservationLeaseExpiresAt DateTime?
+  scheduleRevision          Int                             @default(1)
+  assignmentRevision        Int                             @default(1)
+  preparationRevision      Int                             @default(1)
+  expiresAt                 DateTime
+  offerEndsAt               DateTime?
+  invalidatedReason         String?
+  invalidatedAt             DateTime?
+  createdAt                 DateTime                        @default(now())
+  updatedAt                 DateTime                        @updatedAt
+
+  @@unique([campaignId, candidateId, snapshotId, groupDestinationId, instanceName, scheduleRevision, assignmentRevision, preparationRevision])
+  @@index([campaignId, status, groupDestinationId, instanceName])
+  @@index([status, reservationLeaseExpiresAt])
+  @@index([candidateId, snapshotId])
 }
 
 model WhatsAppDispatch {
@@ -449,6 +519,7 @@ model CommercialPipelineRun {
   createdAt             DateTime                       @default(now())
   completedAt           DateTime?
   dispatchOutbox        CommercialDispatchOutbox?
+  commercialPreparedMessage CommercialPreparedMessage?
   manualPublicationTargets ManualPublicationTarget[] @relation("ManualPublicationTargetRun")
 
   @@index([createdAt])
@@ -550,6 +621,12 @@ model CommercialAutomationSettings {
   dailyGroupLimit          Int?
   dailyShopeeHttpLimit     Int?
   dailyOpenAiGenerationLimit Int?
+  usableCandidateLowWatermark Int @default(2)
+  usableCandidateTarget Int @default(4)
+  preparedLowWatermark Int @default(1)
+  preparedTarget Int @default(2)
+  discoveryPagesPerRun Int @default(1)
+  discoveryRefreshCooldownMinutes Int @default(60)
   scheduleRevision         Int       @default(0)
   updatedAt                DateTime  @default(now()) @updatedAt
 }
@@ -733,4 +810,16 @@ enum CommercialCopyGenerationAttemptStatus {
   SUCCEEDED
   FAILED
   AMBIGUOUS
+}
+
+enum CommercialDiscoveryCheckpointStatus {
+  ACTIVE
+  EXHAUSTED
+}
+
+enum CommercialPreparedMessageStatus {
+  READY
+  RESERVED
+  DISPATCHED
+  INVALIDATED
 }
