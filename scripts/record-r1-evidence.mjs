@@ -14,10 +14,15 @@ const evidencePath = join(manifestRoot, 'EVIDENCE_INDEX.json');
 if (!existsSync(evidencePath)) throw new Error('Missing canonical EVIDENCE_INDEX.json');
 mkdirSync(join(artifactRoot, 'commands'), { recursive: true });
 const startedAt = new Date().toISOString();
-const executable = process.platform === 'win32' && !command[0].includes('.')
-  ? `${command[0]}.cmd`
-  : command[0];
-const result = spawnSync(executable, command.slice(1), {
+const windowsShim = process.platform === 'win32' && ['pnpm', 'npm', 'npx'].includes(command[0]);
+if (windowsShim && !command.every((part) => /^[A-Za-z0-9@_./:=+,-]+$/.test(part))) {
+  throw new Error('Unsafe Windows shim argument');
+}
+const executable = windowsShim ? (process.env.ComSpec ?? 'cmd.exe') : command[0];
+const args = windowsShim
+  ? ['/d', '/s', '/c', `${command[0]}.cmd ${command.slice(1).join(' ')}`]
+  : command.slice(1);
+const result = spawnSync(executable, args, {
   cwd: root,
   encoding: 'utf8',
   shell: false,
