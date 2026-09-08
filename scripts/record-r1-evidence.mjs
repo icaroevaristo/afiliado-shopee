@@ -28,7 +28,14 @@ const result = spawnSync(executable, args, {
   shell: false,
 });
 const finishedAt = new Date().toISOString();
-const sanitize = (value) => value.replaceAll(/postgres(?:ql)?:\/\/[^\s"']+/gi, '[REDACTED_DATABASE_URL]').replaceAll(/(Bearer\s+)[^\s"']+/gi, '$1[REDACTED]');
+const sanitize = (value) =>
+  value
+    .replaceAll(/postgres(?:ql)?:\/\/[^\s"']+/gi, '[REDACTED_DATABASE_URL]')
+    .replaceAll(/(Bearer\s+)[^\s"']+/gi, '$1[REDACTED]')
+    .replaceAll(
+      /(\b(?:[A-Z][A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET)|(?:[A-Z][A-Z0-9_]*_)?API_KEY)\s*[=:]\s*)[^\s,"'}]+/g,
+      '$1[REDACTED]',
+    );
 const stdout = sanitize(result.stdout ?? '');
 const stderr = sanitize(result.stderr ?? '');
 const write = (suffix, value) => {
