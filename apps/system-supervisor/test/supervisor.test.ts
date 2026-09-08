@@ -679,9 +679,28 @@ describe('maintenance migrate', () => {
     vi.mocked(s.h.deps.stopProcessTree).mockResolvedValue(false);
     await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
       code: 'SYSTEM_MAINTENANCE_STOP_FAILED',
+      retainOperationLock: true,
     });
     expect(deploys(s.h)).toHaveLength(0);
     expect(s.h.spawned).toEqual([]);
+    expect(readState(s.root)?.maintenance).toBe(true);
+    expect(
+      readFileSync(join(s.root, '.runtime/local-system/supervisor.log'), 'utf8'),
+    ).toContain('APPLICATION_PROCESS_DID_NOT_STOP');
+  });
+  it('marks maintenance before stopping already-dead application processes', async () => {
+    const s = setup();
+    for (const process of s.h.processes.values()) process.running = false;
+
+    await expect(s.supervisor.migrate(true, s.env)).resolves.toMatchObject({
+      migrationExecutionCount: 1,
+      migrationRetryCount: 0,
+      applicationProcessesAfterQuiesce: 0,
+    });
+
+    expect(deploys(s.h)).toHaveLength(1);
+    expect(s.docker.state.originalRunning).toBe(false);
+    expect(readState(s.root)?.maintenance).toBe(true);
   });
   it('retains maintenance lock when the official stop throws after changing topology', async () => {
     const s = setup();
@@ -1859,6 +1878,36 @@ describe('LocalSystemSupervisor', () => {
     const root = createRoot();
     const state = harness();
     state.setInfrastructure(true);
+
+    const result = await createSupervisor(root, state.deps).stop(
+      explicitSafePreviewEnvironment(),
+    );
+
+    expect(result).toEqual({
+      stopped: false,
+      manualIntervention: [
+        'infraestrutura em execucao sem estado local pertencente a esta worktree',
+      ],
+    });
+    expect(
+      state.commands.some(
+        (command) =>
+          command.command === 'docker' && command.args.includes('stop'),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps normal stop fail-closed when its registered application processes are already dead', async () => {
+    const root = createRoot();
+    const state = harness();
+    state.setInfrastructure(true);
+    writeStateFixture(root, 'preview', {
+      api: {
+        pid: 999,
+        startedAt: '2026-07-25T12:00:00.000Z',
+        log: '.runtime/local-system/api.log',
+      },
+    });
 
     const result = await createSupervisor(root, state.deps).stop(
       explicitSafePreviewEnvironment(),
