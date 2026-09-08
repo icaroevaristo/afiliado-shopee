@@ -41,6 +41,12 @@ serviços comprovados; start aceita PostgreSQL isolado e valida a infraestrutura
 completa após compose up. No Windows, a parada vincula handles ao instante de
 criação inspecionado antes da espera e usa esses mesmos handles na terminação;
 não há fallback de terminação por PID numérico após a espera.
+Um Job Object Windows temporário, sem breakaway, contém os descendentes nativos
+criados durante a espera; a conclusão exige zero processos ativos nesse job.
+Falha ao adotar a árvore bloqueia a parada. Essa proteção cobre filhos nativos
+CreateProcess do runtime Node, não execução delegada a serviços externos/WMI.
+Falha na retomada que encerra todos os processos recém-iniciados restaura o estado
+anterior de manutenção, mantendo disponível a parada oficial da infraestrutura.
 
 SIGINT/SIGTERM durante manutenção preservam o lock: o processo Prisma filho pode
 continuar após a morte do supervisor. `SYSTEM_MAINTENANCE_INTERRUPTED` exige

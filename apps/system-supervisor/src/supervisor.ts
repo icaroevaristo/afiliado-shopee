@@ -2060,6 +2060,7 @@ export class LocalSystemSupervisor {
         delete state.processes[name];
       }
       if (Object.keys(state.processes).length > 0) writeState(this.root, state);
+      else if (previous?.maintenance) writeState(this.root, previous);
       else clearState(this.root);
       if (rollbackFailures.length > 0) {
         appendSupervisorLog(

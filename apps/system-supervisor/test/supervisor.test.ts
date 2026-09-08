@@ -773,6 +773,15 @@ describe('maintenance migrate', () => {
     );
     expect(readState(s.root)?.maintenance).toBeUndefined();
   });
+  it('preserves maintenance ownership after a failed start rolls application back', async () => {
+    const s = setup({ healthFails: true });
+    await s.supervisor.migrate(true, s.env);
+    const before = readState(s.root);
+    await expect(s.supervisor.start(s.env)).rejects.toThrow();
+    expect(readState(s.root)).toEqual(before);
+    expect([...s.h.processes.values()].some((p) => p.running)).toBe(false);
+    expect((await s.supervisor.stop(s.env)).stopped).toBe(true);
+  });
 });
 
 const explicitSafePreviewEnvironment = () => ({
