@@ -1,3 +1,4 @@
+import { createWhatsAppDispatchManualRecoveryQueue } from './whatsapp-dispatch-manual-recovery-queue';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import {
@@ -9,10 +10,7 @@ import {
   createCommercialAutomationPolicyService,
   createPrismaRepositories,
 } from './application-services';
-import {
-  WhatsAppDispatchManualRecoveryService,
-  type ManualRecoveryJobState,
-} from './whatsapp-dispatch-manual-recovery-service';
+import { WhatsAppDispatchManualRecoveryService } from './whatsapp-dispatch-manual-recovery-service';
 import {
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
   type WhatsAppDispatchManualRecoveryInput,
@@ -63,7 +61,9 @@ const main = async () => {
 
   const config = loadConfig();
   if (!config.EVOLUTION_INSTANCE_NAME) {
-    throw new Error('EVOLUTION_INSTANCE_NAME is required for manual recovery requeue');
+    throw new Error(
+      'EVOLUTION_INSTANCE_NAME is required for manual recovery requeue',
+    );
   }
   const applicationRepositories = createPrismaRepositories(prisma);
   const policy = createCommercialAutomationPolicyService({
@@ -84,52 +84,7 @@ const main = async () => {
   try {
     const service = new WhatsAppDispatchManualRecoveryService(
       repository,
-      {
-        findEquivalentJobIds: async (dispatchId) => {
-          const jobs = await queue.getJobs([
-            'waiting',
-            'active',
-            'delayed',
-            'failed',
-            'completed',
-            'paused',
-          ]);
-          return jobs
-            .filter((job) => {
-              return job.data.dispatchId === dispatchId;
-            })
-            .map((job) => String(job.id));
-        },
-        getJob: async (jobId) => {
-          const job = await queue.getJob(jobId);
-          if (!job) return null;
-          return {
-            id: String(job.id),
-            instanceName: job.data.instanceName ?? null,
-            get attemptsMade() {
-              return job.attemptsMade;
-            },
-            getState: async () => {
-              const state = await job.getState();
-              return (
-                [
-                  'failed',
-                  'waiting',
-                  'active',
-                  'delayed',
-                  'completed',
-                  'paused',
-                ].includes(state)
-                  ? state
-                  : 'unknown'
-              ) as ManualRecoveryJobState;
-            },
-            retry: async () => {
-              await job.retry();
-            },
-          };
-        },
-      },
+      createWhatsAppDispatchManualRecoveryQueue(queue),
       { reservationLeaseMs: config.COMMERCIAL_EXECUTION_LEASE_SECONDS * 1000 },
       policy,
     );

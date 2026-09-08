@@ -2468,6 +2468,8 @@ export type WhatsAppDispatchManualRecoveryInspection = {
   attemptCount: number;
   externalMessageId: string | null;
   sentAt: Date | null;
+  submittedAt: Date | null;
+  confirmationDeadlineAt: Date | null;
   runStatus: CommercialPipelineRunStatus;
   runFinalStatus: CommercialPipelineFinalStatus | null;
   investigationRequired: boolean;
