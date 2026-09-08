@@ -19,6 +19,7 @@ import {
 import type { MaintenanceDatabaseSnapshot } from '../src/maintenance-database';
 import {
   composeProjectRuntimeRoot,
+  composeProjectStateRoot,
   evolutionComposeArguments,
 } from '../src/runtime-identity';
 import { LocalSystemSupervisor, expectedServices } from '../src/supervisor';
@@ -1911,6 +1912,8 @@ describe('LocalSystemSupervisor', () => {
 
   it('keeps an explicitly isolated start on its own project volume', async () => {
     const root = createRoot();
+    const projectStateRoot = composeProjectStateRoot(root, 'isolated-a');
+    directories.push(projectStateRoot);
     const state = harness({
       dockerDiscovery: equivalentDockerDiscovery('healthy', 'isolated-a'),
       volumeProjectName: 'isolated-a',
@@ -1937,6 +1940,8 @@ describe('LocalSystemSupervisor', () => {
             'compose --project-name isolated-a',
       ),
     ).toBe(true);
+    expect(readState(projectStateRoot)?.composeProjectName).toBe('isolated-a');
+    expect(readState(root)).toBeNull();
   });
 
   it('persists the Compose identity with managed process state', async () => {
@@ -1950,6 +1955,122 @@ describe('LocalSystemSupervisor', () => {
     expect(JSON.parse(readFileSync(statePath(root), 'utf8'))).toMatchObject({
       version: 1,
       composeProjectName: 'afiliado-shopee',
+    });
+  });
+
+  it('keeps canonical state byte-for-byte intact while an isolated SAFE profile owns its own state', async () => {
+    const root = createRoot();
+    const projectName = 'isolated-state-owner';
+    const isolatedStateRoot = composeProjectStateRoot(root, projectName);
+    directories.push(isolatedStateRoot);
+    const canonicalState: LocalSystemState = {
+      version: 1,
+      composeProjectName: 'afiliado-shopee',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    };
+    writeState(root, canonicalState);
+    const canonicalBytes = readFileSync(statePath(root), 'utf8');
+    const state = harness({
+      dockerDiscovery: equivalentDockerDiscovery('healthy', projectName),
+      volumeProjectName: projectName,
+    });
+    const supervisor = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectName,
+      maintenanceDatabase: async () => certificationSnapshot(),
+    });
+    const env = {
+      ...dailySendReadyEnvironment('local-token'),
+      DATABASE_URL:
+        'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+
+    await supervisor.start(env, 'safe-certification');
+    expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalBytes);
+    expect(readState(isolatedStateRoot)).toMatchObject({
+      composeProjectName: projectName,
+      runtimeProfile: 'safe-certification',
+    });
+    await expect(supervisor.status(env)).resolves.toMatchObject({
+      runtimeProfile: 'safe-certification',
+      runtime: { composeProjectName: projectName },
+    });
+    await expect(supervisor.stop(env)).resolves.toEqual({
+      stopped: true,
+      manualIntervention: [],
+    });
+    expect(readState(isolatedStateRoot)).toMatchObject({
+      composeProjectName: projectName,
+      runtimeProfile: 'safe-certification',
+      processes: {},
+    });
+    expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalBytes);
+  });
+
+  it('keeps isolated projects and their mismatch guards independent', async () => {
+    const root = createRoot();
+    const projectA = 'isolated-state-a';
+    const projectB = 'isolated-state-b';
+    const stateRootA = composeProjectStateRoot(root, projectA);
+    const stateRootB = composeProjectStateRoot(root, projectB);
+    directories.push(stateRootA, stateRootB);
+    writeState(stateRootA, {
+      version: 1,
+      composeProjectName: projectB,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    });
+    writeState(stateRootB, {
+      version: 1,
+      composeProjectName: projectB,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    });
+    const state = harness();
+    const isolatedA = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectA,
+    });
+    const isolatedB = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectB,
+    });
+
+    expect(stateRootA).not.toBe(stateRootB);
+    await expect(
+      isolatedA.status(explicitSafePreviewEnvironment()),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_COMPOSE_PROJECT_MISMATCH',
+    });
+    await expect(
+      isolatedB.status(explicitSafePreviewEnvironment()),
+    ).resolves.toMatchObject({
+      runtime: { composeProjectName: projectB },
     });
   });
 
