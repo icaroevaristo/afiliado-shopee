@@ -4,6 +4,95 @@
 
 Este documento descreve os agentes e componentes de orquestracao atuais do projeto. O estado atual mantem implementacoes locais e mocks como padrao seguro; Evolution API requer selecao e configuracao explicitas.
 
+## Agent Model Policy v2
+
+### Arquitetura padrão
+
+DEFAULT ROOT + SINGLE MUTATOR
+
+- GPT-5.6 TERRA — HIGH
+
+CHEAP SCOUT / ANALYSIS
+
+- GPT-5.6 LUNA — HIGH
+- Usar somente para busca, inventário, documentação, manifests, scans,
+  localização de call-sites e subtarefas mecânicas.
+
+DEFAULT INDEPENDENT REVIEW
+
+- GPT-5.6 SOL — HIGH
+- Executar uma vez após candidate freeze.
+- Review diff-first; não reler o repositório inteiro sem necessidade.
+
+CRITICAL / ADVERSARIAL / ESCALATION
+
+- GPT-6 ASTRA — HIGH
+
+ASTRA não é modelo padrão de implementação. Usar Astra somente quando houver
+migration ou banco operacional, risco de duplicate SEND, ambiguity/recovery após
+possível efeito externo, boundary de segurança, concorrência/idempotência
+crítica, blocker P0/P1 persistente após Terra/Sol, divergência entre reviewers
+ou certificação final `DAILY_USE_READY`.
+
+### Review policy
+
+- Single mutator sempre.
+- Um reviewer por padrão.
+- Segundo reviewer somente se o primeiro encontrar P0/P1, houver discordância
+  ou existir boundary crítico que justifique revisão adicional.
+- Não executar Reviewer A + Reviewer B + Adversarial por padrão.
+
+### Reasoning policy
+
+- LUNA: HIGH.
+- TERRA: HIGH.
+- SOL: HIGH por padrão; MEDIUM é permitido em review simples.
+- ASTRA: HIGH.
+- MAX é proibido por padrão. Usá-lo somente com justificativa explícita para
+  problema que resistiu a tentativas anteriores ou decisão excepcionalmente
+  difícil.
+
+### Context/token policy
+
+- Trabalhar diff-first.
+- Não carregar todo o README, roadmap ou specs em cada agente sem necessidade.
+- Usar o contexto mínimo suficiente: `BASE_SHA`, `HEAD_SHA`, `OBJECTIVE`,
+  `OPEN_FINDINGS`, `INVARIANTS`, `RELEVANT_FILES`, `REQUIRED_GATES` e
+  `PROHIBITED_ACTIONS`.
+- Reviewer recebe candidate freeze, delta e evidência; abre contexto adicional
+  somente sob demanda.
+- Em correção posterior, revisar prioritariamente o delta desde o último
+  candidate, sem recomeçar a auditoria completa.
+
+### Escalation
+
+Fluxo padrão: TERRA HIGH → SOL HIGH → ASTRA HIGH somente se necessário.
+
+Para tarefas baratas: LUNA HIGH → TERRA somente se mutation real for necessária.
+
+Para tarefa crítica excepcional: TERRA HIGH como mutator → ASTRA HIGH como
+adversarial final.
+
+Astra como ROOT + MUTATOR + múltiplos reviewers Astra é proibido por padrão.
+
+### Runtime attestation
+
+Requested model/effort e effective model/effort são conceitos diferentes.
+Nunca declarar modelo ou esforço efetivo sem evidência do runtime. Se não for
+verificável:
+
+```text
+EFFECTIVE_MODEL=UNVERIFIED
+EFFECTIVE_EFFORT=UNVERIFIED
+```
+
+### Safety
+
+Esta política de custo nunca reduz os gates de segurança existentes. Nenhum
+modelo, inclusive Astra, pode ultrapassar sem autorização explícita: SEND real,
+provider pago/real, migration operacional, alteração de estado ambíguo,
+unpause/ativação ou ações externas explicitamente protegidas.
+
 ## Camadas de aplicacao e persistencia
 
 - Servicos de aplicacao: `HunterService`, `ScoreService`, `CopyService`, `SenderService`, `PipelineService` e `AnalyticsService`.
