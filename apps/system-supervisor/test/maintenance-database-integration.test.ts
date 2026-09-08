@@ -491,105 +491,116 @@ volumes:
         expect(final.completed).toBe(final.attempts);
         return { code, stdout, stderr: '' };
       };
-      const deps: SystemDependencies = {
-        run: async (spec: CommandSpec) => {
-          if (spec.command === 'docker') {
-            if (spec.args[0] === 'volume' && spec.args[1] === 'ls')
-              return command(docker, [
-                'volume',
-                'ls',
-                '--filter',
-                `label=com.docker.compose.project=${project}`,
-                '--format',
-                '{{.Name}}',
-              ]);
-            return command(docker, spec.args, spec.env, spec.cwd);
+      const boundaryFailures: unknown[] = [];
+      const runFixtureCommand = async (spec: CommandSpec) => {
+        if (spec.command === 'docker') {
+          if (spec.args[0] === 'volume' && spec.args[1] === 'ls')
+            return command(docker, [
+              'volume',
+              'ls',
+              '--filter',
+              `label=com.docker.compose.project=${project}`,
+              '--format',
+              '{{.Name}}',
+            ]);
+          return command(docker, spec.args, spec.env, spec.cwd);
+        }
+        const tempUrl = spec.env?.DATABASE_URL;
+        if (!tempUrl) throw new Error('Missing fixture datasource');
+        temporaryPort = Number(new URL(tempUrl).port);
+        expect(temporaryPort).not.toBe(5432);
+        expect(temporaryPort).not.toBe(55474);
+        if (spec.args.includes('db:deploy')) {
+          deploys++;
+          expect(await listening(55474)).toBe(false);
+          otherSessions = (await readMaintenanceDatabase(root, tempUrl))
+            .otherSessions;
+          expect(otherSessions).toBe(0);
+          orphanAlive =
+            checked(docker, [
+              'inspect',
+              '--format',
+              '{{.State.Running}}',
+              probe,
+            ]).trim() === 'true';
+          expect(orphanAlive).toBe(true);
+          if (hostOrphan) expect(hostOrphan.alive()).toBe(true);
+          if (scenario === 'failure') {
+            const failure = join(
+              root,
+              'packages/database/prisma/migrations/99999999999999_fixture_failure',
+            );
+            mkdirSync(failure);
+            writeFileSync(
+              join(failure, 'migration.sql'),
+              'SELECT r1d2_intentionally_missing_function();',
+            );
           }
-          const tempUrl = spec.env?.DATABASE_URL;
-          if (!tempUrl) throw new Error('Missing fixture datasource');
-          temporaryPort = Number(new URL(tempUrl).port);
-          expect(temporaryPort).not.toBe(5432);
-          expect(temporaryPort).not.toBe(55474);
-          if (spec.args.includes('db:deploy')) {
-            deploys++;
-            expect(await listening(55474)).toBe(false);
-            otherSessions = (await readMaintenanceDatabase(root, tempUrl))
-              .otherSessions;
-            expect(otherSessions).toBe(0);
-            orphanAlive =
-              checked(docker, [
-                'inspect',
-                '--format',
-                '{{.State.Running}}',
-                probe,
-              ]).trim() === 'true';
-            expect(orphanAlive).toBe(true);
-            if (hostOrphan) expect(hostOrphan.alive()).toBe(true);
-            if (scenario === 'failure') {
-              const failure = join(
-                root,
-                'packages/database/prisma/migrations/99999999999999_fixture_failure',
-              );
-              mkdirSync(failure);
-              writeFileSync(
-                join(failure, 'migration.sql'),
-                'SELECT r1d2_intentionally_missing_function();',
-              );
-            }
+        }
+        const result = spec.args.includes('db:deploy')
+          ? await liveDeploy(spec)
+          : command(spec.command, spec.args, spec.env, spec.cwd);
+        if (spec.args.includes('db:deploy')) {
+          expect(deploys).toBe(1);
+          expect(await listening(55474)).toBe(false);
+          const counts = networkSnapshot();
+          tries = counts.attempts;
+          connections = counts.connections;
+          writes = counts.writes;
+          expect(tries).toBeGreaterThan(0);
+          expect(connections).toBe(0);
+          expect(writes).toBe(0);
+          if (hostOrphan) {
+            expect(hostOrphan.alive()).toBe(true);
+            hostEvidence = await hostOrphan.snapshot();
+            expect(hostEvidence.attempts).toBeGreaterThan(0);
+            expect(hostEvidence.connections).toBe(0);
+            expect(hostEvidence.writes).toBe(0);
           }
-          const result = spec.args.includes('db:deploy')
-            ? await liveDeploy(spec)
-            : command(spec.command, spec.args, spec.env, spec.cwd);
-          if (spec.args.includes('db:deploy')) {
-            expect(deploys).toBe(1);
-            expect(await listening(55474)).toBe(false);
-            const counts = networkSnapshot();
-            tries = counts.attempts;
-            connections = counts.connections;
-            writes = counts.writes;
-            expect(tries).toBeGreaterThan(0);
-            expect(connections).toBe(0);
-            expect(writes).toBe(0);
-            if (hostOrphan) {
-              expect(hostOrphan.alive()).toBe(true);
-              hostEvidence = await hostOrphan.snapshot();
-              expect(hostEvidence.attempts).toBeGreaterThan(0);
-              expect(hostEvidence.connections).toBe(0);
-              expect(hostEvidence.writes).toBe(0);
-            }
-            expect(
-              checked(docker, [
-                'inspect',
-                '--format',
-                '{{.State.Running}}',
-                probe,
-              ]).trim(),
-            ).toBe('true');
-            if (scenario !== 'failure') {
-              const after = await readMaintenanceDatabase(root, tempUrl);
-              pendingAfter = after.pending.length;
+          expect(
+            checked(docker, [
+              'inspect',
+              '--format',
+              '{{.State.Running}}',
+              probe,
+            ]).trim(),
+          ).toBe('true');
+          if (scenario !== 'failure') {
+            const after = await readMaintenanceDatabase(root, tempUrl);
+            pendingAfter = after.pending.length;
+            preserved =
+              after.dispatchFingerprint === before.dispatchFingerprint;
+            expect(preserved).toBe(true);
+            expect(after.systemIdentifier).toBe(before.systemIdentifier);
+            expect(after.paused).toBe(true);
+          } else {
+            const failedClient = createPrismaClient(tempUrl);
+            try {
+              const fingerprints = await failedClient.$queryRaw<
+                Array<{ fingerprint: string }>
+              >`SELECT md5(COALESCE(string_agg(md5(row_to_json(d)::text), '' ORDER BY d.id), '')) AS fingerprint FROM public."WhatsAppDispatch" d`;
               preserved =
-                after.dispatchFingerprint === before.dispatchFingerprint;
+                fingerprints[0]?.fingerprint === before.dispatchFingerprint;
               expect(preserved).toBe(true);
-              expect(after.systemIdentifier).toBe(before.systemIdentifier);
-              expect(after.paused).toBe(true);
-            } else {
-              const failedClient = createPrismaClient(tempUrl);
-              try {
-                const fingerprints = await failedClient.$queryRaw<
-                  Array<{ fingerprint: string }>
-                >`SELECT md5(COALESCE(string_agg(md5(row_to_json(d)::text), '' ORDER BY d.id), '')) AS fingerprint FROM public."WhatsAppDispatch" d`;
-                preserved =
-                  fingerprints[0]?.fingerprint === before.dispatchFingerprint;
-                expect(preserved).toBe(true);
-              } finally {
-                await failedClient.$disconnect();
-              }
+            } finally {
+              await failedClient.$disconnect();
             }
           }
-          if (spec.args.includes('diff') && result.code === 0)
-            diff = 'EMPTY_EXIT_0';
-          return result;
+        }
+        if (spec.args.includes('diff') && result.code === 0)
+          diff = 'EMPTY_EXIT_0';
+        return result;
+      };
+      const deps: SystemDependencies = {
+        run: async (spec) => {
+          try {
+            return await runFixtureCommand(spec);
+          } catch (error) {
+            // The supervisor maps command rejection to a deploy failure. Keep
+            // fixture assertions observable outside that expected-error boundary.
+            boundaryFailures.push(error);
+            throw error;
+          }
         },
         spawn: async () => {
           restarts++;
@@ -658,6 +669,21 @@ volumes:
         }
       } finally {
         release();
+      }
+      expect(boundaryFailures).toEqual([]);
+      if (scenario !== 'mount') {
+        expect(preserved).toBe(true);
+        expect(deploymentWindow.samples.length).toBeGreaterThanOrEqual(2);
+        const first = deploymentWindow.samples[0];
+        const last =
+          deploymentWindow.samples[deploymentWindow.samples.length - 1];
+        expect(last.network.attempts).toBeGreaterThan(first.network.attempts);
+        if (hostOrphan)
+          expect(last.host?.attempts).toBeGreaterThan(
+            first.host?.attempts ?? Infinity,
+          );
+        expect(connections).toBe(0);
+        expect(writes).toBe(0);
       }
       expect(deploys).toBe(scenario === 'mount' ? 0 : 1);
       if (scenario === 'failure') {
