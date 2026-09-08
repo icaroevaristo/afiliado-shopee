@@ -683,6 +683,39 @@ describe('maintenance migrate', () => {
     expect(deploys(s.h)).toHaveLength(0);
     expect(s.h.spawned).toEqual([]);
   });
+  it('retains maintenance lock when the official stop throws after changing topology', async () => {
+    const s = setup();
+    const run = s.h.deps.run;
+    let stopped = false;
+    s.h.deps.run = async (command) => {
+      const result = await run(command);
+      if (command.args[0] === 'compose' && command.args.includes('stop'))
+        stopped = true;
+      if (stopped && command.args.includes('ps'))
+        throw new Error('Post-stop query unavailable');
+      return result;
+    };
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      retainOperationLock: true,
+    });
+    expect(s.h.stopped).toHaveLength(4);
+    expect(deploys(s.h)).toHaveLength(0);
+  });
+  it('blocks temporary creation when original-port inspection is unavailable', async () => {
+    const s = setup();
+    const inspect = s.h.deps.getPortOccupant;
+    s.h.deps.getPortOccupant = async (port) => {
+      if (port === 5432) throw new Error('Port query unavailable');
+      return inspect(port);
+    };
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      retainOperationLock: true,
+    });
+    expect(
+      s.h.commands.filter((command) => command.args[0] === 'create'),
+    ).toHaveLength(0);
+    expect(deploys(s.h)).toHaveLength(0);
+  });
   it('deploys once in temporary PostgreSQL and removes it with canonical topology stopped', async () => {
     const s = setup();
     const result = await s.supervisor.migrate(true, s.env);

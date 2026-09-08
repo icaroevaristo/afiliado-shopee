@@ -1550,17 +1550,17 @@ export class LocalSystemSupervisor {
     );
     await maintenance.prepare();
     assertNotInterrupted();
-    // The existing supervisor owns the whole stop, including canonical PostgreSQL.
-    const stopped = await this.stop(processEnv);
-    if (!stopped.stopped)
-      throw new LocalSystemError(
-        'Topologia nao encerrou; migration bloqueada',
-        'SYSTEM_MAINTENANCE_STOP_FAILED',
-        true,
-      );
-    await assertProcesses(true);
-    writeState(this.root, { ...state, maintenance: true });
     try {
+      // All errors after initiating topology changes retain maintenance ownership.
+      const stopped = await this.stop(processEnv);
+      if (!stopped.stopped)
+        throw new LocalSystemError(
+          'Topologia nao encerrou; migration bloqueada',
+          'SYSTEM_MAINTENANCE_STOP_FAILED',
+          true,
+        );
+      await assertProcesses(true);
+      writeState(this.root, { ...state, maintenance: true });
       assertNotInterrupted();
       const isolated = await maintenance.start(databaseUrl);
       databaseUrl = isolated.databaseUrl;

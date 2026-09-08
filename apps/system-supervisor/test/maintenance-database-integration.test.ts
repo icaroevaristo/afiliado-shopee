@@ -1,9 +1,10 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   cpSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -20,6 +21,13 @@ import { readMaintenanceDatabase } from '../src/maintenance-database';
 import type { CommandSpec, SystemDependencies } from '../src/types';
 import { startHostOrphan } from './maintenance-host-orphan';
 const enabled = process.env.RUN_SUPERVISOR_MAINTENANCE_DB_TEST === 'true';
+type Counters = {
+  attempts: number;
+  connections: number;
+  writes: number;
+  completed?: number;
+};
+type ProbeSample = { at: string; network: Counters; host: Counters | null };
 const listening = (port: number) =>
   new Promise<boolean>((done) => {
     const socket = createConnection({ host: '127.0.0.1', port });
@@ -129,6 +137,17 @@ it.skipIf(!enabled).each(['healthy', 'orphan', 'failure', 'mount'] as const)(
       diff = 'NOT_RUN',
       preserved: boolean | null = null;
     const client = createPrismaClient(url);
+    const deploymentWindow: {
+      before: ProbeSample | null;
+      startedAt: string | null;
+      samples: Array<ProbeSample & { deployProcessAlive: true }>;
+      completedAt: string | null;
+    } = { before: null, startedAt: null, samples: [], completedAt: null };
+    let failureDiagnostics: {
+      successful: number;
+      failed: number;
+      schemaObjects: number;
+    } | null = null;
     let hostOrphan: Awaited<ReturnType<typeof startHostOrphan>> | undefined;
     let hostEvidence: {
       attempts: number;
@@ -294,7 +313,7 @@ volumes:
         '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',
         canonicalId,
       ]).trim();
-      const script = `echo "0 0 0" > /tmp/counts; t=0; c=0; w=0; while true; do if [ -f /tmp/ddl ]; then t=$((t+1)); if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'SELECT 1' >/dev/null 2>&1; then c=$((c+1)); if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'UPDATE public."CommercialAutomationSettings" SET paused=true' >/dev/null 2>&1; then w=$((w+1)); fi; fi; echo "$t $c $w" > /tmp/counts.next; mv /tmp/counts.next /tmp/counts; fi; sleep 0.05; done`;
+      const script = `mkdir /tmp/events; t=0; while [ ! -f /tmp/finish ]; do if [ -f /tmp/ddl ]; then t=$((t+1)); touch /tmp/events/s$t; (if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'SELECT 1' >/dev/null 2>&1; then touch /tmp/events/c$t; if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'UPDATE public."CommercialAutomationSettings" SET paused=true' >/dev/null 2>&1; then touch /tmp/events/w$t; fi; fi; touch /tmp/events/d$t)& fi; sleep 0.05; done; wait; touch /tmp/complete; while true; do sleep 1; done`;
       checked(docker, [
         'run',
         '-d',
@@ -337,6 +356,141 @@ volumes:
       ).toBe('1');
       if (scenario === 'orphan')
         hostOrphan = await startHostOrphan(root, url, env);
+      const networkSnapshot = (): Counters => {
+        const counts = checked(docker, [
+          'exec',
+          probe,
+          'sh',
+          '-c',
+          'for p in s c w d; do find /tmp/events -name "$p*" | wc -l; done',
+        ])
+          .trim()
+          .split(/\s+/)
+          .map(Number);
+        if (
+          counts.length !== 4 ||
+          counts.some((value) => !Number.isInteger(value) || value < 0)
+        )
+          throw new Error('Invalid probe counters');
+        return {
+          attempts: counts[0],
+          connections: counts[1],
+          writes: counts[2],
+          completed: counts[3],
+        };
+      };
+      const sample = async (): Promise<ProbeSample> => ({
+        at: new Date().toISOString(),
+        network: networkSnapshot(),
+        host: hostOrphan ? await hostOrphan.snapshot() : null,
+      });
+      const liveDeploy = async (spec: CommandSpec) => {
+        deploymentWindow.before = await sample();
+        let exited = false,
+          stdout = '',
+          stderr = '';
+        deploymentWindow.startedAt = new Date().toISOString();
+        const child = spawn(spec.command, spec.args, {
+          cwd: spec.cwd,
+          env: spec.env,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on('data', (chunk: string) => {
+          stderr += chunk;
+        });
+        const completion = new Promise<number>((done) => {
+          child.once('error', () => {
+            exited = true;
+            done(1);
+          });
+          child.once('close', (code) => {
+            exited = true;
+            done(code ?? 1);
+          });
+        });
+        // Enable attempts only after the actual deployment process has been spawned.
+        checked(docker, ['exec', probe, 'touch', '/tmp/ddl']);
+        hostOrphan?.begin();
+        while (!exited) {
+          await new Promise((done) => setTimeout(done, 50));
+          if (exited) break;
+          const observation = await sample();
+          // Let queued exit events run; also check the exact owned PID in the OS.
+          await new Promise<void>((done) => setImmediate(done));
+          if (!exited && child.pid) {
+            try {
+              process.kill(child.pid, 0);
+              deploymentWindow.samples.push({
+                ...observation,
+                deployProcessAlive: true,
+              });
+            } catch {
+              /* exited during sample */
+            }
+          }
+        }
+        const code = await completion;
+        deploymentWindow.completedAt = new Date().toISOString();
+        commands.push({
+          args: spec.args,
+          code,
+          ...(code !== 0
+            ? {
+                failure: (stdout + '\n' + stderr)
+                  .replace(/postgres(?:ql)?:\/\/\S+/g, '[DISPOSABLE_URL]')
+                  .slice(-1800),
+              }
+            : {}),
+        });
+        const baseline = deploymentWindow.before;
+        expect(deploymentWindow.samples.length).toBeGreaterThanOrEqual(2);
+        const first = deploymentWindow.samples[0];
+        const last =
+          deploymentWindow.samples[deploymentWindow.samples.length - 1];
+        // A dormant loop with historical nonzero counters cannot satisfy this gate.
+        expect(last.network.attempts).toBeGreaterThan(first.network.attempts);
+        if (hostOrphan)
+          expect(last.host?.attempts).toBeGreaterThan(
+            first.host?.attempts ?? Infinity,
+          );
+        expect(
+          deploymentWindow.samples.some(
+            (s) => s.network.attempts > baseline.network.attempts,
+          ),
+        ).toBe(true);
+        if (hostOrphan)
+          expect(
+            deploymentWindow.samples.some(
+              (s) =>
+                s.host &&
+                baseline.host &&
+                s.host.attempts > baseline.host.attempts,
+            ),
+          ).toBe(true);
+        for (const s of deploymentWindow.samples) {
+          expect(s.network.connections).toBe(0);
+          expect(s.network.writes).toBe(0);
+          if (s.host) {
+            expect(s.host.connections).toBe(0);
+            expect(s.host.writes).toBe(0);
+          }
+        }
+        checked(docker, ['exec', probe, 'touch', '/tmp/finish']);
+        for (let poll = 0; poll < 60; poll++) {
+          const counts = networkSnapshot();
+          if (counts.completed === counts.attempts) break;
+          await new Promise((done) => setTimeout(done, 100));
+        }
+        const final = networkSnapshot();
+        expect(final.completed).toBe(final.attempts);
+        return { code, stdout, stderr: '' };
+      };
       const deps: SystemDependencies = {
         run: async (spec: CommandSpec) => {
           if (spec.command === 'docker') {
@@ -362,20 +516,6 @@ volumes:
             otherSessions = (await readMaintenanceDatabase(root, tempUrl))
               .otherSessions;
             expect(otherSessions).toBe(0);
-            checked(docker, ['exec', probe, 'touch', '/tmp/ddl']);
-            hostOrphan?.begin();
-            // Wait only for adversarial probe evidence, not for database isolation.
-            for (let poll = 0; poll < 30; poll++) {
-              if (
-                Number(
-                  checked(docker, ['exec', probe, 'cat', '/tmp/counts'])
-                    .trim()
-                    .split(/\s+/)[0],
-                ) > 0
-              )
-                break;
-              await new Promise((done) => setTimeout(done, 200));
-            }
             orphanAlive =
               checked(docker, [
                 'inspect',
@@ -397,19 +537,16 @@ volumes:
               );
             }
           }
-          const result = command(spec.command, spec.args, spec.env, spec.cwd);
+          const result = spec.args.includes('db:deploy')
+            ? await liveDeploy(spec)
+            : command(spec.command, spec.args, spec.env, spec.cwd);
           if (spec.args.includes('db:deploy')) {
             expect(deploys).toBe(1);
             expect(await listening(55474)).toBe(false);
-            [tries, connections, writes] = checked(docker, [
-              'exec',
-              probe,
-              'cat',
-              '/tmp/counts',
-            ])
-              .trim()
-              .split(/\s+/)
-              .map(Number);
+            const counts = networkSnapshot();
+            tries = counts.attempts;
+            connections = counts.connections;
+            writes = counts.writes;
             expect(tries).toBeGreaterThan(0);
             expect(connections).toBe(0);
             expect(writes).toBe(0);
@@ -436,6 +573,18 @@ volumes:
               expect(preserved).toBe(true);
               expect(after.systemIdentifier).toBe(before.systemIdentifier);
               expect(after.paused).toBe(true);
+            } else {
+              const failedClient = createPrismaClient(tempUrl);
+              try {
+                const fingerprints = await failedClient.$queryRaw<
+                  Array<{ fingerprint: string }>
+                >`SELECT md5(COALESCE(string_agg(md5(row_to_json(d)::text), '' ORDER BY d.id), '')) AS fingerprint FROM public."WhatsAppDispatch" d`;
+                preserved =
+                  fingerprints[0]?.fingerprint === before.dispatchFingerprint;
+                expect(preserved).toBe(true);
+              } finally {
+                await failedClient.$disconnect();
+              }
             }
           }
           if (spec.args.includes('diff') && result.code === 0)
@@ -511,6 +660,34 @@ volumes:
         release();
       }
       expect(deploys).toBe(scenario === 'mount' ? 0 : 1);
+      if (scenario === 'failure') {
+        const log = readFileSync(
+          join(root, '.runtime/local-system/supervisor.log'),
+          'utf8',
+        );
+        const diagnostics: unknown = JSON.parse(
+          /sanitizedReadback=(\{[^\n]+\}); no retry/.exec(log)?.[1] ?? 'null',
+        );
+        if (
+          diagnostics === null ||
+          typeof diagnostics !== 'object' ||
+          !('failed' in diagnostics) ||
+          typeof diagnostics.failed !== 'number' ||
+          !('successful' in diagnostics) ||
+          typeof diagnostics.successful !== 'number' ||
+          !('schemaObjects' in diagnostics) ||
+          typeof diagnostics.schemaObjects !== 'number'
+        )
+          throw new Error('Failure diagnostics missing');
+        failureDiagnostics = {
+          failed: diagnostics.failed,
+          successful: diagnostics.successful,
+          schemaObjects: diagnostics.schemaObjects,
+        };
+        expect(failureDiagnostics.failed).toBe(1);
+        expect(failureDiagnostics.successful).toBe(38);
+        expect(failureDiagnostics.schemaObjects).toBeGreaterThan(0);
+      }
       expect(restarts).toBe(0);
       expect(requests).toBe(0);
       expect(
@@ -540,6 +717,8 @@ volumes:
             {
               scenario,
               hostEvidence,
+              deploymentWindow,
+              failureDiagnostics,
               status: 'PASS',
               project,
               originalFixtureHostPort: 55474,
@@ -577,7 +756,7 @@ volumes:
             /\.json$/,
             `-${scenario}-commands.json`,
           ),
-          JSON.stringify({ scenario, commands }, null, 2),
+          JSON.stringify({ scenario, commands, deploymentWindow }, null, 2),
         );
       await client.$disconnect();
       if (probeCreated) checked(docker, ['rm', '-f', probe]);

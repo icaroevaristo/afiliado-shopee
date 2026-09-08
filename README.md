@@ -19,6 +19,8 @@ listener original permite um container temporário com a mesma imagem SHA-256 e
 o mesmo volume em `/var/lib/postgresql/data`. Outra montagem RW, identidade
 ambígua ou volume divergente bloqueia antes da criação.
 
+A consulta de portas falha fechada quando indisponível. No Windows usa o inventário nativo de listeners; em POSIX exige `lsof -Q`, que diferencia resultado vazio de erro. Versões sem `-Q` bloqueiam a operação; não há fallback inseguro. Ver [contrato lsof](https://lsof.readthedocs.io/en/stable/manpage/).
+
 O Docker escolhe uma porta host efêmera em `127.0.0.1`, diferente de 5432 e da
 porta original. A URL com as credenciais existentes permanece apenas em memória;
 o container temporário não recebe secrets novos. A URL original da aplicação
