@@ -2,66 +2,60 @@
 
 ## Migrations em manutenção, sem iniciar a aplicação
 
-**Candidato R1D ainda bloqueado para uso operacional.** Existe um P1 aberto:
-uma conexão externa pode entrar depois da última inspeção, permanecer durante o
-DDL e sair antes do postcheck. O teste descartável inclui esse contraexemplo;
-sucesso do comando nesse cenário não certifica quiescência contínua. A exclusão
-de novas conexões exige um contrato de manutenção adicional, ainda não aprovado.
+O comando explícito `corepack pnpm system:maintenance:migrate -- --confirm-operational-migrations`
+exige autorização do proprietário e backup restaurável previamente validado.
+A branch R1D2 implementa isolamento de topologia; a aprovação para uso operacional
+permanece separada dos testes descartáveis e da revisão do código.
 
-`corepack pnpm system:maintenance:migrate -- --confirm-operational-migrations`
-é uma operação explícita de escrita, sujeita à autorização do proprietário e
-backup restaurável previamente validado. Sem a flag literal, falha com
-`SYSTEM_MIGRATION_CONFIRMATION_REQUIRED` antes de parar processos ou alterar Compose/banco.
+Antes de alterar a topologia, valida root/config/state/Compose, volume canônico,
+imagem imutável, identidade do cluster, pausa persistida e histórico Prisma.
+Compartilha o lock exclusivo de start/stop. Sem confirmação literal, não para
+processos nem altera Docker ou banco.
 
-O comando exige PostgreSQL já healthy, volume `${composeProjectName}_postgres_data`
-canônico, state-store da mesma identidade Compose, URL local do banco
-`shopee_auto_affiliate_ai/public`, pausa persistida, histórico Prisma consistente,
-e o mesmo `pg_control_system().system_identifier` via container e datasource,
-PIDs pertencentes e portas sem ocupante externo. Reutiliza o lock de start/stop.
-Encerra somente árvores registradas e revalida processos, portas, identidade do
-banco e `pg_stat_activity` antes de executar uma vez o contrato do pacote database
-`db:deploy`. Não inicia infraestrutura, API, dashboard, workers ou providers.
+A parada usa `system:stop` internamente, incluindo aplicação, PostgreSQL, Redis
+e Evolution quando pertencente ao fluxo oficial. Preserva containers canônicos,
+volumes e agendamentos. Só depois do PostgreSQL canônico parado e da ausência do
+listener original permite um container temporário com a mesma imagem SHA-256 e
+o mesmo volume em `/var/lib/postgresql/data`. Outra montagem RW, identidade
+ambígua ou volume divergente bloqueia antes da criação.
 
-A leitura da pausa seleciona somente a coluna existente no schema anterior às
-migrations. Nenhuma sessão do banco além da própria inspeção é excluída da
-contagem. Escritores externos ao supervisor devem permanecer administrativamente
-suspensos durante todo o DDL: as leituras de atividade antes/depois não constituem
-um bloqueio PostgreSQL contra novas conexões externas. O lock impede os comandos
-gerenciados concorrentes. Uma sessão inexplicada bloqueia o deploy ou seu postcheck.
+O Docker escolhe uma porta host efêmera em `127.0.0.1`, diferente de 5432 e da
+porta original. A URL com as credenciais existentes permanece apenas em memória;
+o container temporário não recebe secrets novos. A URL original da aplicação
+não alcança esse endpoint. `pg_stat_activity` no temporário exclui apenas a
+própria sessão: é um diagnóstico adicional, não a barreira de admissão.
 
-Ao concluir, o estado local fica `maintenance`, com aplicação desligada e
-PostgreSQL disponível; Redis não é necessário. `system:stop` continua disponível
-para parar infraestrutura sem remover dados. Um `system:start` posteriormente
-autorizado preserva seu `db:deploy` antes de spawn. Falha de migration não tem retry,
-mantém aplicação offline e retorna `SYSTEM_MAINTENANCE_DEPLOY_FAILED`. Nenhum
-dispatch histórico é alterado ou reenfileirado.
+Executa uma vez `pnpm --filter @shopee-auto-affiliate-ai/database db:deploy`,
+seguido por migrate status, schema diff vazio, pausa/history/cluster e comparação
+do fingerprint de todos os campos dos dispatches. Não classifica entrega ou
+não entrega. Em sucesso ou falha, encerra/remove somente o container temporário,
+preserva o volume e mantém toda a topologia canônica parada. Não há retry nem
+start automático. Falhas após a parada mantêm lock para investigação humana.
 
-Em manutenção, stop valida também Redis quando presente e limita o comando aos
-serviços comprovados; start aceita PostgreSQL isolado e valida a infraestrutura
-completa após compose up. No Windows, a parada vincula handles ao instante de
-criação inspecionado antes da espera e usa esses mesmos handles na terminação;
-não há fallback de terminação por PID numérico após a espera.
-Um Job Object Windows temporário, sem breakaway, contém os descendentes nativos
-criados durante a espera; a conclusão exige zero processos ativos nesse job.
-Falha ao adotar a árvore bloqueia a parada. Essa proteção cobre filhos nativos
-CreateProcess do runtime Node, não execução delegada a serviços externos/WMI.
-Falha na retomada que encerra todos os processos recém-iniciados restaura o estado
-anterior de manutenção, mantendo disponível a parada oficial da infraestrutura.
+No Windows permanecem PID+startedAt, handles e Job Object, sem terminação tardia
+por PID numérico. Filhos nativos após adoção ficam contidos. A adoção completa de
+cadeias preexistentes em movimento **não está provada**:
+`PROCESS_TREE_COMPLETE_ADOPTION=NOT_PROVEN` e
+`DDL_SAFETY_DEPENDS_ON_COMPLETE_TREE_ADOPTION=false`. A segurança do DDL depende
+da topologia PostgreSQL desligada no endereço que esses processos conhecem.
+Isso não é isolamento contra um administrador local que inspecione portas ou
+controle Docker; tal escritor não pode operar simultaneamente à manutenção.
 
-SIGINT/SIGTERM durante manutenção preservam o lock: o processo Prisma filho pode
-continuar após a morte do supervisor. `SYSTEM_MAINTENANCE_INTERRUPTED` exige
-investigação humana do filho, sessões e `_prisma_migrations` antes de liberar o
-lock local em recovery explicitamente autorizado. Não usar reset/resolve/retry
-automático nem tratar ausência do PID pai como prova de DDL encerrado.
+SIGINT/SIGTERM solicitam interrupção serializada: um DDL já iniciado deve terminar
+antes do cleanup. Morte forçada do supervisor/daemon pode impedir o cleanup;
+o lock de migration interrompida permanece bloqueado para start/stop e exige
+investigação de Prisma/container/volume/histórico. Não usar reset, resolve ou
+retry automático. A retomada futura exige autorização própria e preserva o
+contrato db:deploy-before-spawn.
 
-Testes isolados podem selecionar `--compose-project-name=<projeto>` e
-`POSTGRES_HOST_PORT` (default 5432); o Compose e a URL devem provar exatamente a
-mesma porta/volume. Isso não autoriza operar a identidade canônica em testes.
-
-Integração descartável opt-in: `RUN_SUPERVISOR_MAINTENANCE_DB_TEST=true`, arquivo
-`apps/system-supervisor/test/maintenance-database-integration.test.ts`. Usa somente
-o projeto exclusivo `r1d-maintenance-proof`, porta 55474, fixture sintética e um
-subprocesso escritor controlado; não usa o backup operacional.
+Integração opt-in: `RUN_SUPERVISOR_MAINTENANCE_DB_TEST=true`, arquivo
+`apps/system-supervisor/test/maintenance-database-integration.test.ts`.
+Cria projeto/volume exclusivos, PostgreSQL host 55474 e Redis host 55475.
+O órfão real vive na rede descartável e conhece `postgres:5432`; o adaptador de
+portas do teste representa essa porta original por 55474 no host. O teste não
+sonda a porta 5432 operacional do host e não usa o backup R1C.
+`POSTGRES_HOST_PORT` e `REDIS_HOST_PORT` permitem fixtures isoladas; defaults
+operacionais continuam 5432 e 6379. Resultados medidos constam dos artifacts do run.
 
 Monorepo com pnpm workspaces e Turborepo para automatizar um pipeline afiliado modular da Shopee com agentes de IA, filas e dashboard.
 

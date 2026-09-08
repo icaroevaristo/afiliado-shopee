@@ -4,6 +4,22 @@ import { resolve } from 'node:path';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { LocalSystemError } from './types';
 
+export class MaintenanceDatabaseReadError extends LocalSystemError {
+  constructor(
+    readonly diagnostics: {
+      successful: number;
+      failed: number;
+      rolledBack: number;
+      schemaObjects: number;
+    } | null,
+  ) {
+    super(
+      'Leitura de pausa, identidade ou historico indisponivel/inconsistente',
+      'SYSTEM_MAINTENANCE_DATABASE_PRECHECK',
+    );
+  }
+}
+
 export type MaintenanceDatabaseSnapshot = {
   systemIdentifier: string;
   database: string;
@@ -11,6 +27,7 @@ export type MaintenanceDatabaseSnapshot = {
   paused: boolean | null;
   otherSessions: number;
   pending: string[];
+  dispatchFingerprint: string;
 };
 export type MaintenanceDatabaseReader = (
   root: string,
@@ -46,6 +63,7 @@ export const readMaintenanceDatabase: MaintenanceDatabaseReader = async (
   databaseUrl,
 ) => {
   const client = createPrismaClient(databaseUrl);
+  let diagnostics: MaintenanceDatabaseReadError['diagnostics'] = null;
   try {
     return await client.$transaction(
       async (tx) => {
@@ -61,6 +79,10 @@ export const readMaintenanceDatabase: MaintenanceDatabaseReader = async (
         const activity = await tx.$queryRaw<Array<{ count: number }>>`
         SELECT count(*)::integer AS count FROM pg_stat_activity
         WHERE datname = current_database() AND pid <> pg_backend_pid()`;
+        // Hash in PostgreSQL: no messages, recipient IDs or provider IDs leave the DB.
+        const dispatch = await tx.$queryRaw<Array<{ fingerprint: string }>>`
+        SELECT md5(COALESCE(string_agg(md5(row_to_json(d)::text), '' ORDER BY d.id), '')) AS fingerprint
+        FROM public."WhatsAppDispatch" d`;
         const history = await tx.$queryRaw<
           Array<{
             migration_name: string;
@@ -70,6 +92,19 @@ export const readMaintenanceDatabase: MaintenanceDatabaseReader = async (
           }>
         >`SELECT migration_name, checksum, finished_at, rolled_back_at
           FROM public._prisma_migrations ORDER BY started_at, migration_name`;
+        const objects = await tx.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::integer AS count FROM pg_class WHERE relnamespace = 'public'::regnamespace`;
+        if (objects.length !== 1) throw new Error('schema');
+        diagnostics = {
+          successful: history.filter(
+            (row) => row.finished_at && !row.rolled_back_at,
+          ).length,
+          failed: history.filter(
+            (row) => !row.finished_at && !row.rolled_back_at,
+          ).length,
+          rolledBack: history.filter((row) => row.rolled_back_at).length,
+          schemaObjects: objects[0].count,
+        };
         const directory = resolve(root, 'packages/database/prisma/migrations');
         const names = readdirSync(directory, { withFileTypes: true })
           .filter((entry) => entry.isDirectory())
@@ -99,7 +134,8 @@ export const readMaintenanceDatabase: MaintenanceDatabaseReader = async (
         if (
           control.length !== 1 ||
           identity.length !== 1 ||
-          activity.length !== 1
+          activity.length !== 1 ||
+          dispatch.length !== 1
         )
           throw new Error('identity');
         return {
@@ -112,15 +148,13 @@ export const readMaintenanceDatabase: MaintenanceDatabaseReader = async (
               : null,
           otherSessions: activity[0].count,
           pending: names.filter((name) => !applied.has(name)),
+          dispatchFingerprint: dispatch[0].fingerprint,
         };
       },
       { timeout: 15_000 },
     );
   } catch {
-    throw new LocalSystemError(
-      'Leitura de pausa, identidade ou historico indisponivel/inconsistente',
-      'SYSTEM_MAINTENANCE_DATABASE_PRECHECK',
-    );
+    throw new MaintenanceDatabaseReadError(diagnostics);
   } finally {
     await client.$disconnect();
   }

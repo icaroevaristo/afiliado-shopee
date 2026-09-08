@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotEnv } from '@shopee-auto-affiliate-ai/config';
 
 import { loadLocalSystemEnvironment } from '../src/environment';
-import { installOperationSignalCleanup, parseSystemArgs } from '../src/cli';
+import {
+  installOperationSignalCleanup,
+  installMaintenanceSignalGuard,
+  parseSystemArgs,
+} from '../src/cli';
+import { EventEmitter } from 'node:events';
 import { readState, runtimeDirectory, statePath } from '../src/state-store';
 
 const directories: string[] = [];
@@ -139,6 +144,19 @@ describe('local system CLI arguments', () => {
 });
 
 describe('local system controlled signals', () => {
+  it('defers repeated maintenance interrupts until the in-flight operation cleans up', () => {
+    const runtime = new EventEmitter();
+    const guard = installMaintenanceSignalGuard(runtime);
+    expect(guard.interrupted()).toBe(false);
+    runtime.emit('SIGINT');
+    runtime.emit('SIGTERM');
+    runtime.emit('SIGINT');
+    expect(guard.interrupted()).toBe(true);
+    expect(runtime.listenerCount('SIGINT')).toBe(1);
+    guard.remove();
+    expect(runtime.listenerCount('SIGINT')).toBe(0);
+    expect(runtime.listenerCount('SIGTERM')).toBe(0);
+  });
   it.each([
     ['SIGINT', 130],
     ['SIGTERM', 143],

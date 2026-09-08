@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   mkdirSync,
@@ -10,22 +10,36 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createConnection } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { LocalSystemSupervisor } from '../src/supervisor';
-import { parseSystemArgs } from '../src/cli';
-import { acquireLock, relativeLogPath, writeState } from '../src/state-store';
+import { acquireLock, writeState } from '../src/state-store';
 import { readMaintenanceDatabase } from '../src/maintenance-database';
 import type { CommandSpec, SystemDependencies } from '../src/types';
-
+import { startHostOrphan } from './maintenance-host-orphan';
 const enabled = process.env.RUN_SUPERVISOR_MAINTENANCE_DB_TEST === 'true';
-it.skipIf(!enabled).each([false, true])(
-  'R1D real PostgreSQL: pre-existing session refused; late external session counterexample=%s',
-  async (lateExternalSession) => {
-    const source = resolve(import.meta.dirname, '../../..');
-    const root = mkdtempSync(join(tmpdir(), 'r1d-maintenance-'));
-    const project = 'r1d-maintenance-proof';
-    const volume = `${project}_postgres_data`;
+const listening = (port: number) =>
+  new Promise<boolean>((done) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const finish = (result: boolean) => {
+      socket.destroy();
+      done(result);
+    };
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.setTimeout(1000, () => finish(false));
+  });
+it.skipIf(!enabled).each(['healthy', 'orphan', 'failure', 'mount'] as const)(
+  'R1D2 isolated real PostgreSQL: %s',
+  async (scenario) => {
+    const source = resolve(import.meta.dirname, '../../..'),
+      root = mkdtempSync(join(tmpdir(), 'r1d2-'));
+    const project = `r1d2-${randomUUID().slice(0, 8)}`,
+      volume = `${project}_postgres_data`,
+      probe = `${project}-orphan`,
+      blocker = `${project}-rw`;
     const url =
       'postgresql://postgres@127.0.0.1:55474/shopee_auto_affiliate_ai?schema=public';
     const docker = process.env.R1D_DOCKER_PATH ?? 'docker';
@@ -40,6 +54,7 @@ it.skipIf(!enabled).each([false, true])(
       DATABASE_URL: url,
       REDIS_URL: 'redis://127.0.0.1:55475',
       POSTGRES_HOST_PORT: '55474',
+      REDIS_HOST_PORT: '55475',
       PORT: '56333',
       NODE_ENV: 'test',
       COMMERCIAL_AUTOMATION_MODE: 'preview',
@@ -49,106 +64,81 @@ it.skipIf(!enabled).each([false, true])(
       SCHEDULER_ENABLED: 'false',
       CHECKPOINT_DISABLE: '1',
     };
-    const commands: Array<{ args: string[]; code: number }> = [];
-    const run = (command: string, args: string[]) => {
-      const r = spawnSync(command, args, {
-        cwd: root,
-        env,
+    const commands: Array<{ args: string[]; code: number; failure?: string }> =
+      [];
+    const command = (
+      executable: string,
+      args: string[],
+      commandEnv = env,
+      cwd = root,
+    ) => {
+      const result = spawnSync(executable, args, {
+        cwd,
+        env: commandEnv,
         encoding: 'utf8',
         windowsHide: true,
         timeout: 120_000,
       });
       commands.push({
-        args: args.map((a) => a.replace(url, '[DISPOSABLE_URL]')),
-        code: r.status ?? 1,
+        args: args.map((arg) =>
+          arg.replace(/postgres(?:ql)?:\/\/\S+/g, '[DISPOSABLE_URL]'),
+        ),
+        code: result.status ?? 1,
+        ...(result.status !== 0
+          ? {
+              failure: `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+                .replace(/postgres(?:ql)?:\/\/\S+/g, '[DISPOSABLE_URL]')
+                .slice(-1800),
+            }
+          : {}),
       });
-      if (r.status !== 0)
+      return {
+        code: result.status ?? 1,
+        stdout: result.stdout ?? '',
+        stderr: '',
+      };
+    };
+    const checked = (executable: string, args: string[], commandEnv = env) => {
+      const result = command(executable, args, commandEnv);
+      if (result.code !== 0)
         throw new Error(
-          'Fixture command failed: ' +
-            args.slice(0, 3).join(' ') +
-            ' exit ' +
-            r.status,
+          `Fixture command failed: ${args.slice(0, 3).join(' ')} exit ${result.code}`,
         );
-      return { code: 0, stdout: r.stdout, stderr: '' };
+      return result.stdout;
     };
     const compose = (args: string[]) =>
-      run(docker, ['compose', '--project-name', project, ...args]);
+      checked(docker, ['compose', '--project-name', project, ...args]);
     const prismaPath = join(
-      source,
-      'packages/database/node_modules/prisma/build/index.js',
-    );
-    const schema = join(root, 'packages/database/prisma/schema.prisma');
-    const prisma = (args: string[]) =>
-      run(process.execPath, [prismaPath, ...args]);
-    const database = createPrismaClient(url);
-    const concurrent = createPrismaClient(url);
-    let writer: ChildProcess | undefined;
-    let alive = false,
-      startedAt = '';
-    let deployCount = 0,
+        source,
+        'packages/database/node_modules/prisma/build/index.js',
+      ),
+      schema = join(root, 'packages/database/prisma/schema.prisma');
+    let infrastructure = false,
+      probeCreated = false,
+      blockerCreated = false;
+    let deploys = 0,
       restarts = 0,
-      requests = 0;
-    let lateSessionsAtDeploy = 0;
-    let infrastructureCreated = false;
-    const startWriter = async () => {
-      writer = spawn(process.execPath, [join(root, 'writer.cjs')], {
-        cwd: root,
-        env,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      startedAt = new Date().toISOString();
-      alive = true;
-      writer.once('exit', () => {
-        alive = false;
-      });
-      await new Promise<void>((done, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error('Writer startup timeout')),
-          15_000,
-        );
-        writer?.once('error', reject);
-        writer?.stdout?.once('data', () => {
-          clearTimeout(timer);
-          done();
-        });
-      });
-      if (!writer.pid) throw new Error('No writer PID');
-      writeState(root, {
-        version: 1,
-        composeProjectName: project,
-        startedAt,
-        mode: 'preview',
-        ports: {
-          api: 56333,
-          dashboard: 3000,
-          postgres: 55474,
-          redis: 6379,
-          evolution: 8080,
-        },
-        processes: {
-          api: { pid: writer.pid, startedAt, log: relativeLogPath('api') },
-        },
-      });
-    };
+      requests = 0,
+      temporaryPort = 0,
+      tries = 0,
+      connections = 0,
+      writes = 0,
+      orphanAlive = false;
+    let pendingAfter: number | null = null,
+      otherSessions: number | null = null,
+      diff = 'NOT_RUN',
+      preserved: boolean | null = null;
+    const client = createPrismaClient(url);
+    let hostOrphan: Awaited<ReturnType<typeof startHostOrphan>> | undefined;
+    let hostEvidence: {
+      attempts: number;
+      connections: number;
+      writes: number;
+    } | null = null;
     try {
-      const collision = spawnSync(
-        docker,
-        [
-          'ps',
-          '-aq',
-          '--filter',
-          `label=com.docker.compose.project=${project}`,
-        ],
-        { encoding: 'utf8', windowsHide: true },
-      );
-      expect(collision.status).toBe(0);
-      expect(collision.stdout.trim()).toBe('');
-      const existingVolume = spawnSync(docker, ['volume', 'inspect', volume], {
-        encoding: 'utf8',
-        windowsHide: true,
-      });
-      expect(existingVolume.status).not.toBe(0);
+      expect(await listening(55474)).toBe(false);
+      expect(await listening(55475)).toBe(false);
+      expect(command(docker, ['volume', 'inspect', volume]).code).not.toBe(0);
       mkdirSync(join(root, 'packages/database/prisma/migrations'), {
         recursive: true,
       });
@@ -211,208 +201,401 @@ it.skipIf(!enabled).each([false, true])(
       retries: 30
   redis:
     image: redis:7-alpine
-    ports: ['127.0.0.1:6379:6379']
+    ports: ['127.0.0.1:55475:6379']
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    tmpfs: ['/data']
 volumes:
   postgres_data:
 `,
       );
-      infrastructureCreated = true;
-      compose(['up', '-d', '--pull', 'never', '--wait', 'postgres']);
-      prisma(['migrate', 'deploy', '--schema', schema]);
+      infrastructure = true;
+      compose(['up', '-d', '--pull', 'never', '--wait']);
+      checked(process.execPath, [
+        prismaPath,
+        'migrate',
+        'deploy',
+        '--schema',
+        schema,
+      ]);
       for (const name of names.slice(-4))
         cpSync(
           join(migrations, name),
           join(root, 'packages/database/prisma/migrations', name),
           { recursive: true },
         );
-      // The historical migration already creates the paused singleton.
+      const product = await client.productLead.create({
+        data: {
+          providerProductId: 'fixture',
+          nome: 'fixture',
+          categoria: 'fixture',
+          preco: '10',
+          desconto: 0,
+          nota: 5,
+          vendidos: 1,
+          comissao: 1,
+          loja: 'fixture',
+          urlImagem: 'https://example.invalid/image',
+          title: 'fixture',
+        },
+      });
+      const copy = await client.generatedCopy.create({
+        data: {
+          productId: product.id,
+          titulo: 'fixture',
+          mensagem: 'fixture',
+          cta: 'fixture',
+          hashtags: '',
+        },
+      });
+      const destination = await client.whatsAppDestination.create({
+        data: {
+          name: 'fixture',
+          destination: 'fixture.invalid',
+          active: false,
+        },
+      });
+      await client.whatsAppDispatch.create({
+        data: {
+          productId: product.id,
+          generatedCopyId: copy.id,
+          destinationId: destination.id,
+          status: 'PROCESSING',
+          attemptCount: 1,
+        },
+      });
+      await client.$disconnect();
       const before = await readMaintenanceDatabase(root, url);
       expect(before.pending).toEqual(names.slice(-4));
-      const dispatchesBefore = await database.whatsAppDispatch.count();
-      await database.$disconnect();
-      const clientModule = JSON.stringify(
-        join(source, 'packages/database/node_modules/@prisma/client'),
-      );
-      writeFileSync(
-        join(root, 'writer.cjs'),
-        `const {PrismaClient}=require(${clientModule});
-const p=new PrismaClient({datasources:{db:{url:process.env.DATABASE_URL}}});
-(async()=>{await p.$executeRawUnsafe('UPDATE public."CommercialAutomationSettings" SET paused=true WHERE id=\\'commercial-automation\\'');process.stdout.write('ready');setInterval(()=>p.$executeRawUnsafe('UPDATE public."CommercialAutomationSettings" SET paused=true WHERE id=\\'commercial-automation\\'').catch(()=>{}),50);})().catch(()=>process.exit(1));
-`,
-      );
-      await startWriter();
+      writeState(root, {
+        version: 1,
+        composeProjectName: project,
+        maintenance: true,
+        startedAt: new Date().toISOString(),
+        mode: 'preview',
+        ports: {
+          api: 56333,
+          dashboard: 3000,
+          postgres: 55474,
+          redis: 55475,
+          evolution: 8080,
+        },
+        processes: {},
+      });
+      // This live orphan knows only postgres:5432 in the disposable project network.
+      // No Docker socket, runtime DSN or maintenance port is available to it.
+      const canonicalId = compose(['ps', '-q', 'postgres']).trim();
+      const canonicalIp = checked(docker, [
+        'inspect',
+        '--format',
+        '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',
+        canonicalId,
+      ]).trim();
+      const script = `echo "0 0 0" > /tmp/counts; t=0; c=0; w=0; while true; do if [ -f /tmp/ddl ]; then t=$((t+1)); if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'SELECT 1' >/dev/null 2>&1; then c=$((c+1)); if psql -X -qt -p 5432 -U postgres -d shopee_auto_affiliate_ai -c 'UPDATE public."CommercialAutomationSettings" SET paused=true' >/dev/null 2>&1; then w=$((w+1)); fi; fi; echo "$t $c $w" > /tmp/counts.next; mv /tmp/counts.next /tmp/counts; fi; sleep 0.05; done`;
+      checked(docker, [
+        'run',
+        '-d',
+        '--name',
+        probe,
+        '--network',
+        `${project}_default`,
+        '-e',
+        'PGCONNECT_TIMEOUT=1',
+        '-e',
+        `PGHOST=${canonicalIp}`,
+        '--tmpfs',
+        '/var/lib/postgresql/data',
+        '--entrypoint',
+        'sh',
+        'postgres:16-alpine',
+        '-c',
+        script,
+      ]);
+      probeCreated = true;
+      // Positive control proves the same orphan can reach the original before shutdown.
+      expect(
+        checked(docker, [
+          'exec',
+          probe,
+          'psql',
+          '-X',
+          '-qt',
+          '-h',
+          canonicalIp,
+          '-p',
+          '5432',
+          '-U',
+          'postgres',
+          '-d',
+          'shopee_auto_affiliate_ai',
+          '-c',
+          'SELECT 1',
+        ]).trim(),
+      ).toBe('1');
+      if (scenario === 'orphan')
+        hostOrphan = await startHostOrphan(root, url, env);
       const deps: SystemDependencies = {
         run: async (spec: CommandSpec) => {
+          if (spec.command === 'docker') {
+            if (spec.args[0] === 'volume' && spec.args[1] === 'ls')
+              return command(docker, [
+                'volume',
+                'ls',
+                '--filter',
+                `label=com.docker.compose.project=${project}`,
+                '--format',
+                '{{.Name}}',
+              ]);
+            return command(docker, spec.args, spec.env, spec.cwd);
+          }
+          const tempUrl = spec.env?.DATABASE_URL;
+          if (!tempUrl) throw new Error('Missing fixture datasource');
+          temporaryPort = Number(new URL(tempUrl).port);
+          expect(temporaryPort).not.toBe(5432);
+          expect(temporaryPort).not.toBe(55474);
           if (spec.args.includes('db:deploy')) {
-            deployCount++;
-            if (!lateExternalSession) return run(spec.command, spec.args);
-            // Deliberate counterexample: an unmanaged writer arrives AFTER the
-            // supervisor's last activity snapshot and remains connected through DDL.
-            // This is evidence of an OPEN safety gap, not continuous quiescence proof.
-            await concurrent.$executeRaw`UPDATE public."CommercialAutomationSettings" SET paused=true WHERE id='commercial-automation'`;
-            lateSessionsAtDeploy = (await readMaintenanceDatabase(root, url))
+            deploys++;
+            expect(await listening(55474)).toBe(false);
+            otherSessions = (await readMaintenanceDatabase(root, tempUrl))
               .otherSessions;
-            try {
-              return run(spec.command, spec.args);
-            } finally {
-              await concurrent.$disconnect();
+            expect(otherSessions).toBe(0);
+            checked(docker, ['exec', probe, 'touch', '/tmp/ddl']);
+            hostOrphan?.begin();
+            // Wait only for adversarial probe evidence, not for database isolation.
+            for (let poll = 0; poll < 30; poll++) {
+              if (
+                Number(
+                  checked(docker, ['exec', probe, 'cat', '/tmp/counts'])
+                    .trim()
+                    .split(/\s+/)[0],
+                ) > 0
+              )
+                break;
+              await new Promise((done) => setTimeout(done, 200));
+            }
+            orphanAlive =
+              checked(docker, [
+                'inspect',
+                '--format',
+                '{{.State.Running}}',
+                probe,
+              ]).trim() === 'true';
+            expect(orphanAlive).toBe(true);
+            if (hostOrphan) expect(hostOrphan.alive()).toBe(true);
+            if (scenario === 'failure') {
+              const failure = join(
+                root,
+                'packages/database/prisma/migrations/99999999999999_fixture_failure',
+              );
+              mkdirSync(failure);
+              writeFileSync(
+                join(failure, 'migration.sql'),
+                'SELECT r1d2_intentionally_missing_function();',
+              );
             }
           }
-          if (spec.command !== 'docker') throw new Error('Unexpected command');
-          // Limit volume inventory to this fixture; no operational-volume inventory.
-          if (spec.args[0] === 'volume' && spec.args[1] === 'ls')
-            return { code: 0, stdout: volume, stderr: '' };
-          return run(docker, spec.args);
+          const result = command(spec.command, spec.args, spec.env, spec.cwd);
+          if (spec.args.includes('db:deploy')) {
+            expect(deploys).toBe(1);
+            expect(await listening(55474)).toBe(false);
+            [tries, connections, writes] = checked(docker, [
+              'exec',
+              probe,
+              'cat',
+              '/tmp/counts',
+            ])
+              .trim()
+              .split(/\s+/)
+              .map(Number);
+            expect(tries).toBeGreaterThan(0);
+            expect(connections).toBe(0);
+            expect(writes).toBe(0);
+            if (hostOrphan) {
+              expect(hostOrphan.alive()).toBe(true);
+              hostEvidence = await hostOrphan.snapshot();
+              expect(hostEvidence.attempts).toBeGreaterThan(0);
+              expect(hostEvidence.connections).toBe(0);
+              expect(hostEvidence.writes).toBe(0);
+            }
+            expect(
+              checked(docker, [
+                'inspect',
+                '--format',
+                '{{.State.Running}}',
+                probe,
+              ]).trim(),
+            ).toBe('true');
+            if (scenario !== 'failure') {
+              const after = await readMaintenanceDatabase(root, tempUrl);
+              pendingAfter = after.pending.length;
+              preserved =
+                after.dispatchFingerprint === before.dispatchFingerprint;
+              expect(preserved).toBe(true);
+              expect(after.systemIdentifier).toBe(before.systemIdentifier);
+              expect(after.paused).toBe(true);
+            }
+          }
+          if (spec.args.includes('diff') && result.code === 0)
+            diff = 'EMPTY_EXIT_0';
+          return result;
         },
         spawn: async () => {
           restarts++;
-          throw new Error('Application spawn prohibited');
+          throw new Error('Spawn prohibited');
         },
-        inspectProcess: async (pid) => ({
-          running: pid === writer?.pid && alive,
-          identityMatches: pid === writer?.pid,
-          startedAt,
+        inspectProcess: async () => ({
+          running: false,
+          identityMatches: false,
         }),
-        inspectProcessIdentity: async () => ({
-          running: true,
-          markerMatches: true,
-          startedAt,
+        inspectProcessIdentity: async (pid) => ({
+          running: pid === process.pid,
+          markerMatches: pid === process.pid,
+          startedAt: new Date().toISOString(),
         }),
-        stopProcessTree: async (pid) => {
-          if (!writer || writer.pid !== pid) throw new Error('Foreign PID');
-          const child = writer;
-          await new Promise<void>((done) => {
-            child.once('exit', () => done());
-            child.kill();
-          });
-          return !alive;
+        stopProcessTree: async () => {
+          throw new Error('No registered OS process');
         },
-        // Recording port boundary: this fixture writer exposes no HTTP listener.
-        getPortOccupant: async () => null,
+        // Namespace adapter: original 5432 maps to fixture host 55474; operational 5432 is NEVER probed.
+        getPortOccupant: async (port) =>
+          (await listening(port === 5432 ? 55474 : port))
+            ? { processName: 'fixture' }
+            : null,
         request: async () => {
           requests++;
-          throw new Error('Provider/HTTP prohibited');
+          throw new Error('HTTP prohibited');
         },
         sleep: async (ms) => {
           await new Promise((done) => setTimeout(done, ms));
         },
         now: () => new Date(),
       };
-      const supervisor = new LocalSystemSupervisor(
-        root,
-        deps,
-        [
-          {
-            name: 'api',
-            command: process.execPath,
-            args: [join(root, 'writer.cjs')],
-            marker: 'writer.cjs',
-          },
-        ],
-        {
-          composeProjectName: project,
-          operationLockRoot: root,
-          validateRoot: () => true,
-          loadEnvironmentFiles: false,
-        },
-      );
-      const execute = async () => {
-        const parsed = parseSystemArgs([
-          'migrate',
-          '--confirm-operational-migrations',
-          `--compose-project-name=${project}`,
+      if (scenario === 'mount') {
+        checked(docker, [
+          'create',
+          '--name',
+          blocker,
+          '--mount',
+          `type=volume,src=${volume},dst=/var/lib/postgresql/data`,
+          'postgres:16-alpine',
         ]);
-        if (parsed.command !== 'migrate') throw new Error('Unexpected parse');
-        const release = await acquireLock(root, parsed.command, deps);
-        try {
-          return await supervisor.migrate(parsed.confirmed, env);
-        } finally {
-          release();
+        blockerCreated = true;
+      }
+      const supervisor = new LocalSystemSupervisor(root, deps, [], {
+        composeProjectName: project,
+        operationLockRoot: root,
+        validateRoot: () => true,
+        loadEnvironmentFiles: false,
+      });
+      const release = await acquireLock(root, 'migrate', deps);
+      try {
+        if (scenario === 'failure' || scenario === 'mount')
+          await expect(supervisor.migrate(true, env)).rejects.toMatchObject({
+            code:
+              scenario === 'failure'
+                ? 'SYSTEM_MAINTENANCE_DEPLOY_FAILED'
+                : 'SYSTEM_MAINTENANCE_VOLUME_CONCURRENT_MOUNT',
+          });
+        else {
+          await expect(supervisor.migrate(true, env)).resolves.toMatchObject({
+            pendingBefore: 4,
+            pendingAfter: 0,
+            migrationExecutionCount: 1,
+            ddlSafetyDependsOnCompleteTreeAdoption: false,
+          });
+          expect(diff).toBe('EMPTY_EXIT_0');
         }
-      };
-      expect(
-        (await readMaintenanceDatabase(root, url)).otherSessions,
-      ).toBeGreaterThan(0);
-      await concurrent.$queryRaw`SELECT 1`;
-      await expect(execute()).rejects.toMatchObject({
-        code: 'SYSTEM_MAINTENANCE_DATABASE_BUSY',
-      });
-      expect(deployCount).toBe(0);
-      await concurrent.$disconnect();
-      await startWriter();
-      const result = await execute();
-      expect(result).toMatchObject({
-        pendingBefore: 4,
-        pendingAfter: 0,
-        applicationProcessesBefore: 1,
-        applicationProcessesAfterQuiesce: 0,
-      });
-      expect(deployCount).toBe(1);
+      } finally {
+        release();
+      }
+      expect(deploys).toBe(scenario === 'mount' ? 0 : 1);
       expect(restarts).toBe(0);
       expect(requests).toBe(0);
-      expect(lateSessionsAtDeploy).toBe(lateExternalSession ? 1 : 0);
-      expect(alive).toBe(false);
-      const after = await readMaintenanceDatabase(root, url);
-      expect(after.pending).toHaveLength(0);
-      expect(after.paused).toBe(true);
-      expect(after.otherSessions).toBe(0);
-      prisma([
-        'migrate',
-        'diff',
-        '--from-schema-datasource',
-        schema,
-        '--to-schema-datamodel',
-        schema,
-        '--exit-code',
-      ]);
-      expect(await database.whatsAppDispatch.count()).toBe(dispatchesBefore);
-      await database.$disconnect();
-      expect((await supervisor.stop(env)).stopped).toBe(true);
-      const evidence = {
-        status: lateExternalSession
-          ? 'COUNTEREXAMPLE_REPRODUCED_OPEN_P1'
-          : 'PASS',
-        continuousQuiescence: lateExternalSession
-          ? 'NOT_ENFORCED'
-          : 'NOT_PROVEN_BY_SNAPSHOTS',
-        lateSessionsAtDeploy,
-        officialStopAfterMaintenance: 'PASS_POSTGRES_ONLY',
-        applicationProcessesBefore: 1,
-        applicationProcessesAfterQuiesce: 0,
-        concurrentSessionTest: 'PASS_REFUSED',
-        pendingBefore: 4,
-        pendingAfter: 0,
-        migrationExecutionCount: deployCount,
-        migrationRetryCount: 0,
-        applicationProcessRestarts: restarts,
-        providerCalls: requests,
-        newDispatches: 0,
-        jobRetries: 0,
-        prismaDiff: 'EMPTY_EXIT_0',
-        processBoundary:
-          'Controlled real writer subprocess with recording ownership/port adapters; production OS identity covered by supervisor tests',
-        commands,
-      };
+      expect(
+        checked(docker, [
+          'ps',
+          '-aq',
+          '--filter',
+          `label=shopee.r1d.project=${project}`,
+        ]).trim(),
+      ).toBe('');
+      expect(await listening(55474)).toBe(false);
+      expect(compose(['ps', '--status', 'running', '-q']).trim()).toBe('');
+      expect(
+        checked(docker, [
+          'volume',
+          'ls',
+          '--filter',
+          `label=com.docker.compose.project=${project}`,
+          '--format',
+          '{{.Name}}',
+        ]).trim(),
+      ).toBe(volume);
       if (process.env.R1D_EVIDENCE_PATH)
         writeFileSync(
-          lateExternalSession
-            ? process.env.R1D_EVIDENCE_PATH.replace(
-                /\.json$/,
-                '-late-session.json',
-              )
-            : process.env.R1D_EVIDENCE_PATH,
-          JSON.stringify(evidence, null, 2),
+          process.env.R1D_EVIDENCE_PATH.replace(/\.json$/, `-${scenario}.json`),
+          JSON.stringify(
+            {
+              scenario,
+              hostEvidence,
+              status: 'PASS',
+              project,
+              originalFixtureHostPort: 55474,
+              originalOrphanNetworkPort: 5432,
+              originalHost5432: 'NOT_PROBED_OPERATIONAL',
+              boundary:
+                'Real Docker network postgres:5432 with host-port adapter 55474; not an operational-host-port test',
+              orphanAliveDuringDeploy: orphanAlive,
+              orphanTries: tries,
+              orphanConnections: connections,
+              orphanWrites: writes,
+              temporaryPort,
+              otherSessions,
+              migrationExecutionCount: deploys,
+              migrationRetryCount: 0,
+              pendingBefore: 4,
+              pendingAfter,
+              diff,
+              dispatchPreserved: preserved,
+              tempContainerRemoved: true,
+              canonicalFixtureVolumePreserved: true,
+              applicationRestarts: restarts,
+              requests,
+              commands,
+            },
+            null,
+            2,
+          ),
         );
     } finally {
-      if (writer && alive) writer.kill();
-      await database.$disconnect();
-      await concurrent.$disconnect();
-      if (infrastructureCreated) compose(['down', '--volumes']);
-      // root is exclusively this mkdtemp fixture, never a workspace or operational directory.
+      await hostOrphan?.stop();
+      if (process.env.R1D_EVIDENCE_PATH)
+        writeFileSync(
+          process.env.R1D_EVIDENCE_PATH.replace(
+            /\.json$/,
+            `-${scenario}-commands.json`,
+          ),
+          JSON.stringify({ scenario, commands }, null, 2),
+        );
+      await client.$disconnect();
+      if (probeCreated) checked(docker, ['rm', '-f', probe]);
+      if (blockerCreated) checked(docker, ['rm', blocker]);
+      for (const id of checked(docker, [
+        'ps',
+        '-aq',
+        '--filter',
+        `label=shopee.r1d.project=${project}`,
+      ])
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean))
+        checked(docker, ['rm', '-f', id]);
+      if (infrastructure) compose(['down', '--volumes']);
+      // This directory was returned by mkdtemp for this test only.
       rmSync(root, { recursive: true, force: true });
     }
   },
-  180_000,
+  240_000,
 );

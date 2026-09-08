@@ -6,9 +6,11 @@ import { parseEvolutionConnectionState } from '@shopee-auto-affiliate-ai/provide
 
 import { loadLocalSystemEnvironment } from './environment';
 import { ensureDashboardProductionBuild } from './dashboard-build';
+import { MaintenancePostgres } from './maintenance-postgres';
 import {
   assertMaintenanceDatabaseUrl,
   readMaintenanceDatabase,
+  MaintenanceDatabaseReadError,
   type MaintenanceDatabaseReader,
 } from './maintenance-database';
 import {
@@ -1358,6 +1360,7 @@ export class LocalSystemSupervisor {
   async migrate(
     confirmed: boolean,
     processEnv: NodeJS.ProcessEnv = process.env,
+    interrupted: () => boolean = () => false,
   ) {
     if (confirmed !== true) {
       throw new LocalSystemError(
@@ -1379,7 +1382,7 @@ export class LocalSystemSupervisor {
         'SYSTEM_CONFIG_INVALID',
       );
     }
-    const databaseUrl = assertMaintenanceDatabaseUrl(
+    let databaseUrl = assertMaintenanceDatabaseUrl(
       loaded.env.DATABASE_URL,
       loaded.ports.postgres,
     );
@@ -1528,75 +1531,156 @@ export class LocalSystemSupervisor {
     };
     const postgresId = await assertPostgres();
     const initial = await assertProcesses();
-    await assertDatabase(false);
-    for (const spec of [...this.specs].reverse()) {
-      const registered = initial[spec.name];
-      if (!registered) continue;
-      // Recheck immediately before terminating; never act on a stale PID inventory.
-      const current = await this.deps.inspectProcess(
-        registered.pid,
-        spec.marker,
-        registered.startedAt,
-      );
-      if (!current.running) continue;
-      if (!serviceIdentityMatches(spec, current, state.ports)) {
+    const before = await assertDatabase(false);
+    const assertNotInterrupted = () => {
+      if (interrupted())
         throw new LocalSystemError(
-          'PID mudou antes da parada',
-          'SYSTEM_MAINTENANCE_PROCESS_GUARD',
+          'Manutencao interrompida',
+          'SYSTEM_MAINTENANCE_INTERRUPTED',
         );
-      }
-      if (
-        !(await this.deps.stopProcessTree(registered.pid, current.startedAt))
-      ) {
-        throw new LocalSystemError(
-          'Processo nao encerrou; migration bloqueada',
-          'SYSTEM_MAINTENANCE_STOP_FAILED',
-        );
-      }
-    }
-    await assertProcesses(true);
-    // Persist the stopped application even if migration fails; retain PID history.
-    writeState(this.root, { ...state, maintenance: true });
-    await assertPostgres(postgresId);
-    const before = await assertDatabase(true);
-    // The shared supervisor operation lock excludes managed start/stop throughout DDL.
-    // Non-supervisor writers must remain administratively excluded; activity is checked again below.
-    const result = await this.deps
-      .run(
-        pnpmSpec(
-          this.root,
-          ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
-          runtimeEnv,
-        ),
-      )
-      .catch(() => ({ code: 1, stdout: '', stderr: '' }));
-    if (result.code !== 0) {
-      appendSupervisorLog(
-        this.root,
-        'Maintenance migrate failed; application retained offline; no retry',
-      );
-      throw new LocalSystemError(
-        'Migration falhou; aplicacao desligada; HUMAN_REQUIRED, sem retry',
-        'SYSTEM_MAINTENANCE_DEPLOY_FAILED',
-      );
-    }
-    await assertProcesses(true);
-    await assertPostgres(postgresId);
-    await assertDatabase(true, true);
-    appendSupervisorLog(
-      this.root,
-      'Maintenance migrate complete; application offline; automation paused',
-    );
-    return {
-      migrationsApplied: true,
-      applicationRunning: false,
-      automationPaused: true,
-      applicationProcessesBefore: Object.keys(initial).length,
-      applicationProcessesAfterQuiesce: 0,
-      pendingBefore: before.pending.length,
-      pendingAfter: 0,
-      migrationExecutionCount: 1,
     };
+    const maintenance = new MaintenancePostgres(
+      this.root,
+      this.deps,
+      runtimeEnv,
+      this.composeProjectName,
+      postgresId,
+      postgresVolumeName(this.composeProjectName),
+      loaded.ports.postgres,
+    );
+    await maintenance.prepare();
+    assertNotInterrupted();
+    // The existing supervisor owns the whole stop, including canonical PostgreSQL.
+    const stopped = await this.stop(processEnv);
+    if (!stopped.stopped)
+      throw new LocalSystemError(
+        'Topologia nao encerrou; migration bloqueada',
+        'SYSTEM_MAINTENANCE_STOP_FAILED',
+        true,
+      );
+    await assertProcesses(true);
+    writeState(this.root, { ...state, maintenance: true });
+    try {
+      assertNotInterrupted();
+      const isolated = await maintenance.start(databaseUrl);
+      databaseUrl = isolated.databaseUrl;
+      const migrationEnv = { ...runtimeEnv, DATABASE_URL: databaseUrl };
+      const isolatedBefore = await assertDatabase(true);
+      if (
+        JSON.stringify(isolatedBefore.pending) !==
+          JSON.stringify(before.pending) ||
+        isolatedBefore.dispatchFingerprint !== before.dispatchFingerprint
+      )
+        throw new LocalSystemError(
+          'Estado mudou durante parada',
+          'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+        );
+      await maintenance.verify();
+      assertNotInterrupted();
+      const result = await this.deps
+        .run(
+          pnpmSpec(
+            this.root,
+            ['--filter', '@shopee-auto-affiliate-ai/database', 'db:deploy'],
+            migrationEnv,
+          ),
+        )
+        .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+      if (result.code !== 0) {
+        // Only safe aggregate readback; never retry or print Prisma stderr/DSN.
+        const evidence = await this.maintenanceDatabase(this.root, databaseUrl)
+          .then((snapshot) => ({
+            pending: snapshot.pending.length,
+            paused: snapshot.paused,
+          }))
+          .catch((error: unknown) =>
+            error instanceof MaintenanceDatabaseReadError
+              ? error.diagnostics
+              : null,
+          );
+        appendSupervisorLog(
+          this.root,
+          `Maintenance deploy failed; sanitizedReadback=${JSON.stringify(evidence)}; no retry`,
+        );
+        throw new LocalSystemError(
+          'Migration falhou; topologia desligada; HUMAN_REQUIRED, sem retry',
+          'SYSTEM_MAINTENANCE_DEPLOY_FAILED',
+        );
+      }
+      const after = await assertDatabase(true, true);
+      if (after.dispatchFingerprint !== before.dispatchFingerprint)
+        throw new LocalSystemError(
+          'Historico dispatch alterado',
+          'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+        );
+      for (const args of [
+        ['migrate', 'status'],
+        [
+          'migrate',
+          'diff',
+          '--from-schema-datasource',
+          'prisma/schema.prisma',
+          '--to-schema-datamodel',
+          'prisma/schema.prisma',
+          '--exit-code',
+        ],
+      ]) {
+        const check = await this.deps.run(
+          pnpmSpec(
+            this.root,
+            [
+              '--filter',
+              '@shopee-auto-affiliate-ai/database',
+              'exec',
+              'prisma',
+              ...args,
+            ],
+            migrationEnv,
+          ),
+        );
+        if (check.code !== 0)
+          throw new LocalSystemError(
+            'Prisma postcheck falhou',
+            'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+          );
+      }
+      await maintenance.verify();
+      await assertProcesses(true);
+      assertNotInterrupted();
+      return {
+        migrationsApplied: true,
+        applicationRunning: false,
+        automationPaused: true,
+        applicationProcessesBefore: Object.keys(initial).length,
+        applicationProcessesAfterQuiesce: 0,
+        pendingBefore: before.pending.length,
+        pendingAfter: 0,
+        migrationExecutionCount: 1,
+        migrationRetryCount: 0,
+        maintenanceHost: isolated.host,
+        maintenancePort: isolated.port,
+        processTreeCompleteAdoption: 'NOT_PROVEN',
+        ddlSafetyDependsOnCompleteTreeAdoption: false,
+      };
+    } catch (error) {
+      throw new LocalSystemError(
+        'Maintenance falhou; HUMAN_REQUIRED; sem retry',
+        error instanceof LocalSystemError
+          ? error.code
+          : 'SYSTEM_MAINTENANCE_FAILED',
+        true,
+      );
+    } finally {
+      try {
+        await maintenance.cleanup();
+      } catch {
+        throw new LocalSystemError(
+          'Cleanup nao comprovado; volume preservado; HUMAN_REQUIRED',
+          'SYSTEM_MAINTENANCE_CLEANUP_FAILED',
+          true,
+        );
+      }
+    }
   }
 
   async start(processEnv: NodeJS.ProcessEnv = process.env) {

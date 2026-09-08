@@ -14,6 +14,7 @@ import {
   statePath,
   SUPERVISOR_PROCESS_MARKER,
   readState,
+  writeState,
 } from '../src/state-store';
 import type { MaintenanceDatabaseSnapshot } from '../src/maintenance-database';
 import {
@@ -29,6 +30,7 @@ import type {
   SystemDependencies,
 } from '../src/types';
 import { PREVIEW_STABILITY_PRISMA_VALIDATION } from '../src/types';
+import { maintenanceDockerFixture } from './maintenance-docker-fixture';
 
 const directories: string[] = [];
 const requiredFiles = [
@@ -354,6 +356,10 @@ const harness = (
           stdout: JSON.stringify([
             {
               Name: `${volumeProject}_postgres_data`,
+              Driver: 'local',
+              Scope: 'local',
+              CreatedAt: '2026-09-08',
+              Mountpoint: '/fixture',
               Labels:
                 options.volumeLabels === undefined
                   ? {
@@ -528,6 +534,16 @@ describe('maintenance migrate', () => {
   const setup = (options: Parameters<typeof harness>[0] = {}) => {
     const root = createRoot();
     const h = harness(options);
+    const docker = maintenanceDockerFixture();
+    const originalRun = h.deps.run;
+    h.deps.run = async (command) => {
+      const result = docker.run(command);
+      if (result) {
+        h.commands.push(command);
+        return result;
+      }
+      return originalRun(command);
+    };
     h.setInfrastructure(true);
     const processes: LocalSystemState['processes'] = {};
     specs.forEach((spec, index) => {
@@ -553,6 +569,7 @@ describe('maintenance migrate', () => {
       paused: true,
       otherSessions: 0,
       pending: [],
+      dispatchFingerprint: 'fixture-preserved',
     };
     const read = vi.fn(async () => ({ ...snapshot }));
     const supervisor = new LocalSystemSupervisor(root, h.deps, specs, {
@@ -566,10 +583,16 @@ describe('maintenance migrate', () => {
       DATABASE_URL:
         'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
     };
-    return { root, h, snapshot, read, supervisor, env };
+    return { root, h, snapshot, read, supervisor, env, docker };
   };
   const deploys = (h: ReturnType<typeof harness>) =>
     h.commands.filter((c) => c.args.includes('db:deploy'));
+  const legacyMaintenance = (s: ReturnType<typeof setup>) => {
+    const state = readState(s.root);
+    if (!state) throw new Error('Missing fixture');
+    for (const process of s.h.processes.values()) process.running = false;
+    writeState(s.root, { ...state, maintenance: true });
+  };
 
   it('requires literal confirmation before reads or mutation', async () => {
     const s = setup();
@@ -593,6 +616,23 @@ describe('maintenance migrate', () => {
     const s = setup();
     s.read.mockRejectedValue(new Error('unavailable'));
     await expect(s.supervisor.migrate(true, s.env)).rejects.toThrow();
+    expect(s.h.stopped).toEqual([]);
+    expect(deploys(s.h)).toHaveLength(0);
+  });
+  it('refuses ambiguous canonical volume before stopping or creating maintenance', async () => {
+    const s = setup({ volumeLabels: null });
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toThrow();
+    expect(s.h.stopped).toEqual([]);
+    expect(
+      s.h.commands.filter((command) => command.args[0] === 'create'),
+    ).toEqual([]);
+  });
+  it('refuses an unproven immutable image before stop', async () => {
+    const s = setup();
+    s.docker.state.originalImage = 'postgres:latest';
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_IMAGE_GUARD',
+    });
     expect(s.h.stopped).toEqual([]);
     expect(deploys(s.h)).toHaveLength(0);
   });
@@ -643,7 +683,7 @@ describe('maintenance migrate', () => {
     expect(deploys(s.h)).toHaveLength(0);
     expect(s.h.spawned).toEqual([]);
   });
-  it('deploys once after all processes stop and leaves explicit maintenance state', async () => {
+  it('deploys once in temporary PostgreSQL and removes it with canonical topology stopped', async () => {
     const s = setup();
     const result = await s.supervisor.migrate(true, s.env);
     expect(result).toMatchObject({
@@ -653,23 +693,90 @@ describe('maintenance migrate', () => {
     });
     expect(deploys(s.h)).toHaveLength(1);
     expect(s.h.spawned).toEqual([]);
-    expect(
-      s.h.commands.some(
-        (c) => c.args.includes('up') || c.args.includes('stop'),
-      ),
-    ).toBe(false);
+    expect(s.h.commands.some((c) => c.args.includes('up'))).toBe(false);
     expect(s.h.deps.request).not.toHaveBeenCalled();
+    expect(s.docker.state.originalRunning).toBe(false);
+    expect(s.docker.state.temporaryExists).toBe(false);
+    expect(s.docker.state.image).toBe(s.docker.state.originalImage);
+    expect(new URL(deploys(s.h)[0].env?.DATABASE_URL ?? '').port).toBe('49153');
     expect(readState(s.root)?.maintenance).toBe(true);
   });
   it('never retries a failed migration or spawns application', async () => {
     const s = setup({ migrationFails: true });
     await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
       code: 'SYSTEM_MAINTENANCE_DEPLOY_FAILED',
+      retainOperationLock: true,
     });
     expect(deploys(s.h)).toHaveLength(1);
     expect(s.h.spawned).toEqual([]);
     expect([...s.h.processes.values()].some((p) => p.running)).toBe(false);
     expect(readState(s.root)?.maintenance).toBe(true);
+    expect(s.docker.state.temporaryExists).toBe(false);
+  });
+  it('cleans up an owned container even when docker create loses its successful response', async () => {
+    const s = setup();
+    const run = s.h.deps.run;
+    s.h.deps.run = async (command) => {
+      const result = await run(command);
+      return command.args[0] === 'create'
+        ? { code: 1, stdout: '', stderr: '' }
+        : result;
+    };
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_DOCKER_FAILED',
+      retainOperationLock: true,
+    });
+    expect(s.docker.state.temporaryExists).toBe(false);
+    expect(deploys(s.h)).toHaveLength(0);
+  });
+  it('retains the lock when temporary-container cleanup cannot be certified', async () => {
+    const s = setup();
+    const run = s.h.deps.run;
+    s.h.deps.run = async (command) =>
+      command.args[0] === 'rm'
+        ? { code: 1, stdout: '', stderr: '' }
+        : run(command);
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_CLEANUP_FAILED',
+      retainOperationLock: true,
+    });
+    expect(s.docker.state.temporaryRunning).toBe(false);
+    expect(s.h.spawned).toEqual([]);
+  });
+  it('rejects a nonempty Prisma diff and cleans up without restart', async () => {
+    const s = setup();
+    const run = s.h.deps.run;
+    s.h.deps.run = async (command) => {
+      const result = await run(command);
+      return command.args.includes('diff')
+        ? { code: 2, stdout: '', stderr: '' }
+        : result;
+    };
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+      retainOperationLock: true,
+    });
+    expect(s.docker.state.temporaryExists).toBe(false);
+    expect(deploys(s.h)).toHaveLength(1);
+  });
+  it('honors interruption during DDL only after cleanup and retains the operation lock', async () => {
+    const s = setup();
+    let interrupted = false;
+    const run = s.h.deps.run;
+    s.h.deps.run = async (command) => {
+      const result = await run(command);
+      if (command.args.includes('db:deploy')) interrupted = true;
+      return result;
+    };
+    await expect(
+      s.supervisor.migrate(true, s.env, () => interrupted),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_INTERRUPTED',
+      retainOperationLock: true,
+    });
+    expect(deploys(s.h)).toHaveLength(1);
+    expect(s.docker.state.temporaryExists).toBe(false);
+    expect(s.h.spawned).toEqual([]);
   });
   it('rechecks pause after stopping and blocks a race', async () => {
     const s = setup();
@@ -707,7 +814,7 @@ describe('maintenance migrate', () => {
       stdout: JSON.stringify([dockerInspection('postgres')]),
     };
     const s = setup({ dockerDiscovery: discovery });
-    await s.supervisor.migrate(true, s.env);
+    legacyMaintenance(s);
     vi.mocked(s.h.deps.request).mockResolvedValue({ ok: false, status: 503 });
     expect((await s.supervisor.status(s.env)).overall).toBe('maintenance');
     expect((await s.supervisor.stop(s.env)).stopped).toBe(true);
@@ -717,7 +824,7 @@ describe('maintenance migrate', () => {
     async (difference) => {
       const discovery = equivalentDockerDiscovery();
       const s = setup({ dockerDiscovery: discovery });
-      await s.supervisor.migrate(true, s.env);
+      legacyMaintenance(s);
       const redis = dockerInspection('redis');
       if (difference === 'image') redis.Config.Image = 'unowned:latest';
       else
@@ -741,7 +848,7 @@ describe('maintenance migrate', () => {
       stdout: JSON.stringify([dockerInspection('postgres')]),
     };
     const s = setup({ dockerDiscovery: discovery });
-    await s.supervisor.migrate(true, s.env);
+    legacyMaintenance(s);
     const run = s.h.deps.run;
     s.h.deps.run = async (command) => {
       if (command.args.includes('up'))
@@ -772,6 +879,52 @@ describe('maintenance migrate', () => {
       true,
     );
     expect(readState(s.root)?.maintenance).toBeUndefined();
+  });
+  it.each([
+    ['canonicalStaysRunning', 'SYSTEM_MAINTENANCE_POSTGRES_STILL_RUNNING'],
+    ['concurrentMount', 'SYSTEM_MAINTENANCE_VOLUME_CONCURRENT_MOUNT'],
+  ] as const)('refuses temporary mount with %s', async (flag, code) => {
+    const s = setup();
+    s.docker.state[flag] = true;
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code,
+    });
+    expect(deploys(s.h)).toHaveLength(0);
+    expect(s.h.commands.filter((c) => c.args[0] === 'create')).toHaveLength(0);
+  });
+  it.each([5432, 0, 70000])(
+    'refuses unsafe temporary port %s and cleans up',
+    async (port) => {
+      const s = setup();
+      s.docker.state.port = port;
+      await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+        code: 'SYSTEM_MAINTENANCE_PORT_GUARD',
+      });
+      expect(deploys(s.h)).toHaveLength(0);
+      expect(s.docker.state.temporaryExists).toBe(false);
+    },
+  );
+  it('refuses a public temporary binding and cleans up', async () => {
+    const s = setup();
+    s.docker.state.host = '0.0.0.0';
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_PORT_GUARD',
+    });
+    expect(deploys(s.h)).toHaveLength(0);
+    expect(s.docker.state.temporaryExists).toBe(false);
+  });
+  it('rejects a modified dispatch history during DDL, without restart', async () => {
+    const s = setup();
+    s.read
+      .mockResolvedValueOnce({ ...s.snapshot })
+      .mockResolvedValueOnce({ ...s.snapshot })
+      .mockResolvedValue({ ...s.snapshot, dispatchFingerprint: 'changed' });
+    await expect(s.supervisor.migrate(true, s.env)).rejects.toMatchObject({
+      code: 'SYSTEM_MAINTENANCE_POSTCHECK_FAILED',
+    });
+    expect(deploys(s.h)).toHaveLength(1);
+    expect(s.h.spawned).toEqual([]);
+    expect(s.docker.state.temporaryExists).toBe(false);
   });
   it('preserves maintenance ownership after a failed start rolls application back', async () => {
     const s = setup({ healthFails: true });

@@ -27,7 +27,7 @@ export type LocalSystemState = {
    * legacy state is rejected before any stop/start mutation.
    */
   composeProjectName?: string;
-  /** Application stopped; infrastructure retained by the maintenance command. */
+  /** Maintenance ownership retained; infrastructure may be stopped or legacy PG-only. */
   maintenance?: true;
   startedAt: string;
   mode: AutomationMode;
@@ -121,6 +121,7 @@ export class LocalSystemError extends Error {
   constructor(
     message: string,
     readonly code: string,
+    readonly retainOperationLock = false,
   ) {
     super(message);
     this.name = 'LocalSystemError';
