@@ -51,7 +51,7 @@ delete index.evidence;
 const evidenceId = `E-${stepId}`;
 index.entries ??= [];
 index.entries = index.entries.filter((entry) => entry.evidenceId !== evidenceId);
-index.entries.push({ evidenceId, type: 'command', capturedAt: finishedAt, actor: 'GPT-5.6-TERRA', head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim(), commandOrSource: command.join(' '), exitCode: result.status ?? 1, result: result.status === 0 ? 'PASS' : 'FAIL', redactions: ['DATABASE_URL', 'Authorization'], artifactPath: `artifacts/${runId}/${out.relative}`, stdout: out, stderr: err, startedAt, finishedAt });
+index.entries.push({ evidenceId, type: 'command', capturedAt: finishedAt, actor: 'GPT-5.6-TERRA', head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim(), commandOrSource: sanitize(command.join(' ')), exitCode: result.status ?? 1, result: result.status === 0 ? 'PASS' : 'FAIL', redactions: ['DATABASE_URL', 'Authorization', 'environment secrets'], artifactPath: `artifacts/${runId}/${out.relative}`, stdout: out, stderr: err, startedAt, finishedAt });
 index.evidenceIds = index.entries.map((entry) => entry.evidenceId);
 index.updatedAt = finishedAt;
 writeFileSync(evidencePath, `${JSON.stringify(index, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
