@@ -58,7 +58,7 @@ const availablePort = () =>
   });
 
 it.skipIf(!enabled)(
-  'R1F safe certification uses disposable PostgreSQL and Redis without deploy or providers',
+  'R1F safe certification uses process environment only with disposable PostgreSQL and Redis',
   async () => {
     const source = resolve(import.meta.dirname, '../../..');
     const root = mkdtempSync(join(tmpdir(), 'r1f-safe-certification-'));
@@ -116,7 +116,6 @@ it.skipIf(!enabled)(
     try {
       mkdirSync(join(root, 'packages/database/prisma'), { recursive: true });
       for (const file of [
-        '.env',
         'package.json',
         'pnpm-lock.yaml',
         'infra/evolution/docker-compose.yml',
@@ -127,7 +126,7 @@ it.skipIf(!enabled)(
       ]) {
         const target = join(root, file);
         mkdirSync(resolve(target, '..'), { recursive: true });
-        writeFileSync(target, file === '.env' ? '' : '{}');
+        writeFileSync(target, '{}');
       }
       writeFileSync(
         join(root, 'docker-compose.yml'),
