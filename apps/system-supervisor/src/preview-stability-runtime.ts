@@ -21,6 +21,7 @@ import {
   type PreviewStabilityReport,
 } from './preview-stability';
 import { readState, runtimeDirectory } from './state-store';
+import { composeProjectStateRoot } from './runtime-identity';
 import { createSystemDependencies } from './system-dependencies';
 import {
   createServiceSpecs,
@@ -445,7 +446,11 @@ export const stopValidatedManagedProcess = async ({
     spec.marker,
     registered.startedAt,
   );
-  if (!inspection.running || !inspection.identityMatches) {
+  if (
+    !inspection.running ||
+    !inspection.identityMatches ||
+    (spec.identity && !spec.identity(inspection, state.ports))
+  ) {
     throw new LocalSystemError(
       'Identidade do processo gerenciado divergiu',
       'PREVIEW_STABILITY_MANAGED_PROCESS_IDENTITY_MISMATCH',
@@ -472,6 +477,7 @@ export const createPreviewStabilityDependencies = (
   const loadEnvironmentFiles = options.loadEnvironmentFiles ?? true;
   const composeProjectName =
     options.composeProjectName ?? OPERATIONAL_COMPOSE_PROJECT_NAME;
+  const stateRoot = composeProjectStateRoot(root, composeProjectName);
   const supervisor = new LocalSystemSupervisor(root, dependencies, undefined, {
     loadEnvironmentFiles,
     composeProjectName,
@@ -792,9 +798,19 @@ export const createPreviewStabilityDependencies = (
       } satisfies PreviewStabilityInfrastructure;
     },
     async killManagedProcess(service) {
+      const state = readState(stateRoot);
+      if (
+        state &&
+        state.composeProjectName !== composeProjectName
+      ) {
+        throw new LocalSystemError(
+          'O estado local pertence a outro projeto Compose; nenhum processo sera encerrado',
+          'SYSTEM_COMPOSE_PROJECT_MISMATCH',
+        );
+      }
       await stopValidatedManagedProcess({
         service,
-        state: readState(root),
+        state,
         specs: createServiceSpecs(root),
         dependencies,
       });

@@ -18,7 +18,8 @@ import { createRedisConnection, createCommercialAutomationQueue, createCommercia
 import { expect, it } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { LocalSystemSupervisor } from '../src/supervisor';
-import { acquireLock, writeState } from '../src/state-store';
+import { composeProjectStateRoot } from '../src/runtime-identity';
+import { acquireLock, statePath, writeState } from '../src/state-store';
 import { readMaintenanceDatabase } from '../src/maintenance-database';
 import type { CommandSpec, SystemDependencies } from '../src/types';
 import { startHostOrphan } from './maintenance-host-orphan';
@@ -408,18 +409,36 @@ volumes:
         SCHEDULER_ENABLED: 'false',
         LOCAL_API_AUTH_TOKEN: 'local-test-token',
       };
+      const isolatedStateRoot = composeProjectStateRoot(root, project);
+      writeState(root, {
+        version: 1,
+        composeProjectName: 'afiliado-shopee',
+        startedAt: new Date().toISOString(),
+        mode: 'preview',
+        ports: {
+          api: apiPort,
+          dashboard: dashboardPort,
+          postgres: postgresPort,
+          redis: redisPort,
+          evolution: 8080,
+        },
+        processes: {},
+      });
+      const canonicalState = readFileSync(statePath(root), 'utf8');
 
       await supervisor.start(dangerousEnv, 'safe-certification');
       expect(spawned).toEqual(['r1f-api', 'r1f-dashboard']);
       expect(commands.some((spec) => spec.args.includes('db:deploy'))).toBe(false);
       expect(commands.some((spec) => spec.args.includes('evolution:up'))).toBe(false);
-      expect(readFileSync(join(root, '.runtime/local-system/state.json'), 'utf8')).toContain('safe-certification');
+      expect(readFileSync(statePath(isolatedStateRoot), 'utf8')).toContain('safe-certification');
+      expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalState);
       expect((await supervisor.status(dangerousEnv)).runtimeProfile).toBe('safe-certification');
       await supervisor.stop(dangerousEnv);
       expect(commands.some((spec) => spec.args.includes('evolution:down'))).toBe(false);
       await supervisor.start(dangerousEnv, 'safe-certification');
       await supervisor.stop(dangerousEnv);
       expect(spawned).toEqual(['r1f-api', 'r1f-dashboard', 'r1f-api', 'r1f-dashboard']);
+      expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalState);
       expect(await automation.getJobScheduler(DEFAULT_COMMERCIAL_AUTOMATION_SCHEDULER_JOB_ID)).toEqual(schedulerBefore);
       const redisAfter = await redisFingerprint();
       const postgresAfter = await databaseFingerprint();
@@ -475,6 +494,10 @@ volumes:
         expect(command(docker, ['compose', '--project-name', project, 'down', '--volumes', '--remove-orphans']).code).toBe(0);
       }
       rmSync(root, { recursive: true, force: true });
+      rmSync(composeProjectStateRoot(root, project), {
+        recursive: true,
+        force: true,
+      });
     }
   },
   240_000,
@@ -735,7 +758,7 @@ volumes:
       await client.$disconnect();
       const before = await readMaintenanceDatabase(root, url);
       expect(before.pending).toEqual(names.slice(-4));
-      writeState(root, {
+      writeState(composeProjectStateRoot(root, project), {
         version: 1,
         composeProjectName: project,
         maintenance: true,

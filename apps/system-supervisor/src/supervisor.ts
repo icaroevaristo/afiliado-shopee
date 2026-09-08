@@ -19,6 +19,7 @@ import {
   type MaintenanceDatabaseReader,
 } from './maintenance-database';
 import {
+  composeProjectStateRoot,
   evolutionComposeArguments,
   isValidComposeProjectName,
   mainComposeArguments,
@@ -29,6 +30,7 @@ import {
 
 export {
   composeProjectRuntimeRoot,
+  composeProjectStateRoot,
   evolutionComposeArguments,
   mainComposeArguments,
   OPERATIONAL_COMPOSE_PROJECT_NAME,
@@ -884,6 +886,29 @@ const dashboardProcessIdentity = (
   );
 };
 
+const tsxProcessIdentity = (
+  inspection: ProcessInspection,
+  nodePath: string,
+  tsxPath: string,
+  runtimeTsconfig: string,
+  entrypoint: string,
+) => {
+  const command = inspection.command?.replaceAll('\\', '/');
+  if (!command) return false;
+  const args = processArguments(command);
+  const expected = [nodePath, tsxPath, '--tsconfig', runtimeTsconfig, entrypoint];
+  return (
+    args.length === expected.length &&
+    args.every((argument, index) => {
+      const expectedArgument = expected[index];
+      if (index === 0 || index === 1 || index === 3 || index === 4) {
+        return normalizedPath(argument) === normalizedPath(expectedArgument);
+      }
+      return argument.toLowerCase() === expectedArgument.toLowerCase();
+    })
+  );
+};
+
 const serviceIdentityMatches = (
   spec: ServiceSpec,
   inspection: ProcessInspection,
@@ -927,6 +952,14 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, api],
       marker: processMarker(api),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          api,
+        ),
       healthUrl: (ports) => `http://127.0.0.1:${ports.api}/health`,
     },
     {
@@ -959,12 +992,28 @@ export const createServiceSpecs = (root: string): ServiceSpec[] => {
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, commercialWorker],
       marker: processMarker(commercialWorker),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          commercialWorker,
+        ),
     },
     {
       name: 'whatsapp-dispatch-worker',
       command: process.execPath,
       args: [tsx, '--tsconfig', runtimeTsconfig, dispatchWorker],
       marker: processMarker(dispatchWorker),
+      identity: (inspection) =>
+        tsxProcessIdentity(
+          inspection,
+          process.execPath,
+          tsx,
+          runtimeTsconfig,
+          dispatchWorker,
+        ),
     },
   ];
 };
@@ -1183,6 +1232,12 @@ const legacyComposeProjectIdentityError = () =>
     'SYSTEM_COMPOSE_PROJECT_IDENTITY_UNAVAILABLE',
   );
 
+const processOwnershipUnprovenError = (services: ServiceName[]) =>
+  new LocalSystemError(
+    `A origem dos processos registrados nao pode ser comprovada: ${services.join(', ')}`,
+    'SYSTEM_PROCESS_OWNERSHIP_UNPROVEN',
+  );
+
 const assertPortAvailable = async (
   port: number,
   ownedPid: number | undefined,
@@ -1371,6 +1426,7 @@ export class LocalSystemSupervisor {
   private readonly validateRoot: () => boolean;
   private readonly loadEnvironmentFiles: boolean;
   private readonly composeProjectName: string;
+  private readonly stateRoot: string;
   private readonly operationLockRoot: string;
   private readonly maintenanceDatabase: MaintenanceDatabaseReader;
 
@@ -1400,6 +1456,10 @@ export class LocalSystemSupervisor {
       );
     }
     this.composeProjectName = composeProjectName;
+    this.stateRoot = composeProjectStateRoot(
+      this.root,
+      this.composeProjectName,
+    );
     this.operationLockRoot = options.operationLockRoot ?? this.root;
     this.maintenanceDatabase =
       options.maintenanceDatabase ?? readMaintenanceDatabase;
@@ -1495,7 +1555,7 @@ export class LocalSystemSupervisor {
       loaded.ports.postgres,
     );
     const runtimeEnv = { ...loaded.env, DATABASE_URL: databaseUrl };
-    const state = readState(this.root);
+    const state = readState(this.stateRoot);
     if (!state || state.composeProjectName !== this.composeProjectName) {
       throw new LocalSystemError(
         'Estado local com ownership Compose obrigatorio',
@@ -1660,7 +1720,7 @@ export class LocalSystemSupervisor {
     assertNotInterrupted();
     try {
       // All errors after initiating topology changes retain maintenance ownership.
-      writeState(this.root, { ...state, maintenance: true });
+      writeState(this.stateRoot, { ...state, maintenance: true });
       const stopped = await this.stop(processEnv);
       if (!stopped.stopped) {
         appendSupervisorLog(
@@ -1676,7 +1736,7 @@ export class LocalSystemSupervisor {
         );
       }
       await assertProcesses(true);
-      writeState(this.root, { ...state, maintenance: true });
+      writeState(this.stateRoot, { ...state, maintenance: true });
       assertNotInterrupted();
       const isolated = await maintenance.start(databaseUrl);
       databaseUrl = isolated.databaseUrl;
@@ -1852,7 +1912,7 @@ export class LocalSystemSupervisor {
         'SYSTEM_CONFIG_INVALID',
       );
     }
-    const previous = readState(this.root);
+    const previous = readState(this.stateRoot);
     if (
       previous &&
       runtimeProfileFromState(previous.runtimeProfile) !== runtimeProfile &&
@@ -1874,6 +1934,9 @@ export class LocalSystemSupervisor {
       this.specs,
       this.deps,
     );
+    if (inspected.reused.length > 0) {
+      throw processOwnershipUnprovenError(inspected.reused);
+    }
     let safeCertificationState: LocalSystemState | undefined;
     if (
       previous &&
@@ -1919,13 +1982,7 @@ export class LocalSystemSupervisor {
       };
       // Persist before changing Docker topology so a later ordinary stop uses
       // this profile rather than a SEND .env after an interrupted startup.
-      writeState(this.root, safeCertificationState);
-    }
-    if (inspected.reused.length > 0) {
-      appendSupervisorLog(
-        this.root,
-        `PIDs reutilizados ignorados: ${inspected.reused.join(', ')}`,
-      );
+      writeState(this.stateRoot, safeCertificationState);
     }
     await runRequired(
       this.deps,
@@ -2230,7 +2287,7 @@ export class LocalSystemSupervisor {
             log: relativeLogPath(name),
           };
           startedThisAttempt.push(name);
-          writeState(this.root, state);
+          writeState(this.stateRoot, state);
         }
         if (spec.healthUrl) {
           await waitForHttp(
@@ -2253,7 +2310,7 @@ export class LocalSystemSupervisor {
           }
         }
       }
-      writeState(this.root, state);
+      writeState(this.stateRoot, state);
       const status = await this.status(processEnv);
       if (status.overall !== 'running') {
         throw new LocalSystemError(
@@ -2295,10 +2352,10 @@ export class LocalSystemSupervisor {
         }
         delete state.processes[name];
       }
-      if (Object.keys(state.processes).length > 0) writeState(this.root, state);
-      else if (safeCertificationState) writeState(this.root, safeCertificationState);
-      else if (previous?.maintenance) writeState(this.root, previous);
-      else clearState(this.root);
+      if (Object.keys(state.processes).length > 0) writeState(this.stateRoot, state);
+      else if (safeCertificationState) writeState(this.stateRoot, safeCertificationState);
+      else if (previous?.maintenance) writeState(this.stateRoot, previous);
+      else clearState(this.stateRoot);
       if (rollbackFailures.length > 0) {
         appendSupervisorLog(
           this.root,
@@ -2316,7 +2373,7 @@ export class LocalSystemSupervisor {
   async status(
     processEnv: NodeJS.ProcessEnv = process.env,
   ): Promise<SystemStatusSnapshot> {
-    const state = readState(this.root);
+    const state = readState(this.stateRoot);
     const runtimeProfile = runtimeProfileFromState(state?.runtimeProfile);
     const loaded = this.loadEnvironmentForProfile(
       processEnv,
@@ -2687,7 +2744,7 @@ export class LocalSystemSupervisor {
   }
 
   async stop(processEnv: NodeJS.ProcessEnv = process.env) {
-    const state = readState(this.root);
+    const state = readState(this.stateRoot);
     const loaded = this.loadEnvironmentForProfile(
       processEnv,
       runtimeProfileFromState(state?.runtimeProfile),
@@ -2922,7 +2979,7 @@ export class LocalSystemSupervisor {
     if (state?.runtimeProfile === 'safe-certification') {
       // Only application processes belong to SAFE; shared DB/Redis remain intact.
       if (manualIntervention.length === 0) {
-        writeState(this.root, { ...state, processes: {} });
+        writeState(this.stateRoot, { ...state, processes: {} });
       }
       return { stopped: manualIntervention.length === 0, manualIntervention };
     }
@@ -2992,7 +3049,7 @@ export class LocalSystemSupervisor {
     }
 
     if (manualIntervention.length === 0) {
-      clearState(this.root);
+      clearState(this.stateRoot);
       appendSupervisorLog(
         this.root,
         'Sistema parado sem remover containers, volumes, dados ou agendamentos',

@@ -22,6 +22,20 @@ export const postgresVolumeName = (projectName: string) =>
 export const composeProjectRuntimeRoot = (projectName: string) =>
   resolve(tmpdir(), 'afiliado-shopee-supervisor', projectName);
 
+/**
+ * The canonical project keeps its historical state path in the source
+ * worktree. Explicit Compose projects must never share that state: their
+ * project identity is the state ownership boundary, just as it is for the
+ * operation lock.
+ */
+export const composeProjectStateRoot = (
+  sourceRoot: string,
+  projectName: string,
+) =>
+  projectName === OPERATIONAL_COMPOSE_PROJECT_NAME
+    ? sourceRoot
+    : composeProjectRuntimeRoot(projectName);
+
 export const mainComposeArguments = (
   projectName: string,
   commandArguments: readonly string[] = [],

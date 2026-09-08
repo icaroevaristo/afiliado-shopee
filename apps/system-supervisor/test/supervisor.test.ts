@@ -6,7 +6,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -19,9 +19,16 @@ import {
 import type { MaintenanceDatabaseSnapshot } from '../src/maintenance-database';
 import {
   composeProjectRuntimeRoot,
+  composeProjectStateRoot,
   evolutionComposeArguments,
 } from '../src/runtime-identity';
-import { LocalSystemSupervisor, expectedServices } from '../src/supervisor';
+import {
+  LocalSystemSupervisor,
+  createServiceSpecs,
+  expectedServices,
+  resolveServiceArgs,
+  type ServiceSpec,
+} from '../src/supervisor';
 import { formatStatus } from '../src/cli';
 import type {
   CommandSpec,
@@ -240,7 +247,13 @@ const harness = (
   let evolutionRunning = false;
   const processes = new Map<
     number,
-    { running: boolean; marker: string; startedAt: string; matches: boolean }
+    {
+      running: boolean;
+      marker: string;
+      startedAt: string;
+      matches: boolean;
+      command?: string;
+    }
   >();
   const commands: CommandSpec[] = [];
   const stopped: number[] = [];
@@ -410,7 +423,15 @@ const harness = (
       const pid = nextPid++;
       const startedAt = `2026-07-25T12:00:${String(pid - 100).padStart(2, '0')}.000Z`;
       const marker = spec.args[0];
-      processes.set(pid, { running: true, marker, startedAt, matches: true });
+      processes.set(pid, {
+        running: true,
+        marker,
+        startedAt,
+        matches: true,
+        ...(spec.args.length > 1
+          ? { command: [spec.command, ...spec.args].join(' ') }
+          : {}),
+      });
       const name = specs.find((item) => item.marker === marker)
         ?.name as ServiceName;
       spawned.push(name);
@@ -433,6 +454,7 @@ const harness = (
         running: item?.running ?? false,
         identityMatches: Boolean(item?.matches && item.marker === marker),
         startedAt: item?.startedAt,
+        command: item?.command,
       };
     }),
     inspectProcessIdentity: vi.fn(async (pid, marker) => {
@@ -1060,6 +1082,51 @@ const registeredProcessFixture = (name: ServiceName, pid: number) => ({
   startedAt: '2026-07-25T12:00:00.000Z',
   log: `.runtime/local-system/${name}.log`,
 });
+
+const strictWorktreeSpecs = (root: string): ServiceSpec[] => {
+  const commandFor = (marker: string, entrypoint: string) =>
+    `node ${marker} tsx --tsconfig ${join(root, 'tsconfig.runtime.json')} ${join(root, entrypoint)}`;
+  const spec = (
+    name: ServiceName,
+    marker: string,
+    entrypoint: string,
+    healthUrl?: string,
+  ): ServiceSpec => ({
+    name,
+    command: 'node',
+    args: [
+      marker,
+      'tsx',
+      '--tsconfig',
+      join(root, 'tsconfig.runtime.json'),
+      join(root, entrypoint),
+    ],
+    marker,
+    identity: (inspection) => inspection.command === commandFor(marker, entrypoint),
+    ...(healthUrl ? { healthUrl: () => healthUrl } : {}),
+  });
+  return [
+    spec('api', 'api-entry', 'apps/api/src/server.ts', 'http://api/health'),
+    spec('dashboard', 'dashboard-entry', 'apps/dashboard/server.js', 'http://dashboard'),
+    spec(
+      'commercial-worker',
+      'commercial-entry',
+      'apps/worker/src/commercial-automation-worker.ts',
+    ),
+    spec(
+      'whatsapp-dispatch-worker',
+      'dispatch-entry',
+      'apps/worker/src/whatsapp-dispatch-runtime.ts',
+    ),
+  ];
+};
+
+const strictWorktreeCommand = (
+  root: string,
+  marker: string,
+  entrypoint: string,
+) =>
+  `node ${marker} tsx --tsconfig ${join(root, 'tsconfig.runtime.json')} ${join(root, entrypoint)}`;
 
 describe('LocalSystemSupervisor', () => {
   it('selects services by profile while preserving default preview and SEND', () => {
@@ -1911,6 +1978,8 @@ describe('LocalSystemSupervisor', () => {
 
   it('keeps an explicitly isolated start on its own project volume', async () => {
     const root = createRoot();
+    const projectStateRoot = composeProjectStateRoot(root, 'isolated-a');
+    directories.push(projectStateRoot);
     const state = harness({
       dockerDiscovery: equivalentDockerDiscovery('healthy', 'isolated-a'),
       volumeProjectName: 'isolated-a',
@@ -1937,6 +2006,169 @@ describe('LocalSystemSupervisor', () => {
             'compose --project-name isolated-a',
       ),
     ).toBe(true);
+    expect(readState(projectStateRoot)?.composeProjectName).toBe('isolated-a');
+    expect(readState(root)).toBeNull();
+  });
+
+  it('binds tsx-managed service identity to the current worktree paths', () => {
+    const root = resolve(import.meta.dirname, '../../..');
+    const ports = {
+      api: 3333,
+      dashboard: 3000,
+      postgres: 5432,
+      redis: 6379,
+      evolution: 8080,
+    };
+    for (const service of ['api', 'commercial-worker', 'whatsapp-dispatch-worker'] as const) {
+      const spec = createServiceSpecs(root).find((item) => item.name === service);
+      if (!spec?.identity) throw new Error(`Identity missing for ${service}`);
+      const args = resolveServiceArgs(spec, ports);
+      const command = [spec.command, ...args].map((value) => `"${value}"`).join(' ');
+      expect(spec.identity({ running: true, identityMatches: true, command }, ports)).toBe(true);
+      const foreignCommand = command.replace(
+        root,
+        `${root}-foreign`,
+      );
+      expect(
+        spec.identity(
+          { running: true, identityMatches: true, command: foreignCommand },
+          ports,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('fails closed before state mutation when a shared Compose project records another worktree processes', async () => {
+    const rootA = createRoot();
+    const rootB = createRoot();
+    const project = 'shared-worktree-ownership';
+    const stateRoot = composeProjectStateRoot(rootA, project);
+    directories.push(stateRoot);
+    const state = harness();
+    const apiPid = 701;
+    const dashboardPid = 702;
+    state.processes.set(apiPid, {
+      running: true,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+      command: strictWorktreeCommand(rootA, 'api-entry', 'apps/api/src/server.ts'),
+    });
+    state.processes.set(dashboardPid, {
+      running: true,
+      marker: 'dashboard-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+      command: strictWorktreeCommand(rootA, 'dashboard-entry', 'apps/dashboard/server.js'),
+    });
+    writeState(stateRoot, {
+      version: 1,
+      composeProjectName: project,
+      runtimeProfile: 'safe-certification',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: { api: 3333, dashboard: 3000, postgres: 5432, redis: 6379, evolution: 8080 },
+      processes: {
+        api: registeredProcessFixture('api', apiPid),
+        dashboard: registeredProcessFixture('dashboard', dashboardPid),
+      },
+    });
+    const before = readFileSync(statePath(stateRoot), 'utf8');
+    const supervisor = new LocalSystemSupervisor(rootB, state.deps, strictWorktreeSpecs(rootB), {
+      validateRoot: () => true,
+      composeProjectName: project,
+    });
+
+    await expect(supervisor.start(explicitSafePreviewEnvironment(), 'safe-certification')).rejects.toMatchObject({
+      code: 'SYSTEM_PROCESS_OWNERSHIP_UNPROVEN',
+    });
+    expect(readFileSync(statePath(stateRoot), 'utf8')).toBe(before);
+    expect(state.processes.get(apiPid)?.running).toBe(true);
+    expect(state.processes.get(dashboardPid)?.running).toBe(true);
+    expect(state.spawned).toEqual([]);
+    expect(state.stopped).toEqual([]);
+    expect(state.commands).toEqual([]);
+  });
+
+  it.each([
+    ['api', 'api-entry', 'apps/api/src/server.ts'],
+    ['commercial-worker', 'commercial-entry', 'apps/worker/src/commercial-automation-worker.ts'],
+    ['whatsapp-dispatch-worker', 'dispatch-entry', 'apps/worker/src/whatsapp-dispatch-runtime.ts'],
+  ] as const)('fails closed for a live %s from another worktree', async (service, marker, entrypoint) => {
+    const rootA = createRoot();
+    const rootB = createRoot();
+    const project = `foreign-${service}`;
+    const stateRoot = composeProjectStateRoot(rootA, project);
+    directories.push(stateRoot);
+    const state = harness();
+    state.processes.set(711, {
+      running: true,
+      marker,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+      command: strictWorktreeCommand(rootA, marker, entrypoint),
+    });
+    writeState(stateRoot, {
+      version: 1,
+      composeProjectName: project,
+      runtimeProfile: 'safe-certification',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: { api: 3433, dashboard: 3000, postgres: 5432, redis: 6379, evolution: 8080 },
+      processes: { [service]: registeredProcessFixture(service, 711) },
+    });
+    const before = readFileSync(statePath(stateRoot), 'utf8');
+    const supervisor = new LocalSystemSupervisor(rootB, state.deps, strictWorktreeSpecs(rootB), {
+      validateRoot: () => true,
+      composeProjectName: project,
+    });
+
+    await expect(supervisor.start(explicitSafePreviewEnvironment(), 'safe-certification')).rejects.toMatchObject({
+      code: 'SYSTEM_PROCESS_OWNERSHIP_UNPROVEN',
+    });
+    expect(readFileSync(statePath(stateRoot), 'utf8')).toBe(before);
+    expect(state.processes.get(711)?.running).toBe(true);
+    expect(state.spawned).toEqual([]);
+    expect(state.stopped).toEqual([]);
+  });
+
+  it('reuses a proven process from the current worktree and drops a dead PID safely', async () => {
+    const root = createRoot();
+    const state = harness();
+    const currentSpecs = strictWorktreeSpecs(root);
+    state.processes.set(721, {
+      running: true,
+      marker: 'api-entry',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      matches: true,
+      command: strictWorktreeCommand(root, 'api-entry', 'apps/api/src/server.ts'),
+    });
+    writeState(root, {
+      version: 1,
+      composeProjectName: 'afiliado-shopee',
+      runtimeProfile: 'safe-certification',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: { api: 3333, dashboard: 3000, postgres: 5432, redis: 6379, evolution: 8080 },
+      processes: { api: registeredProcessFixture('api', 721) },
+    });
+    const supervisor = new LocalSystemSupervisor(root, state.deps, currentSpecs, {
+      validateRoot: () => true,
+      maintenanceDatabase: async () => certificationSnapshot(),
+    });
+    const safeEnvironment = {
+      ...explicitSafePreviewEnvironment(),
+      DATABASE_URL:
+        'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+
+    await supervisor.start(safeEnvironment, 'safe-certification');
+    expect(state.spawned).not.toContain('api');
+
+    state.processes.get(721)!.running = false;
+    await supervisor.stop(safeEnvironment);
+    await supervisor.start(safeEnvironment, 'safe-certification');
+    expect(state.spawned).toContain('api');
   });
 
   it('persists the Compose identity with managed process state', async () => {
@@ -1950,6 +2182,122 @@ describe('LocalSystemSupervisor', () => {
     expect(JSON.parse(readFileSync(statePath(root), 'utf8'))).toMatchObject({
       version: 1,
       composeProjectName: 'afiliado-shopee',
+    });
+  });
+
+  it('keeps canonical state byte-for-byte intact while an isolated SAFE profile owns its own state', async () => {
+    const root = createRoot();
+    const projectName = 'isolated-state-owner';
+    const isolatedStateRoot = composeProjectStateRoot(root, projectName);
+    directories.push(isolatedStateRoot);
+    const canonicalState: LocalSystemState = {
+      version: 1,
+      composeProjectName: 'afiliado-shopee',
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    };
+    writeState(root, canonicalState);
+    const canonicalBytes = readFileSync(statePath(root), 'utf8');
+    const state = harness({
+      dockerDiscovery: equivalentDockerDiscovery('healthy', projectName),
+      volumeProjectName: projectName,
+    });
+    const supervisor = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectName,
+      maintenanceDatabase: async () => certificationSnapshot(),
+    });
+    const env = {
+      ...dailySendReadyEnvironment('local-token'),
+      DATABASE_URL:
+        'postgresql://postgres@localhost:5432/shopee_auto_affiliate_ai?schema=public',
+    };
+
+    await supervisor.start(env, 'safe-certification');
+    expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalBytes);
+    expect(readState(isolatedStateRoot)).toMatchObject({
+      composeProjectName: projectName,
+      runtimeProfile: 'safe-certification',
+    });
+    await expect(supervisor.status(env)).resolves.toMatchObject({
+      runtimeProfile: 'safe-certification',
+      runtime: { composeProjectName: projectName },
+    });
+    await expect(supervisor.stop(env)).resolves.toEqual({
+      stopped: true,
+      manualIntervention: [],
+    });
+    expect(readState(isolatedStateRoot)).toMatchObject({
+      composeProjectName: projectName,
+      runtimeProfile: 'safe-certification',
+      processes: {},
+    });
+    expect(readFileSync(statePath(root), 'utf8')).toBe(canonicalBytes);
+  });
+
+  it('keeps isolated projects and their mismatch guards independent', async () => {
+    const root = createRoot();
+    const projectA = 'isolated-state-a';
+    const projectB = 'isolated-state-b';
+    const stateRootA = composeProjectStateRoot(root, projectA);
+    const stateRootB = composeProjectStateRoot(root, projectB);
+    directories.push(stateRootA, stateRootB);
+    writeState(stateRootA, {
+      version: 1,
+      composeProjectName: projectB,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    });
+    writeState(stateRootB, {
+      version: 1,
+      composeProjectName: projectB,
+      startedAt: '2026-07-25T12:00:00.000Z',
+      mode: 'preview',
+      ports: {
+        api: 3433,
+        dashboard: 3000,
+        postgres: 5432,
+        redis: 6379,
+        evolution: 8080,
+      },
+      processes: {},
+    });
+    const state = harness();
+    const isolatedA = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectA,
+    });
+    const isolatedB = new LocalSystemSupervisor(root, state.deps, specs, {
+      validateRoot: () => true,
+      composeProjectName: projectB,
+    });
+
+    expect(stateRootA).not.toBe(stateRootB);
+    await expect(
+      isolatedA.status(explicitSafePreviewEnvironment()),
+    ).rejects.toMatchObject({
+      code: 'SYSTEM_COMPOSE_PROJECT_MISMATCH',
+    });
+    await expect(
+      isolatedB.status(explicitSafePreviewEnvironment()),
+    ).resolves.toMatchObject({
+      runtime: { composeProjectName: projectB },
     });
   });
 
@@ -2760,17 +3108,21 @@ describe('LocalSystemSupervisor', () => {
     ).toHaveLength(1);
   });
 
-  it('recovers stale registrations without killing a reused PID', async () => {
+  it('preserves a live registration whose ownership cannot be proven', async () => {
     const root = createRoot();
     const state = harness();
     const supervisor = createSupervisor(root, state.deps);
     await supervisor.start(environment());
     const oldApi = [...state.processes.entries()][0];
     oldApi[1].matches = false;
+    const before = readFileSync(statePath(root), 'utf8');
 
-    await supervisor.start(environment());
+    await expect(supervisor.start(environment())).rejects.toMatchObject({
+      code: 'SYSTEM_PROCESS_OWNERSHIP_UNPROVEN',
+    });
 
-    expect(state.spawned.filter((name) => name === 'api')).toHaveLength(2);
+    expect(readFileSync(statePath(root), 'utf8')).toBe(before);
+    expect(state.processes.get(oldApi[0])?.running).toBe(true);
     expect(state.stopped).not.toContain(oldApi[0]);
   });
 
