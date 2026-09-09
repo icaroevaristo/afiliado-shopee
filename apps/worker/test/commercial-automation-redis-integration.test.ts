@@ -266,7 +266,7 @@ describeRedis('commercial automation disposable Redis integration', () => {
           ],
           globalSentToday: sentToday,
           horizonMinutes: 5,
-          enforceConfirmedSentRotation: true,
+          maxSlotsPerTarget: 1,
         });
         expect(planned.slots).toHaveLength(1);
         const slot = planned.slots[0];

@@ -169,7 +169,7 @@ const makeConfig = (databaseUrl: string, redisUrl: string) =>
     SCHEDULER_ENABLED: 'false',
   });
 
-describeIntegration('commercial fulfillment 100-slot disposable certification', () => {
+describeIntegration('commercial fulfillment 100-slot temporal-rotation certification', () => {
   const databaseUrl = process.env.DATABASE_URL ?? '';
   const redisUrl = process.env.REDIS_URL ?? '';
 
@@ -664,7 +664,7 @@ describeIntegration('commercial fulfillment 100-slot disposable certification', 
     await prisma.$disconnect();
   }, 120_000);
 
-  it('executa 100 dispatches reais com rotacao derivada de ACK persistido', async () => {
+  it('executa 100 dispatches de fixture com rotacao temporal persistida', async () => {
     let currentNow = new Date(BASE.getTime() + 2 * 60_000);
     const clock = () => new Date(currentNow.getTime());
     const config = makeConfig(databaseUrl, redisUrl);

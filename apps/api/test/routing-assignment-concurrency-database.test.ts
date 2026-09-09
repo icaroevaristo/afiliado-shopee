@@ -254,6 +254,41 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
     });
   });
 
+  it('ACTIVE_LIFECYCLE bloqueia reorder da mesma lista e preserva revision', async () => {
+    const fixture = await createFixture('active-reorder');
+    const initial = await adminPrisma.whatsAppDestination.findUniqueOrThrow({
+      where: { id: fixture.destinationId },
+      include: { instanceAssignments: { orderBy: { position: 'asc' } } },
+    });
+    await expect(
+      adminRepository.updateAdministrativeWithLifecycleGuard(
+        fixture.destinationId,
+        {
+          assignedInstanceNames: [INSTANCE_B, INSTANCE_A],
+          expectedUpdatedAt: initial.updatedAt,
+          now: new Date(),
+        },
+      ),
+    ).resolves.toEqual({ kind: 'ACTIVE_LIFECYCLE' });
+    await expect(
+      adminPrisma.whatsAppDestination.findUnique({
+        where: { id: fixture.destinationId },
+        select: {
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      assignedInstanceName: INSTANCE_A,
+      assignmentRevision: 1,
+      instanceAssignments: [{ instanceName: INSTANCE_A, position: 0 }],
+    });
+  });
+
   it('sender espera o lock administrativo e falha sticky depois do commit A para B', async () => {
     const fixture = await createFixture('sender-waits');
     const locked = deferred();

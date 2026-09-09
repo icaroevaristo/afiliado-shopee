@@ -399,7 +399,7 @@ describe('commercial automation scheduler planner', () => {
     ).toHaveLength(30);
   });
 
-  it('simula 100 slots saudaveis com confirmacao e provider sem duplicidade', () => {
+  it('certifica 100 slots temporais sem deslocar fase quando B falha pre-provider', () => {
     const dailySchedule = {
       ...schedule,
       dailyGlobalLimit: 100,
@@ -412,11 +412,16 @@ describe('commercial automation scheduler planner', () => {
       'afiliado-shopee-secondary',
     ];
     const providerCalls: string[] = [];
+    const theoreticalInstances: string[] = [];
+    const blockedSlotKeys: string[] = [];
     let lastSentAt: Date | null = null;
     let lastSentInstanceName: string | null = null;
+    let sentToday = 0;
 
-    for (let sentToday = 0; sentToday < 100; sentToday += 1) {
-      const now = new Date(nowFor100HealthySlots.getTime() + sentToday * 5 * MINUTE_MS);
+    for (let slotIndex = 0; slotIndex < 100; slotIndex += 1) {
+      const now = new Date(
+        nowFor100HealthySlots.getTime() + slotIndex * 5 * MINUTE_MS,
+      );
       const result = planCommercialTargetSlots({
         now,
         schedule: dailySchedule,
@@ -437,24 +442,38 @@ describe('commercial automation scheduler planner', () => {
         ],
         globalSentToday: sentToday,
         horizonMinutes: 5,
-        enforceConfirmedSentRotation: true,
+        maxSlotsPerTarget: 1,
       });
       expect(result.slots).toHaveLength(1);
       const slot = result.slots[0]!;
+      const expectedInstance = orderedInstances[slotIndex % 2]!;
+      theoreticalInstances.push(slot.target.instanceName ?? '');
+      expect(slot.target.instanceName).toBe(expectedInstance);
+      const blockedBeforeProvider =
+        expectedInstance === orderedInstances[1] && slotIndex % 10 === 3;
+      if (blockedBeforeProvider) {
+        blockedSlotKeys.push(slot.slotKey);
+        continue;
+      }
       const providerCall = `${slot.slotKey}:${slot.target.instanceName}`;
       expect(providerCalls).not.toContain(providerCall);
       providerCalls.push(providerCall);
       lastSentAt = slot.scheduledFor;
       lastSentInstanceName = slot.target.instanceName;
+      sentToday += 1;
     }
 
-    expect(providerCalls).toHaveLength(100);
+    expect(theoreticalInstances.filter((name) => name === orderedInstances[0])).toHaveLength(50);
+    expect(theoreticalInstances.filter((name) => name === orderedInstances[1])).toHaveLength(50);
+    expect(blockedSlotKeys).toHaveLength(10);
+    expect(providerCalls).toHaveLength(90);
     expect(
       providerCalls.filter((call) => call.endsWith(':afiliado-shopee-local')),
     ).toHaveLength(50);
     expect(
       providerCalls.filter((call) => call.endsWith(':afiliado-shopee-secondary')),
-    ).toHaveLength(50);
+    ).toHaveLength(40);
+    expect(new Set(providerCalls).size).toBe(providerCalls.length);
   });
 
   it('mantem o intervalo dominante em tres slots do mesmo grupo', () => {
@@ -1393,7 +1412,69 @@ describe('commercial automation scheduler planner', () => {
     expect(revised.slots[0]!.jobId).not.toBe(first.slots[0]!.jobId);
   });
 
-  it('avanca a rotacao somente depois de um SENT confirmado e mantem B apos falha de B', () => {
+  it('mantem a fase temporal depois de B falhar antes do provider', () => {
+    const rotatingTarget = target('failed-b-temporal-phase', {
+      orderedInstanceNames: ['instance-a', 'instance-b'],
+      instanceActiveByName: { 'instance-a': true, 'instance-b': true },
+      assignmentRevision: 7,
+      dailyLimit: 4,
+      cadenceMinutes: 15,
+    });
+    const runtimeSchedule = {
+      ...schedule,
+      minimumIntervalMinutes: 15,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 4,
+      dailyGroupLimit: 4,
+    };
+    const runtimeInput = {
+      schedule: runtimeSchedule,
+      horizonMinutes: 15,
+      maxSlotsPerTarget: 1,
+    } as const;
+
+    const slotA = planCommercialTargetSlots({
+      ...runtimeInput,
+      now,
+      targets: [rotatingTarget],
+      globalSentToday: 0,
+    }).slots[0];
+    const slotB = planCommercialTargetSlots({
+      ...runtimeInput,
+      now: new Date(now.getTime() + 15 * MINUTE_MS),
+      targets: [
+        {
+          ...rotatingTarget,
+          lastSentAt: now,
+          lastSentInstanceName: 'instance-a',
+          groupSentToday: 1,
+        },
+      ],
+      globalSentToday: 1,
+    }).slots[0];
+    const nextSlotAfterFailedB = planCommercialTargetSlots({
+      ...runtimeInput,
+      now: new Date(now.getTime() + 30 * MINUTE_MS),
+      targets: [
+        {
+          ...rotatingTarget,
+          lastSentAt: now,
+          lastSentInstanceName: 'instance-a',
+          groupSentToday: 1,
+        },
+      ],
+      globalSentToday: 1,
+    }).slots[0];
+
+    expect(slotA?.target.instanceName).toBe('instance-a');
+    expect(slotB?.target.instanceName).toBe('instance-b');
+    expect(nextSlotAfterFailedB?.scheduledFor.toISOString()).toBe(
+      '2026-08-24T12:30:00.000Z',
+    );
+    expect(nextSlotAfterFailedB?.target.instanceName).toBe('instance-a');
+  });
+
+  it('nao usa lastSentInstanceName como cursor da rotacao', () => {
     const base = target('sent-rotation', {
       orderedInstanceNames: ['instance-a', 'instance-b'],
       instanceActiveByName: { 'instance-a': true, 'instance-b': true },
@@ -1406,7 +1487,7 @@ describe('commercial automation scheduler planner', () => {
       schedule: { ...schedule, minimumIntervalMinutes: 1, staggerMinutes: 0 },
       globalSentToday: 0,
       horizonMinutes: 10,
-      enforceConfirmedSentRotation: true,
+      maxSlotsPerTarget: 1,
     } as const;
 
     const first = planCommercialTargetSlots({ ...input, targets: [base] });
@@ -1420,10 +1501,121 @@ describe('commercial automation scheduler planner', () => {
     });
 
     expect(first.slots).toHaveLength(1);
-    expect(first.slots[0]?.target.instanceName).toBe('instance-b');
-    expect(afterBlockedAttempt.slots[0]?.target.instanceName).toBe('instance-b');
+    expect(first.slots[0]?.target.instanceName).toBe('instance-a');
+    expect(afterBlockedAttempt.slots[0]?.target.instanceName).toBe('instance-a');
     expect(afterBlockedAttempt.slots[0]?.jobId).toBe(first.slots[0]?.jobId);
     expect(afterSent.slots[0]?.target.instanceName).toBe('instance-a');
+  });
+
+  it('mantem a mesma escolha temporal para historicos de sucesso diferentes', () => {
+    const base = target('success-independent-matrix', {
+      orderedInstanceNames: ['instance-a', 'instance-b', 'instance-c'],
+      instanceActiveByName: {
+        'instance-a': true,
+        'instance-b': true,
+        'instance-c': true,
+      },
+      assignmentRevision: 9,
+      dailyLimit: 10,
+      cadenceMinutes: 15,
+    });
+    const planningNow = new Date(now.getTime() + 30 * MINUTE_MS);
+    const histories = [
+      { lastSentAt: null, lastSentInstanceName: null, groupSentToday: 0 },
+      { lastSentAt: now, lastSentInstanceName: 'instance-a', groupSentToday: 1 },
+      { lastSentAt: now, lastSentInstanceName: 'instance-b', groupSentToday: 2 },
+      { lastSentAt: now, lastSentInstanceName: 'instance-c', groupSentToday: 3 },
+    ];
+    const choices = histories.map((history) =>
+      planCommercialTargetSlots({
+        now: planningNow,
+        schedule: {
+          ...schedule,
+          minimumIntervalMinutes: 15,
+          staggerMinutes: 0,
+          dailyGlobalLimit: 10,
+          dailyGroupLimit: 10,
+        },
+        targets: [{ ...base, ...history }],
+        globalSentToday: history.groupSentToday,
+        horizonMinutes: 15,
+        maxSlotsPerTarget: 1,
+      }).slots[0]?.target.instanceName,
+    );
+
+    expect(choices).toEqual([
+      'instance-a',
+      'instance-a',
+      'instance-a',
+      'instance-a',
+    ]);
+  });
+
+  it('preserva a fase N=3 quando B e C ficam indisponiveis', () => {
+    const base = target('n3-failure-phase', {
+      orderedInstanceNames: ['instance-a', 'instance-b', 'instance-c'],
+      assignmentRevision: 4,
+      dailyLimit: 8,
+      cadenceMinutes: 1,
+    });
+    const planningSchedule = {
+      ...schedule,
+      minimumIntervalMinutes: 1,
+      staggerMinutes: 0,
+      dailyGlobalLimit: 8,
+      dailyGroupLimit: 8,
+    };
+    const afterBFailure = planCommercialTargetSlots({
+      now,
+      schedule: planningSchedule,
+      targets: [{
+        ...base,
+        instanceActiveByName: {
+          'instance-a': true,
+          'instance-b': false,
+          'instance-c': true,
+        },
+      }],
+      globalSentToday: 0,
+      horizonMinutes: 5,
+    });
+    const afterBAndCFailure = planCommercialTargetSlots({
+      now,
+      schedule: planningSchedule,
+      targets: [{
+        ...base,
+        instanceActiveByName: {
+          'instance-a': true,
+          'instance-b': false,
+          'instance-c': false,
+        },
+      }],
+      globalSentToday: 0,
+      horizonMinutes: 6,
+    });
+
+    expect(afterBFailure.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-a',
+      'instance-c',
+      'instance-a',
+      'instance-c',
+    ]);
+    expect(afterBFailure.slots.map((slot) => slot.scheduledFor.toISOString())).toEqual([
+      '2026-08-24T12:00:00.000Z',
+      '2026-08-24T12:02:00.000Z',
+      '2026-08-24T12:03:00.000Z',
+      '2026-08-24T12:05:00.000Z',
+    ]);
+    expect(afterBAndCFailure.slots.map((slot) => slot.target.instanceName)).toEqual([
+      'instance-a',
+      'instance-a',
+      'instance-a',
+    ]);
+    expect(afterBAndCFailure.slots.map((slot) => slot.scheduledFor.toISOString())).toEqual([
+      '2026-08-24T12:00:00.000Z',
+      '2026-08-24T12:03:00.000Z',
+      '2026-08-24T12:06:00.000Z',
+    ]);
   });
 
   it('planeja somente a proxima slot pendente por target no modo operacional', () => {
@@ -1440,7 +1632,7 @@ describe('commercial automation scheduler planner', () => {
       ],
       globalSentToday: 0,
       horizonMinutes: 10,
-      enforceConfirmedSentRotation: true,
+      maxSlotsPerTarget: 1,
     });
 
     expect(result.slots).toHaveLength(1);
