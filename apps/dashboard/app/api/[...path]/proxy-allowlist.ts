@@ -1,4 +1,10 @@
-export type DashboardProxyMethod = 'GET' | 'PATCH' | 'POST';
+import {
+  DASHBOARD_PROXY_CONTRACTS,
+  type DashboardProxyMethod,
+} from '@shopee-auto-affiliate-ai/shared';
+
+export { DASHBOARD_PROXY_CONTRACTS } from '@shopee-auto-affiliate-ai/shared';
+
 type PathPattern = readonly string[];
 
 export type DashboardUiCallout = {
@@ -51,10 +57,6 @@ export const DASHBOARD_UI_CALLOUTS: readonly DashboardUiCallout[] = [
   { method: 'GET', pattern: ['commercial-publications', 'manual', '*'], functions: ['getManualPublication'], callsites: ['app/produtos/[id]/page.tsx'] },
   { method: 'POST', pattern: ['commercial-publications', 'manual'], functions: ['createManualPublication'], callsites: ['app/produtos/[id]/page.tsx'] },
 ];
-
-export const DASHBOARD_PROXY_CONTRACTS = DASHBOARD_UI_CALLOUTS.map(
-  ({ method, pattern }) => ({ method, pattern }),
-);
 
 const matchesPath = (path: readonly string[], pattern: PathPattern) =>
   path.length === pattern.length &&
