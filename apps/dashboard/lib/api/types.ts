@@ -86,15 +86,49 @@ export type OperationalAdminBlocker = {
   code: string;
   entityId: string | null;
   message: string;
+  source?:
+    | 'DATABASE'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'LIFECYCLE'
+    | 'INSTANCE_HEALTH'
+    | 'RUNTIME'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt?: string;
+  sourceUpdatedAt?: string | null;
   actionHint?: string;
   nextEligibleAt?: string | null;
 };
 
 export type OperationalAdminQueueCounts = {
-  waiting: number;
-  active: number;
-  delayed: number;
-  prioritized: number;
+  status?: 'READY' | 'UNKNOWN' | 'UNAVAILABLE' | 'NOT_REQUIRED';
+  source?: 'QUEUE';
+  observedAt?: string;
+  counts?: {
+    waiting: number;
+    active: number;
+    delayed: number;
+    prioritized: number;
+  } | null;
+  /** Compatibility for snapshots produced before R3 queue measurement metadata. */
+  waiting?: number;
+  active?: number;
+  delayed?: number;
+  prioritized?: number;
+};
+
+export type OperationalReadiness = {
+  status: 'READY' | 'NOT_READY' | 'UNKNOWN' | 'NOT_REQUIRED';
+  source:
+    | 'AUTHENTICATED_API'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'INSTANCE_HEALTH'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt: string;
+  message: string;
 };
 
 export type OperationalAdminInstance = {
@@ -102,6 +136,8 @@ export type OperationalAdminInstance = {
   active: boolean;
   paused: boolean;
   health: 'UNKNOWN';
+  healthSource?: 'NO_AUTHORITATIVE_HEARTBEAT';
+  healthObservedAt?: string;
   assignedGroupCount: number;
   lastSendAt: string | null;
   nextSendAt: string | null;
@@ -190,6 +226,15 @@ export type OperationalAdmin = {
   nextSendAt: string | null;
   lastSendAt: string | null;
   blockers: OperationalAdminBlocker[];
+  readiness?: {
+    controlPlane: OperationalReadiness;
+    queues: OperationalReadiness;
+    scheduler: OperationalReadiness;
+    instanceConnectivity: OperationalReadiness;
+    providerConfiguration: OperationalReadiness;
+    commercial: OperationalReadiness;
+    send: OperationalReadiness;
+  };
   queues: {
     productPipeline: OperationalAdminQueueCounts;
     whatsappDispatch: OperationalAdminQueueCounts;

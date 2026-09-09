@@ -71,15 +71,34 @@ export type OperationalAdminBlocker = {
   code: string;
   entityId: string | null;
   message: string;
+  source:
+    | 'DATABASE'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'LIFECYCLE'
+    | 'INSTANCE_HEALTH'
+    | 'RUNTIME'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt: string;
+  sourceUpdatedAt?: string | null;
   actionHint?: string;
   nextEligibleAt?: string | null;
 };
+
+type OperationalAdminBlockerInput = Omit<
+  OperationalAdminBlocker,
+  'source' | 'observedAt'
+> &
+  Partial<Pick<OperationalAdminBlocker, 'source' | 'observedAt'>>;
 
 export type OperationalAdminInstance = {
   name: string;
   active: boolean;
   paused: boolean;
   health: 'UNKNOWN';
+  healthSource: 'NO_AUTHORITATIVE_HEARTBEAT';
+  healthObservedAt: string;
   assignedGroupCount: number;
   lastSendAt: string | null;
   nextSendAt: string | null;
@@ -145,10 +164,28 @@ export type OperationalAdminCampaign = {
 };
 
 export type OperationalAdminQueueCounts = {
-  waiting: number;
-  active: number;
-  delayed: number;
-  prioritized: number;
+  status: 'READY' | 'UNKNOWN' | 'UNAVAILABLE' | 'NOT_REQUIRED';
+  source: 'QUEUE';
+  observedAt: string;
+  counts: {
+    waiting: number;
+    active: number;
+    delayed: number;
+    prioritized: number;
+  } | null;
+};
+
+export type OperationalReadiness = {
+  status: 'READY' | 'NOT_READY' | 'UNKNOWN' | 'NOT_REQUIRED';
+  source:
+    | 'AUTHENTICATED_API'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'INSTANCE_HEALTH'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt: string;
+  message: string;
 };
 
 export type OperationalAdminResponse = {
@@ -178,6 +215,15 @@ export type OperationalAdminResponse = {
   nextSendAt: string | null;
   lastSendAt: string | null;
   blockers: OperationalAdminBlocker[];
+  readiness: {
+    controlPlane: OperationalReadiness;
+    queues: OperationalReadiness;
+    scheduler: OperationalReadiness;
+    instanceConnectivity: OperationalReadiness;
+    providerConfiguration: OperationalReadiness;
+    commercial: OperationalReadiness;
+    send: OperationalReadiness;
+  };
   queues: {
     productPipeline: OperationalAdminQueueCounts;
     whatsappDispatch: OperationalAdminQueueCounts;
@@ -228,37 +274,69 @@ const INSTANCE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const iso = (value: Date | null | undefined) => value?.toISOString() ?? null;
 
-const emptyQueueCounts = (): OperationalAdminQueueCounts => ({
-  waiting: 0,
-  active: 0,
-  delayed: 0,
-  prioritized: 0,
-});
-
 const readQueueCounts = async (
   queue: QueueCountsReader | undefined,
+  observedAt: Date,
 ): Promise<OperationalAdminQueueCounts> => {
-  if (!queue?.getJobCounts) return emptyQueueCounts();
-  const counts = await queue.getJobCounts(
-    'waiting',
-    'active',
-    'delayed',
-    'prioritized',
-  );
-  return {
-    waiting: counts.waiting ?? 0,
-    active: counts.active ?? 0,
-    delayed: counts.delayed ?? 0,
-    prioritized: counts.prioritized ?? 0,
+  const snapshot = {
+    source: 'QUEUE' as const,
+    observedAt: observedAt.toISOString(),
   };
+  if (!queue?.getJobCounts) {
+    return { ...snapshot, status: 'UNKNOWN', counts: null };
+  }
+  try {
+    const counts = await queue.getJobCounts(
+      'waiting',
+      'active',
+      'delayed',
+      'prioritized',
+    );
+    return {
+      ...snapshot,
+      status: 'READY',
+      counts: {
+        waiting: counts.waiting ?? 0,
+        active: counts.active ?? 0,
+        delayed: counts.delayed ?? 0,
+        prioritized: counts.prioritized ?? 0,
+      },
+    };
+  } catch {
+    return { ...snapshot, status: 'UNAVAILABLE', counts: null };
+  }
+};
+
+const readSchedulerStatus = async (
+  scheduler: SchedulerStatusReader | undefined,
+  observedAt: Date,
+) => {
+  const snapshot = {
+    source: 'SCHEDULER' as const,
+    observedAt: observedAt.toISOString(),
+  };
+  if (!scheduler) {
+    return { ...snapshot, status: 'UNKNOWN' as const, value: null };
+  }
+  try {
+    return {
+      ...snapshot,
+      status: 'READY' as const,
+      value: await scheduler.getStatus(),
+    };
+  } catch {
+    return { ...snapshot, status: 'UNAVAILABLE' as const, value: null };
+  }
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const parseQueuedCommercialTarget = (
-  job: { id?: string | number; name?: string; data?: unknown },
-): QueuedCommercialTarget | null => {
+const parseQueuedCommercialTarget = (job: {
+  id?: string | number;
+  name?: string;
+  data?: unknown;
+}): QueuedCommercialTarget | null => {
   if (
     job.name !== JOB_NAMES.commercialAutomationTarget ||
     !isRecord(job.data) ||
@@ -288,7 +366,8 @@ const parseQueuedCommercialTarget = (
 
 const readAllQueuedTargetJobs = async (queue: QueueTargetJobReader) => {
   const pageSize = 200;
-  const jobs: Array<{ id?: string | number; name?: string; data?: unknown }> = [];
+  const jobs: Array<{ id?: string | number; name?: string; data?: unknown }> =
+    [];
   let start = 0;
   while (true) {
     const page = await queue.getJobs?.(
@@ -332,7 +411,8 @@ const readValidQueuedTargets = async ({
       if (target.scheduleRevision !== scheduleRevision) return false;
       const group = groups.find((candidate) => candidate.id === target.groupId);
       const campaign = group ? campaignForGroup(group, campaigns) : null;
-      if (!group || !campaign || campaign.id !== target.campaignId) return false;
+      if (!group || !campaign || campaign.id !== target.campaignId)
+        return false;
       if (
         group.fingerprint !== target.logicalGroupFingerprint ||
         campaign.logicalGroupFingerprint !== target.logicalGroupFingerprint ||
@@ -372,14 +452,56 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   updatedAt: now,
 });
 
-const uniqueBlockers = (blockers: OperationalAdminBlocker[]) => {
+const sourceForBlocker = (
+  blocker: Pick<OperationalAdminBlocker, 'code' | 'scope'>,
+): OperationalAdminBlocker['source'] => {
+  if (blocker.code === 'QUEUE_HEALTH_UNKNOWN') return 'QUEUE';
+  if (blocker.code === 'SCHEDULER_STATUS_UNKNOWN') return 'SCHEDULER';
+  if (blocker.code === 'WHATSAPP_INSTANCE_CONNECTION_UNKNOWN') {
+    return 'INSTANCE_HEALTH';
+  }
+  if (
+    blocker.code.includes('EXECUTION') ||
+    blocker.code.includes('AMBIGUOUS') ||
+    blocker.code.includes('INVESTIGATION')
+  ) {
+    return 'LIFECYCLE';
+  }
+  if (
+    blocker.code.includes('AUTOMATION') ||
+    blocker.code.includes('LIMIT') ||
+    blocker.code.includes('BUDGET') ||
+    blocker.code.includes('ELIGIBLE') ||
+    blocker.code === 'WHATSAPP_GROUP_SEND_DISABLED' ||
+    blocker.code === 'WHATSAPP_GROUP_SAFE_MODE_REQUIRED'
+  ) {
+    return 'POLICY';
+  }
+  return 'DATABASE';
+};
+
+const uniqueBlockers = (
+  blockers: OperationalAdminBlockerInput[],
+  observedAt: Date,
+) => {
   const seen = new Set<string>();
-  return blockers.filter((blocker) => {
-    const key = [blocker.scope, blocker.entityId, blocker.code].join('|');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return blockers
+    .map((blocker) => ({
+      ...blocker,
+      source: blocker.source ?? sourceForBlocker(blocker),
+      observedAt: blocker.observedAt ?? observedAt.toISOString(),
+    }))
+    .filter((blocker) => {
+      const key = [
+        blocker.scope,
+        blocker.entityId,
+        blocker.code,
+        blocker.source,
+      ].join('|');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 };
 
 const messageForReason = (reason: string) => {
@@ -418,7 +540,7 @@ const reasonBlocker = (
   scope: OperationalAdminBlocker['scope'],
   entityId: string | null,
   reason: string,
-): OperationalAdminBlocker => ({
+): OperationalAdminBlockerInput => ({
   scope,
   entityId,
   code: reason,
@@ -572,7 +694,7 @@ export class OperationalAdminService {
     instances: WhatsAppInstanceRecord[],
     now: Date,
   ) {
-    const blockers: OperationalAdminBlocker[] = [];
+    const blockers: OperationalAdminBlockerInput[] = [];
     if (!group.active) {
       blockers.push({
         scope: 'GROUP',
@@ -658,6 +780,19 @@ export class OperationalAdminService {
         message: 'Todas as instancias atribuidas estao pausadas.',
       });
     }
+    if (executableInstance) {
+      blockers.push({
+        scope: 'INSTANCE',
+        code: 'WHATSAPP_INSTANCE_CONNECTION_UNKNOWN',
+        entityId: executableInstance.name,
+        message:
+          'Nao existe fonte autoritativa recente que confirme a conexao WhatsApp da instancia.',
+        source: 'INSTANCE_HEALTH',
+        observedAt: now.toISOString(),
+        actionHint:
+          'Confirme a conectividade por uma fonte autoritativa antes de permitir SEND.',
+      });
+    }
     if (!campaign) {
       blockers.push({
         scope: 'GROUP',
@@ -732,13 +867,16 @@ export class OperationalAdminService {
       queueProduct,
       queueDispatch,
       queueCommercial,
-      scheduler,
+      schedulerSnapshot,
       providerUsage,
     ] = await Promise.all([
-      readQueueCounts(this.dependencies.queues?.productPipeline),
-      readQueueCounts(this.dependencies.queues?.whatsappDispatch),
-      readQueueCounts(this.dependencies.queues?.commercialAutomation),
-      this.dependencies.scheduler?.getStatus() ?? Promise.resolve(null),
+      readQueueCounts(this.dependencies.queues?.productPipeline, context.now),
+      readQueueCounts(this.dependencies.queues?.whatsappDispatch, context.now),
+      readQueueCounts(
+        this.dependencies.queues?.commercialAutomation,
+        context.now,
+      ),
+      readSchedulerStatus(this.dependencies.scheduler, context.now),
       this.dependencies.externalBudget?.snapshot() ??
         Promise.resolve({
           dayKey: '',
@@ -803,14 +941,20 @@ export class OperationalAdminService {
       string,
       Array<{ scheduledFor: string; instanceName: string }>
     >();
-    const registerUpcomingTarget = (target: {
-      groupId: string;
-      campaignId: string;
-      instanceName: string;
-      scheduledFor: Date;
-    }, fallbackOnly = false) => {
+    const registerUpcomingTarget = (
+      target: {
+        groupId: string;
+        campaignId: string;
+        instanceName: string;
+        scheduledFor: Date;
+      },
+      fallbackOnly = false,
+    ) => {
       const currentGroup = nextByGroup.get(target.groupId);
-      if (!currentGroup || (!fallbackOnly && target.scheduledFor < currentGroup)) {
+      if (
+        !currentGroup ||
+        (!fallbackOnly && target.scheduledFor < currentGroup)
+      ) {
         nextByGroup.set(target.groupId, target.scheduledFor);
       }
       const currentCampaign = nextByCampaign.get(target.campaignId);
@@ -851,12 +995,15 @@ export class OperationalAdminService {
         left.slotKey.localeCompare(right.slotKey),
     );
     for (const slot of plannedSlots) {
-      registerUpcomingTarget({
-        groupId: slot.target.groupId,
-        campaignId: slot.target.campaignId,
-        instanceName: slot.target.instanceName,
-        scheduledFor: slot.scheduledFor,
-      }, true);
+      registerUpcomingTarget(
+        {
+          groupId: slot.target.groupId,
+          campaignId: slot.target.campaignId,
+          instanceName: slot.target.instanceName,
+          scheduledFor: slot.scheduledFor,
+        },
+        true,
+      );
     }
     const groupOutputs: OperationalAdminGroup[] = [];
     for (const group of context.groups) {
@@ -898,7 +1045,7 @@ export class OperationalAdminService {
         lastSendAt: iso(lastByGroup.get(group.id)),
         nextSendAt: iso(nextByGroup.get(group.id) ?? campaignNext),
         upcomingAssignments: upcomingByGroup.get(group.id) ?? [],
-        blockers: uniqueBlockers(blockers),
+        blockers: uniqueBlockers(blockers, context.now),
         memberCount: group.memberCount ?? null,
         ownerIsParticipant: group.ownerIsParticipant ?? null,
         discoveredAt: iso(group.discoveredAt),
@@ -935,6 +1082,42 @@ export class OperationalAdminService {
         reasonBlocker('GLOBAL', null, 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED'),
       );
     }
+    const queueSnapshots = [
+      ['product-pipeline', queueProduct],
+      ['whatsapp-dispatch', queueDispatch],
+      ['commercial-automation', queueCommercial],
+    ] as const;
+    for (const [queueName, queue] of queueSnapshots) {
+      if (queue.status === 'READY') continue;
+      globalBlockers.push({
+        scope: 'GLOBAL',
+        code: 'QUEUE_HEALTH_UNKNOWN',
+        entityId: queueName,
+        message:
+          queue.status === 'UNAVAILABLE'
+            ? 'A leitura authoritative da fila falhou nesta atualizacao.'
+            : 'A fila obrigatoria nao possui uma leitura authoritative nesta atualizacao.',
+        source: 'QUEUE',
+        observedAt: queue.observedAt,
+        actionHint:
+          'Restaure a leitura da fila antes de tratar sua capacidade como vazia.',
+      });
+    }
+    if (schedulerSnapshot.status !== 'READY') {
+      globalBlockers.push({
+        scope: 'GLOBAL',
+        code: 'SCHEDULER_STATUS_UNKNOWN',
+        entityId: null,
+        message:
+          schedulerSnapshot.status === 'UNAVAILABLE'
+            ? 'A leitura authoritative do scheduler falhou nesta atualizacao.'
+            : 'O scheduler nao possui uma leitura authoritative nesta atualizacao.',
+        source: 'SCHEDULER',
+        observedAt: schedulerSnapshot.observedAt,
+        actionHint:
+          'Restaure a leitura do scheduler antes de tratar a agenda comercial como atual.',
+      });
+    }
     const instances = context.instances.map((instance) => {
       const assignedGroups = groupOutputs.filter((group) =>
         group.assignedInstanceNames.includes(instance.name),
@@ -945,7 +1128,7 @@ export class OperationalAdminService {
             blocker.scope === 'INSTANCE' || blocker.scope === 'GLOBAL',
         ),
       );
-      const blockers: OperationalAdminBlocker[] = [...groupBlockers];
+      const blockers: OperationalAdminBlockerInput[] = [...groupBlockers];
       if (!instance.active) {
         blockers.push({
           scope: 'INSTANCE',
@@ -967,10 +1150,12 @@ export class OperationalAdminService {
         active: instance.active,
         paused: instance.paused === true,
         health: 'UNKNOWN' as const,
+        healthSource: 'NO_AUTHORITATIVE_HEARTBEAT' as const,
+        healthObservedAt: context.now.toISOString(),
         assignedGroupCount: assignedGroups.length,
         lastSendAt: iso(lastByInstance.get(instance.name)),
         nextSendAt: iso(nextByInstance.get(instance.name)),
-        blockers: uniqueBlockers(blockers),
+        blockers: uniqueBlockers(blockers, context.now),
         updatedAt: instance.updatedAt.toISOString(),
       };
     });
@@ -1009,9 +1194,28 @@ export class OperationalAdminService {
         },
         lastSendAt: iso(lastByCampaign.get(campaign.id)),
         nextSendAt: iso(nextByCampaign.get(campaign.id)),
-        blockers: uniqueBlockers(campaignBlockers),
+        blockers: uniqueBlockers(campaignBlockers, context.now),
       };
     });
+    const allBlockers = uniqueBlockers(
+      [...globalBlockers, ...groupOutputs.flatMap((group) => group.blockers)],
+      context.now,
+    );
+    const queueReadinessStatus = queueSnapshots.every(
+      ([, queue]) => queue.status === 'READY',
+    )
+      ? 'READY'
+      : 'UNKNOWN';
+    const instanceReadinessStatus =
+      context.instances.length === 0 ? 'NOT_READY' : 'UNKNOWN';
+    const commercialReadinessStatus = allBlockers.some(
+      (blocker) =>
+        blocker.source === 'POLICY' || blocker.source === 'LIFECYCLE',
+    )
+      ? 'NOT_READY'
+      : 'UNKNOWN';
+    const sendReadinessStatus =
+      allBlockers.length > 0 ? 'NOT_READY' : 'UNKNOWN';
     return {
       generatedAt: context.now.toISOString(),
       automation: {
@@ -1042,10 +1246,67 @@ export class OperationalAdminService {
         queuedTargets[0]?.scheduledFor ?? plan.slots[0]?.scheduledFor,
       ),
       lastSendAt: iso(lastGlobal),
-      blockers: uniqueBlockers([
-        ...globalBlockers,
-        ...groupOutputs.flatMap((group) => group.blockers),
-      ]),
+      blockers: allBlockers,
+      readiness: {
+        controlPlane: {
+          status: 'READY',
+          source: 'AUTHENTICATED_API',
+          observedAt: context.now.toISOString(),
+          message: 'O snapshot foi retornado por uma rota autenticada.',
+        },
+        queues: {
+          status: queueReadinessStatus,
+          source: 'QUEUE',
+          observedAt: context.now.toISOString(),
+          message:
+            queueReadinessStatus === 'READY'
+              ? 'Todas as filas obrigatorias foram medidas nesta atualizacao.'
+              : 'Pelo menos uma fila obrigatoria nao possui medicao authoritative atual.',
+        },
+        scheduler: {
+          status: schedulerSnapshot.status === 'READY' ? 'READY' : 'UNKNOWN',
+          source: 'SCHEDULER',
+          observedAt: schedulerSnapshot.observedAt,
+          message:
+            schedulerSnapshot.status === 'READY'
+              ? 'O scheduler foi consultado nesta atualizacao.'
+              : 'O scheduler nao possui leitura authoritative atual.',
+        },
+        instanceConnectivity: {
+          status: instanceReadinessStatus,
+          source: 'INSTANCE_HEALTH',
+          observedAt: context.now.toISOString(),
+          message:
+            instanceReadinessStatus === 'NOT_READY'
+              ? 'Nao ha instancia registrada para o plano comercial.'
+              : 'Registro administrativo nao prova conexao WhatsApp.',
+        },
+        providerConfiguration: {
+          status: 'UNKNOWN',
+          source: 'PROVIDER_CONFIGURATION',
+          observedAt: context.now.toISOString(),
+          message:
+            'Este snapshot nao infere configuracao ou conectividade de provider sem uma fonte autoritativa.',
+        },
+        commercial: {
+          status: commercialReadinessStatus,
+          source: 'POLICY',
+          observedAt: context.now.toISOString(),
+          message:
+            commercialReadinessStatus === 'NOT_READY'
+              ? 'Uma politica ou lifecycle impede a execucao comercial.'
+              : 'A prontidao comercial nao pode ser afirmada sem todas as fontes requeridas.',
+        },
+        send: {
+          status: sendReadinessStatus,
+          source: 'PROVIDER_CONFIGURATION',
+          observedAt: context.now.toISOString(),
+          message:
+            sendReadinessStatus === 'NOT_READY'
+              ? 'Existem blockers que impedem chegar ao boundary de SEND.'
+              : 'A configuracao sozinha nao prova que SEND e seguro.',
+        },
+      },
       queues: {
         productPipeline: queueProduct,
         whatsappDispatch: queueDispatch,
@@ -1057,7 +1318,7 @@ export class OperationalAdminService {
       investigationRequired: context.counts.investigationRequired,
       pendingDispatches: context.counts.pendingDispatches,
       pendingOutboxes: context.counts.pendingOutboxes,
-      scheduler,
+      scheduler: schedulerSnapshot.value,
       instances,
       groups: groupOutputs,
       campaigns,

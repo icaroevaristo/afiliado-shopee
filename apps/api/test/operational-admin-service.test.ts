@@ -378,24 +378,52 @@ const createService = (options?: {
     Array<{ id?: string | number; name?: string; data?: unknown }>
   >;
   plannerSlots?: PlannedCommercialTargetSlot[];
+  queueCounts?: {
+    productPipeline?: Record<string, number> | 'THROW';
+    whatsappDispatch?: Record<string, number> | 'THROW';
+    commercialAutomation?: Record<string, number> | 'THROW';
+  };
+  scheduler?: 'READY' | 'THROW';
 }) => {
   status.hasActiveGroupLifecycle = async () => false;
   const instances = new MemoryInstances();
   const groups = new MemoryGroups();
   const getCommercialJobs = vi.fn(
-    async (
-      _types: Array<'waiting' | 'active' | 'delayed'>,
-      start = 0,
-    ) => {
+    async (_types: Array<'waiting' | 'active' | 'delayed'>, start = 0) => {
       const jobs = options?.commercialTargetJobPages
-        ? options.commercialTargetJobPages[Math.floor(start / 200)] ?? []
-        : options?.commercialTargetJobs ?? [];
+        ? (options.commercialTargetJobPages[Math.floor(start / 200)] ?? [])
+        : (options?.commercialTargetJobs ?? []);
       return jobs.map((job) => ({
         ...job,
         name: job.name ?? JOB_NAMES.commercialAutomationTarget,
       }));
     },
   );
+  const queueReader = (value: Record<string, number> | 'THROW' | undefined) =>
+    value === undefined
+      ? undefined
+      : {
+          getJobCounts: async () => {
+            if (value === 'THROW') throw new Error('queue unavailable');
+            return value;
+          },
+        };
+  const productPipeline = queueReader(options?.queueCounts?.productPipeline);
+  const whatsappDispatch = queueReader(options?.queueCounts?.whatsappDispatch);
+  const commercialCounts = queueReader(
+    options?.queueCounts?.commercialAutomation,
+  );
+  const commercialAutomation =
+    options?.commercialTargetJobs ||
+    options?.commercialTargetJobPages ||
+    commercialCounts
+      ? {
+          ...commercialCounts,
+          ...(options?.commercialTargetJobs || options?.commercialTargetJobPages
+            ? { getJobs: getCommercialJobs }
+            : {}),
+        }
+      : undefined;
   return {
     instances,
     groups,
@@ -418,11 +446,23 @@ const createService = (options?: {
       config,
       maxMessagesPerRun: 1,
       clock: () => NOW,
-      ...(options?.commercialTargetJobs || options?.commercialTargetJobPages
+      ...(productPipeline || whatsappDispatch || commercialAutomation
         ? {
             queues: {
-              commercialAutomation: {
-                getJobs: getCommercialJobs,
+              ...(productPipeline ? { productPipeline } : {}),
+              ...(whatsappDispatch ? { whatsappDispatch } : {}),
+              ...(commercialAutomation ? { commercialAutomation } : {}),
+            },
+          }
+        : {}),
+      ...(options?.scheduler
+        ? {
+            scheduler: {
+              getStatus: async () => {
+                if (options.scheduler === 'THROW') {
+                  throw new Error('scheduler unavailable');
+                }
+                return { status: 'registered' };
               },
             },
           }
@@ -432,6 +472,106 @@ const createService = (options?: {
 };
 
 describe('OperationalAdminService', () => {
+  it('preserva ausência de reader como UNKNOWN, sem inventar fila vazia', async () => {
+    const { service } = createService();
+
+    const result = await service.getOverview();
+
+    expect(result.queues.productPipeline).toMatchObject({
+      status: 'UNKNOWN',
+      source: 'QUEUE',
+      counts: null,
+      observedAt: NOW.toISOString(),
+    });
+    expect(
+      result.blockers.filter(
+        (blocker) => blocker.code === 'QUEUE_HEALTH_UNKNOWN',
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('reporta zero somente depois de medir cada estado de fila', async () => {
+    const { service } = createService({
+      queueCounts: {
+        productPipeline: {},
+        whatsappDispatch: {},
+        commercialAutomation: {},
+      },
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.queues.productPipeline).toMatchObject({
+      status: 'READY',
+      counts: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+    });
+    expect(result.readiness.queues.status).toBe('READY');
+    expect(
+      result.blockers.some(
+        (blocker) => blocker.code === 'QUEUE_HEALTH_UNKNOWN',
+      ),
+    ).toBe(false);
+  });
+
+  it('mantém saúde parcial de filas quando uma leitura falha', async () => {
+    const { service } = createService({
+      queueCounts: {
+        productPipeline: { waiting: 2 },
+        whatsappDispatch: 'THROW',
+        commercialAutomation: { delayed: 1 },
+      },
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.queues.productPipeline).toMatchObject({
+      status: 'READY',
+      counts: { waiting: 2, active: 0, delayed: 0, prioritized: 0 },
+    });
+    expect(result.queues.whatsappDispatch).toMatchObject({
+      status: 'UNAVAILABLE',
+      counts: null,
+    });
+    expect(result.queues.commercialAutomation).toMatchObject({
+      status: 'READY',
+      counts: { waiting: 0, active: 0, delayed: 1, prioritized: 0 },
+    });
+  });
+
+  it('marca scheduler sem leitura como blocker correlacionado, sem derrubar o snapshot', async () => {
+    const { service } = createService({ scheduler: 'THROW' });
+
+    const result = await service.getOverview();
+    const blocker = result.blockers.find(
+      (candidate) => candidate.code === 'SCHEDULER_STATUS_UNKNOWN',
+    );
+
+    expect(blocker).toMatchObject({
+      source: 'SCHEDULER',
+      observedAt: NOW.toISOString(),
+    });
+    expect(result.readiness.scheduler.status).toBe('UNKNOWN');
+    expect(result.scheduler).toBeNull();
+  });
+
+  it('correlaciona conexão de instância não comprovada com source e timestamp', async () => {
+    const { service } = createService();
+
+    const result = await service.getOverview();
+    const blocker = result.blockers.find(
+      (candidate) => candidate.code === 'WHATSAPP_INSTANCE_CONNECTION_UNKNOWN',
+    );
+
+    expect(blocker).toMatchObject({
+      scope: 'INSTANCE',
+      entityId: 'instance-a',
+      source: 'INSTANCE_HEALTH',
+      observedAt: NOW.toISOString(),
+    });
+    expect(result.readiness.instanceConnectivity.status).toBe('UNKNOWN');
+    expect(result.readiness.send.status).toBe('NOT_READY');
+  });
+
   it('deriva limites efetivos, próximo/último envio e blockers sem persistir estados derivados', async () => {
     const { service } = createService();
     const result = await service.getOverview();
@@ -484,7 +624,9 @@ describe('OperationalAdminService', () => {
 
   it('T18 usa o fallback do planner quando não há target job pendente válido', async () => {
     const plannerAt = new Date('2026-08-28T19:52:00.000Z');
-    const { service } = createService({ plannerSlots: [plannedSlot(plannerAt)] });
+    const { service } = createService({
+      plannerSlots: [plannedSlot(plannerAt)],
+    });
 
     const result = await service.getOverview();
 
@@ -544,7 +686,11 @@ describe('OperationalAdminService', () => {
 
     const result = await service.getOverview();
 
-    expect(getCommercialJobs).toHaveBeenCalledWith(['waiting', 'delayed'], 0, 199);
+    expect(getCommercialJobs).toHaveBeenCalledWith(
+      ['waiting', 'delayed'],
+      0,
+      199,
+    );
     expect(result.nextSendAt).toBeNull();
   });
 

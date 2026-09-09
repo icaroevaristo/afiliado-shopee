@@ -866,9 +866,10 @@ export function OperationalAdminPanel({
               aggregate.
             </p>
             <p className="mt-1 font-mono text-xs">
-              Queue: waiting {overview.queues.whatsappDispatch.waiting} · active{' '}
-              {overview.queues.whatsappDispatch.active} · delayed{' '}
-              {overview.queues.whatsappDispatch.delayed}
+              {overview.queues.whatsappDispatch.status === 'READY' &&
+              overview.queues.whatsappDispatch.counts
+                ? `Queue: waiting ${overview.queues.whatsappDispatch.counts.waiting} · active ${overview.queues.whatsappDispatch.counts.active} · delayed ${overview.queues.whatsappDispatch.counts.delayed}`
+                : `Queue: ${overview.queues.whatsappDispatch.status ?? 'UNKNOWN'} · contagens não medidas`}
             </p>
           </div>
         </>
