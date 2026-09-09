@@ -99,6 +99,9 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
         fingerprint: fingerprintWhatsAppGroupId(externalGroupId),
         sourceInstanceName: INSTANCE_A,
         assignedInstanceName: INSTANCE_A,
+        instanceAssignments: {
+          create: { instanceName: INSTANCE_A, position: 0 },
+        },
       },
     });
     if (withDispatch) {
@@ -177,6 +180,23 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
       },
     );
     expect(update).toMatchObject({ kind: 'UPDATED' });
+    await expect(
+      adminPrisma.whatsAppDestination.findUnique({
+        where: { id: fixture.destinationId },
+        select: {
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      assignedInstanceName: INSTANCE_B,
+      assignmentRevision: 2,
+      instanceAssignments: [{ instanceName: INSTANCE_B, position: 0 }],
+    });
     await adminPrisma.whatsAppDispatch.create({
       data: {
         id: fixture.dispatchId,
@@ -215,6 +235,23 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
         },
       ),
     ).resolves.toEqual({ kind: 'ACTIVE_LIFECYCLE' });
+    await expect(
+      adminPrisma.whatsAppDestination.findUnique({
+        where: { id: fixture.destinationId },
+        select: {
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      assignedInstanceName: INSTANCE_A,
+      assignmentRevision: 1,
+      instanceAssignments: [{ instanceName: INSTANCE_A, position: 0 }],
+    });
   });
 
   it('sender espera o lock administrativo e falha sticky depois do commit A para B', async () => {
@@ -229,7 +266,20 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
       `;
       await transaction.whatsAppDestination.update({
         where: { id: fixture.destinationId },
-        data: { assignedInstanceName: INSTANCE_B },
+        data: {
+          assignedInstanceName: INSTANCE_B,
+          assignmentRevision: { increment: 1 },
+        },
+      });
+      await transaction.whatsAppGroupInstanceAssignment.deleteMany({
+        where: { destinationId: fixture.destinationId },
+      });
+      await transaction.whatsAppGroupInstanceAssignment.create({
+        data: {
+          destinationId: fixture.destinationId,
+          instanceName: INSTANCE_B,
+          position: 0,
+        },
       });
       locked.resolve();
       await release.promise;
@@ -308,6 +358,113 @@ describeDatabase('routing assignment PostgreSQL serialization', () => {
       kind: 'UPDATED',
       group: { assignedInstanceName: INSTANCE_B },
     });
+    await expect(
+      adminPrisma.whatsAppDestination.findUnique({
+        where: { id: normal.destinationId },
+        select: {
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      assignedInstanceName: INSTANCE_B,
+      assignmentRevision: 2,
+      instanceAssignments: [{ instanceName: INSTANCE_B, position: 0 }],
+    });
+  });
+
+  it('reassignment de um grupo não altera assignments de outros grupos', async () => {
+    const groupA = await createFixture('isolated-a', false);
+    const groupB = await createFixture('isolated-b', false);
+    const groupC = await createFixture('isolated-c', false);
+    const before = await adminPrisma.whatsAppDestination.findMany({
+      where: { id: { in: [groupB.destinationId, groupC.destinationId] } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        assignedInstanceName: true,
+        assignmentRevision: true,
+        instanceAssignments: {
+          orderBy: { position: 'asc' },
+          select: { instanceName: true, position: true },
+        },
+      },
+    });
+
+    await expect(
+      adminRepository.updateAdministrativeWithLifecycleGuard(
+        groupA.destinationId,
+        {
+          assignedInstanceName: INSTANCE_B,
+          expectedUpdatedAt: groupA.destination.updatedAt,
+          now: new Date(),
+        },
+      ),
+    ).resolves.toMatchObject({ kind: 'UPDATED' });
+
+    await expect(
+      adminPrisma.whatsAppDestination.findMany({
+        where: { id: { in: [groupB.destinationId, groupC.destinationId] } },
+        orderBy: { id: 'asc' },
+        select: {
+          id: true,
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual(before);
+  });
+
+  it('claim de lifecycle de um grupo não altera outros grupos da mesma instância', async () => {
+    const groupA = await createFixture('lifecycle-a');
+    const groupB = await createFixture('lifecycle-b', false);
+    const groupC = await createFixture('lifecycle-c', false);
+    const unaffectedIds = [groupB.destinationId, groupC.destinationId];
+    const before = await adminPrisma.whatsAppDestination.findMany({
+      where: { id: { in: unaffectedIds } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        assignedInstanceName: true,
+        assignmentRevision: true,
+        instanceAssignments: {
+          orderBy: { position: 'asc' },
+          select: { instanceName: true, position: true },
+        },
+      },
+    });
+
+    await expect(
+      senderRepository.claimPendingForSending(groupA.dispatchId, INSTANCE_A),
+    ).resolves.toEqual({ kind: 'CLAIMED' });
+    await expect(
+      adminPrisma.whatsAppDispatch.findMany({
+        where: { destinationId: { in: unaffectedIds } },
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      adminPrisma.whatsAppDestination.findMany({
+        where: { id: { in: unaffectedIds } },
+        orderBy: { id: 'asc' },
+        select: {
+          id: true,
+          assignedInstanceName: true,
+          assignmentRevision: true,
+          instanceAssignments: {
+            orderBy: { position: 'asc' },
+            select: { instanceName: true, position: true },
+          },
+        },
+      }),
+    ).resolves.toEqual(before);
   });
 
   it('libera o row lock antes do provider fake', async () => {

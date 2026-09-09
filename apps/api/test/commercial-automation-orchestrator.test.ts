@@ -2353,6 +2353,46 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
   });
 
+  it('bloqueia job com assignmentRevision anterior sem reroute ou efeito', async () => {
+    const currentTarget: CommercialAutomationTarget = {
+      groupId: 'group-a',
+      groupName: 'Grupo A',
+      logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+      campaignId: 'campaign-a',
+      nicheId: 'niche-a',
+      dailyLimit: 60,
+      instanceName: 'instance-b',
+      orderedInstanceNames: ['instance-b'],
+      assignmentRevision: 2,
+    };
+    const subject = createSubject({ targets: [currentTarget] });
+
+    await expect(
+      subject.orchestrator.executeTick({
+        ...tick,
+        mode: 'send',
+        provider: 'official',
+        targetConstraint: {
+          campaignId: 'campaign-a',
+          groupId: 'group-a',
+          logicalGroupFingerprint: 'grp_aaaaaaaaaaaa',
+          instanceName: 'instance-a',
+          scheduledFor: '2026-07-25T14:00:00.000Z',
+          slotKey: 'slot-assignment-revision-1',
+          scheduleRevision: 1,
+          assignmentRevision: 1,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reasons: ['COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE'],
+    });
+    expect(subject.syncOffers.run).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.preflight).not.toHaveBeenCalled();
+    expect(subject.candidateFlow.prepare).not.toHaveBeenCalled();
+    expect(subject.confirmation.confirm).not.toHaveBeenCalled();
+  });
+
   it('avanca de A sem candidato para B com COPY_READY sem criar artefatos em A', async () => {
     const targets: CommercialAutomationTarget[] = [
       {

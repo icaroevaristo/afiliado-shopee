@@ -1,12 +1,12 @@
 # Estado Atual e Gaps Pós-MVP
 
 **Status:** `LIVE_CANONICAL`
-**Baseline R1/R2:** R1 está mergeada; R2 foi mergeada em `#150` na main
-`2bc5c813ed2eca9035a78ad903e4d89dbb9dbd1f`.
-**Escopo desta leitura:** código, documentação e certificação SAFE isolada da
-R3. A certificação usa PostgreSQL/Redis TEST descartáveis; os recursos
-canônicos permaneceram parados e sem mutação. Nenhum provider externo foi
-iniciado.
+**Baseline R1/R2/R3:** R1 está mergeada; R2 foi mergeada em `#150`; R3 foi
+mergeada em `#151`. A base da certificação R4 é a main
+`608971960146d8e3c80a76d5fd4959e87a6e7977`.
+**Escopo desta leitura:** código e certificação R4 em PostgreSQL/Redis TEST
+descartáveis. Os recursos canônicos permaneceram parados e sem mutação. Nenhum
+provider externo foi iniciado. A R4 permanece candidate até revisão e merge.
 
 ## 1. Classificação documental
 
@@ -53,8 +53,12 @@ esta tabela não converte documento antigo em verdade atual.
 - Status de fila, scheduler, provider e instância só pode ser afirmado quando
   a fonte correspondente estiver presente e atual; ausência de fonte não é
   fila vazia, provider online ou instância conectada.
-- O schema/modelo atual tem apenas `WhatsAppDestination.assignedInstanceName`;
-  não há coleção ordenada de N instâncias por grupo nem cursor derivado do slot.
+- O schema mantém o campo primário legado
+  `WhatsAppDestination.assignedInstanceName`, a revisão
+  `assignmentRevision` e a coleção ordenada
+  `WhatsAppGroupInstanceAssignment`. A certificação R4 cobre somente uma
+  instância compartilhada por vários grupos; rotação de várias instâncias em um
+  grupo pertence à R5.
 - A instância é apresentada com health `UNKNOWN`; isso é seguro, mas a
   certificação de um heartbeat autoritativo ainda não existe.
 - Os blockers são derivados e ricos, mas a causa dos grupos concretos do
@@ -71,13 +75,13 @@ esta tabela não converte documento antigo em verdade atual.
 | GAP-03 | `CLOSED_BY_R2`                        | PR #150 / evidência R2                      | control-plane autenticado, quickstart SAFE e CAS stale-write foram certificados sem expor token ao browser                                      |
 | GAP-04 | `PARTIALLY_FIXED`                     | `E30-CODE-004`, `E30-OP-001`                | código deriva blockers; causa dos dados operacionais ainda precisa de leitura e correlação; R3                                                  |
 | GAP-05 | `REJECTED` como risco de falso online | `E30-CODE-004`                              | `UNKNOWN` é honesto sem heartbeat; não declarar conectado por registro DB. Um contrato de heartbeat futuro é melhoria separada                  |
-| GAP-06 | `PARTIALLY_FIXED`                     | `E30-CODE-002`                              | um número pode ter muitos grupos via assignments, mas falta certificação operacional específica; R4                                             |
+| GAP-06 | `R4_CANDIDATE`                        | evidência R4 disposable vinculada ao candidate | três grupos independentes compartilham uma instância sem colapso de targets; reassignment/lifecycle são certificados em PostgreSQL e BullMQ TEST; revisão e merge permanecem pendentes |
 | GAP-07 | `PARTIALLY_FIXED`                     | `E30-CODE-002`, `E141-DB-004`               | branch atual representa assignment ordenada, revision e binding por slot; revisão independente e readiness operacional continuam pendentes      |
 | GAP-08 | `OPEN`                                | `E30-CODE-002`                              | UI atual expressa um número responsável, não ordem/estratégia N-sender; R6                                                                      |
 | GAP-09 | `OPEN`                                | `E30-OP-001`                                | browser/Playwright não foi executado nesta missão; R7 deve produzir screenshots/traces ou BLOCKED                                               |
 | GAP-10 | `OPEN`                                | `E30-OP-001`                                | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8                                           |
 | GAP-11 | `HUMAN_REQUIRED`                      | `E30-DOC-001`                               | retirar pause/ativar operação real jamais é inferido por um agente; R9                                                                          |
-| GAP-12 | `IN_PROGRESS`                         | R3 candidate / evidência pendente de freeze | o snapshot operacional está sendo tornado explícito sobre fontes, timestamps, UNKNOWN e blockers correlacionados; a candidate não está mergeada |
+| GAP-12 | `CLOSED_BY_R3`                        | PR #151 / evidência R3                      | o snapshot operacional preserva fontes, timestamps, UNKNOWN e blockers correlacionados; readiness diária continua sendo gate posterior          |
 
 ## 4. Invariantes e estado atual do GAP-07
 
@@ -106,7 +110,7 @@ Exemplo obrigatório: se 08:15 foi reservado para N2 e N2 está indisponível,
 08:30 continua sendo N1, não a “próxima instância saudável”. Falhar o slot é
 preferível a mudar o contrato sem decisão explícita.
 
-## 5. Limites da evidência R3
+## 5. Limites das evidências R3 e R4
 
 A fixture SAFE isolada comprovou `paused=true`, health local de PostgreSQL e
 Redis TEST, leitura autenticada do control-plane e medições atuais das filas da
@@ -116,7 +120,12 @@ consultada; fonte ausente ou indisponível permanece `UNKNOWN`/`UNAVAILABLE`.
 Essa evidência não afirma o estado dos dados, filas ou providers do ambiente
 canônico/operacional. Ela também não prova Evolution conectada, instância
 WhatsApp saudável, quota externa disponível, autorização de SEND ou
-`DAILY_USE_READY`. A R3 permanece candidate até revisão independente e merge.
+`DAILY_USE_READY`.
+
+A certificação R4 usa três grupos sintéticos, cada um com uma única assignment
+para a mesma instância, e não inicia worker nem provider. Ela prova persistência,
+planejamento, materialização BullMQ sem consumer e concorrência de reassignment
+no ambiente TEST. Não certifica rotação N→1 da R5 nem autoriza SEND.
 
 Os nomes de status acima seguem exclusivamente o vocabulário de
 `FINDING_LEDGER_SCHEMA.md`; não usar `CONFIRMED_OPEN`, `ALREADY_FIXED` ou

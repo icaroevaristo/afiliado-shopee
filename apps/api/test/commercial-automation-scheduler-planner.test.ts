@@ -630,6 +630,47 @@ describe('commercial automation scheduler planner', () => {
     );
   });
 
+  it('isola quota, cooldown e pausa entre três grupos da mesma instância', () => {
+    const sharedInstance = 'instance-shared';
+    const plan = (blockedA: Partial<CommercialAutomationPlannerTarget>) =>
+      planCommercialTargetSlots({
+        now,
+        schedule: {
+          ...schedule,
+          staggerMinutes: 0,
+          dailyGlobalLimit: 2,
+          dailyGroupLimit: 10,
+        },
+        targets: [
+          target('a', { instanceName: sharedInstance, ...blockedA }),
+          target('b', { instanceName: sharedInstance }),
+          target('c', { instanceName: sharedInstance }),
+        ],
+        globalSentToday: 0,
+        horizonMinutes: 10,
+      });
+    const quota = plan({ groupSentToday: 10 });
+    const cooldown = plan({
+      lastSentAt: new Date('2026-08-24T11:55:00.000Z'),
+    });
+    const paused = plan({ active: false });
+
+    for (const result of [quota, cooldown, paused]) {
+      expect(result.slots.map((slot) => slot.target.campaignId)).toEqual([
+        'campaign-b',
+        'campaign-c',
+      ]);
+      expect(
+        result.slots.every(
+          (slot) => slot.target.instanceName === sharedInstance,
+        ),
+      ).toBe(true);
+      expect(new Set(result.slots.map((slot) => slot.target.groupId)).size).toBe(
+        2,
+      );
+    }
+  });
+
   it('mantem o espaçamento de stagger entre slots de cadencias diferentes', () => {
     const result = planCommercialTargetSlots({
       now,
