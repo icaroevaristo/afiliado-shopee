@@ -59,7 +59,17 @@ const matchesPath = (path: readonly string[], pattern: PathPattern) =>
   path.length === pattern.length &&
   pattern.every((segment, index) => segment === '*' || segment === path[index]);
 
-const isAllowedPath = (method: string, path: readonly string[]) => {
+const isSafePathSegment = (segment: string) =>
+  segment.length > 0 &&
+  segment !== '.' &&
+  segment !== '..' &&
+  !segment.includes('\\');
+
+export const isDashboardProxyPathAllowed = (
+  method: string,
+  path: readonly string[],
+) => {
+  if (!path.every(isSafePathSegment)) return false;
   if (method === 'GET')
     return READ_PATHS.some((pattern) => matchesPath(path, pattern));
   if (method === 'PATCH')
@@ -147,7 +157,9 @@ const assertApiServer = async (apiServerUrl: string) => {
 
 const proxyRequest = async (request: Request, context: RouteContext) => {
   const { path } = await context.params;
-  if (!isAllowedPath(request.method, path)) return blockedResponse();
+  if (!isDashboardProxyPathAllowed(request.method, path)) {
+    return blockedResponse();
+  }
 
   let apiServerUrl: string;
   let authorization: string;
