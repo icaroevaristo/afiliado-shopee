@@ -83,6 +83,11 @@ describe('dashboard proxy callout inventory', () => {
     expect(isDashboardProxyPathAllowed('PATCH', ['whatsapp', 'groups', 'admin'])).toBe(false);
   });
 
+  it('does not retain stale dashboard routes that have no UI callout', () => {
+    expect(isDashboardProxyPathAllowed('GET', ['commercial', 'niches', 'niche-1'])).toBe(false);
+    expect(isDashboardProxyPathAllowed('GET', ['whatsapp', 'groups', 'admin'])).toBe(false);
+  });
+
   it('rejects encoded traversal and malformed path segments', () => {
     expect(isDashboardProxyPathAllowed('GET', ['shopee', 'offers', '..'])).toBe(false);
     expect(isDashboardProxyPathAllowed('GET', ['shopee', 'offers', 'a\\b'])).toBe(false);
