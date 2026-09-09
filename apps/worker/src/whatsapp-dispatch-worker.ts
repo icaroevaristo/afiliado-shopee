@@ -31,6 +31,7 @@ import {
   assertCommercialStickyIdentity,
   isCommercialInstanceAssigned,
 } from '../../api/src/commercial-instance-stickiness';
+import type { R8OneShotAuthorizationFence } from './r8-one-shot-authorization-fence';
 
 export type WhatsAppDispatchWorkerLogger = {
   info: (obj: unknown, msg?: string) => void;
@@ -123,6 +124,7 @@ type WhatsAppDispatchProcessorBaseOptions = {
   deliveryConfirmationTimeoutMs?: number;
   deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
+  oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
 };
 
 export type WhatsAppDispatchProcessorOptions =
@@ -160,6 +162,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   deliveryConfirmationTimeoutMs?: number;
   deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
+  oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
 };
 
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
@@ -475,6 +478,12 @@ export const processWhatsAppDispatchJob = async (
     );
   }
 
+  options.oneShotAuthorizationFence?.assertJob({
+    jobId: job.id,
+    dispatchId: job.data.dispatchId,
+    instanceName: job.data.instanceName,
+  });
+
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
   const commercialRun = await repositories.commercialRuns.findByDispatchId(
@@ -561,13 +570,22 @@ export const processWhatsAppDispatchJob = async (
     draftService: options.draftService ?? new CommercialMessageDraftService(),
     clock,
     confirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
+    preSendFence: options.oneShotAuthorizationFence
+      ? (input) => options.oneShotAuthorizationFence?.assertPreSend(input)
+      : undefined,
   });
   await revalidateCommercialDispatchBeforeSend({
     job,
     repositories,
     resolvedProvider,
   });
-  resolvedProvider.provider.beginRun?.(job.id ?? job.data.dispatchId);
+  const providerRunId = options.oneShotAuthorizationFence
+    ? options.oneShotAuthorizationFence.providerRunId(
+        job.id,
+        job.data.dispatchId,
+      )
+    : (job.id ?? job.data.dispatchId);
+  resolvedProvider.provider.beginRun?.(providerRunId);
   let dispatch;
   try {
     dispatch = await sender.sendDispatch(job.data.dispatchId);
@@ -712,6 +730,7 @@ export const createWhatsAppDispatchWorker = (
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
     deliveryConfirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
     manualLifecycleFinalizer,
+    oneShotAuthorizationFence: options.oneShotAuthorizationFence,
   };
   const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,

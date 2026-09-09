@@ -26,6 +26,7 @@ import {
   createWhatsAppDispatchWorker,
   type WhatsAppDispatchWorkerLogger,
 } from './whatsapp-dispatch-worker';
+import type { R8OneShotAuthorizationFence } from './r8-one-shot-authorization-fence';
 
 export type WhatsAppDispatchWorkerFactory = (
   redisUrl: string,
@@ -71,6 +72,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     providerFactoryOptions?: WhatsAppProviderFactoryOptions;
     workerFactory?: WhatsAppDispatchWorkerFactory;
     recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
+    oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
   } = {},
 ) => {
   if (config.COMMERCIAL_AUTOMATION_MODE !== 'send') {
@@ -79,6 +81,14 @@ export const startIsolatedWhatsAppDispatchWorker = async (
       'WHATSAPP_DISPATCH_WORKER_SEND_MODE_REQUIRED',
     );
   }
+  options.oneShotAuthorizationFence?.assertRuntime({
+    allowedDestinations: config.EVOLUTION_ALLOWED_DESTINATIONS,
+    groupSendEnabled: config.WHATSAPP_GROUP_SEND_ENABLED,
+    safeMode: config.EVOLUTION_SAFE_MODE,
+    maxMessagesPerRun: config.WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN,
+    schedulerEnabled: config.SCHEDULER_ENABLED,
+    commercialSchedulerEnabled: config.COMMERCIAL_SCHEDULER_ENABLED,
+  });
   const logger = options.logger ?? consoleLogger;
   const recovery = options.recoveryCoordinator
     ? await options.recoveryCoordinator.run()
@@ -121,6 +131,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
         config.WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS * 1000,
       deliveryConfirmationExpiryIntervalMs:
         config.WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS * 1000,
+      oneShotAuthorizationFence: options.oneShotAuthorizationFence,
     },
   );
 

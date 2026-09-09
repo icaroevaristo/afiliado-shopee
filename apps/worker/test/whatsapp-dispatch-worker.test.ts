@@ -26,6 +26,12 @@ import {
   COMMERCIAL_AI_COPY_VALIDATION_VERSION,
 } from '../../api/src/commercial-ai-copy-prompt';
 import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
+import {
+  createR8OneShotAuthorizationFence,
+  r8DestinationSha256,
+  r8MessagePayloadSha256,
+  type R8OneShotAuthorizationManifest,
+} from '../src/r8-one-shot-authorization-fence';
 
 const fakeDestination = {
   id: 'dest-123',
@@ -205,6 +211,40 @@ const commercialGroupSendPolicy = () =>
 
 const handoffNow = new Date('2026-08-14T12:00:00.000Z');
 const handoffLeaseMilliseconds = 120_000;
+
+const r8AuthorizationManifest = (
+  overrides: Partial<R8OneShotAuthorizationManifest> = {},
+): R8OneShotAuthorizationManifest => ({
+  authorizationId: 'r8-authorization-test',
+  authorized: true,
+  approvedAt: '2026-08-14T11:59:00.000Z',
+  expiresAt: '2026-08-14T12:01:00.000Z',
+  candidateHead: 'candidate-head',
+  candidateTree: 'candidate-tree',
+  jobId: 'job-handoff',
+  dispatchId: 'dispatch-handoff',
+  targetFingerprint: commercialGroupFingerprint,
+  destinationSha256: r8DestinationSha256(commercialGroupId),
+  instanceName: 'instance',
+  assignmentRevision: 7,
+  campaignId: 'campaign-1',
+  productId: 'prod-123',
+  candidateId: 'candidate-123',
+  snapshotId: 'snap-123',
+  snapshotRevision: 1,
+  generatedCopyId: 'copy-123',
+  deliveryMode: 'IMAGE',
+  messagePayloadSha256: r8MessagePayloadSha256({
+    deliveryMode: 'IMAGE',
+    message: `Title\n\nMessage\n\nBuy now ${commercialAffiliateLink}\n\n#sale`,
+    imageUrl: 'https://shopee.com.br/image.jpg',
+  }),
+  maxWhatsAppSend: 1,
+  maxEvolutionHttpRequests: 4,
+  allowWebhookReadinessSync: true,
+  allowSingleDispatchLifecycleWrites: true,
+  ...overrides,
+});
 
 const commercialRunForHandoff = (): CommercialPipelineRunRecord => ({
   id: 'run-handoff',
@@ -1877,5 +1917,306 @@ describe('processWhatsAppDispatchJob', () => {
     expect(repositories.commercialRuns.finalizeByDispatchId).not.toHaveBeenCalled();
     expect(manualLifecycleFinalizer.finalizeAfterDispatch).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('vincula a autorização R8 ao job, target, revision e payload exatos', async () => {
+    const dispatch: WhatsAppDispatchDetails = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      destination: {
+        ...commercialDispatch.destination,
+        assignmentRevision: 7,
+        assignedInstanceNames: ['instance'],
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue({
+        status: 'sent' as const,
+        externalMessageId: 'external-r8-one-shot',
+        sentAt: handoffNow,
+      }),
+    };
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: r8AuthorizationManifest(),
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => handoffNow,
+    });
+    const job = {
+      id: 'job-handoff',
+      name: JOB_NAMES.whatsappDispatch,
+      data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+      opts: { attempts: 1 },
+    };
+    const options = {
+      repositories,
+      whatsAppProvider: provider,
+      whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+      logger: { info: vi.fn(), error: vi.fn() },
+      groupSendPolicy: commercialGroupSendPolicy(),
+      clock: () => handoffNow,
+      reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+      oneShotAuthorizationFence: fence,
+    };
+
+    await expect(processWhatsAppDispatchJob(job, options)).resolves.toMatchObject({
+      status: 'SUBMITTED',
+    });
+    await expect(processWhatsAppDispatchJob(job, options)).rejects.toMatchObject({
+      code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(provider.sendMessage).toHaveBeenCalledOnce();
+    expect(provider.beginRun).toHaveBeenCalledOnce();
+    expect(provider.beginRun).toHaveBeenCalledWith(
+      'r8:r8-authorization-test:job-handoff',
+    );
+    expect(fence.sendBudgetConsumed).toBe(1);
+  });
+
+  it('bloqueia revision stale mesmo quando a instância ainda pertence à lista', async () => {
+    const dispatch: WhatsAppDispatchDetails = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      destination: {
+        ...commercialDispatch.destination,
+        assignmentRevision: 8,
+        assignedInstanceNames: ['instance', 'instance-b'],
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: r8AuthorizationManifest({ assignmentRevision: 7 }),
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => handoffNow,
+    });
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-handoff',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger: { info: vi.fn(), error: vi.fn() },
+          groupSendPolicy: commercialGroupSendPolicy(),
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+          oneShotAuthorizationFence: fence,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(fence.sendBudgetConsumed).toBe(0);
+  });
+
+  it.each([
+    ['candidate head', { candidateHead: 'foreign-head' }],
+    ['candidate tree', { candidateTree: 'foreign-tree' }],
+    ['target fingerprint', { targetFingerprint: 'foreign-fingerprint' }],
+    ['destination hash', { destinationSha256: '0'.repeat(64) }],
+    ['instance', { instanceName: 'foreign-instance' }],
+    ['candidate', { candidateId: 'foreign-candidate' }],
+    ['snapshot', { snapshotRevision: 2 }],
+    ['copy', { generatedCopyId: 'foreign-copy' }],
+    ['delivery mode', { deliveryMode: 'TEXT' as const }],
+  ])(
+    'invalida autorização one-shot quando diverge %s',
+    async (_field, overrides) => {
+      const dispatch: WhatsAppDispatchDetails = {
+        ...commercialDispatch,
+        id: 'dispatch-handoff',
+        destination: {
+          ...commercialDispatch.destination,
+          assignmentRevision: 7,
+          assignedInstanceNames: ['instance'],
+        },
+      };
+      const { repositories } = createHandoffRepositories({ dispatch });
+      const provider: WhatsAppProvider = {
+        beginRun: vi.fn(),
+        sendMessage: vi.fn(),
+      };
+      const fence = createR8OneShotAuthorizationFence({
+        manifest: r8AuthorizationManifest(overrides),
+        candidateHead: 'candidate-head',
+        candidateTree: 'candidate-tree',
+        clock: () => handoffNow,
+      });
+
+      await expect(
+        processWhatsAppDispatchJob(
+          {
+            id: 'job-handoff',
+            name: JOB_NAMES.whatsappDispatch,
+            data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+            opts: { attempts: 1 },
+          },
+          {
+            repositories,
+            whatsAppProvider: provider,
+            whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+            logger: { info: vi.fn(), error: vi.fn() },
+            groupSendPolicy: commercialGroupSendPolicy(),
+            clock: () => handoffNow,
+            reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+            oneShotAuthorizationFence: fence,
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+        deliveryMayHaveStarted: false,
+      });
+
+      expect(provider.sendMessage).not.toHaveBeenCalled();
+      expect(fence.sendBudgetConsumed).toBe(0);
+    },
+  );
+
+  it('bloqueia payload divergente da autorização one-shot antes do provider', async () => {
+    const dispatch: WhatsAppDispatchDetails = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      destination: {
+        ...commercialDispatch.destination,
+        assignmentRevision: 7,
+        assignedInstanceNames: ['instance'],
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: r8AuthorizationManifest({
+        messagePayloadSha256: '0'.repeat(64),
+      }),
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => handoffNow,
+    });
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-handoff',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger: { info: vi.fn(), error: vi.fn() },
+          groupSendPolicy: commercialGroupSendPolicy(),
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+          oneShotAuthorizationFence: fence,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(fence.sendBudgetConsumed).toBe(0);
+  });
+
+  it('rejeita autorização não concedida antes de qualquer leitura de lifecycle', async () => {
+    const { repositories, renewAttempt } = createHandoffRepositories({
+      dispatch: { ...commercialDispatch, id: 'dispatch-handoff' },
+    });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: r8AuthorizationManifest({ authorized: false }),
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => handoffNow,
+    });
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-handoff',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger: { info: vi.fn(), error: vi.fn() },
+          oneShotAuthorizationFence: fence,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' });
+
+    expect(repositories.commercialRuns.findByDispatchId).not.toHaveBeenCalled();
+    expect(renewAttempt).not.toHaveBeenCalled();
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('vincula a autorização one-shot ao runtime seguro e ao destino único', () => {
+    const validRuntime = {
+      allowedDestinations: [commercialGroupId],
+      groupSendEnabled: true,
+      safeMode: true,
+      maxMessagesPerRun: 1,
+      schedulerEnabled: false,
+      commercialSchedulerEnabled: false,
+    };
+    const createFence = (overrides: Partial<R8OneShotAuthorizationManifest> = {}) =>
+      createR8OneShotAuthorizationFence({
+        manifest: r8AuthorizationManifest(overrides),
+        candidateHead: 'candidate-head',
+        candidateTree: 'candidate-tree',
+        clock: () => handoffNow,
+      });
+
+    expect(() => createFence().assertRuntime(validRuntime)).not.toThrow();
+    expect(() =>
+      createFence().assertRuntime({
+        ...validRuntime,
+        allowedDestinations: [commercialGroupId, '120363111111111111@g.us'],
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
+    expect(() =>
+      createFence().assertRuntime({
+        ...validRuntime,
+        allowedDestinations: ['120363111111111111@g.us'],
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
+    expect(() =>
+      createFence().assertRuntime({ ...validRuntime, schedulerEnabled: true }),
+    ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
+    expect(() =>
+      createFence({ expiresAt: '2026-08-14T11:59:59.999Z' }).assertRuntime(
+        validRuntime,
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
   });
 });

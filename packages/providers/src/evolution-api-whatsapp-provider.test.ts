@@ -555,13 +555,17 @@ describe('EvolutionApiWhatsAppProvider', () => {
 
   it('impede request HTTP se groupSendGuard bloquear envio de imagem em grupo', async () => {
     const httpClient = vi.fn();
+    const deliveryWebhookHttpClient = vi.fn();
     const groupSendGuard = new EvolutionGroupSendGuard({
       enabled: false,
       safeMode: true,
       maxMessagesPerRun: 10,
     });
     vi.spyOn(groupSendGuard, 'authorizeRequest');
-    const provider = createProvider(httpClient, { groupSendGuard });
+    const provider = createProvider(httpClient, {
+      groupSendGuard,
+      deliveryWebhookHttpClient,
+    });
 
     const groupJid = '120363000000000000@g.us';
     await expect(
@@ -577,6 +581,7 @@ describe('EvolutionApiWhatsAppProvider', () => {
     });
 
     expect(groupSendGuard.authorizeRequest).toHaveBeenCalledWith(groupJid);
+    expect(deliveryWebhookHttpClient).not.toHaveBeenCalled();
     expect(httpClient).not.toHaveBeenCalled();
   });
 
@@ -775,6 +780,7 @@ describe('createWhatsAppProvider', () => {
         EVOLUTION_API_URL: 'http://localhost:8080',
         EVOLUTION_API_KEY: API_KEY,
         EVOLUTION_INSTANCE_NAME: 'affiliate-bot',
+        EVOLUTION_ALLOWED_DESTINATIONS: ['5511999999999'],
       },
       { httpClient },
     );

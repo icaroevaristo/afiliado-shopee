@@ -1,0 +1,700 @@
+import { randomUUID } from 'node:crypto';
+
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
+import {
+  fingerprintWhatsAppGroupId,
+  WhatsAppSendError,
+  type WhatsAppProvider,
+} from '@shopee-auto-affiliate-ai/providers';
+import {
+  createRedisConnection,
+  createWhatsAppDispatchQueue,
+  enqueueControlledWhatsAppDispatch,
+} from '@shopee-auto-affiliate-ai/queue';
+
+import { createPrismaRepositories } from '../../api/src/application-services';
+import {
+  COMMERCIAL_AI_COPY_PROMPT_VERSION,
+  COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+} from '../../api/src/commercial-ai-copy-prompt';
+import { fingerprintCommercialOffer } from '../../api/src/commercial-offer-snapshot';
+import { WhatsAppDeliveryConfirmationService } from '../../api/src/whatsapp-delivery-confirmation-service';
+import { WhatsAppGroupSendPolicy } from '../../api/src/whatsapp-group-send-policy';
+import {
+  createWhatsAppDispatchWorker,
+  processWhatsAppDispatchJob,
+} from '../src/whatsapp-dispatch-worker';
+import {
+  createR8OneShotAuthorizationFence,
+  r8DestinationSha256,
+  r8MessagePayloadSha256,
+} from '../src/r8-one-shot-authorization-fence';
+
+const enabled = process.env.RUN_R8_PRESEND_DB_REDIS_TEST === 'true';
+const suite = enabled ? describe : describe.skip;
+const PREFIX = 'r8-presend-fixture';
+const HEAD = 'r8-test-head';
+const TREE = 'r8-test-tree';
+const logger = { info: () => undefined, error: () => undefined };
+
+type Seed = {
+  id: string;
+  now: Date;
+  instance: string;
+  destination: string;
+  fingerprint: string;
+  affiliateLink: string;
+  imageUrl: string;
+  caption: string;
+  jobId: string;
+};
+
+suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
+  let prisma: ReturnType<typeof createPrismaClient>;
+  let connection: ReturnType<typeof createRedisConnection>;
+  let queue: ReturnType<typeof createWhatsAppDispatchQueue>;
+
+  beforeAll(async () => {
+    const databaseUrl = process.env.DATABASE_URL ?? '';
+    const redisUrl = process.env.REDIS_URL ?? '';
+    const database = new URL(databaseUrl);
+    const redis = new URL(redisUrl);
+    if (
+      database.hostname !== '127.0.0.1' ||
+      !database.pathname.startsWith('/r8_') ||
+      redis.hostname !== '127.0.0.1'
+    ) {
+      throw new Error('R8 disposable PostgreSQL/Redis identities required');
+    }
+    prisma = createPrismaClient(databaseUrl);
+    connection = createRedisConnection(redisUrl);
+    queue = createWhatsAppDispatchQueue(connection);
+    await cleanup();
+    await queue.obliterate({ force: true });
+  });
+
+  afterAll(async () => {
+    await Promise.allSettled([queue?.obliterate({ force: true }), cleanup()]);
+    await Promise.allSettled([
+      queue?.close(),
+      connection?.quit(),
+      prisma?.$disconnect(),
+    ]);
+  });
+
+  const cleanup = async () => {
+    if (!prisma) return;
+    await prisma.whatsAppDeliveryEventInbox.deleteMany({
+      where: { instanceName: { startsWith: PREFIX } },
+    });
+    await prisma.commercialDispatchOutbox.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.whatsAppDispatch.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialPipelineRun.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialAutomationExecution.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialPreparedMessage.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialCopyGenerationAttempt.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialPromotionCandidate.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.generatedCopy.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialOfferSnapshot.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.manualPublicationTarget.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.manualPublicationRequest.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.productLead.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.commercialGroupCampaign.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.whatsAppDestination.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+    await prisma.whatsAppInstance.deleteMany({
+      where: { name: { startsWith: PREFIX } },
+    });
+    await prisma.commercialNiche.deleteMany({
+      where: { id: { startsWith: PREFIX } },
+    });
+  };
+
+  const makeProvider = (
+    implementation: WhatsAppProvider['sendMessage'],
+  ): WhatsAppProvider => ({
+    beginRun: vi.fn(),
+    sendMessage: vi.fn(implementation),
+  });
+
+  const fenceFor = (seed: Seed, assignmentRevision = 1) =>
+    createR8OneShotAuthorizationFence({
+      manifest: {
+        authorizationId: `${seed.id}-authorization`,
+        authorized: true,
+        approvedAt: new Date(seed.now.getTime() - 60_000).toISOString(),
+        expiresAt: new Date(seed.now.getTime() + 10 * 60_000).toISOString(),
+        candidateHead: HEAD,
+        candidateTree: TREE,
+        jobId: seed.jobId,
+        dispatchId: seed.id,
+        targetFingerprint: seed.fingerprint,
+        destinationSha256: r8DestinationSha256(seed.destination),
+        instanceName: seed.instance,
+        assignmentRevision,
+        campaignId: seed.id,
+        productId: seed.id,
+        candidateId: seed.id,
+        snapshotId: seed.id,
+        snapshotRevision: 1,
+        generatedCopyId: seed.id,
+        deliveryMode: 'IMAGE',
+        messagePayloadSha256: r8MessagePayloadSha256({
+          deliveryMode: 'IMAGE',
+          message: seed.caption,
+          imageUrl: seed.imageUrl,
+        }),
+        maxWhatsAppSend: 1,
+        maxEvolutionHttpRequests: 4,
+        allowWebhookReadinessSync: true,
+        allowSingleDispatchLifecycleWrites: true,
+      },
+      candidateHead: HEAD,
+      candidateTree: TREE,
+      clock: () => seed.now,
+    });
+
+  const processJob = (
+    seed: Seed,
+    provider: WhatsAppProvider,
+    fence = fenceFor(seed),
+  ) =>
+    processWhatsAppDispatchJob(
+      {
+        id: seed.jobId,
+        name: 'whatsapp-dispatch',
+        data: { dispatchId: seed.id, instanceName: seed.instance },
+        opts: { attempts: 1 },
+      },
+      {
+        prisma,
+        logger,
+        commercialAutomationMode: 'send',
+        whatsAppProvider: provider,
+        whatsAppProviderResolver: () => provider,
+        reservationLeaseMilliseconds: 120_000,
+        groupSendPolicy: new WhatsAppGroupSendPolicy({
+          enabled: true,
+          safeMode: true,
+          instanceName: seed.instance,
+        }),
+        oneShotAuthorizationFence: fence,
+        clock: () => seed.now,
+      },
+    );
+
+  it('persists one exact effect across duplicate, crash, restart, stale revision and webhook replay matrices', async () => {
+    const fetchGuard = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('External network forbidden in R8'));
+    try {
+      const baselineJobs = await queue.getJobs(
+        ['waiting', 'delayed', 'active', 'prioritized'],
+        0,
+        -1,
+      );
+      expect(baselineJobs).toHaveLength(0);
+
+      const success = await seedLifecycle('success');
+      const successProvider = makeProvider(async () => ({
+        status: 'sent',
+        externalMessageId: `${success.id}-external`,
+        sentAt: success.now,
+      }));
+      const successFence = fenceFor(success);
+      const runtime = createWhatsAppDispatchWorker(process.env.REDIS_URL ?? '', {
+        prisma,
+        connection,
+        logger,
+        commercialAutomationMode: 'send',
+        whatsAppProvider: successProvider,
+        whatsAppProviderResolver: () => successProvider,
+        reservationLeaseMilliseconds: 120_000,
+        groupSendPolicy: new WhatsAppGroupSendPolicy({
+          enabled: true,
+          safeMode: true,
+          instanceName: success.instance,
+        }),
+        oneShotAuthorizationFence: successFence,
+        clock: () => success.now,
+      });
+      try {
+        await enqueueControlledWhatsAppDispatch(
+          queue,
+          { dispatchId: success.id, instanceName: success.instance },
+          success.jobId,
+        );
+        await enqueueControlledWhatsAppDispatch(
+          queue,
+          { dispatchId: success.id, instanceName: success.instance },
+          success.jobId,
+        );
+        await waitForJob(success.jobId, 'completed');
+      } finally {
+        await runtime.close();
+      }
+      expect(successProvider.sendMessage).toHaveBeenCalledTimes(1);
+      expect(successFence.sendBudgetConsumed).toBe(1);
+      expect(await queue.getJobs(['waiting', 'delayed', 'active'], 0, -1)).toHaveLength(0);
+      const persistedSuccessJobs = (
+        await queue.getJobs(
+          ['waiting', 'delayed', 'active', 'completed', 'failed'],
+          0,
+          -1,
+        )
+      ).filter((job) => job.id === success.jobId);
+      expect(persistedSuccessJobs).toHaveLength(1);
+      const persistedSuccess = await prisma.whatsAppDispatch.findUniqueOrThrow({
+        where: { id: success.id },
+      });
+      expect(persistedSuccess).toMatchObject({
+        status: 'SUBMITTED',
+        attemptCount: 1,
+        externalMessageId: `${success.id}-external`,
+      });
+      await expect(
+        processJob(success, successProvider, fenceFor(success)),
+      ).rejects.toThrow();
+      expect(successProvider.sendMessage).toHaveBeenCalledTimes(1);
+
+      const deliveryRepositories = createPrismaRepositories(prisma);
+      if (!deliveryRepositories.whatsappDeliveryEvents) {
+        throw new Error('R8 durable delivery inbox repository unavailable');
+      }
+      const delivery = new WhatsAppDeliveryConfirmationService({
+        dispatches: deliveryRepositories.whatsappDispatches,
+        deliveryEvents: deliveryRepositories.whatsappDeliveryEvents,
+        runs: deliveryRepositories.commercialRuns,
+        promotionCandidates: deliveryRepositories.commercialPromotions,
+        logger,
+      });
+      const receipt = {
+        instanceName: success.instance,
+        externalMessageId: `${success.id}-external`,
+        status: 'SERVER_ACK' as const,
+        occurredAt: success.now,
+      };
+      await delivery.consume(receipt);
+      await delivery.consume(receipt);
+      expect(
+        await prisma.whatsAppDispatch.findUniqueOrThrow({
+          where: { id: success.id },
+        }),
+      ).toMatchObject({ status: 'SENT', attemptCount: 1 });
+      expect(successProvider.sendMessage).toHaveBeenCalledTimes(1);
+
+      const preflight = await seedLifecycle('preflight');
+      const preflightProvider = makeProvider(async () => {
+        throw new WhatsAppSendError(
+          'Synthetic local pre-request block',
+          'R8_SYNTHETIC_PRE_REQUEST_BLOCK',
+          { deliveryMayHaveStarted: false },
+        );
+      });
+      await expect(processJob(preflight, preflightProvider)).rejects.toMatchObject({
+        code: 'R8_SYNTHETIC_PRE_REQUEST_BLOCK',
+      });
+      expect(
+        await prisma.whatsAppDispatch.findUniqueOrThrow({
+          where: { id: preflight.id },
+        }),
+      ).toMatchObject({ status: 'FAILED', attemptCount: 1 });
+      await expect(
+        processJob(preflight, preflightProvider, fenceFor(preflight)),
+      ).rejects.toThrow();
+      expect(preflightProvider.sendMessage).toHaveBeenCalledTimes(1);
+
+      const ambiguous = await seedLifecycle('ambiguous');
+      const ambiguousProvider = makeProvider(async () => {
+        throw new WhatsAppSendError(
+          'Synthetic request uncertainty',
+          'EVOLUTION_TIMEOUT',
+          { deliveryMayHaveStarted: true },
+        );
+      });
+      await expect(processJob(ambiguous, ambiguousProvider)).rejects.toMatchObject({
+        code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS',
+      });
+      expect(
+        await prisma.whatsAppDispatch.findUniqueOrThrow({
+          where: { id: ambiguous.id },
+        }),
+      ).toMatchObject({ status: 'PROCESSING', attemptCount: 1 });
+      await expect(
+        processJob(ambiguous, ambiguousProvider, fenceFor(ambiguous)),
+      ).rejects.toThrow();
+      expect(ambiguousProvider.sendMessage).toHaveBeenCalledTimes(1);
+
+      const crash = await seedLifecycle('post-provider-crash');
+      const crashProvider = makeProvider(async () => ({
+        status: 'sent',
+        externalMessageId: `${crash.id}-external`,
+        sentAt: crash.now,
+      }));
+      const repositories = createPrismaRepositories(prisma);
+      const markSubmitted = vi
+        .spyOn(repositories.whatsappDispatches, 'markSubmitted')
+        .mockRejectedValueOnce(new Error('Synthetic crash before markSubmitted'));
+      await expect(
+        processWhatsAppDispatchJob(
+          {
+            id: crash.jobId,
+            name: 'whatsapp-dispatch',
+            data: { dispatchId: crash.id, instanceName: crash.instance },
+            opts: { attempts: 1 },
+          },
+          {
+            repositories,
+            logger,
+            commercialAutomationMode: 'send',
+            whatsAppProvider: crashProvider,
+            whatsAppProviderResolver: () => crashProvider,
+            reservationLeaseMilliseconds: 120_000,
+            groupSendPolicy: new WhatsAppGroupSendPolicy({
+              enabled: true,
+              safeMode: true,
+              instanceName: crash.instance,
+            }),
+            oneShotAuthorizationFence: fenceFor(crash),
+            clock: () => crash.now,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'WHATSAPP_DISPATCH_DELIVERY_AMBIGUOUS' });
+      markSubmitted.mockRestore();
+      expect(
+        await prisma.whatsAppDispatch.findUniqueOrThrow({
+          where: { id: crash.id },
+        }),
+      ).toMatchObject({
+        status: 'PROCESSING',
+        attemptCount: 1,
+        externalMessageId: null,
+      });
+      await expect(
+        processJob(crash, crashProvider, fenceFor(crash)),
+      ).rejects.toThrow();
+      expect(crashProvider.sendMessage).toHaveBeenCalledTimes(1);
+
+      const stale = await seedLifecycle('stale-assignment');
+      await prisma.whatsAppInstance.create({
+        data: { name: `${stale.instance}-b`, active: true, paused: false },
+      });
+      await prisma.whatsAppDestination.update({
+        where: { id: stale.id },
+        data: {
+          assignmentRevision: { increment: 1 },
+          instanceAssignments: {
+            create: { instanceName: `${stale.instance}-b`, position: 1 },
+          },
+        },
+      });
+      const staleProvider = makeProvider(async () => ({
+        status: 'sent',
+        externalMessageId: `${stale.id}-should-not-send`,
+        sentAt: stale.now,
+      }));
+      await expect(
+        processJob(stale, staleProvider, fenceFor(stale, 1)),
+      ).rejects.toMatchObject({
+        code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+        deliveryMayHaveStarted: false,
+      });
+      expect(staleProvider.sendMessage).not.toHaveBeenCalled();
+
+      expect(fetchGuard).not.toHaveBeenCalled();
+      expect(
+        await queue.getJobs(['waiting', 'delayed', 'active'], 0, -1),
+      ).toHaveLength(0);
+      process.stdout.write(
+        `R8_PRESEND_CERTIFICATION_SUMMARY=${JSON.stringify({
+          postgres: 'DISPOSABLE_LOOPBACK_R8_DATABASE',
+          redis: 'DISPOSABLE_LOOPBACK_R8_REDIS',
+          bullMqBaselineActiveJobs: 0,
+          deterministicJobRecords: persistedSuccessJobs.length,
+          successfulProviderCalls: 1,
+          successfulDispatchAttemptCount: 1,
+          successfulLifecycle: ['SUBMITTED', 'SENT'],
+          duplicateWebhookProviderCalls: 0,
+          preRequestFailureProviderCalls: 1,
+          preRequestFailureStatus: 'FAILED',
+          ambiguousProviderCalls: 1,
+          ambiguousStatus: 'PROCESSING',
+          postProviderCrashCalls: 1,
+          postProviderCrashStatus: 'PROCESSING',
+          submittedRestartAdditionalProviderCalls: 0,
+          staleAssignmentProviderCalls: 0,
+          finalActiveQueueJobs: 0,
+          externalNetworkAttempts: 0,
+        })}\n`,
+      );
+    } finally {
+      fetchGuard.mockRestore();
+    }
+  }, 60_000);
+
+  const waitForJob = async (jobId: string, state: 'completed' | 'failed') => {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const job = await queue.getJob(jobId);
+      if (job && (await job.getState()) === state) return;
+      if (job && state === 'completed' && (await job.getState()) === 'failed') {
+        throw new Error(`R8 job failed: ${job.failedReason}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`R8 job did not reach ${state}`);
+  };
+
+  async function seedLifecycle(scenario: string) {
+    const id = `${PREFIX}-${scenario}-${randomUUID()}`;
+    const now = new Date();
+    const instance = `${id}-instance`;
+    const numeric = BigInt(`0x${randomUUID().replaceAll('-', '').slice(0, 16)}`)
+      .toString()
+      .slice(0, 12)
+      .padStart(12, '0');
+    const destination = `120363${numeric}@g.us`;
+    const fingerprint = fingerprintWhatsAppGroupId(destination);
+    const affiliateLink = `https://s.shopee.com.br/${id}`;
+    const productLink = `https://shopee.com.br/product/1/${id}`;
+    const imageUrl = `https://example.invalid/${id}.jpg`;
+    const snapshotFingerprint = fingerprintCommercialOffer({
+      source: 'OFFICIAL',
+      providerProductId: id,
+      productLink,
+      affiliateLink,
+      price: '100.00',
+      priceMin: '100.00',
+      priceMax: '100.00',
+      discountRate: 20,
+      commissionRate: 10,
+      offerStartsAt: null,
+      offerEndsAt: null,
+      unavailableAt: null,
+    });
+    const caption = `Synthetic offer\n\nSynthetic product\n\nConfira ${affiliateLink}\n\n#r8`;
+    const jobId = `${id}-job`;
+    await prisma.whatsAppInstance.create({
+      data: { name: instance, active: true, paused: false },
+    });
+    await prisma.whatsAppDestination.create({
+      data: {
+        id,
+        name: 'Synthetic R8 group',
+        destination,
+        type: 'GROUP',
+        active: true,
+        available: true,
+        paused: false,
+        fingerprint,
+        sourceInstanceName: instance,
+        assignedInstanceName: instance,
+        assignmentRevision: 1,
+        instanceAssignments: {
+          create: { instanceName: instance, position: 0 },
+        },
+      },
+    });
+    await prisma.commercialNiche.create({
+      data: { id, name: 'Synthetic R8 niche', slug: id, active: true },
+    });
+    await prisma.commercialGroupCampaign.create({
+      data: {
+        id,
+        name: 'Synthetic R8 campaign',
+        logicalGroupFingerprint: fingerprint,
+        anchorDestinationId: id,
+        nicheId: id,
+        active: true,
+        attemptExecutionId: id,
+        attemptReservedAt: now,
+        attemptLeaseExpiresAt: new Date(now.getTime() + 120_000),
+      },
+    });
+    await prisma.productLead.create({
+      data: {
+        id,
+        source: 'OFFICIAL',
+        providerProductId: id,
+        nome: 'Synthetic product',
+        categoria: 'fixture',
+        preco: 100,
+        precoMin: 100,
+        precoMax: 100,
+        desconto: 20,
+        nota: 4.8,
+        vendidos: 100,
+        comissao: 10,
+        loja: 'Synthetic shop',
+        urlImagem: imageUrl,
+        productLink,
+        affiliateLink,
+        title: 'Synthetic product',
+        fetchedAt: now,
+        lastSeenAt: now,
+        commercialSnapshotRevision: 1,
+        commercialSnapshotFingerprint: snapshotFingerprint,
+      },
+    });
+    await prisma.commercialOfferSnapshot.create({
+      data: {
+        id,
+        productId: id,
+        revision: 1,
+        fingerprint: snapshotFingerprint,
+        price: 100,
+        priceMin: 100,
+        priceMax: 100,
+        discountRate: 20,
+        commissionRate: 10,
+        observedRating: 4.8,
+        observedSales: 100,
+        capturedAt: now,
+      },
+    });
+    await prisma.generatedCopy.create({
+      data: {
+        id,
+        productId: id,
+        source: 'AI',
+        provider: 'r8-fake',
+        model: 'r8-fake',
+        promptVersion: COMMERCIAL_AI_COPY_PROMPT_VERSION,
+        validationVersion: COMMERCIAL_AI_COPY_VALIDATION_VERSION,
+        inputFingerprint: id,
+        snapshotId: id,
+        createdFromCandidateId: id,
+        titulo: 'Synthetic offer',
+        mensagem: 'Synthetic product',
+        cta: `Confira ${affiliateLink}`,
+        hashtags: '#r8',
+      },
+    });
+    await prisma.commercialPromotionCandidate.create({
+      data: {
+        id,
+        campaignId: id,
+        productId: id,
+        snapshotId: id,
+        generatedCopyId: id,
+        status: 'RESERVED',
+        rankPosition: 1,
+        commercialScore: 82,
+        scorePolicyVersion: 'official-v2',
+        minimumScoreUsed: 60,
+        scoreBreakdown: {},
+        promotionSignals: ['CURRENT_DISCOUNT'],
+        queuedAt: now,
+        lastEvaluatedAt: now,
+        expiresAt: new Date(now.getTime() + 3_600_000),
+      },
+    });
+    await prisma.commercialAutomationExecution.create({
+      data: {
+        id,
+        schedulerJobId: `${id}-scheduler`,
+        bullMqJobId: `${id}-execution-job`,
+        ownerId: `${id}-owner`,
+        heartbeatAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 120_000),
+        mode: 'SEND',
+        status: 'QUEUED',
+        externalStage: 'EXTERNAL_MAY_HAVE_STARTED',
+        reasons: [],
+        commercialRunId: id,
+      },
+    });
+    await prisma.whatsAppDispatch.create({
+      data: {
+        id,
+        productId: id,
+        generatedCopyId: id,
+        destinationId: id,
+        instanceName: instance,
+        status: 'PENDING',
+        attemptCount: 0,
+      },
+    });
+    await prisma.commercialPipelineRun.create({
+      data: {
+        id,
+        executionId: id,
+        instanceName: instance,
+        mode: 'CONFIRMED',
+        status: 'STARTED',
+        productId: id,
+        groupDestinationId: id,
+        productName: 'Synthetic product',
+        productPrice: 100,
+        groupName: 'Synthetic R8 group',
+        groupFingerprint: fingerprint,
+        score: 82,
+        scorePolicyVersion: 'official-v2',
+        minimumScoreUsed: 60,
+        maximumScoreObserved: 82,
+        candidateCount: 1,
+        eligibleCount: 1,
+        rejectedCount: 0,
+        rejectionSummary: {},
+        selectionReasons: ['R8 synthetic fixture'],
+        copyPreview: caption,
+        plannedSubIds: [],
+        dispatchId: id,
+        jobId,
+        confirmedAt: now,
+        finalStatus: 'PENDING',
+        investigationRequired: false,
+      },
+    });
+    await prisma.commercialDispatchOutbox.create({
+      data: {
+        id,
+        commercialRunId: id,
+        dispatchId: id,
+        jobId,
+        instanceName: instance,
+        status: 'PUBLISHED',
+        publishedAt: now,
+      },
+    });
+    return {
+      id,
+      now,
+      instance,
+      destination,
+      fingerprint,
+      affiliateLink,
+      imageUrl,
+      caption,
+      jobId,
+    };
+  }
+});

@@ -244,8 +244,6 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
         ? fingerprintWhatsAppGroupId(destination)
         : maskEvolutionDestination(destination);
 
-      await this.assertReady();
-
       if (isGroup) {
         if (!this.groupSendGuard) {
           throw new AppError(
@@ -257,6 +255,10 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
       } else {
         this.sendGuard?.authorizeRequest(destination);
       }
+
+      // Target authorization is a local, zero-effect fence. It must run before
+      // webhook readiness because readiness may synchronize Evolution state.
+      await this.assertReady();
 
       try {
         payload = buildEvolutionMessagePayload({

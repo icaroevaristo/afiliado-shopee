@@ -1,13 +1,13 @@
 # Estado Atual e Gaps Pós-MVP
 
-**Status:** `R7_CANDIDATE`
+**Status:** `R8_PRESEND_CANDIDATE`
 **Baseline R1/R2/R3:** R1 está mergeada; R2 foi mergeada em `#150`; R3 foi
 mergeada em `#151`; R4 foi mergeada em `#152`; R5 foi mergeada em `#153`; R6
-foi mergeada em `#154`. A base da certificação R7 é a main
-`90b998f835bc50b9e135ea780fbab8dad2b715d8`.
-**Escopo desta leitura:** código e certificação R7 do Dashboard inteiro em build
-de produção, usando API TEST local e browser real. Nenhum provider externo foi
-iniciado. A R7 permanece candidate até revisão e merge.
+foi mergeada em `#154`; R7 foi mergeada em `#155`. A base da certificação
+pré-SEND R8 é a main `32293e5da1bc9792b3f5d67d30d51639294db897`.
+**Escopo desta leitura:** auditoria e certificação pré-SEND com provider fake,
+PostgreSQL/Redis/BullMQ TEST descartáveis e zero chamada à Evolution. A prova
+live continua exigindo autorização futura do owner vinculada ao target exato.
 
 ## 1. Classificação documental
 
@@ -80,8 +80,8 @@ esta tabela não converte documento antigo em verdade atual.
 | GAP-06 | `CLOSED_BY_R4`                        | PR #152 / evidência R4                  | três grupos independentes compartilham uma instância sem colapso de targets; reassignment/lifecycle foram certificados em PostgreSQL e BullMQ TEST |
 | GAP-07 | `CLOSED_BY_R5`                        | PR #153 / evidência R5                  | a lista persistida ordenada e sua revision governam a rotação temporal; falha ou indisponibilidade não desloca a fase                              |
 | GAP-08 | `CLOSED_BY_R6`                        | PR #154 / evidência R6                  | o Dashboard administra a lista ordenada como rascunho explícito, preserva autoridade do backend e trata CAS/lifecycle sem retry automático         |
-| GAP-09 | `R7_CANDIDATE`                        | evidência R7 vinculada ao candidate     | build de produção, rotas, estados, quatro larguras, teclado e superfícies client-visible de secrets foram certificados em browser real            |
-| GAP-10 | `OPEN`                                | `E30-OP-001`                            | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8                                              |
+| GAP-09 | `CLOSED_BY_R7`                        | PR #155 / evidência R7                  | build de produção, rotas, estados, quatro larguras, teclado e superfícies client-visible de secrets foram certificados em browser real            |
+| GAP-10 | `R8_PRESEND_CANDIDATE`                | evidência R8 vinculada ao candidate     | o boundary pré-SEND vincula autorização, tree, job, target, assignment revision e hash do payload; SEND live permanece proibido sem autorização    |
 | GAP-11 | `HUMAN_REQUIRED`                      | `E30-DOC-001`                           | retirar pause/ativar operação real jamais é inferido por um agente; R9                                                                             |
 | GAP-12 | `CLOSED_BY_R3`                        | PR #151 / evidência R3                  | o snapshot operacional preserva fontes, timestamps, UNKNOWN e blockers correlacionados; readiness diária continua sendo gate posterior             |
 
@@ -114,7 +114,7 @@ Exemplo obrigatório: se 08:15 foi reservado para N2 e N2 está indisponível,
 08:30 continua sendo N1, não a “próxima instância saudável”. Falhar o slot é
 preferível a mudar o contrato sem decisão explícita.
 
-## 5. Estado mergeado do GAP-08 e candidate do GAP-09
+## 5. Estado mergeado do GAP-08 e GAP-09
 
 O Dashboard mantém a ordem persistida recebida do backend separada do rascunho
 local. Reordenar, adicionar ou remover um WhatsApp não muda o resumo persistido
@@ -129,7 +129,7 @@ sucedido. A UI não calcula `upcomingAssignments`, não cria cursor e não subst
 uma assignment indisponível. Essas garantias foram mergeadas na R6 pelo PR
 `#154`.
 
-A certificação R7 candidate inventaria todas as rotas `page.tsx`, executa as
+A certificação R7 mergeada inventaria todas as rotas `page.tsx`, executa as
 rotas principais em `390x844`, `768x1024`, `1024x768` e `1440x900` sobre
 `next start`, e cobre rotas de detalhe, navegação, erro inicial, vazio, loading,
 perda e recuperação da API, teclado e independência entre health público e o
@@ -138,9 +138,20 @@ injeta o token sintético somente no servidor.
 
 A verificação de secrets usa sentinels sintéticos distintos no build e no
 runtime e inspeciona chunks cliente, HTML/RSC, DOM, URL, storage, cookies,
-console e headers iniciados pelo browser. Esses resultados continuam candidate
-até revisão e merge da R7. R8 e R9 permanecem pendentes e
-`DAILY_USE_READY=false`.
+console e headers iniciados pelo browser. Esses resultados foram mergeados no
+PR `#155`.
+
+O candidate pré-SEND R8 mantém o caminho canônico de publicação manual e
+adiciona uma fence opcional para a futura prova live. Ela rejeita antes do
+provider quando autorização, HEAD/tree, job, dispatch, grupo, hash do destino,
+instância, `assignmentRevision`, candidate, snapshot, copy, modo ou hash da
+mensagem divergem. O orçamento é consumido antes da chamada ao provider e não
+pode exceder um. A allowlist local do destino é validada antes da prontidão de
+webhook, pois essa prontidão pode sincronizar estado na Evolution.
+
+Essa certificação usa somente infraestrutura TEST e provider fake. Ela não
+autoriza Evolution, webhook real ou WhatsApp SEND. R8 live e R9 permanecem
+pendentes e `DAILY_USE_READY=false`.
 
 ## 6. Limites das evidências R3 e R4
 

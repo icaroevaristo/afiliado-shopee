@@ -96,6 +96,39 @@ describe('isolated WhatsApp dispatch worker', () => {
     expect(workerFactory).not.toHaveBeenCalled();
   });
 
+  it('valida a autorização one-shot antes de recovery e readiness', async () => {
+    const providerFactory = vi.fn();
+    const workerFactory = vi.fn();
+    const recoveryCoordinator = { run: vi.fn() };
+    const authorizationError = Object.assign(
+      new Error('one-shot authorization invalid'),
+      { code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' },
+    );
+    const oneShotAuthorizationFence = {
+      assertRuntime: vi.fn(() => {
+        throw authorizationError;
+      }),
+      assertJob: vi.fn(),
+      providerRunId: vi.fn(),
+      assertPreSend: vi.fn(),
+      sendBudgetConsumed: 0,
+    };
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory,
+        workerFactory,
+        recoveryCoordinator,
+        oneShotAuthorizationFence,
+      }),
+    ).rejects.toBe(authorizationError);
+
+    expect(oneShotAuthorizationFence.assertRuntime).toHaveBeenCalledOnce();
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+  });
+
   it('compoe somente provider, politica e consumer de whatsapp-dispatch', async () => {
     const provider: WhatsAppProvider = {
       sendMessage: vi.fn<WhatsAppProvider['sendMessage']>(async () => ({

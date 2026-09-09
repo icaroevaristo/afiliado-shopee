@@ -318,6 +318,7 @@ export const createSenderService = ({
   instanceName,
   clock,
   confirmationTimeoutMs,
+  preSendFence,
 }: {
   repositories: Pick<ApplicationRepositories, 'whatsappDispatches'> &
     Partial<{
@@ -333,6 +334,7 @@ export const createSenderService = ({
   instanceName?: string;
   clock?: () => Date;
   confirmationTimeoutMs?: number;
+  preSendFence?: ConstructorParameters<typeof SenderService>[0]['preSendFence'];
 }) =>
   new SenderService({
     dispatches: repositories.whatsappDispatches,
@@ -345,6 +347,7 @@ export const createSenderService = ({
     groupSendPolicy,
     instanceName,
     confirmationTimeoutMs,
+    preSendFence,
   });
 
 export const createPrismaRepositories = (
