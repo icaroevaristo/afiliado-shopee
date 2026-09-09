@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { change, click, render } from '../test/render';
 import { GroupsManagement } from './groups-management';
@@ -103,6 +103,28 @@ const overview = {
       blockers: [],
       updatedAt: '2026-08-28T12:00:00.000Z',
     },
+    {
+      name: 'whatsapp-terciario',
+      active: true,
+      paused: false,
+      health: 'UNKNOWN',
+      assignedGroupCount: 1,
+      lastSendAt: null,
+      nextSendAt: null,
+      blockers: [],
+      updatedAt: '2026-08-28T12:00:00.000Z',
+    },
+    {
+      name: 'whatsapp-reserva',
+      active: true,
+      paused: false,
+      health: 'UNKNOWN',
+      assignedGroupCount: 0,
+      lastSendAt: null,
+      nextSendAt: null,
+      blockers: [],
+      updatedAt: '2026-08-28T12:00:00.000Z',
+    },
   ],
   groups: [
     {
@@ -114,6 +136,18 @@ const overview = {
       fingerprint: 'grp_aaaaaaaaaaaa',
       sourceInstanceName: 'whatsapp-principal',
       assignedInstanceName: 'whatsapp-principal',
+      assignedInstanceNames: [
+        'whatsapp-principal',
+        'whatsapp-secundario',
+        'whatsapp-terciario',
+      ],
+      assignmentRevision: 7,
+      upcomingAssignments: [
+        {
+          scheduledFor: '2026-08-28T13:00:00.000Z',
+          instanceName: 'whatsapp-principal',
+        },
+      ],
       campaign: { id: 'campaign-a', name: 'Casa em oferta', active: true },
       niche: { id: 'niche-a', name: 'Casa', active: true },
       lastSendAt: '2026-08-28T11:00:00.000Z',
@@ -223,6 +257,34 @@ const cardByName = (container: HTMLElement, name: string) =>
     (card) => card.querySelector('.ops-card-title')?.textContent === name,
   );
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
+
+const overviewWithGroupAOrder = (
+  assignedInstanceNames: string[],
+  updatedAt = '2026-08-28T12:30:00.000Z',
+) => ({
+  ...overview,
+  groups: overview.groups.map((group) =>
+    group.id === 'group-a-internal'
+      ? {
+          ...group,
+          assignedInstanceName: assignedInstanceNames[0] ?? null,
+          assignedInstanceNames,
+          assignmentRevision: 8,
+          updatedAt,
+        }
+      : group,
+  ),
+});
+
 describe('GroupsManagement', () => {
   it('mostra resumo, filtros, dados reais e oculta IDs no primeiro nível', async () => {
     const screen = await render(<GroupsManagement />);
@@ -269,10 +331,11 @@ describe('GroupsManagement', () => {
 
     await click(buttons.find((button) => button.textContent === 'Todos')!);
     const selects = screen.container.querySelectorAll('select');
-    await change(selects[0], 'whatsapp-secundario');
-    expect(cardByName(screen.container, 'Ofertas B')).toBeTruthy();
-    expect(cardByName(screen.container, 'Ofertas A')).toBeFalsy();
+    await change(selects[0], 'whatsapp-terciario');
+    expect(cardByName(screen.container, 'Ofertas A')).toBeTruthy();
+    expect(cardByName(screen.container, 'Ofertas B')).toBeFalsy();
 
+    await change(selects[0], '');
     await change(selects[1], 'campaign-b');
     expect(
       selects[1].querySelector('option[value="campaign-a"]')?.textContent,
@@ -387,7 +450,7 @@ describe('GroupsManagement', () => {
     await screen.unmount();
   });
 
-  it('faz a troca de responsável somente após ação explícita e envia expectedUpdatedAt', async () => {
+  it('mantém o resumo persistido enquanto edita um rascunho e envia somente a lista ordenada', async () => {
     const screen = await render(<GroupsManagement />);
     const card = cardByName(screen.container, 'Ofertas A')!;
     await click(
@@ -395,26 +458,108 @@ describe('GroupsManagement', () => {
         button.textContent?.includes('Editar'),
       )!,
     );
-    const assignment = card.querySelector('select[aria-label]')!;
-    await change(assignment, 'whatsapp-secundario');
+    const moveSecondUp = card.querySelector(
+      'button[aria-label="Mover whatsapp-secundario para cima"]',
+    )!;
+    await click(moveSecondUp);
     expect(updateOperationalGroupMock).not.toHaveBeenCalled();
+    expect(card.textContent).toContain(
+      'Ordem persistida: whatsapp-principal → whatsapp-secundario → whatsapp-terciario',
+    );
+    expect(card.textContent).toContain('Alterações não salvas');
 
     await click(
       Array.from(card.querySelectorAll('button')).find((button) =>
-        button.textContent?.includes('Trocar WhatsApp responsável'),
+        button.textContent?.includes('Salvar ordem dos WhatsApps'),
       )!,
     );
     expect(window.confirm).toHaveBeenCalledWith(
-      'Trocar o WhatsApp responsável de whatsapp-principal para whatsapp-secundario no grupo Ofertas A?',
+      'Alterar a ordem de WhatsApps do grupo Ofertas A? Ordem anterior: whatsapp-principal → whatsapp-secundario → whatsapp-terciario. Nova ordem: whatsapp-secundario → whatsapp-principal → whatsapp-terciario.',
     );
     expect(updateOperationalGroupMock).toHaveBeenCalledWith(
       'group-a-internal',
       {
-        assignedInstanceName: 'whatsapp-secundario',
+        assignedInstanceNames: [
+          'whatsapp-secundario',
+          'whatsapp-principal',
+          'whatsapp-terciario',
+        ],
         expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
         confirmation: 'CONFIRMAR_REATRIBUICAO_GRUPO',
       },
     );
+    await screen.unmount();
+  });
+
+  it('adiciona e remove itens no rascunho sem oferecer assignments duplicadas', async () => {
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+
+    const addSelect = card.querySelector(
+      'select[aria-label="Adicionar WhatsApp para Ofertas A"]',
+    )!;
+    expect(
+      Array.from(addSelect.querySelectorAll('option')).map(
+        (option) => option.value,
+      ),
+    ).toEqual(['', 'whatsapp-reserva']);
+    await change(addSelect, 'whatsapp-reserva');
+    await click(
+      Array.from(card.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Adicionar',
+      )!,
+    );
+    expect(
+      Array.from(card.querySelectorAll<HTMLSelectElement>('select')).some(
+        (select) => select.value === 'whatsapp-reserva',
+      ),
+    ).toBe(true);
+
+    await click(
+      card.querySelector('button[aria-label="Remover whatsapp-secundario"]')!,
+    );
+    expect(
+      Array.from(card.querySelectorAll<HTMLSelectElement>('select')).some(
+        (select) => select.value === 'whatsapp-secundario',
+      ),
+    ).toBe(false);
+    expect(card.textContent).toContain('Alterações não salvas');
+    expect(updateOperationalGroupMock).not.toHaveBeenCalled();
+    await screen.unmount();
+  });
+
+  it('preserva assignment persistida indisponível sem remover, substituir ou oferecê-la como nova', async () => {
+    getOperationalAdminMock.mockResolvedValueOnce({
+      ...overview,
+      instances: overview.instances.map((instance) =>
+        instance.name === 'whatsapp-secundario'
+          ? { ...instance, active: false, paused: true }
+          : instance,
+      ),
+    });
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    expect(card.textContent).toContain(
+      'Ordem persistida: whatsapp-principal → whatsapp-secundario → whatsapp-terciario',
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    const unavailableSelect = Array.from(
+      card.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'whatsapp-secundario');
+    expect(
+      unavailableSelect?.querySelector('option[value="whatsapp-secundario"]')
+        ?.textContent,
+    ).toContain('(indisponível)');
+    expect(updateOperationalGroupMock).not.toHaveBeenCalled();
     await screen.unmount();
   });
 
@@ -436,7 +581,7 @@ describe('GroupsManagement', () => {
     );
 
     expect(updateOperationalGroupMock).toHaveBeenCalledTimes(1);
-    expect(getOperationalAdminMock).toHaveBeenCalledTimes(1);
+    expect(getOperationalAdminMock).toHaveBeenCalledTimes(2);
     expect(screen.container.textContent).toContain(
       'Este grupo foi alterado em outro lugar. Atualize os dados antes de tentar novamente.',
     );
@@ -464,7 +609,186 @@ describe('GroupsManagement', () => {
     expect(screen.container.textContent).toContain(
       'Alteração concluída, mas não foi possível atualizar os dados exibidos.',
     );
+    expect(screen.container.textContent).toContain(
+      'Os dados exibidos podem estar desatualizados.',
+    );
     expect(screen.container.textContent).not.toContain('Grupos indisponíveis');
+    await screen.unmount();
+  });
+
+  it('descarta o rascunho ao fechar o editor e torna a revisão somente leitura', async () => {
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    const edit = Array.from(card.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Editar'),
+    )!;
+    await click(edit);
+    await click(
+      card.querySelector(
+        'button[aria-label="Mover whatsapp-secundario para cima"]',
+      )!,
+    );
+    expect(card.textContent).toContain('Alterações não salvas');
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Fechar edição'),
+      )!,
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    expect(card.textContent).toContain('Igual ao estado persistido');
+    expect(card.textContent).toContain('Revisão do roteamento7');
+    expect(updateOperationalGroupMock).not.toHaveBeenCalled();
+    await screen.unmount();
+  });
+
+  it('impede duplo submit e bloqueia nova mutation quando o refresh pós-write falha', async () => {
+    const patchResult = deferred<object>();
+    updateOperationalGroupMock.mockReturnValueOnce(patchResult.promise);
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    await click(
+      card.querySelector(
+        'button[aria-label="Mover whatsapp-secundario para cima"]',
+      )!,
+    );
+    const save = Array.from(card.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Salvar ordem dos WhatsApps'),
+    )!;
+    await act(async () => {
+      save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(updateOperationalGroupMock).toHaveBeenCalledTimes(1);
+    getOperationalAdminMock.mockRejectedValueOnce(
+      new Error('refresh indisponível'),
+    );
+    await act(async () => patchResult.resolve({}));
+    expect(screen.container.textContent).toContain(
+      'Os dados exibidos podem estar desatualizados.',
+    );
+    expect(save).toHaveProperty('disabled', true);
+    await click(save);
+    expect(updateOperationalGroupMock).toHaveBeenCalledTimes(1);
+    await screen.unmount();
+  });
+
+  it('ignora leitura antiga que termina depois do snapshot pós-write', async () => {
+    const staleRead = deferred<typeof overview>();
+    const currentRead = deferred<ReturnType<typeof overviewWithGroupAOrder>>();
+    const screen = await render(<GroupsManagement />);
+    getOperationalAdminMock
+      .mockImplementationOnce(() => staleRead.promise)
+      .mockImplementationOnce(() => currentRead.promise);
+
+    await click(
+      Array.from(screen.container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Atualizar',
+      )!,
+    );
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    await click(
+      card.querySelector(
+        'button[aria-label="Mover whatsapp-secundario para cima"]',
+      )!,
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Salvar ordem dos WhatsApps'),
+      )!,
+    );
+    await act(async () =>
+      currentRead.resolve(
+        overviewWithGroupAOrder([
+          'whatsapp-secundario',
+          'whatsapp-principal',
+          'whatsapp-terciario',
+        ]),
+      ),
+    );
+    await act(async () => staleRead.resolve(overview));
+    expect(cardByName(screen.container, 'Ofertas A')?.textContent).toContain(
+      'Ordem persistida: whatsapp-secundario → whatsapp-principal → whatsapp-terciario',
+    );
+    await screen.unmount();
+  });
+
+  it('recarrega o estado do servidor após CAS 409 e exige nova confirmação', async () => {
+    updateOperationalGroupMock.mockRejectedValueOnce(
+      new DashboardApiErrorMock('conflito', 409, 'OPERATIONAL_CAS_CONFLICT'),
+    );
+    getOperationalAdminMock
+      .mockResolvedValueOnce(overview)
+      .mockResolvedValueOnce(
+        overviewWithGroupAOrder([
+          'whatsapp-secundario',
+          'whatsapp-principal',
+          'whatsapp-terciario',
+        ]),
+      );
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas A')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    await click(
+      card.querySelector('button[aria-label*="para cima"]:not([disabled])')!,
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Salvar ordem'),
+      )!,
+    );
+    expect(updateOperationalGroupMock).toHaveBeenCalledTimes(1);
+    expect(cardByName(screen.container, 'Ofertas A')?.textContent).toContain(
+      'Ordem persistida: whatsapp-secundario → whatsapp-principal → whatsapp-terciario',
+    );
+    expect(screen.container.textContent).toContain('alterado em outro lugar');
+    await screen.unmount();
+  });
+
+  it('remove o último responsável somente com confirmação específica e sem fallback', async () => {
+    const screen = await render(<GroupsManagement />);
+    const card = cardByName(screen.container, 'Ofertas B')!;
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Editar'),
+      )!,
+    );
+    await click(
+      card.querySelector('button[aria-label="Remover whatsapp-secundario"]')!,
+    );
+    await click(
+      Array.from(card.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Trocar WhatsApp responsável'),
+      )!,
+    );
+    expect(window.confirm).toHaveBeenCalledWith(
+      'Remover o último WhatsApp responsável do grupo Ofertas B? Ordem anterior: whatsapp-secundario. Nova ordem: nenhum. O grupo ficará sem WhatsApp responsável.',
+    );
+    expect(updateOperationalGroupMock).toHaveBeenCalledWith(
+      'group-b-internal',
+      {
+        assignedInstanceNames: [],
+        expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
+        confirmation: 'CONFIRMAR_REATRIBUICAO_GRUPO',
+      },
+    );
     await screen.unmount();
   });
 
@@ -483,11 +807,14 @@ describe('GroupsManagement', () => {
         button.textContent?.includes('Editar'),
       )!,
     );
-    const assignment = card.querySelector('select[aria-label]')!;
-    await change(assignment, 'whatsapp-secundario');
+    await click(
+      card.querySelector(
+        'button[aria-label="Mover whatsapp-secundario para cima"]',
+      )!,
+    );
     await click(
       Array.from(card.querySelectorAll('button')).find((button) =>
-        button.textContent?.includes('Trocar WhatsApp responsável'),
+        button.textContent?.includes('Salvar ordem dos WhatsApps'),
       )!,
     );
 

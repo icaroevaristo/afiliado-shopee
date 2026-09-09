@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DashboardApiError,
   getOperationalAdmin,
@@ -188,6 +188,12 @@ function AdvancedGroupDetails({ group }: { group: OperationalAdminGroup }) {
             {formatDateTime(group.lastSyncedAt)}
           </dd>
         </div>
+        <div>
+          <dt className="text-xs text-slate-500">Revisão do roteamento</dt>
+          <dd className="mt-1 text-slate-700">
+            {group.assignmentRevision ?? 'Não disponível'}
+          </dd>
+        </div>
         {group.blockers.length > 0 ? (
           <div className="sm:col-span-2">
             <dt className="text-xs text-slate-500">Diagnóstico técnico</dt>
@@ -205,6 +211,7 @@ function GroupCard({
   group,
   overview,
   saving,
+  mutationBlocked,
   expanded,
   onToggleExpanded,
   onChange,
@@ -212,6 +219,7 @@ function GroupCard({
   group: OperationalAdminGroup;
   overview: OperationalAdmin;
   saving: boolean;
+  mutationBlocked: boolean;
   expanded: boolean;
   onToggleExpanded: () => void;
   onChange: (
@@ -239,14 +247,21 @@ function GroupCard({
     group.updatedAt,
   ]);
 
+  useEffect(() => {
+    if (!expanded) {
+      setAssignments(groupAssignments(group));
+      setAssignmentToAdd('');
+    }
+  }, [expanded, group]);
+
   const activeInstances = overview.instances.filter(
     (instance) => instance.active && !instance.paused,
   );
   const hasPending = groupHasPending(group);
   const originalAssignments = groupAssignments(group);
   const assignmentChanged = !assignmentsEqual(assignments, originalAssignments);
-  const assignmentLabel = assignments.length
-    ? assignments.join(' → ')
+  const assignmentLabel = originalAssignments.length
+    ? originalAssignments.join(' → ')
     : 'Nenhum WhatsApp responsável';
 
   return (
@@ -262,7 +277,10 @@ function GroupCard({
               <OpsBadge tone="warning">Disponibilidade pendente</OpsBadge>
             )}
           </div>
-          <p className="mt-2 text-sm text-slate-600">{assignmentLabel}</p>
+          <p className="mt-2 text-sm text-slate-600">
+            <span className="font-medium">Ordem persistida:</span>{' '}
+            {assignmentLabel}
+          </p>
         </div>
         <button
           type="button"
@@ -310,7 +328,7 @@ function GroupCard({
           <strong>{formatDateTime(group.lastSendAt)}</strong>
         </div>
         <div className="sm:col-span-2">
-          <span className="ops-detail-label">Próximos slots</span>
+          <span className="ops-detail-label">Próximos slots persistidos</span>
           <strong className="text-sm font-medium">
             {upcomingAssignmentLabel(group)}
           </strong>
@@ -346,7 +364,7 @@ function GroupCard({
             <button
               type="button"
               className="ops-button"
-              disabled={saving}
+              disabled={saving || mutationBlocked}
               onClick={() =>
                 onChange(
                   group,
@@ -365,7 +383,7 @@ function GroupCard({
               type="button"
               className="ops-button"
               data-variant="danger"
-              disabled={saving}
+              disabled={saving || mutationBlocked}
               onClick={() =>
                 onChange(
                   group,
@@ -393,6 +411,27 @@ function GroupCard({
                 A rotação segue esta ordem. A troca é explícita e fica bloqueada
                 enquanto houver envio em andamento.
               </p>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-white p-3 text-sm">
+              <span className="font-medium text-slate-700">
+                Ordem persistida
+              </span>
+              <p className="mt-1 text-slate-600">{assignmentLabel}</p>
+            </div>
+            <div
+              className="flex flex-wrap items-center justify-between gap-2"
+              aria-live="polite"
+            >
+              <span className="font-medium text-slate-700">Rascunho</span>
+              {assignmentChanged ? (
+                <span className="rounded-md bg-amber-50 px-2 py-1 text-sm font-medium text-amber-900">
+                  Alterações não salvas
+                </span>
+              ) : (
+                <span className="text-sm text-slate-500">
+                  Igual ao estado persistido
+                </span>
+              )}
             </div>
             <div
               className="grid gap-2"
@@ -438,7 +477,7 @@ function GroupCard({
                             ),
                           );
                         }}
-                        disabled={saving}
+                        disabled={saving || mutationBlocked}
                         aria-label={`Novo WhatsApp responsável para ${group.name} posição ${index + 1}`}
                       >
                         {currentUnavailable ? (
@@ -463,7 +502,7 @@ function GroupCard({
                       type="button"
                       className="ops-button"
                       aria-label={`Mover ${name} para cima`}
-                      disabled={saving || index === 0}
+                      disabled={saving || mutationBlocked || index === 0}
                       onClick={() =>
                         setAssignments((current) => {
                           const next = [...current];
@@ -481,7 +520,11 @@ function GroupCard({
                       type="button"
                       className="ops-button"
                       aria-label={`Mover ${name} para baixo`}
-                      disabled={saving || index === assignments.length - 1}
+                      disabled={
+                        saving ||
+                        mutationBlocked ||
+                        index === assignments.length - 1
+                      }
                       onClick={() =>
                         setAssignments((current) => {
                           const next = [...current];
@@ -499,7 +542,7 @@ function GroupCard({
                       type="button"
                       className="ops-button"
                       aria-label={`Remover ${name}`}
-                      disabled={saving}
+                      disabled={saving || mutationBlocked}
                       onClick={() =>
                         setAssignments((current) =>
                           current.filter((_, itemIndex) => itemIndex !== index),
@@ -520,7 +563,7 @@ function GroupCard({
                     className="ops-input"
                     value={assignmentToAdd}
                     onChange={(event) => setAssignmentToAdd(event.target.value)}
-                    disabled={saving}
+                    disabled={saving || mutationBlocked}
                     aria-label={`Adicionar WhatsApp para ${group.name}`}
                   >
                     <option value="">Adicionar número…</option>
@@ -538,7 +581,7 @@ function GroupCard({
                 <button
                   type="button"
                   className="ops-button"
-                  disabled={saving || !assignmentToAdd}
+                  disabled={saving || mutationBlocked || !assignmentToAdd}
                   onClick={() => {
                     setAssignments((current) => [...current, assignmentToAdd]);
                     setAssignmentToAdd('');
@@ -552,7 +595,7 @@ function GroupCard({
               type="button"
               className="ops-button"
               data-variant="primary"
-              disabled={saving || !assignmentChanged}
+              disabled={saving || mutationBlocked || !assignmentChanged}
               onClick={() => {
                 const previous = originalAssignments.length
                   ? originalAssignments.join(' → ')
@@ -560,16 +603,11 @@ function GroupCard({
                 const nextLabel = assignments.length
                   ? assignments.join(' → ')
                   : 'nenhum';
-                const input =
-                  group.assignedInstanceNames !== undefined ||
-                  assignments.length > 1 ||
-                  originalAssignments.length > 1
-                    ? { assignedInstanceNames: assignments }
-                    : { assignedInstanceName: assignments[0] ?? null };
+                const input = { assignedInstanceNames: assignments };
                 const confirmationMessage =
-                  assignments.length <= 1 && originalAssignments.length <= 1
-                    ? `Trocar o WhatsApp responsável de ${previous} para ${nextLabel} no grupo ${group.name}?`
-                    : `Trocar a ordem de WhatsApps de ${previous} para ${nextLabel} no grupo ${group.name}?`;
+                  assignments.length === 0 && originalAssignments.length > 0
+                    ? `Remover o último WhatsApp responsável do grupo ${group.name}? Ordem anterior: ${previous}. Nova ordem: nenhum. O grupo ficará sem WhatsApp responsável.`
+                    : `Alterar a ordem de WhatsApps do grupo ${group.name}? Ordem anterior: ${previous}. Nova ordem: ${nextLabel}.`;
                 onChange(
                   group,
                   input,
@@ -602,19 +640,29 @@ export function GroupsManagement() {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [snapshotStale, setSnapshotStale] = useState(false);
+  const latestReadRef = useRef(0);
+  const mutationsInFlightRef = useRef(new Set<string>());
 
   const load = async (
     initial = false,
     { showError = true }: { showError?: boolean } = {},
   ): Promise<boolean> => {
+    const readId = latestReadRef.current + 1;
+    latestReadRef.current = readId;
     if (initial) setLoading(true);
     else setRefreshing(true);
     setError(null);
     setSuccess(null);
     try {
-      setOverview(await getOperationalAdmin());
+      const nextOverview = await getOperationalAdmin();
+      if (readId !== latestReadRef.current) return false;
+      setOverview(nextOverview);
+      setSnapshotStale(false);
       return true;
     } catch (cause) {
+      if (readId !== latestReadRef.current) return false;
+      if (!initial) setSnapshotStale(true);
       if (showError) {
         setError(
           operationalErrorMessage(
@@ -625,8 +673,10 @@ export function GroupsManagement() {
       }
       return false;
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (readId === latestReadRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -669,6 +719,13 @@ export function GroupsManagement() {
     confirmation: string,
     confirmationMessage: string,
   ) => {
+    if (snapshotStale) {
+      setError(
+        'Os dados exibidos podem estar desatualizados. Atualize com sucesso antes de salvar outra alteração.',
+      );
+      return;
+    }
+    if (mutationsInFlightRef.current.has(group.id)) return;
     if (!actionConfirmed(confirmationMessage)) return;
     if (!group.updatedAt) {
       setError(
@@ -676,6 +733,7 @@ export function GroupsManagement() {
       );
       return;
     }
+    mutationsInFlightRef.current.add(group.id);
     setSavingId(group.id);
     setError(null);
     setSuccess(null);
@@ -686,14 +744,28 @@ export function GroupsManagement() {
         confirmation,
       });
       const refreshed = await load(false, { showError: false });
+      if (!refreshed) setSnapshotStale(true);
       setSuccess(
         refreshed
           ? `Grupo ${group.name} atualizado.`
           : 'Alteração concluída, mas não foi possível atualizar os dados exibidos.',
       );
     } catch (cause) {
-      setError(operationalErrorMessage(cause, 'O grupo não foi atualizado.'));
+      const message = operationalErrorMessage(
+        cause,
+        'O grupo não foi atualizado.',
+      );
+      if (
+        cause instanceof DashboardApiError &&
+        cause.code === 'OPERATIONAL_CAS_CONFLICT'
+      ) {
+        const refreshed = await load(false, { showError: false });
+        if (refreshed) setExpandedId(null);
+        else setSnapshotStale(true);
+      }
+      setError(message);
     } finally {
+      mutationsInFlightRef.current.delete(group.id);
       setSavingId(null);
     }
   };
@@ -751,6 +823,20 @@ export function GroupsManagement() {
         <div className="ops-state" role="status" aria-live="polite">
           <CheckCircle2 size={16} aria-hidden="true" />
           <span>{success}</span>
+        </div>
+      ) : null}
+      {snapshotStale && overview ? (
+        <div
+          className="ops-state"
+          data-tone="warning"
+          role="alert"
+          aria-live="assertive"
+        >
+          <AlertCircle size={16} aria-hidden="true" />
+          <span>
+            Os dados exibidos podem estar desatualizados. Atualize com sucesso
+            antes de salvar outra alteração.
+          </span>
         </div>
       ) : null}
 
@@ -865,6 +951,7 @@ export function GroupsManagement() {
                     group={group}
                     overview={overview}
                     saving={savingId === group.id}
+                    mutationBlocked={snapshotStale}
                     expanded={expandedId === group.id}
                     onToggleExpanded={() =>
                       setExpandedId((current) =>
