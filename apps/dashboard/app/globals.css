@@ -41,11 +41,15 @@
 }
 
 html {
+  max-width: 100%;
+  overflow-x: clip;
   background: var(--ops-canvas);
   color-scheme: light;
 }
 
 body {
+  max-width: 100%;
+  overflow-x: clip;
   min-height: 100vh;
   margin: 0;
   background: var(--ops-canvas);
@@ -2374,6 +2378,9 @@ textarea:focus-visible {
 .offers-page,
 .offer-detail-page {
   display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   gap: 20px;
 }
 
@@ -2533,6 +2540,9 @@ textarea:focus-visible {
 }
 
 .offers-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   border: 1px solid var(--ops-border);
   border-radius: 8px;
@@ -3155,7 +3165,7 @@ textarea:focus-visible {
   }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 800px) {
   .offers-table-wrap {
     display: none;
   }

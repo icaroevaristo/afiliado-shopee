@@ -1,13 +1,13 @@
 # Estado Atual e Gaps Pós-MVP
 
-**Status:** `R6_CANDIDATE`
+**Status:** `R7_CANDIDATE`
 **Baseline R1/R2/R3:** R1 está mergeada; R2 foi mergeada em `#150`; R3 foi
-mergeada em `#151`; R4 foi mergeada em `#152`; R5 foi mergeada em `#153`.
-A base da certificação R6 é a main
-`61e57bb69e676ab24724df601cd3928a8be31e10`.
-**Escopo desta leitura:** código e certificação R6 do editor de rotação no
-Dashboard, usando API TEST local e browser real. Nenhum provider externo foi
-iniciado. A R6 permanece candidate até revisão e merge.
+mergeada em `#151`; R4 foi mergeada em `#152`; R5 foi mergeada em `#153`; R6
+foi mergeada em `#154`. A base da certificação R7 é a main
+`90b998f835bc50b9e135ea780fbab8dad2b715d8`.
+**Escopo desta leitura:** código e certificação R7 do Dashboard inteiro em build
+de produção, usando API TEST local e browser real. Nenhum provider externo foi
+iniciado. A R7 permanece candidate até revisão e merge.
 
 ## 1. Classificação documental
 
@@ -64,9 +64,9 @@ esta tabela não converte documento antigo em verdade atual.
   certificação de um heartbeat autoritativo ainda não existe.
 - Os blockers são derivados e ricos, mas a causa dos grupos concretos do
   ambiente operacional não foi lida nesta missão documental.
-- A R6 cobre somente o editor de rotação em 390 px e desktop. A matriz visual
-  completa nas quatro larguras e o quickstart pós-merge continuam pertencendo
-  às fases posteriores.
+- A matriz R7 usa dados sintéticos e API TEST em memória. Ela não comprova o
+  estado atual do ambiente operacional, não autoriza SEND e não torna o sistema
+  pronto para uso diário.
 
 ## 3. Gaps auditados
 
@@ -79,8 +79,8 @@ esta tabela não converte documento antigo em verdade atual.
 | GAP-05 | `REJECTED` como risco de falso online | `E30-CODE-004`                          | `UNKNOWN` é honesto sem heartbeat; não declarar conectado por registro DB. Um contrato de heartbeat futuro é melhoria separada                     |
 | GAP-06 | `CLOSED_BY_R4`                        | PR #152 / evidência R4                  | três grupos independentes compartilham uma instância sem colapso de targets; reassignment/lifecycle foram certificados em PostgreSQL e BullMQ TEST |
 | GAP-07 | `CLOSED_BY_R5`                        | PR #153 / evidência R5                  | a lista persistida ordenada e sua revision governam a rotação temporal; falha ou indisponibilidade não desloca a fase                              |
-| GAP-08 | `R6_CANDIDATE`                        | evidência R6 vinculada ao candidate     | o Dashboard administra a lista ordenada como rascunho explícito, preserva autoridade do backend e trata CAS/lifecycle sem retry automático         |
-| GAP-09 | `OPEN`                                | evidência browser R6 limitada ao editor | R7 deve produzir a matriz visual e funcional completa nas quatro larguras; o smoke cirúrgico da rotação não fecha essa fase                        |
+| GAP-08 | `CLOSED_BY_R6`                        | PR #154 / evidência R6                  | o Dashboard administra a lista ordenada como rascunho explícito, preserva autoridade do backend e trata CAS/lifecycle sem retry automático         |
+| GAP-09 | `R7_CANDIDATE`                        | evidência R7 vinculada ao candidate     | build de produção, rotas, estados, quatro larguras, teclado e superfícies client-visible de secrets foram certificados em browser real            |
 | GAP-10 | `OPEN`                                | `E30-OP-001`                            | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8                                              |
 | GAP-11 | `HUMAN_REQUIRED`                      | `E30-DOC-001`                           | retirar pause/ativar operação real jamais é inferido por um agente; R9                                                                             |
 | GAP-12 | `CLOSED_BY_R3`                        | PR #151 / evidência R3                  | o snapshot operacional preserva fontes, timestamps, UNKNOWN e blockers correlacionados; readiness diária continua sendo gate posterior             |
@@ -114,7 +114,7 @@ Exemplo obrigatório: se 08:15 foi reservado para N2 e N2 está indisponível,
 08:30 continua sendo N1, não a “próxima instância saudável”. Falhar o slot é
 preferível a mudar o contrato sem decisão explícita.
 
-## 5. Estado candidate do GAP-08
+## 5. Estado mergeado do GAP-08 e candidate do GAP-09
 
 O Dashboard mantém a ordem persistida recebida do backend separada do rascunho
 local. Reordenar, adicionar ou remover um WhatsApp não muda o resumo persistido
@@ -126,8 +126,21 @@ Conflitos `409` de CAS ou lifecycle são mostrados sem retry automático. Um CAS
 stale permite uma única leitura bounded do snapshot atual; falha de leitura após
 write marca a tela como desatualizada e bloqueia nova mutation até refresh bem
 sucedido. A UI não calcula `upcomingAssignments`, não cria cursor e não substitui
-uma assignment indisponível. Essas garantias permanecem candidate até a R6 ser
-revisada e mergeada.
+uma assignment indisponível. Essas garantias foram mergeadas na R6 pelo PR
+`#154`.
+
+A certificação R7 candidate inventaria todas as rotas `page.tsx`, executa as
+rotas principais em `390x844`, `768x1024`, `1024x768` e `1440x900` sobre
+`next start`, e cobre rotas de detalhe, navegação, erro inicial, vazio, loading,
+perda e recuperação da API, teclado e independência entre health público e o
+estado funcional de cada página. O proxy same-origin permanece real no teste e
+injeta o token sintético somente no servidor.
+
+A verificação de secrets usa sentinels sintéticos distintos no build e no
+runtime e inspeciona chunks cliente, HTML/RSC, DOM, URL, storage, cookies,
+console e headers iniciados pelo browser. Esses resultados continuam candidate
+até revisão e merge da R7. R8 e R9 permanecem pendentes e
+`DAILY_USE_READY=false`.
 
 ## 6. Limites das evidências R3 e R4
 

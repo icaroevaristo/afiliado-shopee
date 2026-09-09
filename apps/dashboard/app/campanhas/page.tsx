@@ -58,9 +58,6 @@ const emptyCreateDraft = (): CreateCampaignDraft => ({
   dailyLimit: '60',
 });
 
-const maskFingerprint = (value: string | null | undefined) =>
-  value ? `${value.slice(0, 10)}...${value.slice(-6)}` : '—';
-
 const timeToMinutes = (value: string) => {
   const match = /^(\d{2}):(\d{2})$/.exec(value);
   if (!match) return null;
@@ -352,7 +349,6 @@ export default function CampaignsPage() {
               >
                 <div className="grid gap-4 md:grid-cols-4">
                   <div className="ops-control"><div className="ops-control-label">Grupo</div><div className="ops-control-value text-sm">{group?.name ?? campaign.anchorDestination?.name ?? 'Não associado'}</div><div className="ops-control-sub">{group?.active && group.available ? 'autorizado e disponível' : 'estado não confirmado'}</div></div>
-                  <div className="ops-control"><div className="ops-control-label">Fingerprint</div><div className="ops-control-value ops-mono">{maskFingerprint(group?.fingerprint ?? campaign.logicalGroupFingerprint)}</div><div className="ops-control-sub">identidade lógica</div></div>
                   <label className="ops-control"><span className="ops-control-label">Cadência (min)</span><input className="ops-input" type="number" min="5" max="180" value={draft.cadence} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...draft, cadence: event.target.value } }))} /><span className="ops-control-sub">intervalo da campanha</span></label>
                   <label className="ops-control"><span className="ops-control-label">Janela</span><span className="flex gap-2"><input className="ops-input min-w-0" type="time" value={draft.start} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...draft, start: event.target.value } }))} /><input className="ops-input min-w-0" type="time" value={draft.end} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...draft, end: event.target.value } }))} /></span><span className="ops-control-sub">fuso horário {campaign.timezone}</span></label>
                   <label className="ops-control"><span className="ops-control-label">Limite diário</span><input className="ops-input" type="number" min="1" max={COMMERCIAL_DAILY_LIMIT_MAX} value={draft.dailyLimit} onChange={(event) => setDrafts((current) => ({ ...current, [campaign.id]: { ...draft, dailyLimit: event.target.value } }))} /><span className="ops-control-sub">mensagens desta campanha · teto de entrada {formatDailyLimit(COMMERCIAL_DAILY_LIMIT_MAX)}</span></label>
@@ -369,7 +365,7 @@ export default function CampaignsPage() {
       ) : null}
 
       <OpsSection title="Diretório de grupos" meta={`${groups.length} grupos retornados · nenhuma autorização é alterada aqui`}>
-        {groups.length === 0 ? <OpsEmpty title="Nenhum grupo retornado" message="A API não expôs grupos disponíveis nesta consulta." /> : <div className="ops-table-wrap -mx-[18px]"><table className="ops-table"><thead><tr><th>Nome</th><th>Fingerprint</th><th>Estado</th><th>Membros</th><th>Sincronizado</th></tr></thead><tbody>{groups.map((group) => <tr key={group.id}><td><strong>{group.name}</strong><div className="ops-row-product-meta ops-mono">{group.id}</div></td><td className="ops-mono">{maskFingerprint(group.fingerprint)}</td><td><div className="flex gap-2"><OpsBadge tone={group.active ? 'success' : 'neutral'}>{group.active ? 'ATIVO' : 'INATIVO'}</OpsBadge><OpsBadge tone={group.available ? 'success' : 'warning'}>{group.available ? 'ONLINE' : 'INDISPONÍVEL'}</OpsBadge></div></td><td className="ops-mono">{group.memberCount ?? '—'}</td><td>{formatDateTime(group.lastSyncedAt)}</td></tr>)}</tbody></table></div>}
+        {groups.length === 0 ? <OpsEmpty title="Nenhum grupo retornado" message="A API não expôs grupos disponíveis nesta consulta." /> : <div className="ops-table-wrap -mx-[18px]"><table className="ops-table"><thead><tr><th>Nome</th><th>Estado</th><th>Membros</th><th>Sincronizado</th></tr></thead><tbody>{groups.map((group) => <tr key={group.id}><td><strong>{group.name}</strong></td><td><div className="flex gap-2"><OpsBadge tone={group.active ? 'success' : 'neutral'}>{group.active ? 'ATIVO' : 'INATIVO'}</OpsBadge><OpsBadge tone={group.available ? 'success' : 'warning'}>{group.available ? 'ONLINE' : 'INDISPONÍVEL'}</OpsBadge></div></td><td className="ops-mono">{group.memberCount ?? '—'}</td><td>{formatDateTime(group.lastSyncedAt)}</td></tr>)}</tbody></table></div>}
       </OpsSection>
     </>
   );
