@@ -1,29 +1,68 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getOperationalAdmin, type OperationalAdmin } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 
+type SnapshotState = 'loading' | 'available' | 'stale' | 'unavailable';
+
+const queueWaiting = (queue: OperationalAdmin['queues']['productPipeline']) =>
+  queue.status === 'READY' && queue.counts
+    ? String(queue.counts.waiting)
+    : `${queue.status ?? 'UNKNOWN'} (não medido)`;
+
 export function OperationalStatusSummary() {
   const [overview, setOverview] = useState<OperationalAdmin | null>(null);
+  const [state, setState] = useState<SnapshotState>('loading');
+  const hasSnapshot = useRef(false);
 
-  useEffect(() => {
-    let active = true;
-    if (typeof getOperationalAdmin !== 'function')
-      return () => {
-        active = false;
-      };
-    void getOperationalAdmin()
-      .then((value) => {
-        if (active) setOverview(value);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
+  const load = useCallback(async () => {
+    setState('loading');
+    try {
+      setOverview(await getOperationalAdmin());
+      hasSnapshot.current = true;
+      setState('available');
+    } catch {
+      setState(hasSnapshot.current ? 'stale' : 'unavailable');
+    }
   }, []);
 
-  if (!overview) return null;
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!overview) {
+    return (
+      <section
+        className="ops-section"
+        aria-labelledby="operational-summary-heading"
+      >
+        <h2 id="operational-summary-heading" className="ops-section-title">
+          Estado operacional centralizado
+        </h2>
+        <button
+          className="ops-button mt-3"
+          type="button"
+          onClick={() => void load()}
+        >
+          Atualizar status
+        </button>
+        {state === 'loading' ? (
+          <p className="ops-section-meta">Carregando snapshot operacional.</p>
+        ) : (
+          <div
+            className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+            role="alert"
+          >
+            <p>
+              O snapshot operacional está indisponível. Nenhum estado foi
+              presumido.
+            </p>
+          </div>
+        )}
+      </section>
+    );
+  }
   const campaigns = overview.campaigns ?? [];
   return (
     <section
@@ -40,6 +79,13 @@ export function OperationalStatusSummary() {
             reservations e filas.
           </p>
         </div>
+        <button
+          className="ops-button"
+          type="button"
+          onClick={() => void load()}
+        >
+          Atualizar status
+        </button>
       </div>
       <div className="ops-control-grid">
         <div className="ops-control">
@@ -67,13 +113,23 @@ export function OperationalStatusSummary() {
           </div>
         </div>
       </div>
+      {state === 'stale' ? (
+        <div
+          className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+          role="alert"
+        >
+          <p>
+            O último snapshot permanece visível, mas a atualização atual falhou.
+          </p>
+        </div>
+      ) : null}
       <div className="ops-health-list mt-4">
         <div className="ops-health-row">
           <span className="ops-health-name">Filas</span>
           <span className="ops-mono">
-            pipeline {overview.queues.productPipeline.waiting} · dispatch{' '}
-            {overview.queues.whatsappDispatch.waiting} · automação{' '}
-            {overview.queues.commercialAutomation.waiting}
+            pipeline {queueWaiting(overview.queues.productPipeline)} · dispatch{' '}
+            {queueWaiting(overview.queues.whatsappDispatch)} · automação{' '}
+            {queueWaiting(overview.queues.commercialAutomation)}
           </span>
         </div>
         <div className="ops-health-row">
@@ -90,6 +146,17 @@ export function OperationalStatusSummary() {
               : overview.blockers.map((blocker) => blocker.code).join(' · ')}
           </span>
         </div>
+        {overview.readiness ? (
+          <div className="ops-health-row">
+            <span className="ops-health-name">Readiness</span>
+            <span className="ops-mono">
+              control {overview.readiness.controlPlane.status} · comercial{' '}
+              {overview.readiness.commercial.status} · send{' '}
+              {overview.readiness.send.status} · provider{' '}
+              {overview.readiness.providerConfiguration.status}
+            </span>
+          </div>
+        ) : null}
       </div>
       {campaigns.length > 0 ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">

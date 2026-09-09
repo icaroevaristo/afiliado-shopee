@@ -121,9 +121,14 @@ const makeOperational = (overrides: Record<string, unknown> = {}) => ({
     dailyShopeeHttpLimitOverride: 8,
     dailyOpenAiGenerationLimitOverride: 6,
     providerUsage: {
-      dayKey: '2026-08-10',
-      shopee: { used: 3, limit: 8, reached: false },
-      openAi: { used: 2, limit: 6, reached: false },
+      status: 'READY',
+      source: 'PROVIDER_USAGE',
+      observedAt: '2026-08-10T12:00:00.000Z',
+      usage: {
+        dayKey: '2026-08-10',
+        shopee: { used: 3, limit: 8, reached: false },
+        openAi: { used: 2, limit: 6, reached: false },
+      },
     },
     hardCaps: {
       maxMessagesPerRun: 1,
@@ -429,9 +434,14 @@ describe('AutomationPage — Lote 6', () => {
         automation: {
           ...makeOperational().automation,
           providerUsage: {
-            dayKey: '2026-08-10',
-            shopee: { used: 0, limit: 8, reached: false },
-            openAi: { used: 0, limit: 6, reached: false },
+            status: 'READY',
+            source: 'PROVIDER_USAGE',
+            observedAt: '2026-08-10T12:00:00.000Z',
+            usage: {
+              dayKey: '2026-08-10',
+              shopee: { used: 0, limit: 8, reached: false },
+              openAi: { used: 0, limit: 6, reached: false },
+            },
           },
         },
       }),
@@ -444,10 +454,19 @@ describe('AutomationPage — Lote 6', () => {
   });
 
   it('mostra uso indisponível sem transformar ausência em zero', async () => {
-    const operational = makeOperational();
-    (operational.automation as { providerUsage?: unknown }).providerUsage =
-      undefined;
-    getOperationalAdminMock.mockResolvedValueOnce(operational);
+    getOperationalAdminMock.mockResolvedValueOnce(
+      makeOperational({
+        automation: {
+          ...makeOperational().automation,
+          providerUsage: {
+            status: 'UNKNOWN',
+            source: 'PROVIDER_USAGE',
+            observedAt: '2026-08-10T12:00:00.000Z',
+            usage: null,
+          },
+        },
+      }),
+    );
     const screen = await renderLoaded();
 
     const text = screen.container.textContent ?? '';
@@ -710,8 +729,10 @@ describe('AutomationPage — Lote 6', () => {
         ) as HTMLInputElement
       ).value,
     ).toBe('77');
-    expect(screen.container.textContent).toContain('3 de 12');
-    expect(screen.container.textContent).toContain('2 de 10');
+    expect(screen.container.textContent).toContain('ShopeeNão disponível');
+    expect(screen.container.textContent).toContain('OpenAINão disponível');
+    expect(screen.container.textContent).not.toContain('3 de 12');
+    expect(screen.container.textContent).not.toContain('2 de 10');
     expect(screen.container.textContent).toContain(
       'Alteração salva, mas não foi possível atualizar os dados exibidos.',
     );

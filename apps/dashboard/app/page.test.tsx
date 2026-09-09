@@ -72,9 +72,14 @@ const operationalAdmin = {
     dailyShopeeHttpLimitOverride: null,
     dailyOpenAiGenerationLimitOverride: null,
     providerUsage: {
-      dayKey: '2026-08-09',
-      shopee: { used: 2, limit: 60, reached: false },
-      openAi: { used: 1, limit: 60, reached: false },
+      status: 'READY',
+      source: 'PROVIDER_USAGE',
+      observedAt: '2026-08-09T12:00:00.000Z',
+      usage: {
+        dayKey: '2026-08-09',
+        shopee: { used: 2, limit: 60, reached: false },
+        openAi: { used: 1, limit: 60, reached: false },
+      },
     },
     hardCaps: { maxMessagesPerRun: 1 },
     scheduleRevision: 4,

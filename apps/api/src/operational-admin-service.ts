@@ -7,9 +7,11 @@ import {
 import { COMMERCIAL_GROUP_FINGERPRINT } from './commercial-group-selection';
 import {
   resolveCommercialAutomationSchedule,
+  type CommercialAutomationReason,
   type CommercialAutomationPolicyConfig,
   type CommercialAutomationPolicyService,
 } from './commercial-automation-policy-service';
+import type { CommercialAutomationSchedulerStatusSnapshot } from './commercial-automation-scheduler-status-service';
 import { getOrderedAssignedInstanceNames } from './commercial-instance-stickiness';
 import type { CommercialAutomationSchedulerPlanner } from './commercial-automation-scheduler-planner';
 import type {
@@ -63,7 +65,7 @@ type QueuedCommercialTarget = {
 };
 
 type SchedulerStatusReader = {
-  getStatus: () => Promise<unknown>;
+  getStatus: () => Promise<CommercialAutomationSchedulerStatusSnapshot>;
 };
 
 export type OperationalAdminBlocker = {
@@ -71,15 +73,34 @@ export type OperationalAdminBlocker = {
   code: string;
   entityId: string | null;
   message: string;
+  source:
+    | 'DATABASE'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'LIFECYCLE'
+    | 'INSTANCE_HEALTH'
+    | 'RUNTIME'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt: string;
+  sourceUpdatedAt?: string | null;
   actionHint?: string;
   nextEligibleAt?: string | null;
 };
+
+type OperationalAdminBlockerInput = Omit<
+  OperationalAdminBlocker,
+  'source' | 'observedAt'
+> &
+  Partial<Pick<OperationalAdminBlocker, 'source' | 'observedAt'>>;
 
 export type OperationalAdminInstance = {
   name: string;
   active: boolean;
   paused: boolean;
   health: 'UNKNOWN';
+  healthSource: 'NO_AUTHORITATIVE_HEARTBEAT';
+  healthObservedAt: string;
   assignedGroupCount: number;
   lastSendAt: string | null;
   nextSendAt: string | null;
@@ -145,10 +166,35 @@ export type OperationalAdminCampaign = {
 };
 
 export type OperationalAdminQueueCounts = {
-  waiting: number;
-  active: number;
-  delayed: number;
-  prioritized: number;
+  status: 'READY' | 'UNKNOWN' | 'UNAVAILABLE' | 'NOT_REQUIRED';
+  source: 'QUEUE';
+  observedAt: string;
+  counts: {
+    waiting: number;
+    active: number;
+    delayed: number;
+    prioritized: number;
+  } | null;
+};
+
+export type OperationalAdminProviderUsage = {
+  status: 'READY' | 'UNKNOWN' | 'UNAVAILABLE';
+  source: 'PROVIDER_USAGE';
+  observedAt: string;
+  usage: CommercialExternalProviderBudgetSnapshot | null;
+};
+
+export type OperationalReadiness = {
+  status: 'READY' | 'NOT_READY' | 'UNKNOWN' | 'NOT_REQUIRED';
+  source:
+    | 'AUTHENTICATED_API'
+    | 'POLICY'
+    | 'QUEUE'
+    | 'SCHEDULER'
+    | 'INSTANCE_HEALTH'
+    | 'PROVIDER_CONFIGURATION';
+  observedAt: string;
+  message: string;
 };
 
 export type OperationalAdminResponse = {
@@ -168,7 +214,7 @@ export type OperationalAdminResponse = {
     dailyOpenAiGenerationLimit: number;
     dailyShopeeHttpLimitOverride: number | null;
     dailyOpenAiGenerationLimitOverride: number | null;
-    providerUsage: CommercialExternalProviderBudgetSnapshot;
+    providerUsage: OperationalAdminProviderUsage;
     hardCaps: {
       maxMessagesPerRun: number;
     };
@@ -178,6 +224,15 @@ export type OperationalAdminResponse = {
   nextSendAt: string | null;
   lastSendAt: string | null;
   blockers: OperationalAdminBlocker[];
+  readiness: {
+    controlPlane: OperationalReadiness;
+    queues: OperationalReadiness;
+    scheduler: OperationalReadiness;
+    instanceConnectivity: OperationalReadiness;
+    providerConfiguration: OperationalReadiness;
+    commercial: OperationalReadiness;
+    send: OperationalReadiness;
+  };
   queues: {
     productPipeline: OperationalAdminQueueCounts;
     whatsappDispatch: OperationalAdminQueueCounts;
@@ -228,37 +283,108 @@ const INSTANCE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const iso = (value: Date | null | undefined) => value?.toISOString() ?? null;
 
-const emptyQueueCounts = (): OperationalAdminQueueCounts => ({
-  waiting: 0,
-  active: 0,
-  delayed: 0,
-  prioritized: 0,
-});
-
 const readQueueCounts = async (
   queue: QueueCountsReader | undefined,
+  observedAt: Date,
 ): Promise<OperationalAdminQueueCounts> => {
-  if (!queue?.getJobCounts) return emptyQueueCounts();
-  const counts = await queue.getJobCounts(
-    'waiting',
-    'active',
-    'delayed',
-    'prioritized',
-  );
-  return {
-    waiting: counts.waiting ?? 0,
-    active: counts.active ?? 0,
-    delayed: counts.delayed ?? 0,
-    prioritized: counts.prioritized ?? 0,
+  const snapshot = {
+    source: 'QUEUE' as const,
+    observedAt: observedAt.toISOString(),
   };
+  if (!queue?.getJobCounts) {
+    return { ...snapshot, status: 'UNKNOWN', counts: null };
+  }
+  try {
+    const counts = await queue.getJobCounts(
+      'waiting',
+      'active',
+      'delayed',
+      'prioritized',
+    );
+    return {
+      ...snapshot,
+      status: 'READY',
+      counts: {
+        waiting: counts.waiting ?? 0,
+        active: counts.active ?? 0,
+        delayed: counts.delayed ?? 0,
+        prioritized: counts.prioritized ?? 0,
+      },
+    };
+  } catch {
+    return { ...snapshot, status: 'UNAVAILABLE', counts: null };
+  }
+};
+
+const readSchedulerStatus = async (
+  scheduler: SchedulerStatusReader | undefined,
+  observedAt: Date,
+) => {
+  const snapshot = {
+    source: 'SCHEDULER' as const,
+    observedAt: observedAt.toISOString(),
+  };
+  if (!scheduler) {
+    return {
+      ...snapshot,
+      observationStatus: 'UNKNOWN' as const,
+      readinessStatus: 'UNKNOWN' as const,
+      value: null,
+    };
+  }
+  try {
+    const value = await scheduler.getStatus();
+    const readinessStatus =
+      value.enabled && value.status === 'registered'
+        ? ('READY' as const)
+        : ('NOT_READY' as const);
+    return {
+      ...snapshot,
+      observationStatus: 'READY' as const,
+      readinessStatus,
+      value,
+    };
+  } catch {
+    return {
+      ...snapshot,
+      observationStatus: 'UNAVAILABLE' as const,
+      readinessStatus: 'UNKNOWN' as const,
+      value: null,
+    };
+  }
+};
+
+const readProviderUsage = async (
+  externalBudget:
+    Pick<CommercialExternalProviderBudgetService, 'snapshot'> | undefined,
+  observedAt: Date,
+): Promise<OperationalAdminProviderUsage> => {
+  const snapshot = {
+    source: 'PROVIDER_USAGE' as const,
+    observedAt: observedAt.toISOString(),
+  };
+  if (!externalBudget) {
+    return { ...snapshot, status: 'UNKNOWN', usage: null };
+  }
+  try {
+    return {
+      ...snapshot,
+      status: 'READY',
+      usage: await externalBudget.snapshot(),
+    };
+  } catch {
+    return { ...snapshot, status: 'UNAVAILABLE', usage: null };
+  }
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const parseQueuedCommercialTarget = (
-  job: { id?: string | number; name?: string; data?: unknown },
-): QueuedCommercialTarget | null => {
+const parseQueuedCommercialTarget = (job: {
+  id?: string | number;
+  name?: string;
+  data?: unknown;
+}): QueuedCommercialTarget | null => {
   if (
     job.name !== JOB_NAMES.commercialAutomationTarget ||
     !isRecord(job.data) ||
@@ -288,7 +414,8 @@ const parseQueuedCommercialTarget = (
 
 const readAllQueuedTargetJobs = async (queue: QueueTargetJobReader) => {
   const pageSize = 200;
-  const jobs: Array<{ id?: string | number; name?: string; data?: unknown }> = [];
+  const jobs: Array<{ id?: string | number; name?: string; data?: unknown }> =
+    [];
   let start = 0;
   while (true) {
     const page = await queue.getJobs?.(
@@ -316,14 +443,22 @@ const readValidQueuedTargets = async ({
   scheduleRevision: number;
   groups: WhatsAppGroupRecord[];
   campaigns: CommercialGroupCampaignRecord[];
-}): Promise<QueuedCommercialTarget[]> => {
-  if (!queue?.getJobs) return [];
+}): Promise<{
+  status: 'READY' | 'UNKNOWN' | 'UNAVAILABLE';
+  targets: QueuedCommercialTarget[];
+}> => {
+  if (!queue?.getJobs) return { status: 'UNKNOWN', targets: [] };
   // An active job has already crossed its scheduled instant and must not be
   // advertised as a future commitment. Waiting and delayed send targets are
   // the only queue states that can truthfully populate "Próximo envio". Read
   // every page so an arbitrary BullMQ page boundary cannot hide the earliest
   // valid commitment.
-  const jobs = await readAllQueuedTargetJobs(queue);
+  let jobs: Awaited<ReturnType<typeof readAllQueuedTargetJobs>>;
+  try {
+    jobs = await readAllQueuedTargetJobs(queue);
+  } catch {
+    return { status: 'UNAVAILABLE', targets: [] };
+  }
   const validTargets = jobs
     .map(parseQueuedCommercialTarget)
     .filter((target): target is QueuedCommercialTarget => target !== null)
@@ -332,7 +467,8 @@ const readValidQueuedTargets = async ({
       if (target.scheduleRevision !== scheduleRevision) return false;
       const group = groups.find((candidate) => candidate.id === target.groupId);
       const campaign = group ? campaignForGroup(group, campaigns) : null;
-      if (!group || !campaign || campaign.id !== target.campaignId) return false;
+      if (!group || !campaign || campaign.id !== target.campaignId)
+        return false;
       if (
         group.fingerprint !== target.logicalGroupFingerprint ||
         campaign.logicalGroupFingerprint !== target.logicalGroupFingerprint ||
@@ -348,11 +484,14 @@ const readValidQueuedTargets = async ({
         return false;
       }
     });
-  return validTargets.sort(
-    (left, right) =>
-      left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
-      left.slotKey.localeCompare(right.slotKey),
-  );
+  return {
+    status: 'READY',
+    targets: validTargets.sort(
+      (left, right) =>
+        left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
+        left.slotKey.localeCompare(right.slotKey),
+    ),
+  };
 };
 
 const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
@@ -372,14 +511,81 @@ const fallbackSettings = (now: Date): CommercialAutomationSettingsRecord => ({
   updatedAt: now,
 });
 
-const uniqueBlockers = (blockers: OperationalAdminBlocker[]) => {
+const POLICY_REASON_SOURCES = {
+  AUTOMATION_DISABLED: 'POLICY',
+  AUTOMATION_PAUSED: 'POLICY',
+  OUTSIDE_ALLOWED_WINDOW: 'POLICY',
+  GLOBAL_DAILY_LIMIT_REACHED: 'POLICY',
+  GROUP_DAILY_LIMIT_REACHED: 'POLICY',
+  MINIMUM_INTERVAL_NOT_REACHED: 'POLICY',
+  NO_AUTHORIZED_GROUP: 'POLICY',
+  MULTIPLE_AUTHORIZED_GROUPS: 'POLICY',
+  COMMERCIAL_AUTOMATION_DUPLICATE_LOGICAL_GROUP: 'POLICY',
+  COMMERCIAL_AUTOMATION_TARGET_NOT_ELIGIBLE: 'POLICY',
+  AMBIGUOUS_COMMERCIAL_RUN_EXISTS: 'POLICY',
+  COMMERCIAL_EXECUTION_IN_PROGRESS: 'POLICY',
+  STALE_COMMERCIAL_EXECUTION_EXISTS: 'POLICY',
+} satisfies Record<CommercialAutomationReason, 'POLICY'>;
+
+const BLOCKER_SOURCE_BY_CODE: Record<
+  string,
+  OperationalAdminBlocker['source']
+> = {
+  ...POLICY_REASON_SOURCES,
+  AMBIGUOUS_COMMERCIAL_RUN_EXISTS: 'LIFECYCLE',
+  COMMERCIAL_EXECUTION_IN_PROGRESS: 'LIFECYCLE',
+  STALE_COMMERCIAL_EXECUTION_EXISTS: 'LIFECYCLE',
+  COMMERCIAL_SHOPEE_DAILY_BUDGET_REACHED: 'POLICY',
+  COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED: 'POLICY',
+  WHATSAPP_GROUP_SEND_DISABLED: 'POLICY',
+  WHATSAPP_GROUP_SAFE_MODE_REQUIRED: 'POLICY',
+  NEXT_ELIGIBLE_AT: 'POLICY',
+  QUEUE_HEALTH_UNKNOWN: 'QUEUE',
+  SCHEDULER_STATUS_UNKNOWN: 'SCHEDULER',
+  SCHEDULER_DISABLED: 'SCHEDULER',
+  SCHEDULER_NOT_REGISTERED: 'SCHEDULER',
+  PROVIDER_USAGE_UNKNOWN: 'PROVIDER_CONFIGURATION',
+  WHATSAPP_INSTANCE_CONNECTION_UNKNOWN: 'INSTANCE_HEALTH',
+  OPERATIONAL_STATUS_UNAVAILABLE: 'RUNTIME',
+  GROUP_INACTIVE: 'DATABASE',
+  GROUP_PAUSED: 'DATABASE',
+  GROUP_UNAVAILABLE: 'DATABASE',
+  FINGERPRINT_MISMATCH: 'DATABASE',
+  ASSIGNMENT_INVALID: 'DATABASE',
+  INSTANCE_INACTIVE: 'DATABASE',
+  INSTANCE_PAUSED: 'DATABASE',
+  NO_CAMPAIGN_ASSIGNMENT: 'DATABASE',
+  CAMPAIGN_INACTIVE: 'DATABASE',
+  NICHE_INACTIVE: 'DATABASE',
+};
+
+const sourceForBlocker = (
+  blocker: Pick<OperationalAdminBlocker, 'code' | 'scope'>,
+): OperationalAdminBlocker['source'] =>
+  BLOCKER_SOURCE_BY_CODE[blocker.code] ?? 'RUNTIME';
+
+const uniqueBlockers = (
+  blockers: OperationalAdminBlockerInput[],
+  observedAt: Date,
+) => {
   const seen = new Set<string>();
-  return blockers.filter((blocker) => {
-    const key = [blocker.scope, blocker.entityId, blocker.code].join('|');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return blockers
+    .map((blocker) => ({
+      ...blocker,
+      source: blocker.source ?? sourceForBlocker(blocker),
+      observedAt: blocker.observedAt ?? observedAt.toISOString(),
+    }))
+    .filter((blocker) => {
+      const key = [
+        blocker.scope,
+        blocker.entityId,
+        blocker.code,
+        blocker.source,
+      ].join('|');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 };
 
 const messageForReason = (reason: string) => {
@@ -418,7 +624,7 @@ const reasonBlocker = (
   scope: OperationalAdminBlocker['scope'],
   entityId: string | null,
   reason: string,
-): OperationalAdminBlocker => ({
+): OperationalAdminBlockerInput => ({
   scope,
   entityId,
   code: reason,
@@ -572,7 +778,7 @@ export class OperationalAdminService {
     instances: WhatsAppInstanceRecord[],
     now: Date,
   ) {
-    const blockers: OperationalAdminBlocker[] = [];
+    const blockers: OperationalAdminBlockerInput[] = [];
     if (!group.active) {
       blockers.push({
         scope: 'GROUP',
@@ -658,6 +864,19 @@ export class OperationalAdminService {
         message: 'Todas as instancias atribuidas estao pausadas.',
       });
     }
+    if (executableInstance) {
+      blockers.push({
+        scope: 'INSTANCE',
+        code: 'WHATSAPP_INSTANCE_CONNECTION_UNKNOWN',
+        entityId: executableInstance.name,
+        message:
+          'Nao existe fonte autoritativa recente que confirme a conexao WhatsApp da instancia.',
+        source: 'INSTANCE_HEALTH',
+        observedAt: now.toISOString(),
+        actionHint:
+          'Confirme a conectividade por uma fonte autoritativa antes de permitir SEND.',
+      });
+    }
     if (!campaign) {
       blockers.push({
         scope: 'GROUP',
@@ -732,27 +951,17 @@ export class OperationalAdminService {
       queueProduct,
       queueDispatch,
       queueCommercial,
-      scheduler,
+      schedulerSnapshot,
       providerUsage,
     ] = await Promise.all([
-      readQueueCounts(this.dependencies.queues?.productPipeline),
-      readQueueCounts(this.dependencies.queues?.whatsappDispatch),
-      readQueueCounts(this.dependencies.queues?.commercialAutomation),
-      this.dependencies.scheduler?.getStatus() ?? Promise.resolve(null),
-      this.dependencies.externalBudget?.snapshot() ??
-        Promise.resolve({
-          dayKey: '',
-          shopee: {
-            used: 0,
-            limit: schedule.dailyShopeeHttpLimit,
-            reached: false,
-          },
-          openAi: {
-            used: 0,
-            limit: schedule.dailyOpenAiGenerationLimit,
-            reached: false,
-          },
-        }),
+      readQueueCounts(this.dependencies.queues?.productPipeline, context.now),
+      readQueueCounts(this.dependencies.queues?.whatsappDispatch, context.now),
+      readQueueCounts(
+        this.dependencies.queues?.commercialAutomation,
+        context.now,
+      ),
+      readSchedulerStatus(this.dependencies.scheduler, context.now),
+      readProviderUsage(this.dependencies.externalBudget, context.now),
     ]);
     const campaignByGroup = new Map(
       context.groups.map((group) => [
@@ -760,13 +969,30 @@ export class OperationalAdminService {
         campaignForGroup(group, context.campaigns),
       ]),
     );
-    const queuedTargets = await readValidQueuedTargets({
+    const queuedTargetSnapshot = await readValidQueuedTargets({
       queue: this.dependencies.queues?.commercialAutomation,
       now: context.now,
       scheduleRevision: schedule.scheduleRevision,
       groups: context.groups,
       campaigns: context.campaigns,
     });
+    const commercialQueueAuthorityReady =
+      queueCommercial.status === 'READY' &&
+      queuedTargetSnapshot.status === 'READY';
+    const commercialQueue: OperationalAdminQueueCounts =
+      commercialQueueAuthorityReady
+        ? queueCommercial
+        : {
+            ...queueCommercial,
+            status:
+              queueCommercial.status === 'UNAVAILABLE' ||
+              queuedTargetSnapshot.status === 'UNAVAILABLE'
+                ? 'UNAVAILABLE'
+                : 'UNKNOWN',
+          };
+    const queuedTargets = commercialQueueAuthorityReady
+      ? queuedTargetSnapshot.targets
+      : [];
     const plan = await this.dependencies.planner.preview(context.now);
     const lastByGroup = new Map<string, Date>();
     const lastByCampaign = new Map<string, Date>();
@@ -803,14 +1029,20 @@ export class OperationalAdminService {
       string,
       Array<{ scheduledFor: string; instanceName: string }>
     >();
-    const registerUpcomingTarget = (target: {
-      groupId: string;
-      campaignId: string;
-      instanceName: string;
-      scheduledFor: Date;
-    }, fallbackOnly = false) => {
+    const registerUpcomingTarget = (
+      target: {
+        groupId: string;
+        campaignId: string;
+        instanceName: string;
+        scheduledFor: Date;
+      },
+      fallbackOnly = false,
+    ) => {
       const currentGroup = nextByGroup.get(target.groupId);
-      if (!currentGroup || (!fallbackOnly && target.scheduledFor < currentGroup)) {
+      if (
+        !currentGroup ||
+        (!fallbackOnly && target.scheduledFor < currentGroup)
+      ) {
         nextByGroup.set(target.groupId, target.scheduledFor);
       }
       const currentCampaign = nextByCampaign.get(target.campaignId);
@@ -850,13 +1082,16 @@ export class OperationalAdminService {
         left.scheduledFor.getTime() - right.scheduledFor.getTime() ||
         left.slotKey.localeCompare(right.slotKey),
     );
-    for (const slot of plannedSlots) {
-      registerUpcomingTarget({
-        groupId: slot.target.groupId,
-        campaignId: slot.target.campaignId,
-        instanceName: slot.target.instanceName,
-        scheduledFor: slot.scheduledFor,
-      }, true);
+    for (const slot of commercialQueueAuthorityReady ? plannedSlots : []) {
+      registerUpcomingTarget(
+        {
+          groupId: slot.target.groupId,
+          campaignId: slot.target.campaignId,
+          instanceName: slot.target.instanceName,
+          scheduledFor: slot.scheduledFor,
+        },
+        true,
+      );
     }
     const groupOutputs: OperationalAdminGroup[] = [];
     for (const group of context.groups) {
@@ -898,7 +1133,7 @@ export class OperationalAdminService {
         lastSendAt: iso(lastByGroup.get(group.id)),
         nextSendAt: iso(nextByGroup.get(group.id) ?? campaignNext),
         upcomingAssignments: upcomingByGroup.get(group.id) ?? [],
-        blockers: uniqueBlockers(blockers),
+        blockers: uniqueBlockers(blockers, context.now),
         memberCount: group.memberCount ?? null,
         ownerIsParticipant: group.ownerIsParticipant ?? null,
         discoveredAt: iso(group.discoveredAt),
@@ -925,15 +1160,76 @@ export class OperationalAdminService {
         reasonBlocker('GLOBAL', null, 'WHATSAPP_GROUP_SAFE_MODE_REQUIRED'),
       );
     }
-    if (providerUsage.shopee.reached) {
+    if (providerUsage.usage?.shopee.reached) {
       globalBlockers.push(
         reasonBlocker('GLOBAL', null, 'COMMERCIAL_SHOPEE_DAILY_BUDGET_REACHED'),
       );
     }
-    if (providerUsage.openAi.reached) {
+    if (providerUsage.usage?.openAi.reached) {
       globalBlockers.push(
         reasonBlocker('GLOBAL', null, 'COMMERCIAL_OPENAI_DAILY_BUDGET_REACHED'),
       );
+    }
+    const queueSnapshots = [
+      ['product-pipeline', queueProduct],
+      ['whatsapp-dispatch', queueDispatch],
+      ['commercial-automation', commercialQueue],
+    ] as const;
+    for (const [queueName, queue] of queueSnapshots) {
+      if (queue.status === 'READY') continue;
+      globalBlockers.push({
+        scope: 'GLOBAL',
+        code: 'QUEUE_HEALTH_UNKNOWN',
+        entityId: queueName,
+        message:
+          queue.status === 'UNAVAILABLE'
+            ? 'A leitura authoritative da fila falhou nesta atualizacao.'
+            : 'A fila obrigatoria nao possui uma leitura authoritative nesta atualizacao.',
+        source: 'QUEUE',
+        observedAt: queue.observedAt,
+        actionHint:
+          'Restaure a leitura da fila antes de tratar sua capacidade como vazia.',
+      });
+    }
+    if (providerUsage.status !== 'READY') {
+      globalBlockers.push({
+        scope: 'GLOBAL',
+        code: 'PROVIDER_USAGE_UNKNOWN',
+        entityId: null,
+        message:
+          providerUsage.status === 'UNAVAILABLE'
+            ? 'A leitura authoritative de uso dos providers falhou nesta atualizacao.'
+            : 'O uso dos providers nao possui uma leitura authoritative nesta atualizacao.',
+        source: 'PROVIDER_CONFIGURATION',
+        observedAt: providerUsage.observedAt,
+        actionHint:
+          'Restaure a fonte de uso antes de interpretar ausencia de medicao como zero.',
+      });
+    }
+    if (schedulerSnapshot.readinessStatus !== 'READY') {
+      const schedulerCode =
+        schedulerSnapshot.observationStatus !== 'READY'
+          ? 'SCHEDULER_STATUS_UNKNOWN'
+          : schedulerSnapshot.value?.status === 'not-registered'
+            ? 'SCHEDULER_NOT_REGISTERED'
+            : 'SCHEDULER_DISABLED';
+      globalBlockers.push({
+        scope: 'GLOBAL',
+        code: schedulerCode,
+        entityId: null,
+        message:
+          schedulerSnapshot.observationStatus === 'UNAVAILABLE'
+            ? 'A leitura authoritative do scheduler falhou nesta atualizacao.'
+            : schedulerSnapshot.observationStatus === 'UNKNOWN'
+              ? 'O scheduler nao possui uma leitura authoritative nesta atualizacao.'
+              : schedulerCode === 'SCHEDULER_NOT_REGISTERED'
+                ? 'O scheduler obrigatorio nao esta registrado.'
+                : 'O scheduler obrigatorio esta desativado.',
+        source: 'SCHEDULER',
+        observedAt: schedulerSnapshot.observedAt,
+        actionHint:
+          'Restaure ou registre o scheduler antes de tratar a agenda comercial como pronta.',
+      });
     }
     const instances = context.instances.map((instance) => {
       const assignedGroups = groupOutputs.filter((group) =>
@@ -945,7 +1241,7 @@ export class OperationalAdminService {
             blocker.scope === 'INSTANCE' || blocker.scope === 'GLOBAL',
         ),
       );
-      const blockers: OperationalAdminBlocker[] = [...groupBlockers];
+      const blockers: OperationalAdminBlockerInput[] = [...groupBlockers];
       if (!instance.active) {
         blockers.push({
           scope: 'INSTANCE',
@@ -967,10 +1263,12 @@ export class OperationalAdminService {
         active: instance.active,
         paused: instance.paused === true,
         health: 'UNKNOWN' as const,
+        healthSource: 'NO_AUTHORITATIVE_HEARTBEAT' as const,
+        healthObservedAt: context.now.toISOString(),
         assignedGroupCount: assignedGroups.length,
         lastSendAt: iso(lastByInstance.get(instance.name)),
         nextSendAt: iso(nextByInstance.get(instance.name)),
-        blockers: uniqueBlockers(blockers),
+        blockers: uniqueBlockers(blockers, context.now),
         updatedAt: instance.updatedAt.toISOString(),
       };
     });
@@ -1009,9 +1307,28 @@ export class OperationalAdminService {
         },
         lastSendAt: iso(lastByCampaign.get(campaign.id)),
         nextSendAt: iso(nextByCampaign.get(campaign.id)),
-        blockers: uniqueBlockers(campaignBlockers),
+        blockers: uniqueBlockers(campaignBlockers, context.now),
       };
     });
+    const allBlockers = uniqueBlockers(
+      [...globalBlockers, ...groupOutputs.flatMap((group) => group.blockers)],
+      context.now,
+    );
+    const queueReadinessStatus = queueSnapshots.every(
+      ([, queue]) => queue.status === 'READY',
+    )
+      ? 'READY'
+      : 'UNKNOWN';
+    const instanceReadinessStatus =
+      context.instances.length === 0 ? 'NOT_READY' : 'UNKNOWN';
+    const commercialReadinessStatus = allBlockers.some(
+      (blocker) =>
+        blocker.source === 'POLICY' || blocker.source === 'LIFECYCLE',
+    )
+      ? 'NOT_READY'
+      : 'UNKNOWN';
+    const sendReadinessStatus =
+      allBlockers.length > 0 ? 'NOT_READY' : 'UNKNOWN';
     return {
       generatedAt: context.now.toISOString(),
       automation: {
@@ -1038,18 +1355,77 @@ export class OperationalAdminService {
         scheduleRevision: schedule.scheduleRevision,
         updatedAt: context.settings.updatedAt.toISOString(),
       },
-      nextSendAt: iso(
-        queuedTargets[0]?.scheduledFor ?? plan.slots[0]?.scheduledFor,
-      ),
+      nextSendAt: commercialQueueAuthorityReady
+        ? iso(queuedTargets[0]?.scheduledFor ?? plan.slots[0]?.scheduledFor)
+        : null,
       lastSendAt: iso(lastGlobal),
-      blockers: uniqueBlockers([
-        ...globalBlockers,
-        ...groupOutputs.flatMap((group) => group.blockers),
-      ]),
+      blockers: allBlockers,
+      readiness: {
+        controlPlane: {
+          status: 'READY',
+          source: 'AUTHENTICATED_API',
+          observedAt: context.now.toISOString(),
+          message: 'O snapshot foi retornado por uma rota autenticada.',
+        },
+        queues: {
+          status: queueReadinessStatus,
+          source: 'QUEUE',
+          observedAt: context.now.toISOString(),
+          message:
+            queueReadinessStatus === 'READY'
+              ? 'Todas as filas obrigatorias foram medidas nesta atualizacao.'
+              : 'Pelo menos uma fila obrigatoria nao possui medicao authoritative atual.',
+        },
+        scheduler: {
+          status: schedulerSnapshot.readinessStatus,
+          source: 'SCHEDULER',
+          observedAt: schedulerSnapshot.observedAt,
+          message:
+            schedulerSnapshot.readinessStatus === 'READY'
+              ? 'O scheduler obrigatorio esta registrado e habilitado.'
+              : schedulerSnapshot.observationStatus === 'READY'
+                ? 'O scheduler foi consultado, mas nao esta operacionalmente pronto.'
+                : 'O scheduler nao possui leitura authoritative atual.',
+        },
+        instanceConnectivity: {
+          status: instanceReadinessStatus,
+          source: 'INSTANCE_HEALTH',
+          observedAt: context.now.toISOString(),
+          message:
+            instanceReadinessStatus === 'NOT_READY'
+              ? 'Nao ha instancia registrada para o plano comercial.'
+              : 'Registro administrativo nao prova conexao WhatsApp.',
+        },
+        providerConfiguration: {
+          status: 'UNKNOWN',
+          source: 'PROVIDER_CONFIGURATION',
+          observedAt: context.now.toISOString(),
+          message:
+            'Este snapshot nao infere configuracao ou conectividade de provider sem uma fonte autoritativa.',
+        },
+        commercial: {
+          status: commercialReadinessStatus,
+          source: 'POLICY',
+          observedAt: context.now.toISOString(),
+          message:
+            commercialReadinessStatus === 'NOT_READY'
+              ? 'Uma politica ou lifecycle impede a execucao comercial.'
+              : 'A prontidao comercial nao pode ser afirmada sem todas as fontes requeridas.',
+        },
+        send: {
+          status: sendReadinessStatus,
+          source: 'PROVIDER_CONFIGURATION',
+          observedAt: context.now.toISOString(),
+          message:
+            sendReadinessStatus === 'NOT_READY'
+              ? 'Existem blockers que impedem chegar ao boundary de SEND.'
+              : 'A configuracao sozinha nao prova que SEND e seguro.',
+        },
+      },
       queues: {
         productPipeline: queueProduct,
         whatsappDispatch: queueDispatch,
-        commercialAutomation: queueCommercial,
+        commercialAutomation: commercialQueue,
       },
       activeExecutions: context.counts.activeExecutions,
       activeReservations: context.counts.activeReservations,
@@ -1057,7 +1433,7 @@ export class OperationalAdminService {
       investigationRequired: context.counts.investigationRequired,
       pendingDispatches: context.counts.pendingDispatches,
       pendingOutboxes: context.counts.pendingOutboxes,
-      scheduler,
+      scheduler: schedulerSnapshot.value,
       instances,
       groups: groupOutputs,
       campaigns,

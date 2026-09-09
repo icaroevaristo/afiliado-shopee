@@ -308,6 +308,12 @@ function BlockerList({ blockers }: { blockers: OperationalAdminBlocker[] }) {
               Próximo momento: {dateValue(blocker.nextEligibleAt)}
             </span>
           ) : null}
+          {blocker.source || blocker.observedAt ? (
+            <span className="mt-1 block text-xs text-amber-800">
+              Fonte: {blocker.source ?? 'UNKNOWN'} · observado:{' '}
+              {dateValue(blocker.observedAt ?? null)}
+            </span>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -321,14 +327,29 @@ function QueueCard({
   label: string;
   counts: OperationalAdmin['queues']['productPipeline'];
 }) {
+  if (counts.status !== 'READY' || !counts.counts) {
+    return (
+      <div className="min-w-0 rounded-md border border-amber-300 bg-amber-50 p-4">
+        <h3 className="text-sm font-semibold text-slate-950">{label}</h3>
+        <p className="mt-2 text-sm text-amber-950">
+          {counts.status ?? 'UNKNOWN'}: as contagens não foram medidas nesta
+          atualização.
+        </p>
+        <p className="mt-1 text-xs text-amber-900">
+          Fonte: {counts.source ?? 'QUEUE'} · observado:{' '}
+          {dateValue(counts.observedAt ?? null)}
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-4">
       <h3 className="text-sm font-semibold text-slate-950">{label}</h3>
       <dl className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-        <TechnicalField label="Aguardando" value={counts.waiting} />
-        <TechnicalField label="Ativos" value={counts.active} />
-        <TechnicalField label="Atrasados" value={counts.delayed} />
-        <TechnicalField label="Prioridade" value={counts.prioritized} />
+        <TechnicalField label="Aguardando" value={counts.counts.waiting} />
+        <TechnicalField label="Ativos" value={counts.counts.active} />
+        <TechnicalField label="Atrasados" value={counts.counts.delayed} />
+        <TechnicalField label="Prioridade" value={counts.counts.prioritized} />
       </dl>
     </div>
   );
@@ -509,6 +530,15 @@ function InstanceCard({ instance }: { instance: OperationalAdminInstance }) {
       </div>
       <dl className="mt-4 grid min-w-0 gap-3 sm:grid-cols-2">
         <TechnicalField label="Health retornado" value={instance.health} mono />
+        <TechnicalField
+          label="Fonte do health"
+          value={instance.healthSource ?? 'NO_AUTHORITATIVE_HEARTBEAT'}
+          mono
+        />
+        <TechnicalField
+          label="Health observado"
+          value={dateValue(instance.healthObservedAt ?? null)}
+        />
         <TechnicalField
           label="Grupos atribuídos"
           value={instance.assignedGroupCount}
@@ -960,20 +990,34 @@ export default function DiagnosticsPage() {
                   />
                   <TechnicalField
                     label="Shopee hoje"
-                    value={`${admin.automation.providerUsage.shopee.used} / ${admin.automation.providerUsage.shopee.limit}`}
+                    value={
+                      admin.automation.providerUsage.usage
+                        ? `${admin.automation.providerUsage.usage.shopee.used} / ${admin.automation.providerUsage.usage.shopee.limit}`
+                        : `Não medido (${admin.automation.providerUsage.status})`
+                    }
                   />
                   <TechnicalField
                     label="OpenAI hoje"
-                    value={`${admin.automation.providerUsage.openAi.used} / ${admin.automation.providerUsage.openAi.limit}`}
+                    value={
+                      admin.automation.providerUsage.usage
+                        ? `${admin.automation.providerUsage.usage.openAi.used} / ${admin.automation.providerUsage.usage.openAi.limit}`
+                        : `Não medido (${admin.automation.providerUsage.status})`
+                    }
                   />
                   <TechnicalField
                     label="Uso Shopee atingido"
-                    value={admin.automation.providerUsage.shopee.reached}
+                    value={
+                      admin.automation.providerUsage.usage?.shopee.reached ??
+                      'UNKNOWN'
+                    }
                     mono
                   />
                   <TechnicalField
                     label="Uso OpenAI atingido"
-                    value={admin.automation.providerUsage.openAi.reached}
+                    value={
+                      admin.automation.providerUsage.usage?.openAi.reached ??
+                      'UNKNOWN'
+                    }
                     mono
                   />
                 </dl>

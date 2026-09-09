@@ -28,9 +28,14 @@ const overview = {
     dailyShopeeHttpLimitOverride: null,
     dailyOpenAiGenerationLimitOverride: null,
     providerUsage: {
-      dayKey: '2026-08-28',
-      shopee: { used: 0, limit: 10, reached: false },
-      openAi: { used: 0, limit: 10, reached: false },
+      status: 'READY' as const,
+      source: 'PROVIDER_USAGE' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      usage: {
+        dayKey: '2026-08-28',
+        shopee: { used: 0, limit: 10, reached: false },
+        openAi: { used: 0, limit: 10, reached: false },
+      },
     },
     hardCaps: {
       dailyGlobalLimit: 10,
@@ -43,10 +48,69 @@ const overview = {
   nextSendAt: null,
   lastSendAt: null,
   blockers: [],
+  readiness: {
+    controlPlane: {
+      status: 'READY' as const,
+      source: 'AUTHENTICATED_API' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'Authenticated route.',
+    },
+    queues: {
+      status: 'READY' as const,
+      source: 'QUEUE' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'Measured.',
+    },
+    scheduler: {
+      status: 'UNKNOWN' as const,
+      source: 'SCHEDULER' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'No scheduler reader.',
+    },
+    instanceConnectivity: {
+      status: 'UNKNOWN' as const,
+      source: 'INSTANCE_HEALTH' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'No authoritative heartbeat.',
+    },
+    providerConfiguration: {
+      status: 'UNKNOWN' as const,
+      source: 'PROVIDER_CONFIGURATION' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'No authoritative provider source.',
+    },
+    commercial: {
+      status: 'NOT_READY' as const,
+      source: 'POLICY' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'Paused.',
+    },
+    send: {
+      status: 'NOT_READY' as const,
+      source: 'PROVIDER_CONFIGURATION' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      message: 'Blocked.',
+    },
+  },
   queues: {
-    productPipeline: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
-    whatsappDispatch: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
-    commercialAutomation: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+    productPipeline: {
+      status: 'READY' as const,
+      source: 'QUEUE' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      counts: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+    },
+    whatsappDispatch: {
+      status: 'READY' as const,
+      source: 'QUEUE' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      counts: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+    },
+    commercialAutomation: {
+      status: 'READY' as const,
+      source: 'QUEUE' as const,
+      observedAt: '2026-08-28T12:00:00.000Z',
+      counts: { waiting: 0, active: 0, delayed: 0, prioritized: 0 },
+    },
   },
   activeExecutions: 0,
   activeReservations: 0,
@@ -261,8 +325,9 @@ describe('operational admin routes', () => {
       method: 'PATCH',
       url: '/whatsapp/groups/group-1/admin',
       payload: {
-        assignedInstanceNames: Array.from({ length: 33 }, (_, index) =>
-          `instance-${index}`,
+        assignedInstanceNames: Array.from(
+          { length: 33 },
+          (_, index) => `instance-${index}`,
         ),
         expectedUpdatedAt: '2026-08-28T12:00:00.000Z',
         confirmation: OPERATIONAL_ASSIGNMENT_CONFIRMATION,

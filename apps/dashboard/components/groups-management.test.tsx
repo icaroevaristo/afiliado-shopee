@@ -45,9 +45,14 @@ const overview = {
     dailyShopeeHttpLimitOverride: null,
     dailyOpenAiGenerationLimitOverride: null,
     providerUsage: {
-      dayKey: '2026-08-28',
-      shopee: { used: 0, limit: 10, reached: false },
-      openAi: { used: 0, limit: 10, reached: false },
+      status: 'READY',
+      source: 'PROVIDER_USAGE',
+      observedAt: '2026-08-28T12:00:00.000Z',
+      usage: {
+        dayKey: '2026-08-28',
+        shopee: { used: 0, limit: 10, reached: false },
+        openAi: { used: 0, limit: 10, reached: false },
+      },
     },
     hardCaps: {
       maxMessagesPerRun: 1,
@@ -440,7 +445,9 @@ describe('GroupsManagement', () => {
 
   it('confirma a alteração mesmo quando a leitura pós-write falha, sem repetir o write', async () => {
     const screen = await render(<GroupsManagement />);
-    getOperationalAdminMock.mockRejectedValueOnce(new Error('refresh indisponível'));
+    getOperationalAdminMock.mockRejectedValueOnce(
+      new Error('refresh indisponível'),
+    );
     const card = cardByName(screen.container, 'Ofertas A')!;
     await click(
       Array.from(card.querySelectorAll('button')).find((button) =>

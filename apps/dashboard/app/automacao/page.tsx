@@ -814,21 +814,10 @@ export default function AutomationPage() {
               dailyOpenAiGenerationLimitOverride:
                 intent.dailyOpenAiGenerationLimit,
               providerUsage: {
-                ...operationalRef.current.automation.providerUsage,
-                shopee: {
-                  ...operationalRef.current.automation.providerUsage.shopee,
-                  limit: intent.dailyShopeeHttpLimit,
-                  reached:
-                    operationalRef.current.automation.providerUsage.shopee
-                      .used >= intent.dailyShopeeHttpLimit,
-                },
-                openAi: {
-                  ...operationalRef.current.automation.providerUsage.openAi,
-                  limit: intent.dailyOpenAiGenerationLimit,
-                  reached:
-                    operationalRef.current.automation.providerUsage.openAi
-                      .used >= intent.dailyOpenAiGenerationLimit,
-                },
+                status: 'UNKNOWN' as const,
+                source: 'PROVIDER_USAGE' as const,
+                observedAt: new Date().toISOString(),
+                usage: null,
               },
               scheduleRevision: next.scheduleRevision,
               updatedAt: new Date().toISOString(),
@@ -1092,12 +1081,16 @@ export default function AutomationPage() {
           <div className="ops-control-grid">
             <UsageCard
               label="Shopee"
-              value={formatUsage(operational?.automation.providerUsage?.shopee)}
+              value={formatUsage(
+                operational?.automation.providerUsage.usage?.shopee,
+              )}
               detail="Consultas Shopee por dia"
             />
             <UsageCard
               label="OpenAI"
-              value={formatUsage(operational?.automation.providerUsage?.openAi)}
+              value={formatUsage(
+                operational?.automation.providerUsage.usage?.openAi,
+              )}
               detail="Gerações OpenAI por dia"
             />
           </div>

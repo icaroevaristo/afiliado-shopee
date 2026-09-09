@@ -1,28 +1,31 @@
 # Estado Atual e Gaps Pós-MVP
 
 **Status:** `LIVE_CANONICAL`
-**HEAD auditado:** `441c154650c808e496c3d9848f05e72ef40ddc95`
-**Escopo desta leitura:** código e documentação; nenhum runtime, DB, Redis ou
-provider foi iniciado nesta missão.
+**Baseline R1/R2:** R1 está mergeada; R2 foi mergeada em `#150` na main
+`2bc5c813ed2eca9035a78ad903e4d89dbb9dbd1f`.
+**Escopo desta leitura:** código, documentação e certificação SAFE isolada da
+R3. A certificação usa PostgreSQL/Redis TEST descartáveis; os recursos
+canônicos permaneceram parados e sem mutação. Nenhum provider externo foi
+iniciado.
 
 ## 1. Classificação documental
 
-| Fonte | Classificação | Uso correto |
-| --- | --- | --- |
-| `docs/PROJECT-ROADMAP.md` | `LIVE_CANONICAL` | escopo/status macro do MVP; o SHA nele é checkpoint histórico |
-| `AGENTS.md` | `LIVE_REFERENCE` | contratos e guardrails do repositório; código atual prevalece em divergência |
-| `CODEX.md` | `LIVE_REFERENCE` | arquitetura e operação documentadas; não substitui evidência de runtime |
-| `README.md` | `LIVE_REFERENCE` | quickstarts e contratos locais; claims operacionais são históricos até revalidação |
-| `docs/shopee-affiliate.md` | `LIVE_REFERENCE` | contratos Shopee/ofertas; conferir rotas e código |
-| `docs/phase-7-destinations-publication-policies.md` | `HISTORICAL_EVIDENCE` | decisões/invariantes da fase, não estado atual |
-| `docs/phase-8-dispatch-outbox-sender-lifecycle.md` | `HISTORICAL_EVIDENCE` | contrato de lifecycle e evidência histórica |
-| `docs/phase-9-e2e-no-send.md` | `HISTORICAL_EVIDENCE` | no-SEND e recovery históricos |
-| `docs/phase-10-runtime-normalization.md` | `HISTORICAL_EVIDENCE` | claims de normalização/readiness da fase, não estado atual |
-| `docs/phase-1` a `phase-4` | `HISTORICAL_EVIDENCE` | contratos de identidade, seleção e provenance; código é autoridade |
-| `docs/dashboard-design.md` | `SUPERSEDED` | direção visual anterior; contém afirmações que antecedem Dashboard 2.0 |
-| `apps/dashboard/DESIGN.md` | `LIVE_REFERENCE` | princípios visuais e UX; não é contrato de API |
-| `docs/DASHBOARD-2-IMPLEMENTATION-PLAN.md` | `LIVE_REFERENCE` | mapa de capacidade/UX; endpoints e código vencem a tabela |
-| `docs/autonomous-execution/*` | `LIVE_CANONICAL` | governança pós-MVP, readiness e handoff |
+| Fonte                                               | Classificação         | Uso correto                                                                        |
+| --------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------- |
+| `docs/PROJECT-ROADMAP.md`                           | `LIVE_CANONICAL`      | escopo/status macro do MVP; o SHA nele é checkpoint histórico                      |
+| `AGENTS.md`                                         | `LIVE_REFERENCE`      | contratos e guardrails do repositório; código atual prevalece em divergência       |
+| `CODEX.md`                                          | `LIVE_REFERENCE`      | arquitetura e operação documentadas; não substitui evidência de runtime            |
+| `README.md`                                         | `LIVE_REFERENCE`      | quickstarts e contratos locais; claims operacionais são históricos até revalidação |
+| `docs/shopee-affiliate.md`                          | `LIVE_REFERENCE`      | contratos Shopee/ofertas; conferir rotas e código                                  |
+| `docs/phase-7-destinations-publication-policies.md` | `HISTORICAL_EVIDENCE` | decisões/invariantes da fase, não estado atual                                     |
+| `docs/phase-8-dispatch-outbox-sender-lifecycle.md`  | `HISTORICAL_EVIDENCE` | contrato de lifecycle e evidência histórica                                        |
+| `docs/phase-9-e2e-no-send.md`                       | `HISTORICAL_EVIDENCE` | no-SEND e recovery históricos                                                      |
+| `docs/phase-10-runtime-normalization.md`            | `HISTORICAL_EVIDENCE` | claims de normalização/readiness da fase, não estado atual                         |
+| `docs/phase-1` a `phase-4`                          | `HISTORICAL_EVIDENCE` | contratos de identidade, seleção e provenance; código é autoridade                 |
+| `docs/dashboard-design.md`                          | `SUPERSEDED`          | direção visual anterior; contém afirmações que antecedem Dashboard 2.0             |
+| `apps/dashboard/DESIGN.md`                          | `LIVE_REFERENCE`      | princípios visuais e UX; não é contrato de API                                     |
+| `docs/DASHBOARD-2-IMPLEMENTATION-PLAN.md`           | `LIVE_REFERENCE`      | mapa de capacidade/UX; endpoints e código vencem a tabela                          |
+| `docs/autonomous-execution/*`                       | `LIVE_CANONICAL`      | governança pós-MVP, readiness e handoff                                            |
 
 `AMBIGUOUS` deve ser usado no futuro quando a fonte não puder ser resolvida;
 esta tabela não converte documento antigo em verdade atual.
@@ -36,6 +39,8 @@ esta tabela não converte documento antigo em verdade atual.
   processos, lock e shutdown sem `down -v` no fluxo normal.
 - `system:status` expõe project/volume sanitizados.
 - O dashboard usa proxy same-origin com Authorization server-side.
+- R2 fechou a matriz de call-sites do proxy, o control-plane autenticado e o
+  conflito CAS stale-write; health público continua distinto de control-plane.
 - `OperationalAdminService` deriva blockers de grupo, campanha, assignment,
   quota, cooldown, pausa e disponibilidade.
 - Scheduler comercial cria targets com `scheduleRevision`, `slotKey`,
@@ -45,8 +50,9 @@ esta tabela não converte documento antigo em verdade atual.
 
 ### Limitações observadas
 
-- O proxy usa padrões exatos; o cliente de Ofertas chama detalhe e preview que
-  não estão cobertos por padrões equivalentes na allowlist observada.
+- Status de fila, scheduler, provider e instância só pode ser afirmado quando
+  a fonte correspondente estiver presente e atual; ausência de fonte não é
+  fila vazia, provider online ou instância conectada.
 - O schema/modelo atual tem apenas `WhatsAppDestination.assignedInstanceName`;
   não há coleção ordenada de N instâncias por grupo nem cursor derivado do slot.
 - A instância é apresentada com health `UNKNOWN`; isso é seguro, mas a
@@ -58,19 +64,20 @@ esta tabela não converte documento antigo em verdade atual.
 
 ## 3. Gaps auditados
 
-| ID | Classificação | Evidência | Leitura e próxima ação |
-| --- | --- | --- | --- |
-| GAP-01 | `PARTIALLY_FIXED` | `E30-CODE-001`, `E30-OP-001` | Fase 29 corrigiu identidade no código; falta smoke pós-merge de volume/restart em R1 |
-| GAP-02 | `OPEN` | `E30-CODE-003` | completar allowlist/proxy de detalhe e preview sem abrir endpoints indevidos; R2 |
-| GAP-03 | `PARTIALLY_FIXED` | `E30-CODE-005` | token/auth existem no supervisor/proxy; falta quickstart autenticado comprovado; R2 |
-| GAP-04 | `PARTIALLY_FIXED` | `E30-CODE-004`, `E30-OP-001` | código deriva blockers; causa dos dados operacionais ainda precisa de leitura e correlação; R3 |
-| GAP-05 | `REJECTED` como risco de falso online | `E30-CODE-004` | `UNKNOWN` é honesto sem heartbeat; não declarar conectado por registro DB. Um contrato de heartbeat futuro é melhoria separada |
-| GAP-06 | `PARTIALLY_FIXED` | `E30-CODE-002` | um número pode ter muitos grupos via assignments, mas falta certificação operacional específica; R4 |
-| GAP-07 | `PARTIALLY_FIXED` | `E30-CODE-002`, `E141-DB-004` | branch atual representa assignment ordenada, revision e binding por slot; revisão independente e readiness operacional continuam pendentes |
-| GAP-08 | `OPEN` | `E30-CODE-002` | UI atual expressa um número responsável, não ordem/estratégia N-sender; R6 |
-| GAP-09 | `OPEN` | `E30-OP-001` | browser/Playwright não foi executado nesta missão; R7 deve produzir screenshots/traces ou BLOCKED |
-| GAP-10 | `OPEN` | `E30-OP-001` | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8 |
-| GAP-11 | `HUMAN_REQUIRED` | `E30-DOC-001` | retirar pause/ativar operação real jamais é inferido por um agente; R9 |
+| ID     | Classificação                         | Evidência                                   | Leitura e próxima ação                                                                                                                          |
+| ------ | ------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| GAP-01 | `PARTIALLY_FIXED`                     | `E30-CODE-001`, `E30-OP-001`                | Fase 29 corrigiu identidade no código; falta smoke pós-merge de volume/restart em R1                                                            |
+| GAP-02 | `CLOSED_BY_R2`                        | PR #150 / evidência R2                      | a allowlist do proxy agora é vinculada aos call-sites reais; nenhuma rota genérica foi adicionada                                               |
+| GAP-03 | `CLOSED_BY_R2`                        | PR #150 / evidência R2                      | control-plane autenticado, quickstart SAFE e CAS stale-write foram certificados sem expor token ao browser                                      |
+| GAP-04 | `PARTIALLY_FIXED`                     | `E30-CODE-004`, `E30-OP-001`                | código deriva blockers; causa dos dados operacionais ainda precisa de leitura e correlação; R3                                                  |
+| GAP-05 | `REJECTED` como risco de falso online | `E30-CODE-004`                              | `UNKNOWN` é honesto sem heartbeat; não declarar conectado por registro DB. Um contrato de heartbeat futuro é melhoria separada                  |
+| GAP-06 | `PARTIALLY_FIXED`                     | `E30-CODE-002`                              | um número pode ter muitos grupos via assignments, mas falta certificação operacional específica; R4                                             |
+| GAP-07 | `PARTIALLY_FIXED`                     | `E30-CODE-002`, `E141-DB-004`               | branch atual representa assignment ordenada, revision e binding por slot; revisão independente e readiness operacional continuam pendentes      |
+| GAP-08 | `OPEN`                                | `E30-CODE-002`                              | UI atual expressa um número responsável, não ordem/estratégia N-sender; R6                                                                      |
+| GAP-09 | `OPEN`                                | `E30-OP-001`                                | browser/Playwright não foi executado nesta missão; R7 deve produzir screenshots/traces ou BLOCKED                                               |
+| GAP-10 | `OPEN`                                | `E30-OP-001`                                | checklist final deve encadear start, banco canônico, preview, restart, recovery e SEND controlado; R8                                           |
+| GAP-11 | `HUMAN_REQUIRED`                      | `E30-DOC-001`                               | retirar pause/ativar operação real jamais é inferido por um agente; R9                                                                          |
+| GAP-12 | `IN_PROGRESS`                         | R3 candidate / evidência pendente de freeze | o snapshot operacional está sendo tornado explícito sobre fontes, timestamps, UNKNOWN e blockers correlacionados; a candidate não está mergeada |
 
 ## 4. Invariantes e estado atual do GAP-07
 
@@ -99,11 +106,17 @@ Exemplo obrigatório: se 08:15 foi reservado para N2 e N2 está indisponível,
 08:30 continua sendo N1, não a “próxima instância saudável”. Falhar o slot é
 preferível a mudar o contrato sem decisão explícita.
 
-## 5. O que não foi afirmado
+## 5. Limites da evidência R3
 
-Não há nesta missão evidência atual de filas vazias, `paused`, health Docker,
-Evolution conectada, browser HTTP, quotas ou providers. Esses estados devem ser
-coletados em gates futuros; manter `UNVERIFIED` é deliberado.
+A fixture SAFE isolada comprovou `paused=true`, health local de PostgreSQL e
+Redis TEST, leitura autenticada do control-plane e medições atuais das filas da
+fixture. Zeros de fila ou de uso só são mostrados quando a respectiva fonte foi
+consultada; fonte ausente ou indisponível permanece `UNKNOWN`/`UNAVAILABLE`.
+
+Essa evidência não afirma o estado dos dados, filas ou providers do ambiente
+canônico/operacional. Ela também não prova Evolution conectada, instância
+WhatsApp saudável, quota externa disponível, autorização de SEND ou
+`DAILY_USE_READY`. A R3 permanece candidate até revisão independente e merge.
 
 Os nomes de status acima seguem exclusivamente o vocabulário de
 `FINDING_LEDGER_SCHEMA.md`; não usar `CONFIRMED_OPEN`, `ALREADY_FIXED` ou
