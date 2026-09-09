@@ -155,6 +155,60 @@ describe.skipIf(process.platform !== 'win32')(
         unrelated.kill();
       }
     }, 60_000);
+    it('stops a detached descendant through its pinned process handle', async () => {
+      const childScript =
+        '/* r2-detached-descendant */ setInterval(() => {}, 1000)';
+      const parentScript = `/* r2-detached-parent */
+        const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}], { detached: true, windowsHide: true, stdio: 'ignore' });
+        child.once('spawn', () => process.send(child.pid));
+        setInterval(() => {}, 1000);
+      `;
+      const parent = spawn(process.execPath, ['-e', parentScript], {
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      });
+      let descendant: number | undefined;
+      try {
+        const [value]: unknown[] = await once(parent, 'message');
+        if (typeof value !== 'number' || !parent.pid)
+          throw new Error('Missing fixture PIDs');
+        descendant = value;
+        const deps = createSystemDependencies();
+        const identity = await deps.inspectProcessIdentity(
+          parent.pid,
+          'r2-detached-parent',
+        );
+        if (!identity.startedAt) throw new Error('Missing fixture identity');
+        expect(await deps.stopProcessTree(parent.pid, identity.startedAt)).toBe(
+          true,
+        );
+        expect(
+          (
+            await deps.inspectProcessIdentity(
+              descendant,
+              'r2-detached-descendant',
+            )
+          ).running,
+        ).toBe(false);
+      } finally {
+        parent.kill();
+        if (descendant) {
+          const remaining = await createSystemDependencies().inspectProcessIdentity(
+            descendant,
+            'r2-detached-descendant',
+          );
+          if (
+            remaining.running &&
+            remaining.markerMatches &&
+            remaining.startedAt
+          )
+            await createSystemDependencies().stopProcessTree(
+              descendant,
+              remaining.startedAt,
+            );
+        }
+      }
+    }, 60_000);
     it('refuses a stale start identity, then stops the same controlled process with pinned handles', async () => {
       const owned = await startOwnedProcess();
       const unrelated = await startOwnedProcess();
