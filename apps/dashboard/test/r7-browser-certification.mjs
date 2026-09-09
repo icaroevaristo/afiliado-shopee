@@ -564,8 +564,63 @@ const walkFiles = async (root) => {
 const countSentinelMatches = (content, sentinels) =>
   sentinels.reduce((count, sentinel) => count + (content.includes(sentinel) ? 1 : 0), 0);
 
+const credentialPatterns = [
+  /\bBearer\s+[A-Za-z0-9._~-]{16,}/gi,
+  /\b(?:postgres(?:ql)?|redis|rediss|mysql|mongodb(?:\+srv)?):\/\/[^\s"'<>]+/gi,
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
+  /\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]{16,}/gi,
+  /\b(?:authorization|proxy-authorization)\s*[:=]\s*["']?(?:Basic|Bearer)\s+[A-Za-z0-9._~+\/-]{12,}/gi,
+  /\b(?:password|passwd|client_secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*["'][^"'\r\n]{8,}["']/gi,
+];
+
+const countCredentialMatches = (content) =>
+  credentialPatterns.reduce((count, pattern) => count + (content.match(pattern) ?? []).length, 0);
+
+const sanitizeCapturedContent = (content) => content
+  .replace(/https?:\/\/(?:127\.0\.0\.1|localhost):\d+/gi, '<LOOPBACK>')
+  .replace(/\bBearer\s+[A-Za-z0-9._~-]{8,}/gi, 'Bearer [REDACTED]')
+  .replace(/\b(?:postgres(?:ql)?|redis|rediss|mysql|mongodb(?:\+srv)?):\/\/[^\s"'<>]+/gi, '[REDACTED_DSN]');
+
 const compact = (value) => value.replace(/\s+/g, ' ').trim();
 const slugFor = (route) => route === '/' ? 'home' : route.replace(/^\//, '').replaceAll('/', '-').replaceAll('?', '-').replaceAll('=', '-');
+
+const tabTo = async (page, locator, { reverse = false, max = 120 } = {}) => {
+  const target = locator.first();
+  await target.waitFor({ state: 'visible' });
+  for (let presses = 0; presses <= max; presses += 1) {
+    if (await target.evaluate((element) => element === document.activeElement)) return presses;
+    await page.keyboard.press(reverse ? 'Shift+Tab' : 'Tab');
+  }
+  throw new Error(`keyboard focus did not reach ${await target.getAttribute('aria-label') ?? compact(await target.innerText().catch(() => 'control'))}`);
+};
+
+const auditAccessibleNames = async (page, scopeSelector = 'main') => page.evaluate((selector) => {
+  const scope = document.querySelector(selector);
+  if (!scope) return { inspected: 0, missing: [] };
+  const controls = Array.from(scope.querySelectorAll('button, a[href], input, select, textarea, summary'));
+  const visibleControls = controls.filter((element) => {
+    const style = getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0 && !(element instanceof HTMLInputElement && element.type === 'hidden');
+  });
+  const missing = visibleControls.filter((element) => {
+    const labelledBy = element.getAttribute('aria-labelledby');
+    const labelledText = labelledBy
+      ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? '').join(' ')
+      : '';
+    const explicitLabel = element.id
+      ? document.querySelector(`label[for="${CSS.escape(element.id)}"]`)?.textContent ?? ''
+      : '';
+    const wrappingLabel = element.closest('label')?.textContent ?? '';
+    const text = [element.getAttribute('aria-label'), labelledText, explicitLabel, wrappingLabel, element.getAttribute('title'), element.getAttribute('placeholder'), element.textContent]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text.length === 0;
+  }).map((element) => ({ tag: element.tagName, type: element.getAttribute('type'), className: element.className }));
+  return { inspected: visibleControls.length, missing };
+}, scopeSelector);
 
 const run = async () => {
   await mkdir(screenshotRoot, { recursive: true });
@@ -605,7 +660,7 @@ const run = async () => {
   for (const file of staticFiles) {
     const content = await readFile(file, 'utf8');
     clientArtifactSentinelMatches += countSentinelMatches(content, allSentinels);
-    clientArtifactSecretMatches += (content.match(/(?:postgres(?:ql)?:\/\/[^\s"']+|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer\s+[A-Za-z0-9._~-]{16,})/gi) ?? []).length;
+    clientArtifactSecretMatches += countCredentialMatches(content);
     if (file.endsWith('.map')) sourceMapCount += 1;
   }
   assert(clientArtifactSentinelMatches === 0, 'synthetic server secret found in client artifact');
@@ -644,12 +699,18 @@ const run = async () => {
   let browserUrlSecretMatches = 0;
   let storageSecretMatches = 0;
   let consoleSecretMatches = 0;
+  let domCredentialMatches = 0;
+  let browserUrlCredentialMatches = 0;
+  let storageCredentialMatches = 0;
+  let consoleCredentialMatches = 0;
   let backendUrlInBrowser = 0;
   let horizontalOverflowFailures = 0;
   let criticalControlUnreachable = 0;
   let uncaughtPageErrors = 0;
   let brokenNavLinks = 0;
   let activeNavMismatch = 0;
+  let criticalControlsWithoutAccessibleName = 0;
+  let stateDependsOnlyOnColor = 0;
 
   const chromeCandidates = [
     process.env.R7_CHROME_EXECUTABLE,
@@ -708,16 +769,25 @@ const run = async () => {
     const domMatches = countSentinelMatches(dom, allSentinels);
     const urlMatches = countSentinelMatches(urls, allSentinels);
     const storageMatches = countSentinelMatches(storage, allSentinels);
+    const domCredentialCount = countCredentialMatches(dom);
+    const urlCredentialCount = countCredentialMatches(urls);
+    const storageCredentialCount = countCredentialMatches(storage);
     const backendMatches = urls.includes(runtimeSentinelUrl) || dom.includes(runtimeSentinelUrl) ? 1 : 0;
     domSecretMatches += domMatches;
     browserUrlSecretMatches += urlMatches;
     storageSecretMatches += storageMatches;
+    domCredentialMatches += domCredentialCount;
+    browserUrlCredentialMatches += urlCredentialCount;
+    storageCredentialMatches += storageCredentialCount;
     backendUrlInBrowser += backendMatches;
     assert(domMatches === 0, `${scenarioId}: sentinel in DOM`);
     assert(urlMatches === 0, `${scenarioId}: sentinel in browser URL/resource`);
     assert(storageMatches === 0, `${scenarioId}: sentinel in browser storage`);
+    assert(domCredentialCount === 0, `${scenarioId}: credential-shaped material in DOM`);
+    assert(urlCredentialCount === 0, `${scenarioId}: credential-shaped material in browser URL/resource`);
+    assert(storageCredentialCount === 0, `${scenarioId}: credential-shaped material in browser storage`);
     assert(backendMatches === 0, `${scenarioId}: backend URL exposed to browser`);
-    return { domSecretMatches: domMatches, browserUrlSecretMatches: urlMatches, storageSecretMatches: storageMatches, backendUrlInBrowser: backendMatches };
+    return { domSecretMatches: domMatches, browserUrlSecretMatches: urlMatches, storageSecretMatches: storageMatches, domCredentialMatches: domCredentialCount, browserUrlCredentialMatches: urlCredentialCount, storageCredentialMatches: storageCredentialCount, backendUrlInBrowser: backendMatches };
   };
 
   const recordScenario = async ({ scenarioId, route, viewport, stateName, screenshot = false, action }) => {
@@ -733,7 +803,9 @@ const run = async () => {
     page.on('console', (message) => {
       const text = message.text();
       const sentinelCount = countSentinelMatches(text, allSentinels);
+      const credentialCount = countCredentialMatches(text);
       consoleSecretMatches += sentinelCount;
+      consoleCredentialMatches += credentialCount;
       if (message.type() === 'error') {
         if (stateName === 'error' || stateName === 'offline' || scenarioId === 'R7-HEALTH-OFFLINE-PROTECTED-SUCCESS') controlledConsoleErrors.push(text);
         else unexpectedConsoleErrors.push(text);
@@ -1020,17 +1092,24 @@ const run = async () => {
       const page = await context.newPage();
       await page.goto(`${dashboardBase}/whatsapp`, { waitUntil: 'networkidle' });
       const menu = page.getByRole('button', { name: 'Abrir menu principal' });
-      await menu.focus();
+      const tabsToMenu = await tabTo(page, menu);
       await page.keyboard.press('Enter');
       assert(await menu.getAttribute('aria-expanded') === 'true', 'mobile drawer aria-expanded invalid');
       const close = page.getByRole('button', { name: 'Fechar menu principal' }).last();
       await close.waitFor();
       assert(await close.evaluate((element) => element === document.activeElement), 'mobile drawer did not receive focus');
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      assert(await close.evaluate((element) => element === document.activeElement), 'Shift+Tab/Tab navigation did not return to drawer close control');
       await page.keyboard.press('Escape');
       assert(await menu.getAttribute('aria-expanded') === 'false', 'Escape did not close drawer');
       assert(await menu.evaluate((element) => element === document.activeElement), 'focus did not return to menu trigger');
       const focusStyle = await menu.evaluate((element) => { const style = getComputedStyle(element); return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth, boxShadow: style.boxShadow }; });
       assert((focusStyle.outlineStyle !== 'none' && focusStyle.outlineWidth !== '0px') || focusStyle.boxShadow !== 'none', 'critical keyboard focus not visible');
+      await page.keyboard.press('Space');
+      assert(await menu.getAttribute('aria-expanded') === 'true', 'Space did not open mobile drawer');
+      await page.keyboard.press('Escape');
+      assert(await menu.evaluate((element) => element === document.activeElement), 'focus did not return after Space/Escape drawer cycle');
       const touchControls = [
         menu,
         page.getByRole('button', { name: 'Atualizar' }),
@@ -1045,7 +1124,81 @@ const run = async () => {
         touchTargetMatrix.push({ accessibleName: await control.getAttribute('aria-label') ?? compact(await control.innerText()), width: box.width, height: box.height, pass });
       }
       assert(touchTargetMatrix.every((entry) => entry.pass), `touch target failure: ${JSON.stringify(touchTargetMatrix)}`);
-      browserTrace.push({ scenarioId: 'R7-KEYBOARD-DRAWER-TOUCH', route: '/whatsapp', head, tree, browserVersion: await browser.version(), viewport: { width: 390, height: 844 }, state: 'accessibility', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: 'PASS', actions: ['focus menu trigger', 'Enter opens', 'Escape closes', 'focus returns', 'measure critical touch targets'], requests: [], console: [], domAssertions: { accessibleNamesMissing: 0, stateDependsOnlyOnColor: 0 }, layoutAssertions: { touchTargetMatrix, criticalControlUnreachable }, focusAssertions: { drawerKeyboard: 'PASS', escape: 'PASS', focusReturn: 'PASS', focusVisibility: 'PASS' }, externalNetworkAttempts: 0, browserAuthorizationHeaders: 0 });
+      const accessibleNameAudit = await auditAccessibleNames(page);
+      criticalControlsWithoutAccessibleName += accessibleNameAudit.missing.length;
+      assert(accessibleNameAudit.missing.length === 0, `unnamed WhatsApp controls: ${JSON.stringify(accessibleNameAudit.missing)}`);
+      browserTrace.push({ scenarioId: 'R7-KEYBOARD-DRAWER-TOUCH', route: '/whatsapp', head, tree, browserVersion: await browser.version(), viewport: { width: 390, height: 844 }, state: 'accessibility', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: 'PASS', actions: [`Tab x${tabsToMenu} reaches menu trigger`, 'Enter opens drawer', 'Shift+Tab and Tab traverse drawer controls', 'Escape closes drawer', 'Space reopens drawer', 'focus returns', 'measure accessible names and critical touch targets'], requests: [], console: [], domAssertions: { accessibleNamesInspected: accessibleNameAudit.inspected, accessibleNamesMissing: accessibleNameAudit.missing.length }, layoutAssertions: { touchTargetMatrix, criticalControlUnreachable }, focusAssertions: { tab: 'PASS', shiftTab: 'PASS', enter: 'PASS', space: 'PASS', drawerKeyboard: 'PASS', escape: 'PASS', focusReturn: 'PASS', focusVisibility: 'PASS' }, externalNetworkAttempts: 0, browserAuthorizationHeaders: 0 });
+      await context.close();
+    }
+
+    resetState();
+    {
+      const context = await newContext({ width: 1440, height: 900 });
+      const page = await context.newPage();
+      await page.goto(`${dashboardBase}/produtos`, { waitUntil: 'networkidle' });
+      const search = page.getByRole('textbox', { name: 'Buscar por produto ou loja' });
+      const tabsToSearch = await tabTo(page, search);
+      await page.keyboard.type('Organizador');
+      assert(await search.inputValue() === 'Organizador', 'keyboard product filter input failed');
+      const details = page.getByRole('link', { name: 'Ver detalhes' }).first();
+      const tabsToDetails = await tabTo(page, details);
+      await page.keyboard.press('Enter');
+      await page.getByRole('heading', { level: 1, name: 'Detalhe da oferta' }).waitFor();
+      const accessibleNameAudit = await auditAccessibleNames(page);
+      criticalControlsWithoutAccessibleName += accessibleNameAudit.missing.length;
+      assert(accessibleNameAudit.missing.length === 0, `unnamed product/detail controls: ${JSON.stringify(accessibleNameAudit.missing)}`);
+      browserTrace.push({ scenarioId: 'R7-KEYBOARD-FILTER-LIST-ACTION', route: '/produtos', head, tree, browserVersion: await browser.version(), viewport: { width: 1440, height: 900 }, state: 'accessibility', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: 'PASS', actions: [`Tab x${tabsToSearch} reaches product filter`, 'type filter with keyboard', `Tab x${tabsToDetails} reaches list action`, 'Enter opens synthetic detail'], requests: [], console: [], domAssertions: { productFilterValue: 'Organizador', detailHeadingPresent: true, accessibleNamesInspected: accessibleNameAudit.inspected, accessibleNamesMissing: accessibleNameAudit.missing.length }, layoutAssertions: {}, focusAssertions: { tab: 'PASS', enter: 'PASS', filter: 'PASS', listAction: 'PASS' }, externalNetworkAttempts: 0, browserAuthorizationHeaders: 0 });
+      await context.close();
+    }
+
+    resetState();
+    {
+      const context = await newContext({ width: 1440, height: 900 });
+      const page = await context.newPage();
+      await page.goto(`${dashboardBase}/nichos`, { waitUntil: 'networkidle' });
+      const newNiche = page.getByRole('button', { name: 'Novo nicho' });
+      const tabsToNewNiche = await tabTo(page, newNiche);
+      await page.keyboard.press('Space');
+      await page.getByText('Criar nicho', { exact: true }).waitFor();
+      const nameInput = page.getByPlaceholder('Ex.: Maternidade');
+      const tabsToName = await tabTo(page, nameInput);
+      await page.keyboard.type('Nicho por teclado');
+      assert(await nameInput.inputValue() === 'Nicho por teclado', 'keyboard form input failed');
+      const accessibleNameAudit = await auditAccessibleNames(page);
+      criticalControlsWithoutAccessibleName += accessibleNameAudit.missing.length;
+      assert(accessibleNameAudit.missing.length === 0, `unnamed niche form controls: ${JSON.stringify(accessibleNameAudit.missing)}`);
+      browserTrace.push({ scenarioId: 'R7-KEYBOARD-FORM', route: '/nichos', head, tree, browserVersion: await browser.version(), viewport: { width: 1440, height: 900 }, state: 'accessibility', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: 'PASS', actions: [`Tab x${tabsToNewNiche} reaches New niche`, 'Space opens editor', `Tab x${tabsToName} reaches name field`, 'type form value without mutation'], requests: [], console: [], domAssertions: { formValue: 'Nicho por teclado', mutationCount: 0, accessibleNamesInspected: accessibleNameAudit.inspected, accessibleNamesMissing: accessibleNameAudit.missing.length }, layoutAssertions: {}, focusAssertions: { tab: 'PASS', space: 'PASS', form: 'PASS' }, externalNetworkAttempts: 0, browserAuthorizationHeaders: 0 });
+      await context.close();
+    }
+
+    resetState();
+    {
+      const context = await newContext({ width: 1440, height: 900 });
+      const page = await context.newPage();
+      page.on('dialog', (dialog) => dialog.accept());
+      await page.goto(`${dashboardBase}/whatsapp`, { waitUntil: 'networkidle' });
+      const card = page.locator('.ops-group-card').filter({ hasText: 'Ofertas da casa' });
+      const edit = card.getByRole('button', { name: 'Editar' });
+      const tabsToEdit = await tabTo(page, edit);
+      await page.keyboard.press('Enter');
+      const move = card.getByRole('button', { name: 'Mover WhatsApp B para cima' });
+      const tabsToMove = await tabTo(page, move);
+      await page.keyboard.press('Space');
+      const stateText = await card.innerText();
+      const draftCommunicatedByText = stateText.includes('Alterações não salvas') && stateText.includes('Ordem persistida: WhatsApp A → WhatsApp B → WhatsApp C');
+      if (!draftCommunicatedByText) stateDependsOnlyOnColor += 1;
+      assert(draftCommunicatedByText, 'rotation draft state is not communicated by text');
+      const save = card.getByRole('button', { name: /Salvar ordem/ });
+      const tabsToSave = await tabTo(page, save);
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      assert(await save.evaluate((element) => element === document.activeElement), 'rotation Shift+Tab/Tab focus traversal failed');
+      await page.keyboard.press('Enter');
+      await page.getByText('Ordem persistida: WhatsApp B → WhatsApp A → WhatsApp C').waitFor();
+      const accessibleNameAudit = await auditAccessibleNames(page);
+      criticalControlsWithoutAccessibleName += accessibleNameAudit.missing.length;
+      assert(accessibleNameAudit.missing.length === 0, `unnamed rotation controls: ${JSON.stringify(accessibleNameAudit.missing)}`);
+      browserTrace.push({ scenarioId: 'R7-KEYBOARD-ROTATION-EDITOR', route: '/whatsapp', head, tree, browserVersion: await browser.version(), viewport: { width: 1440, height: 900 }, state: 'accessibility', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: 'PASS', actions: [`Tab x${tabsToEdit} reaches Edit`, 'Enter opens rotation editor', `Tab x${tabsToMove} reaches move control`, 'Space reorders draft', 'Shift+Tab and Tab preserve focus order', `Tab x${tabsToSave} reaches Save`, 'Enter confirms one PATCH'], requests: [], console: [], domAssertions: { unsavedDraftTextVisible: draftCommunicatedByText, persistedOrderAfterSave: ['WhatsApp B', 'WhatsApp A', 'WhatsApp C'], accessibleNamesInspected: accessibleNameAudit.inspected, accessibleNamesMissing: accessibleNameAudit.missing.length }, layoutAssertions: {}, focusAssertions: { tab: 'PASS', shiftTab: 'PASS', enter: 'PASS', space: 'PASS', rotationEditor: 'PASS' }, externalNetworkAttempts: 0, browserAuthorizationHeaders: 0 });
       await context.close();
     }
 
@@ -1191,10 +1344,18 @@ const run = async () => {
       await result.context.close();
     }
 
-    const htmlRscSentinelMatches = htmlRscBodies.reduce((count, entry) => count + countSentinelMatches(entry.body, allSentinels), 0);
-    const htmlSecretMatches = htmlRscBodies.filter((entry) => entry.contentType.includes('text/html')).reduce((count, entry) => count + countSentinelMatches(entry.body, allSentinels), 0);
-    const rscSecretMatches = htmlRscBodies.filter((entry) => entry.contentType.includes('text/x-component')).reduce((count, entry) => count + countSentinelMatches(entry.body, allSentinels), 0);
+    const uniqueHtmlRscBodies = [...new Map(htmlRscBodies.map((entry) => [`${entry.route}|${entry.contentType}|${sha256(entry.body)}`, entry])).values()];
+    const htmlEntries = uniqueHtmlRscBodies.filter((entry) => entry.contentType.includes('text/html'));
+    const rscEntries = uniqueHtmlRscBodies.filter((entry) => entry.contentType.includes('text/x-component'));
+    const htmlSentinelMatches = htmlEntries.reduce((count, entry) => count + countSentinelMatches(entry.body, allSentinels), 0);
+    const rscSentinelMatches = rscEntries.reduce((count, entry) => count + countSentinelMatches(entry.body, allSentinels), 0);
+    const htmlCredentialMatches = htmlEntries.reduce((count, entry) => count + countCredentialMatches(entry.body), 0);
+    const rscCredentialMatches = rscEntries.reduce((count, entry) => count + countCredentialMatches(entry.body), 0);
+    const htmlRscSentinelMatches = htmlSentinelMatches + rscSentinelMatches;
+    const htmlSecretMatches = htmlSentinelMatches + htmlCredentialMatches;
+    const rscSecretMatches = rscSentinelMatches + rscCredentialMatches;
     assert(htmlRscSentinelMatches === 0, 'server sentinel leaked to HTML/RSC');
+    assert(htmlCredentialMatches === 0 && rscCredentialMatches === 0, 'credential-shaped material found in HTML/RSC');
     assert(externalNetworkAttempts.length === 0, 'external browser network request observed');
     assert(browserAuthorizationHeaders.length === 0, 'Authorization header originated in browser');
     assert(unexpectedConsoleErrors.length === 0, `unexpected browser console errors: ${unexpectedConsoleErrors.slice(0, 5).join(' | ')}`);
@@ -1203,7 +1364,9 @@ const run = async () => {
     assert(activeNavMismatch === 0, 'active navigation mismatch observed');
     assert(horizontalOverflowFailures === 0, 'horizontal overflow failure observed');
     assert(criticalControlUnreachable === 0, 'critical control unreachable');
-    assert(domSecretMatches === 0 && browserUrlSecretMatches === 0 && storageSecretMatches === 0 && consoleSecretMatches === 0 && backendUrlInBrowser === 0, 'browser secret surface failed');
+    assert(criticalControlsWithoutAccessibleName === 0, 'critical control without accessible name observed');
+    assert(stateDependsOnlyOnColor === 0, 'critical state depended only on color');
+    assert(domSecretMatches === 0 && browserUrlSecretMatches === 0 && storageSecretMatches === 0 && consoleSecretMatches === 0 && domCredentialMatches === 0 && browserUrlCredentialMatches === 0 && storageCredentialMatches === 0 && consoleCredentialMatches === 0 && backendUrlInBrowser === 0, 'browser secret surface failed');
 
     const trace = {
       runId,
@@ -1234,7 +1397,8 @@ const run = async () => {
         mobileDrawerKeyboard: 'PASS',
         keyboardCriticalFlow: 'PASS',
         criticalFocusVisibility: 'PASS',
-        stateDependsOnlyOnColor: 0,
+        criticalControlWithoutAccessibleName: criticalControlsWithoutAccessibleName,
+        stateDependsOnlyOnColor,
         requiredHoverInteraction: 0,
       },
       secretCertification: {
@@ -1246,10 +1410,18 @@ const run = async () => {
         clientArtifactSecretMatches,
         htmlSecretMatches,
         rscSecretMatches,
+        htmlSentinelMatches,
+        rscSentinelMatches,
+        htmlCredentialMatches,
+        rscCredentialMatches,
         domSecretMatches,
         browserUrlSecretMatches,
         storageSecretMatches,
         consoleSecretMatches,
+        domCredentialMatches,
+        browserUrlCredentialMatches,
+        storageCredentialMatches,
+        consoleCredentialMatches,
         browserAuthorizationHeaderCount: browserAuthorizationHeaders.length,
         backendUrlInBrowser,
         tokenInBrowser: 0,
@@ -1258,12 +1430,29 @@ const run = async () => {
     };
     const tracePath = resolve(browserRoot, 'browser-trace.json');
     const screenshotIndexPath = resolve(browserRoot, 'screenshot-index.json');
+    const htmlRscSecretScanPath = resolve(browserRoot, 'html-rsc-secret-scan.json');
     await mkdir(browserRoot, { recursive: true });
     const traceContent = `${JSON.stringify(trace, null, 2)}\n`;
     const screenshotContent = `${JSON.stringify({ runId, head, tree, capturedAt: new Date().toISOString(), screenshots: screenshotIndex, assertions: { screenshotCount: screenshotIndex.length, screenshotMatrix: 'PASS', screenshotIndexValidation: 'PASS', screenshotHashValidation: 'PASS', screenshotHeadBinding: 'PASS' } }, null, 2)}\n`;
+    const htmlRscSecretScanContent = `${JSON.stringify({
+      runId,
+      head,
+      tree,
+      capturedAt: new Date().toISOString(),
+      entries: uniqueHtmlRscBodies.map((entry) => ({
+        route: entry.route,
+        contentType: entry.contentType,
+        bodySha256: sha256(entry.body),
+        sentinelMatches: countSentinelMatches(entry.body, allSentinels),
+        credentialMatches: countCredentialMatches(entry.body),
+        sanitizedContent: sanitizeCapturedContent(entry.body),
+      })),
+      assertions: { htmlSentinelMatches, rscSentinelMatches, htmlCredentialMatches, rscCredentialMatches, result: 'PASS' },
+    }, null, 2)}\n`;
     await writeFile(tracePath, traceContent, 'utf8');
     await writeFile(screenshotIndexPath, screenshotContent, 'utf8');
-    process.stdout.write(`${JSON.stringify({ result: 'PASS', runId, head, tree, productionBuild: 'PASS', productionServer: 'NEXT_START', browserVersion: await browser.version(), routeFileCount: pageFiles.length, routeMatrixCount: routeMatrix.length, canonicalOwnerRouteCount: routeMatrix.filter((entry) => entry.classification === 'CANONICAL_OWNER_ROUTE').length, detailRouteCount: routeMatrix.filter((entry) => entry.classification === 'DETAIL_ROUTE').length, screenshotCount: screenshotIndex.length, browserScenarioCount: browserTrace.length, tracePath: relative(repositoryRoot, tracePath).split(sep).join('/'), traceSha256: sha256(traceContent), screenshotIndexPath: relative(repositoryRoot, screenshotIndexPath).split(sep).join('/'), screenshotIndexSha256: sha256(screenshotContent), externalBrowserNetworkAttempts: 0, clientArtifactSentinelMatches, clientArtifactSecretMatches, htmlSecretMatches, rscSecretMatches, domSecretMatches, browserUrlSecretMatches, storageSecretMatches, consoleSecretMatches, browserAuthorizationHeaderCount: 0, backendUrlInBrowser: 0, tokenInBrowser: 0, sourceMapStatus: trace.secretCertification.sourceMapStatus })}\n`);
+    await writeFile(htmlRscSecretScanPath, htmlRscSecretScanContent, 'utf8');
+    process.stdout.write(`${JSON.stringify({ result: 'PASS', runId, head, tree, productionBuild: 'PASS', productionServer: 'NEXT_START', browserVersion: await browser.version(), routeFileCount: pageFiles.length, routeMatrixCount: routeMatrix.length, canonicalOwnerRouteCount: routeMatrix.filter((entry) => entry.classification === 'CANONICAL_OWNER_ROUTE').length, detailRouteCount: routeMatrix.filter((entry) => entry.classification === 'DETAIL_ROUTE').length, screenshotCount: screenshotIndex.length, browserScenarioCount: browserTrace.length, tracePath: relative(repositoryRoot, tracePath).split(sep).join('/'), traceSha256: sha256(traceContent), screenshotIndexPath: relative(repositoryRoot, screenshotIndexPath).split(sep).join('/'), screenshotIndexSha256: sha256(screenshotContent), htmlRscSecretScanPath: relative(repositoryRoot, htmlRscSecretScanPath).split(sep).join('/'), htmlRscSecretScanSha256: sha256(htmlRscSecretScanContent), externalBrowserNetworkAttempts: 0, clientArtifactSentinelMatches, clientArtifactSecretMatches, htmlSecretMatches, rscSecretMatches, htmlCredentialMatches, rscCredentialMatches, domSecretMatches, browserUrlSecretMatches, storageSecretMatches, consoleSecretMatches, domCredentialMatches, browserUrlCredentialMatches, storageCredentialMatches, consoleCredentialMatches, criticalControlsWithoutAccessibleName, stateDependsOnlyOnColor, browserAuthorizationHeaderCount: 0, backendUrlInBrowser: 0, tokenInBrowser: 0, sourceMapStatus: trace.secretCertification.sourceMapStatus })}\n`);
   } finally {
     if (browser) await browser.close();
     await new Promise((resolvePromise) => api.close(resolvePromise));

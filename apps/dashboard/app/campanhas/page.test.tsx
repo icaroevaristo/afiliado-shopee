@@ -208,6 +208,17 @@ describe('CampaignsPage', () => {
     await screen.unmount();
   });
 
+  it('mantém fingerprints e IDs técnicos fora da superfície operacional principal', async () => {
+    const screen = await render(<CampaignsPage />);
+    await act(async () => undefined);
+
+    expect(screen.container.textContent).not.toContain('Fingerprint');
+    expect(screen.container.textContent).not.toContain('fingerprint-a');
+    expect(screen.container.textContent).not.toContain('group-1');
+    expect(screen.container.textContent).toContain('Grupo A');
+    await screen.unmount();
+  });
+
   it('mantém o nicho inativo atual e oferece alternativas ativas', async () => {
     const inactiveCampaign = {
       ...campaign,
