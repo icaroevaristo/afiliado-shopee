@@ -594,7 +594,9 @@ export const processWhatsAppDispatchJob = async (
       await repositories.whatsappDispatches.findByIdForSending(
         job.data.dispatchId,
       );
-    options.oneShotAuthorizationFence.assertDispatch(authorizationDispatch);
+    options.oneShotAuthorizationFence.assertDispatch(
+      authorizationDispatch ?? undefined,
+    );
   }
   const providerRunId = options.oneShotAuthorizationFence
     ? options.oneShotAuthorizationFence.providerRunId(
