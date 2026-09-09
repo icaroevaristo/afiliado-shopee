@@ -46,7 +46,10 @@ try {
   $owned.Add($rootProcess)
   [void]$rootProcess.Handle
   $expected = [DateTime]::Parse('${expected}').ToUniversalTime()
-  if ([Math]::Abs(($rootProcess.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -ge 1) { exit 4 }
+  # JavaScript serializes the inspected Windows start time to milliseconds,
+  # while DateTime retains sub-millisecond ticks. Preserve the identity pin
+  # while accepting that loss of precision.
+  if ([Math]::Abs(($rootProcess.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -gt 1) { exit 4 }
   # Default job limits do not permit breakaway. Future CreateProcess children
   # inherit membership; failure to adopt the owned tree fails closed.
   $job = [SupervisorProcessHandle]::CreateJobObject([IntPtr]::Zero, $null)
