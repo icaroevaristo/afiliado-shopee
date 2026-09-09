@@ -584,7 +584,7 @@ export const processWhatsAppDispatchJob = async (
       ? (input) => options.oneShotAuthorizationFence?.assertPreSend(input)
       : undefined,
   });
-  const revalidatedDispatch = await revalidateCommercialDispatchBeforeSend({
+  await revalidateCommercialDispatchBeforeSend({
     job,
     repositories,
     resolvedProvider,
