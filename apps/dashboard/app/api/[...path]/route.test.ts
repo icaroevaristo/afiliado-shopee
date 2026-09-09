@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DELETE,
   GET,
-  isDashboardProxyPathAllowed,
   PATCH,
   POST,
   PUT,
 } from './route';
+import { isDashboardProxyPathAllowed } from './proxy-allowlist';
 
 afterEach(() => {
   vi.restoreAllMocks();
