@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DELETE, GET, PATCH, POST, PUT } from './route';
+import {
+  DELETE,
+  GET,
+  PATCH,
+  POST,
+  PUT,
+} from './route';
+import {
+  DASHBOARD_PROXY_CONTRACTS,
+  isDashboardProxyPathAllowed,
+} from './proxy-allowlist';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -7,6 +17,13 @@ afterEach(() => {
 });
 
 describe('dashboard API proxy', () => {
+  it('mantém um contrato exato para todas as ações atualmente usadas pela UI', () => {
+    for (const { method, pattern } of DASHBOARD_PROXY_CONTRACTS) {
+      const path = pattern.map((segment, index) => segment === '*' ? `value-${index}` : segment);
+      expect(isDashboardProxyPathAllowed(method, path)).toBe(true);
+    }
+  });
+
   it('encaminha leitura para o servidor privado sem expor credencial ao browser', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
@@ -27,14 +44,14 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics?limit=1'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health?limit=1'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(200);
     expect(await response.clone().json()).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:3334/analytics?limit=1',
+      'http://127.0.0.1:3334/health?limit=1',
       expect.objectContaining({ method: 'GET', cache: 'no-store' }),
     );
     expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty(
@@ -278,7 +295,7 @@ describe('dashboard API proxy', () => {
     );
   });
 
-  it('permite somente os caminhos de agenda explicitamente autorizados', async () => {
+  it('permite somente os caminhos de automacao explicitamente autorizados', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
     const fetchMock = vi
@@ -304,17 +321,17 @@ describe('dashboard API proxy', () => {
       { params: Promise.resolve({ path: ['commercial-automation', 'settings'] }) },
     );
     const response = await PATCH(
-      new Request('http://dashboard.local/api/commercial-automation/settings/schedule', {
+      new Request('http://dashboard.local/api/commercial-automation/settings/admin', {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ staggerMinutes: 5 }),
       }),
-      { params: Promise.resolve({ path: ['commercial-automation', 'settings', 'schedule'] }) },
+      { params: Promise.resolve({ path: ['commercial-automation', 'settings', 'admin'] }) },
     );
 
     expect(response.status).toBe(200);
     expect(fetchMock.mock.calls[3][0]).toBe(
-      'http://127.0.0.1:3334/commercial-automation/settings/schedule',
+      'http://127.0.0.1:3334/commercial-automation/settings/admin',
     );
   });
 
@@ -373,8 +390,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await PUT(
-      new Request('http://dashboard.local/api/analytics', { method: 'PUT' }),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health', { method: 'PUT' }),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(404);
@@ -409,6 +426,93 @@ describe('dashboard API proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['segmento extra', 'GET', ['commercial', 'campaigns', 'campaign-1', 'mine']],
+    ['segmento ausente', 'GET', ['commercial', 'campaigns', 'campaign-1', 'queue', 'extra']],
+    ['traversal pontual', 'PATCH', ['commercial', 'campaigns', '..']],
+    ['traversal com barra invertida', 'PATCH', ['commercial', 'campaigns', '..\\settings']],
+  ] as const)('bloqueia %s sem chamar o upstream', async (_label, method, path) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const handler = method === 'GET' ? GET : PATCH;
+    const response = await handler(
+      new Request(`http://dashboard.local/api/${path.join('/')}`, {
+        method,
+        body: method === 'PATCH' ? '{}' : undefined,
+      }),
+      { params: Promise.resolve({ path: [...path] }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('preserva a codificação de um identificador permitido sem aceitar traversal', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await PATCH(
+      new Request('http://dashboard.local/api/whatsapp/instances/worker%2Fone', {
+        method: 'PATCH',
+        body: '{}',
+      }),
+      {
+        params: Promise.resolve({
+          path: ['whatsapp', 'instances', 'worker/one'],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      'http://127.0.0.1:3334/whatsapp/instances/worker%2Fone',
+    );
+  });
+
+  it('descarta credenciais do browser e encaminha somente os headers necessários', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/commercial-automation/status', {
+        headers: {
+          accept: 'application/json',
+          authorization: 'Bearer browser-token',
+          cookie: 'dashboard-session=browser-controlled',
+          'x-untrusted-header': 'discard-me',
+        },
+      }),
+      { params: Promise.resolve({ path: ['commercial-automation', 'status'] }) },
+    );
+
+    expect(response.status).toBe(200);
+    const headers = fetchMock.mock.calls[1][1].headers;
+    expect(headers.get('authorization')).toBe('Bearer proxy-test-token');
+    expect(headers.get('cookie')).toBeNull();
+    expect(headers.get('x-untrusted-header')).toBeNull();
+    expect(await response.text()).not.toContain('proxy-test-token');
+  });
+
   it('bloqueia PATCH fora de settings sem chamar o upstream', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -432,8 +536,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -449,8 +553,30 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: 'DASHBOARD_API_TARGET_INVALID',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'ftp://127.0.0.1:3334',
+    'http://api.example.invalid',
+    'http://proxy-user:proxy-password@127.0.0.1:3334',
+  ])('rejeita destinos upstream inválidos sem chamar o upstream: %s', async (target) => {
+    vi.stubEnv('DASHBOARD_API_URL', target);
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await GET(
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -472,8 +598,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -485,5 +611,35 @@ describe('dashboard API proxy', () => {
       'http://127.0.0.1:3333/health',
       expect.objectContaining({ cache: 'no-store' }),
     );
+  });
+
+  it('falha fechada sem reenviar mutações quando o upstream fica indisponível', async () => {
+    vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
+    vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'ok', service: 'api' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError('connection refused'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await PATCH(
+      new Request('http://dashboard.local/api/commercial-automation/settings', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ paused: true }),
+      }),
+      { params: Promise.resolve({ path: ['commercial-automation', 'settings'] }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: 'DASHBOARD_API_UPSTREAM_UNAVAILABLE',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

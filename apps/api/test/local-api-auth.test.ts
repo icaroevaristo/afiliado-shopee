@@ -119,6 +119,43 @@ describe('local API authentication and CORS', () => {
     expect(analytics).toHaveBeenCalledOnce();
   });
 
+  it('requires the same Bearer boundary for the commercial control plane', async () => {
+    const readiness = vi.fn().mockResolvedValue({
+      enabled: false,
+      allowed: false,
+      reasons: ['AUTOMATION_DISABLED'],
+    });
+    const app = await buildApp({
+      logger: false,
+      localApiAuthToken: token,
+      commercialAutomationPolicyService: {
+        evaluateAutomationReadiness: readiness,
+        setPaused: vi.fn(),
+      },
+    });
+    apps.push(app);
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/commercial-automation/status',
+    });
+    const invalid = await app.inject({
+      method: 'GET',
+      url: '/commercial-automation/status',
+      headers: { authorization: 'Bearer wrong-token' },
+    });
+    const valid = await app.inject({
+      method: 'GET',
+      url: '/commercial-automation/status',
+      headers: { authorization },
+    });
+
+    expect(missing.statusCode).toBe(401);
+    expect(invalid.statusCode).toBe(401);
+    expect(valid.statusCode).toBe(200);
+    expect(readiness).toHaveBeenCalledOnce();
+  });
+
   it('rejects a commercial confirmation phrase without authentication', async () => {
     const { app, confirm } = await setup();
 

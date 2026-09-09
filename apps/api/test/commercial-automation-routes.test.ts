@@ -301,4 +301,62 @@ describe('commercial automation routes', () => {
         'A configuração mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
     });
   });
+
+  it('aplica uma escrita CAS uma vez e preserva o estado após double-submit obsoleto', async () => {
+    let paused = true;
+    let updatedAt = '2026-07-25T15:00:00.000Z';
+    let writes = 0;
+    const setPaused = vi.fn(
+      async (input: {
+        paused: boolean;
+        confirmation?: string;
+        expectedUpdatedAt?: string;
+      }) => {
+        if (input.expectedUpdatedAt !== updatedAt) {
+          throw new AppError(
+            'A configuração mudou desde que esta tela foi carregada. Atualize e confirme novamente.',
+            'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+          );
+        }
+        writes += 1;
+        paused = input.paused;
+        updatedAt = '2026-07-25T15:00:01.000Z';
+        return { ...status, paused, updatedAt };
+      },
+    );
+    const app = await buildAuthenticatedTestApp({
+      logger: false,
+      prisma: {} as never,
+      commercialAutomationPolicyService: {
+        evaluateAutomationReadiness: vi.fn().mockResolvedValue(status),
+        setPaused,
+      },
+    });
+    apps.push(app);
+    const payload = {
+      paused: false,
+      confirmation: 'RETOMAR_AUTOMACAO_COMERCIAL',
+      expectedUpdatedAt: '2026-07-25T15:00:00.000Z',
+    };
+
+    const current = await app.inject({
+      method: 'PATCH',
+      url: '/commercial-automation/settings',
+      payload,
+    });
+    const stale = await app.inject({
+      method: 'PATCH',
+      url: '/commercial-automation/settings',
+      payload,
+    });
+
+    expect(current.statusCode).toBe(200);
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({
+      error: 'COMMERCIAL_AUTOMATION_RESUME_CONFLICT',
+    });
+    expect(writes).toBe(1);
+    expect(paused).toBe(false);
+    expect(updatedAt).toBe('2026-07-25T15:00:01.000Z');
+  });
 });
