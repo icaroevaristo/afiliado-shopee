@@ -23,10 +23,12 @@ import type {
 } from '../src/repositories';
 import type {
   CommercialAutomationPolicyConfig,
+  CommercialAutomationReason,
   CommercialAutomationPolicyService,
   CommercialAutomationStatus,
 } from '../src/commercial-automation-policy-service';
 import type { PlannedCommercialTargetSlot } from '../src/commercial-automation-scheduler-planner';
+import type { CommercialExternalProviderBudgetSnapshot } from '../src/commercial-external-provider-budget-service';
 
 const NOW = new Date('2026-08-28T15:00:00.000Z');
 
@@ -377,19 +379,25 @@ const createService = (options?: {
   commercialTargetJobPages?: Array<
     Array<{ id?: string | number; name?: string; data?: unknown }>
   >;
+  commercialTargetRead?: 'READY' | 'THROW' | 'MISSING';
   plannerSlots?: PlannedCommercialTargetSlot[];
   queueCounts?: {
     productPipeline?: Record<string, number> | 'THROW';
     whatsappDispatch?: Record<string, number> | 'THROW';
     commercialAutomation?: Record<string, number> | 'THROW';
   };
-  scheduler?: 'READY' | 'THROW';
+  scheduler?: 'registered' | 'disabled' | 'not-registered' | 'THROW';
+  providerUsage?: CommercialExternalProviderBudgetSnapshot | 'THROW';
+  policyReasons?: CommercialAutomationReason[];
 }) => {
   status.hasActiveGroupLifecycle = async () => false;
   const instances = new MemoryInstances();
   const groups = new MemoryGroups();
   const getCommercialJobs = vi.fn(
     async (_types: Array<'waiting' | 'active' | 'delayed'>, start = 0) => {
+      if (options?.commercialTargetRead === 'THROW') {
+        throw new Error('target jobs unavailable');
+      }
       const jobs = options?.commercialTargetJobPages
         ? (options.commercialTargetJobPages[Math.floor(start / 200)] ?? [])
         : (options?.commercialTargetJobs ?? []);
@@ -411,19 +419,38 @@ const createService = (options?: {
   const productPipeline = queueReader(options?.queueCounts?.productPipeline);
   const whatsappDispatch = queueReader(options?.queueCounts?.whatsappDispatch);
   const commercialCounts = queueReader(
-    options?.queueCounts?.commercialAutomation,
+    options?.queueCounts?.commercialAutomation ??
+      (options?.commercialTargetJobs !== undefined ||
+      options?.commercialTargetJobPages !== undefined ||
+      options?.commercialTargetRead === 'READY' ||
+      options?.commercialTargetRead === 'THROW'
+        ? {}
+        : undefined),
   );
+  const hasCommercialTargetReader =
+    options?.commercialTargetRead !== 'MISSING' &&
+    (options?.commercialTargetJobs !== undefined ||
+      options?.commercialTargetJobPages !== undefined ||
+      options?.commercialTargetRead !== undefined ||
+      commercialCounts !== undefined);
   const commercialAutomation =
-    options?.commercialTargetJobs ||
-    options?.commercialTargetJobPages ||
-    commercialCounts
+    hasCommercialTargetReader || commercialCounts
       ? {
           ...commercialCounts,
-          ...(options?.commercialTargetJobs || options?.commercialTargetJobPages
-            ? { getJobs: getCommercialJobs }
-            : {}),
+          ...(hasCommercialTargetReader ? { getJobs: getCommercialJobs } : {}),
         }
       : undefined;
+  const providerUsage = options?.providerUsage;
+  const schedulerStatus = options?.scheduler;
+  const servicePolicy = options?.policyReasons
+    ? {
+        ...policy,
+        evaluateAutomationReadiness: async () => ({
+          ...readiness,
+          reasons: options.policyReasons ?? [],
+        }),
+      }
+    : policy;
   return {
     instances,
     groups,
@@ -436,7 +463,7 @@ const createService = (options?: {
       history,
       settings: settingsRepository,
       status,
-      policy,
+      policy: servicePolicy,
       planner: {
         preview: async () => ({
           slots: options?.plannerSlots ?? [],
@@ -455,14 +482,40 @@ const createService = (options?: {
             },
           }
         : {}),
-      ...(options?.scheduler
+      ...(schedulerStatus
         ? {
             scheduler: {
               getStatus: async () => {
-                if (options.scheduler === 'THROW') {
+                if (schedulerStatus === 'THROW') {
                   throw new Error('scheduler unavailable');
                 }
-                return { status: 'registered' };
+                const enabled = schedulerStatus !== 'disabled';
+                return {
+                  enabled,
+                  status: schedulerStatus,
+                  jobId: 'scheduled-commercial-automation',
+                  queue: 'commercial-automation',
+                  jobName: JOB_NAMES.commercialAutomationTick,
+                  cron: '* * * * *',
+                  timezone: 'America/Sao_Paulo',
+                  nextRunAt:
+                    schedulerStatus === 'registered'
+                      ? '2026-08-28T15:01:00.000Z'
+                      : null,
+                  mode: 'preview',
+                };
+              },
+            },
+          }
+        : {}),
+      ...(providerUsage
+        ? {
+            externalBudget: {
+              snapshot: async () => {
+                if (providerUsage === 'THROW') {
+                  throw new Error('provider usage unavailable');
+                }
+                return providerUsage;
               },
             },
           }
@@ -538,7 +591,73 @@ describe('OperationalAdminService', () => {
     });
   });
 
-  it('marca scheduler sem leitura como blocker correlacionado, sem derrubar o snapshot', async () => {
+  it('mantém o snapshot disponível quando getJobCounts da fila comercial falha', async () => {
+    const plannerAt = new Date('2026-08-28T19:52:00.000Z');
+    const { service } = createService({
+      plannerSlots: [plannedSlot(plannerAt)],
+      commercialTargetRead: 'READY',
+      queueCounts: {
+        productPipeline: { waiting: 2 },
+        whatsappDispatch: { delayed: 1 },
+        commercialAutomation: 'THROW',
+      },
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.queues.productPipeline.status).toBe('READY');
+    expect(result.queues.whatsappDispatch.status).toBe('READY');
+    expect(result.queues.commercialAutomation).toMatchObject({
+      status: 'UNAVAILABLE',
+      counts: null,
+    });
+    expect(result.nextSendAt).toBeNull();
+    expect(result.blockers).toContainEqual(
+      expect.objectContaining({
+        code: 'QUEUE_HEALTH_UNKNOWN',
+        entityId: 'commercial-automation',
+        source: 'QUEUE',
+      }),
+    );
+  });
+
+  it('mantém o snapshot disponível quando getJobs da fila comercial falha', async () => {
+    const plannerAt = new Date('2026-08-28T19:52:00.000Z');
+    const { service } = createService({
+      plannerSlots: [plannedSlot(plannerAt)],
+      commercialTargetRead: 'THROW',
+      queueCounts: {
+        productPipeline: { active: 1 },
+        whatsappDispatch: { waiting: 3 },
+        commercialAutomation: { waiting: 4 },
+      },
+    });
+
+    const result = await service.getOverview();
+
+    expect(result.queues.productPipeline).toMatchObject({
+      status: 'READY',
+      counts: { waiting: 0, active: 1, delayed: 0, prioritized: 0 },
+    });
+    expect(result.queues.whatsappDispatch).toMatchObject({
+      status: 'READY',
+      counts: { waiting: 3, active: 0, delayed: 0, prioritized: 0 },
+    });
+    expect(result.queues.commercialAutomation).toMatchObject({
+      status: 'UNAVAILABLE',
+      counts: { waiting: 4, active: 0, delayed: 0, prioritized: 0 },
+    });
+    expect(result.nextSendAt).toBeNull();
+    expect(result.groups[0]?.nextSendAt).toBeNull();
+    expect(result.blockers).toContainEqual(
+      expect.objectContaining({
+        code: 'QUEUE_HEALTH_UNKNOWN',
+        entityId: 'commercial-automation',
+      }),
+    );
+  });
+
+  it('marca falha de leitura do scheduler sem derrubar o snapshot', async () => {
     const { service } = createService({ scheduler: 'THROW' });
 
     const result = await service.getOverview();
@@ -552,6 +671,125 @@ describe('OperationalAdminService', () => {
     });
     expect(result.readiness.scheduler.status).toBe('UNKNOWN');
     expect(result.scheduler).toBeNull();
+  });
+
+  it.each([
+    {
+      scheduler: 'registered' as const,
+      readiness: 'READY',
+      blocker: null,
+    },
+    {
+      scheduler: 'disabled' as const,
+      readiness: 'NOT_READY',
+      blocker: 'SCHEDULER_DISABLED',
+    },
+    {
+      scheduler: 'not-registered' as const,
+      readiness: 'NOT_READY',
+      blocker: 'SCHEDULER_NOT_REGISTERED',
+    },
+  ])(
+    'deriva readiness operacional do estado $scheduler do scheduler',
+    async ({ scheduler, readiness: expectedReadiness, blocker }) => {
+      const { service } = createService({ scheduler });
+
+      const result = await service.getOverview();
+
+      expect(result.readiness.scheduler.status).toBe(expectedReadiness);
+      expect(result.scheduler).toMatchObject({ status: scheduler });
+      if (blocker) {
+        expect(result.blockers).toContainEqual(
+          expect.objectContaining({ code: blocker, source: 'SCHEDULER' }),
+        );
+      } else {
+        expect(
+          result.blockers.some((candidate) =>
+            candidate.code.startsWith('SCHEDULER_'),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
+
+  it('mantém scheduler sem reader como UNKNOWN', async () => {
+    const { service } = createService();
+
+    const result = await service.getOverview();
+
+    expect(result.readiness.scheduler.status).toBe('UNKNOWN');
+    expect(result.blockers).toContainEqual(
+      expect.objectContaining({
+        code: 'SCHEDULER_STATUS_UNKNOWN',
+        source: 'SCHEDULER',
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: 'zero medido',
+      snapshot: {
+        dayKey: '2026-08-28',
+        shopee: { used: 0, limit: 4, reached: false },
+        openAi: { used: 0, limit: 3, reached: false },
+      },
+    },
+    {
+      name: 'uso medido',
+      snapshot: {
+        dayKey: '2026-08-28',
+        shopee: { used: 2, limit: 4, reached: false },
+        openAi: { used: 3, limit: 3, reached: true },
+      },
+    },
+  ])(
+    'expõe provider usage quando a fonte retorna $name',
+    async ({ snapshot }) => {
+      const { service } = createService({ providerUsage: snapshot });
+
+      const result = await service.getOverview();
+
+      expect(result.automation.providerUsage).toEqual({
+        status: 'READY',
+        source: 'PROVIDER_USAGE',
+        observedAt: NOW.toISOString(),
+        usage: snapshot,
+      });
+    },
+  );
+
+  it('não transforma fonte de provider ausente em zero', async () => {
+    const { service } = createService();
+
+    const result = await service.getOverview();
+
+    expect(result.automation.providerUsage).toEqual({
+      status: 'UNKNOWN',
+      source: 'PROVIDER_USAGE',
+      observedAt: NOW.toISOString(),
+      usage: null,
+    });
+    expect(result.blockers).toContainEqual(
+      expect.objectContaining({ code: 'PROVIDER_USAGE_UNKNOWN' }),
+    );
+  });
+
+  it('não derruba o snapshot nem inventa zero quando provider usage falha', async () => {
+    const { service } = createService({ providerUsage: 'THROW' });
+
+    const result = await service.getOverview();
+
+    expect(result.automation.providerUsage).toMatchObject({
+      status: 'UNAVAILABLE',
+      usage: null,
+    });
+    expect(result.blockers).toContainEqual(
+      expect.objectContaining({
+        code: 'PROVIDER_USAGE_UNKNOWN',
+        source: 'PROVIDER_CONFIGURATION',
+      }),
+    );
   });
 
   it('correlaciona conexão de instância não comprovada com source e timestamp', async () => {
@@ -589,22 +827,26 @@ describe('OperationalAdminService', () => {
     expect(result.activeReservations).toBe(0);
   });
 
-  it('atribui bloqueio de janela operacional à fonte POLICY', async () => {
-    const previousReasons = readiness.reasons;
-    readiness.reasons = ['OUTSIDE_ALLOWED_WINDOW'];
-    try {
-      const { service } = createService();
+  it.each([
+    ['MINIMUM_INTERVAL_NOT_REACHED', 'POLICY'],
+    ['NO_AUTHORIZED_GROUP', 'POLICY'],
+    ['MULTIPLE_AUTHORIZED_GROUPS', 'POLICY'],
+    ['OUTSIDE_ALLOWED_WINDOW', 'POLICY'],
+    ['AMBIGUOUS_COMMERCIAL_RUN_EXISTS', 'LIFECYCLE'],
+    ['COMMERCIAL_EXECUTION_IN_PROGRESS', 'LIFECYCLE'],
+    ['STALE_COMMERCIAL_EXECUTION_EXISTS', 'LIFECYCLE'],
+  ] satisfies Array<[CommercialAutomationReason, 'POLICY' | 'LIFECYCLE']>)(
+    'atribui %s à fonte explícita %s',
+    async (reason, source) => {
+      const { service } = createService({ policyReasons: [reason] });
+
       const result = await service.getOverview();
 
       expect(
-        result.blockers.find(
-          (blocker) => blocker.code === 'OUTSIDE_ALLOWED_WINDOW',
-        ),
-      ).toMatchObject({ source: 'POLICY', observedAt: NOW.toISOString() });
-    } finally {
-      readiness.reasons = previousReasons;
-    }
-  });
+        result.blockers.find((blocker) => blocker.code === reason),
+      ).toMatchObject({ source, observedAt: NOW.toISOString() });
+    },
+  );
 
   it('T17 usa target pendente às 16:37 antes do slot hipotético do planner às 16:52', async () => {
     const queuedAt = new Date('2026-08-28T19:37:00.000Z');
@@ -643,6 +885,7 @@ describe('OperationalAdminService', () => {
     const plannerAt = new Date('2026-08-28T19:52:00.000Z');
     const { service } = createService({
       plannerSlots: [plannedSlot(plannerAt)],
+      commercialTargetRead: 'READY',
     });
 
     const result = await service.getOverview();

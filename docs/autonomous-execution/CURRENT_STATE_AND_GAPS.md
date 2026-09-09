@@ -3,8 +3,10 @@
 **Status:** `LIVE_CANONICAL`
 **Baseline R1/R2:** R1 está mergeada; R2 foi mergeada em `#150` na main
 `2bc5c813ed2eca9035a78ad903e4d89dbb9dbd1f`.
-**Escopo desta leitura:** código e documentação; nenhum runtime, DB, Redis ou
-provider foi iniciado nesta missão.
+**Escopo desta leitura:** código, documentação e certificação SAFE isolada da
+R3. A certificação usa PostgreSQL/Redis TEST descartáveis; os recursos
+canônicos permaneceram parados e sem mutação. Nenhum provider externo foi
+iniciado.
 
 ## 1. Classificação documental
 
@@ -104,11 +106,17 @@ Exemplo obrigatório: se 08:15 foi reservado para N2 e N2 está indisponível,
 08:30 continua sendo N1, não a “próxima instância saudável”. Falhar o slot é
 preferível a mudar o contrato sem decisão explícita.
 
-## 5. O que não foi afirmado
+## 5. Limites da evidência R3
 
-Não há nesta missão evidência atual de filas vazias, `paused`, health Docker,
-Evolution conectada, browser HTTP, quotas ou providers. Esses estados devem ser
-coletados em gates futuros; manter `UNVERIFIED` é deliberado.
+A fixture SAFE isolada comprovou `paused=true`, health local de PostgreSQL e
+Redis TEST, leitura autenticada do control-plane e medições atuais das filas da
+fixture. Zeros de fila ou de uso só são mostrados quando a respectiva fonte foi
+consultada; fonte ausente ou indisponível permanece `UNKNOWN`/`UNAVAILABLE`.
+
+Essa evidência não afirma o estado dos dados, filas ou providers do ambiente
+canônico/operacional. Ela também não prova Evolution conectada, instância
+WhatsApp saudável, quota externa disponível, autorização de SEND ou
+`DAILY_USE_READY`. A R3 permanece candidate até revisão independente e merge.
 
 Os nomes de status acima seguem exclusivamente o vocabulário de
 `FINDING_LEDGER_SCHEMA.md`; não usar `CONFIRMED_OPEN`, `ALREADY_FIXED` ou

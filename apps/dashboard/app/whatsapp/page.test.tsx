@@ -36,9 +36,14 @@ const overview = {
     dailyShopeeHttpLimitOverride: null,
     dailyOpenAiGenerationLimitOverride: null,
     providerUsage: {
-      dayKey: '2026-08-28',
-      shopee: { used: 0, limit: 10, reached: false },
-      openAi: { used: 0, limit: 10, reached: false },
+      status: 'READY',
+      source: 'PROVIDER_USAGE',
+      observedAt: '2026-08-28T12:00:00.000Z',
+      usage: {
+        dayKey: '2026-08-28',
+        shopee: { used: 0, limit: 10, reached: false },
+        openAi: { used: 0, limit: 10, reached: false },
+      },
     },
     hardCaps: {
       maxMessagesPerRun: 1,

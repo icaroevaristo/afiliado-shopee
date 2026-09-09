@@ -990,20 +990,34 @@ export default function DiagnosticsPage() {
                   />
                   <TechnicalField
                     label="Shopee hoje"
-                    value={`${admin.automation.providerUsage.shopee.used} / ${admin.automation.providerUsage.shopee.limit}`}
+                    value={
+                      admin.automation.providerUsage.usage
+                        ? `${admin.automation.providerUsage.usage.shopee.used} / ${admin.automation.providerUsage.usage.shopee.limit}`
+                        : `Não medido (${admin.automation.providerUsage.status})`
+                    }
                   />
                   <TechnicalField
                     label="OpenAI hoje"
-                    value={`${admin.automation.providerUsage.openAi.used} / ${admin.automation.providerUsage.openAi.limit}`}
+                    value={
+                      admin.automation.providerUsage.usage
+                        ? `${admin.automation.providerUsage.usage.openAi.used} / ${admin.automation.providerUsage.usage.openAi.limit}`
+                        : `Não medido (${admin.automation.providerUsage.status})`
+                    }
                   />
                   <TechnicalField
                     label="Uso Shopee atingido"
-                    value={admin.automation.providerUsage.shopee.reached}
+                    value={
+                      admin.automation.providerUsage.usage?.shopee.reached ??
+                      'UNKNOWN'
+                    }
                     mono
                   />
                   <TechnicalField
                     label="Uso OpenAI atingido"
-                    value={admin.automation.providerUsage.openAi.reached}
+                    value={
+                      admin.automation.providerUsage.usage?.openAi.reached ??
+                      'UNKNOWN'
+                    }
                     mono
                   />
                 </dl>

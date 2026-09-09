@@ -212,9 +212,14 @@ export type OperationalAdmin = {
     dailyShopeeHttpLimitOverride: number | null;
     dailyOpenAiGenerationLimitOverride: number | null;
     providerUsage: {
-      dayKey: string;
-      shopee: { used: number; limit: number; reached: boolean };
-      openAi: { used: number; limit: number; reached: boolean };
+      status: 'READY' | 'UNKNOWN' | 'UNAVAILABLE';
+      source: 'PROVIDER_USAGE';
+      observedAt: string;
+      usage: {
+        dayKey: string;
+        shopee: { used: number; limit: number; reached: boolean };
+        openAi: { used: number; limit: number; reached: boolean };
+      } | null;
     };
     hardCaps: {
       maxMessagesPerRun: number;
