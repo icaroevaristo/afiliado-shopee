@@ -109,6 +109,7 @@ describe('isolated WhatsApp dispatch worker', () => {
         throw authorizationError;
       }),
       assertJob: vi.fn(),
+      assertDispatch: vi.fn(),
       providerRunId: vi.fn(),
       assertPreSend: vi.fn(),
       sendBudgetConsumed: 0,

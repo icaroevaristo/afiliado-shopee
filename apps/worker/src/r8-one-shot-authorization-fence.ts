@@ -51,6 +51,7 @@ export type R8OneShotAuthorizationFence = {
     dispatchId: string;
     instanceName: string | undefined;
   }): void;
+  assertDispatch(dispatch: WhatsAppDispatchDetails | undefined): void;
   providerRunId(jobId: string | undefined, dispatchId: string): string;
   assertPreSend(input: R8OneShotPreSendInput): void;
   readonly sendBudgetConsumed: number;
@@ -140,6 +141,40 @@ export const createR8OneShotAuthorizationFence = (input: {
     }
   };
 
+  const assertDispatchIdentity = (
+    dispatch: WhatsAppDispatchDetails | undefined,
+  ) => {
+    assertManifest();
+    const candidateId = dispatch?.generatedCopy.createdFromCandidateId;
+    const candidates =
+      dispatch?.generatedCopy.promotionCandidates?.filter(
+        (candidate) => candidate.id === candidateId,
+      ) ?? [];
+    const candidate = candidates.length === 1 ? candidates[0] : undefined;
+    if (
+      !dispatch ||
+      dispatch.status !== 'PENDING' ||
+      dispatch.attemptCount !== 0 ||
+      dispatch.externalMessageId !== null ||
+      dispatch.sentAt !== null ||
+      dispatch.id !== manifest.dispatchId ||
+      dispatch.destination.fingerprint !== manifest.targetFingerprint ||
+      r8DestinationSha256(dispatch.destination.destination) !==
+        manifest.destinationSha256 ||
+      dispatch.instanceName !== manifest.instanceName ||
+      dispatch.destination.assignmentRevision !== manifest.assignmentRevision ||
+      dispatch.productId !== manifest.productId ||
+      dispatch.generatedCopyId !== manifest.generatedCopyId ||
+      !candidate ||
+      candidate.id !== manifest.candidateId ||
+      candidate.campaignId !== manifest.campaignId ||
+      candidate.snapshotId !== manifest.snapshotId ||
+      candidate.snapshot.revision !== manifest.snapshotRevision
+    ) {
+      rejected();
+    }
+  };
+
   return {
     assertRuntime(runtime) {
       assertManifest();
@@ -158,6 +193,7 @@ export const createR8OneShotAuthorizationFence = (input: {
       }
     },
     assertJob,
+    assertDispatch: assertDispatchIdentity,
     providerRunId(jobId, dispatchId) {
       assertJob({
         jobId,
@@ -167,29 +203,10 @@ export const createR8OneShotAuthorizationFence = (input: {
       return `r8:${manifest.authorizationId}:${manifest.jobId}`;
     },
     assertPreSend(preSend) {
-      assertManifest();
       const dispatch = preSend.dispatch;
-      const candidateId = dispatch.generatedCopy.createdFromCandidateId;
-      const candidates =
-        dispatch.generatedCopy.promotionCandidates?.filter(
-          (candidate) => candidate.id === candidateId,
-        ) ?? [];
-      const candidate = candidates.length === 1 ? candidates[0] : undefined;
+      assertDispatchIdentity(dispatch);
       if (
         sendBudgetConsumed !== 0 ||
-        dispatch.id !== manifest.dispatchId ||
-        dispatch.destination.fingerprint !== manifest.targetFingerprint ||
-        r8DestinationSha256(dispatch.destination.destination) !==
-          manifest.destinationSha256 ||
-        dispatch.instanceName !== manifest.instanceName ||
-        dispatch.destination.assignmentRevision !== manifest.assignmentRevision ||
-        dispatch.productId !== manifest.productId ||
-        dispatch.generatedCopyId !== manifest.generatedCopyId ||
-        !candidate ||
-        candidate.id !== manifest.candidateId ||
-        candidate.campaignId !== manifest.campaignId ||
-        candidate.snapshotId !== manifest.snapshotId ||
-        candidate.snapshot.revision !== manifest.snapshotRevision ||
         preSend.deliveryMode !== manifest.deliveryMode ||
         r8MessagePayloadSha256({
           deliveryMode: preSend.deliveryMode,

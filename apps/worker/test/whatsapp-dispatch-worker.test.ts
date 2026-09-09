@@ -2023,6 +2023,9 @@ describe('processWhatsAppDispatchJob', () => {
       deliveryMayHaveStarted: false,
     });
 
+    expect(
+      repositories.whatsappDispatches.claimPendingForSending,
+    ).not.toHaveBeenCalled();
     expect(provider.sendMessage).not.toHaveBeenCalled();
     expect(fence.sendBudgetConsumed).toBe(0);
   });
@@ -2138,6 +2141,59 @@ describe('processWhatsAppDispatchJob', () => {
       deliveryMayHaveStarted: false,
     });
 
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(fence.sendBudgetConsumed).toBe(0);
+  });
+
+  it('não reutiliza a mesma autorização depois de uma tentativa persistida', async () => {
+    const dispatch: WhatsAppDispatchDetails = {
+      ...commercialDispatch,
+      id: 'dispatch-handoff',
+      attemptCount: 1,
+      destination: {
+        ...commercialDispatch.destination,
+        assignmentRevision: 7,
+        assignedInstanceNames: ['instance'],
+      },
+    };
+    const { repositories } = createHandoffRepositories({ dispatch });
+    const provider: WhatsAppProvider = {
+      beginRun: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: r8AuthorizationManifest(),
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => handoffNow,
+    });
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'job-handoff',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: 'dispatch-handoff', instanceName: 'instance' },
+          opts: { attempts: 1 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          whatsAppProviderResolver: vi.fn().mockResolvedValue(provider),
+          logger: { info: vi.fn(), error: vi.fn() },
+          groupSendPolicy: commercialGroupSendPolicy(),
+          clock: () => handoffNow,
+          reservationLeaseMilliseconds: handoffLeaseMilliseconds,
+          oneShotAuthorizationFence: fence,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'COMMERCIAL_DISPATCH_RESERVATION_LIFECYCLE_INVALID',
+    });
+
+    expect(
+      repositories.whatsappDispatches.claimPendingForSending,
+    ).not.toHaveBeenCalled();
     expect(provider.sendMessage).not.toHaveBeenCalled();
     expect(fence.sendBudgetConsumed).toBe(0);
   });

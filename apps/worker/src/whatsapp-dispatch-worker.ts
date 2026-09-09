@@ -358,7 +358,11 @@ const resolveCommercialDispatchProvider = async (input: {
         'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
       );
     }
-    return { provider: input.defaultProvider, instanceName: undefined };
+    return {
+      provider: input.defaultProvider,
+      instanceName: undefined,
+      dispatch: undefined,
+    };
   }
   const dispatch =
     await input.repositories.whatsappDispatches.findByIdWithDetails(
@@ -381,7 +385,11 @@ const resolveCommercialDispatchProvider = async (input: {
     jobInstanceName: input.job.data.instanceName,
   });
   if (!stickyInstanceName) {
-    return { provider: input.defaultProvider, instanceName: undefined };
+    return {
+      provider: input.defaultProvider,
+      instanceName: undefined,
+      dispatch,
+    };
   }
   if (!outbox) {
     throw reservationHandoffError(
@@ -421,6 +429,7 @@ const resolveCommercialDispatchProvider = async (input: {
   return {
     provider: await input.providerResolver(stickyInstanceName),
     instanceName: stickyInstanceName,
+    dispatch,
   };
 };
 
@@ -454,6 +463,7 @@ const revalidateCommercialDispatchBeforeSend = async (input: {
       'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
     );
   }
+  return revalidated.dispatch;
 };
 
 export const processWhatsAppDispatchJob = async (
@@ -574,11 +584,12 @@ export const processWhatsAppDispatchJob = async (
       ? (input) => options.oneShotAuthorizationFence?.assertPreSend(input)
       : undefined,
   });
-  await revalidateCommercialDispatchBeforeSend({
+  const revalidatedDispatch = await revalidateCommercialDispatchBeforeSend({
     job,
     repositories,
     resolvedProvider,
   });
+  options.oneShotAuthorizationFence?.assertDispatch(revalidatedDispatch);
   const providerRunId = options.oneShotAuthorizationFence
     ? options.oneShotAuthorizationFence.providerRunId(
         job.id,
