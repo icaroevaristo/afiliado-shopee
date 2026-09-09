@@ -497,7 +497,7 @@ describe('dashboard API proxy', () => {
       new Request('http://dashboard.local/api/commercial-automation/status', {
         headers: {
           accept: 'application/json',
-          authorization: 'Bearer browser-controlled-token',
+          authorization: 'Bearer browser-token',
           cookie: 'dashboard-session=browser-controlled',
           'x-untrusted-header': 'discard-me',
         },
