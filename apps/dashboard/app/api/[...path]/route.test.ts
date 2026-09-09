@@ -6,7 +6,10 @@ import {
   POST,
   PUT,
 } from './route';
-import { isDashboardProxyPathAllowed } from './proxy-allowlist';
+import {
+  DASHBOARD_PROXY_CONTRACTS,
+  isDashboardProxyPathAllowed,
+} from './proxy-allowlist';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -15,51 +18,8 @@ afterEach(() => {
 
 describe('dashboard API proxy', () => {
   it('mantém um contrato exato para todas as ações atualmente usadas pela UI', () => {
-    const dashboardActions = [
-      ['GET', ['health']],
-      ['GET', ['analytics']],
-      ['GET', ['scheduler']],
-      ['GET', ['commercial-automation', 'status']],
-      ['GET', ['commercial-automation', 'scheduler']],
-      ['GET', ['commercial-automation', 'settings']],
-      ['GET', ['commercial-automation', 'schedule', 'preview']],
-      ['GET', ['commercial-automation', 'executions']],
-      ['GET', ['commercial-automation', 'outbox']],
-      ['GET', ['commercial', 'campaigns']],
-      ['GET', ['commercial', 'campaigns', 'campaign-1', 'queue']],
-      ['GET', ['commercial', 'niches']],
-      ['GET', ['commercial-pipeline', 'runs']],
-      ['GET', ['coupons']],
-      ['GET', ['pipeline', 'jobs', 'job-1']],
-      ['GET', ['shopee', 'offers']],
-      ['GET', ['shopee', 'offers', 'categories']],
-      ['GET', ['shopee', 'offers', 'offer-1']],
-      ['GET', ['whatsapp', 'destinations']],
-      ['GET', ['whatsapp', 'dispatches']],
-      ['GET', ['whatsapp', 'dispatches', 'dispatch-1']],
-      ['GET', ['whatsapp', 'groups']],
-      ['GET', ['whatsapp', 'instances']],
-      ['GET', ['operational-admin']],
-      ['GET', ['commercial-publications', 'manual', 'options']],
-      ['GET', ['commercial-publications', 'manual', 'request-1']],
-      ['PATCH', ['commercial-automation', 'settings']],
-      ['PATCH', ['commercial-automation', 'settings', 'schedule']],
-      ['PATCH', ['commercial-automation', 'settings', 'admin']],
-      ['PATCH', ['commercial', 'campaigns', 'campaign-1']],
-      ['PATCH', ['commercial', 'niches', 'niche-1']],
-      ['PATCH', ['whatsapp', 'groups', 'group-1', 'admin']],
-      ['PATCH', ['whatsapp', 'instances', 'instance-1']],
-      ['POST', ['commercial-publications', 'manual']],
-      ['POST', ['shopee', 'offers', 'offer-1', 'copy-preview']],
-      ['POST', ['whatsapp', 'instances']],
-      ['POST', ['commercial', 'campaigns']],
-      ['POST', ['commercial', 'campaigns', 'campaign-1', 'activate']],
-      ['POST', ['commercial', 'campaigns', 'campaign-1', 'deactivate']],
-      ['POST', ['commercial', 'niches']],
-      ['POST', ['commercial', 'niches', 'preview']],
-    ] as const;
-
-    for (const [method, path] of dashboardActions) {
+    for (const { method, pattern } of DASHBOARD_PROXY_CONTRACTS) {
+      const path = pattern.map((segment, index) => segment === '*' ? `value-${index}` : segment);
       expect(isDashboardProxyPathAllowed(method, path)).toBe(true);
     }
   });
@@ -84,14 +44,14 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics?limit=1'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health?limit=1'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(200);
     expect(await response.clone().json()).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:3334/analytics?limit=1',
+      'http://127.0.0.1:3334/health?limit=1',
       expect.objectContaining({ method: 'GET', cache: 'no-store' }),
     );
     expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty(
@@ -335,7 +295,7 @@ describe('dashboard API proxy', () => {
     );
   });
 
-  it('permite somente os caminhos de agenda explicitamente autorizados', async () => {
+  it('permite somente os caminhos de automacao explicitamente autorizados', async () => {
     vi.stubEnv('DASHBOARD_API_URL', 'http://127.0.0.1:3334');
     vi.stubEnv('LOCAL_API_AUTH_TOKEN', 'proxy-test-token');
     const fetchMock = vi
@@ -361,17 +321,17 @@ describe('dashboard API proxy', () => {
       { params: Promise.resolve({ path: ['commercial-automation', 'settings'] }) },
     );
     const response = await PATCH(
-      new Request('http://dashboard.local/api/commercial-automation/settings/schedule', {
+      new Request('http://dashboard.local/api/commercial-automation/settings/admin', {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ staggerMinutes: 5 }),
       }),
-      { params: Promise.resolve({ path: ['commercial-automation', 'settings', 'schedule'] }) },
+      { params: Promise.resolve({ path: ['commercial-automation', 'settings', 'admin'] }) },
     );
 
     expect(response.status).toBe(200);
     expect(fetchMock.mock.calls[3][0]).toBe(
-      'http://127.0.0.1:3334/commercial-automation/settings/schedule',
+      'http://127.0.0.1:3334/commercial-automation/settings/admin',
     );
   });
 
@@ -430,8 +390,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await PUT(
-      new Request('http://dashboard.local/api/analytics', { method: 'PUT' }),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health', { method: 'PUT' }),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(404);
@@ -576,8 +536,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -593,8 +553,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -615,8 +575,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
@@ -638,8 +598,8 @@ describe('dashboard API proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const response = await GET(
-      new Request('http://dashboard.local/api/analytics'),
-      { params: Promise.resolve({ path: ['analytics'] }) },
+      new Request('http://dashboard.local/api/health'),
+      { params: Promise.resolve({ path: ['health'] }) },
     );
 
     expect(response.status).toBe(503);
