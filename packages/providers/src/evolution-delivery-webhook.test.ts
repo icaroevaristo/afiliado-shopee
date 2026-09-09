@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { EvolutionDeliveryWebhookReadiness } from './evolution-delivery-webhook';
+import {
+  EvolutionDeliveryWebhookReadiness,
+  type EvolutionWebhookHttpClient,
+} from './evolution-delivery-webhook';
 
 const callbackUrl =
   'http://host.docker.internal:3001/whatsapp/events/messages.update';
@@ -139,7 +142,7 @@ describe('EvolutionDeliveryWebhookReadiness', () => {
   });
 
   it('fails closed when readiness times out', async () => {
-    const httpClient = vi.fn((_url: string, init?: RequestInit) =>
+    const httpClient = vi.fn<EvolutionWebhookHttpClient>((_input, init) =>
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => {
           reject(new DOMException('aborted', 'AbortError'));
