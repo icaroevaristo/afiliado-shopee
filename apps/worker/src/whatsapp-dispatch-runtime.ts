@@ -82,6 +82,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     );
   }
   options.oneShotAuthorizationFence?.assertRuntime({
+    instanceName: config.EVOLUTION_INSTANCE_NAME,
     allowedDestinations: config.EVOLUTION_ALLOWED_DESTINATIONS,
     groupSendEnabled: config.WHATSAPP_GROUP_SEND_ENABLED,
     safeMode: config.EVOLUTION_SAFE_MODE,
@@ -102,7 +103,9 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     ...options.providerFactoryOptions,
     logger,
   });
-  await provider.assertReady?.();
+  if (!options.oneShotAuthorizationFence) {
+    await provider.assertReady?.();
+  }
   const providerResolver = (instanceName: string) =>
     (options.providerFactory ?? createWhatsAppProvider)(
       { ...config, EVOLUTION_INSTANCE_NAME: instanceName },

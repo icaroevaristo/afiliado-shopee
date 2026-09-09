@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
+import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import {
+  createWhatsAppProvider,
   fingerprintWhatsAppGroupId,
   WhatsAppSendError,
+  type HttpClient,
   type WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
 import {
@@ -25,6 +28,7 @@ import {
   createWhatsAppDispatchWorker,
   processWhatsAppDispatchJob,
 } from '../src/whatsapp-dispatch-worker';
+import { startIsolatedWhatsAppDispatchWorker } from '../src/whatsapp-dispatch-runtime';
 import {
   createR8OneShotAuthorizationFence,
   r8DestinationSha256,
@@ -210,6 +214,168 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
         clock: () => seed.now,
       },
     );
+
+  const runEvolutionHttpBudgetCase = async (
+    scenario: 'already-ready' | 'sync-required' | 'foreign-webhook',
+  ) => {
+    const seed = await seedLifecycle(`http-budget-${scenario}`);
+    const webhookUrl =
+      'http://host.docker.internal:3333/whatsapp/events/messages.update';
+    const webhookToken = 'r8-synthetic-webhook-token';
+    let synchronized = false;
+    const calls: Array<'find' | 'set' | 'send'> = [];
+    const httpClient: HttpClient = async (input) => {
+      const pathname = new URL(input.toString()).pathname;
+      if (pathname.includes('/webhook/find/')) {
+        calls.push('find');
+        const webhook =
+          scenario === 'foreign-webhook'
+            ? {
+                enabled: true,
+                url: 'http://foreign.invalid/webhook',
+                events: ['MESSAGES_UPDATE'],
+              }
+            : scenario === 'already-ready' || synchronized
+              ? {
+                  enabled: true,
+                  url: webhookUrl,
+                  events: ['MESSAGES_UPDATE'],
+                  headers: { authorization: `Bearer ${webhookToken}` },
+                  byEvents: false,
+                  base64: false,
+                }
+              : { enabled: false, events: [] };
+        return new Response(JSON.stringify(webhook), { status: 200 });
+      }
+      if (pathname.includes('/webhook/set/')) {
+        calls.push('set');
+        synchronized = true;
+        return new Response(JSON.stringify({ configured: true }), {
+          status: 200,
+        });
+      }
+      if (pathname.includes('/message/send')) {
+        calls.push('send');
+        return new Response(
+          JSON.stringify({ key: { id: `${seed.id}-external` } }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected synthetic Evolution path: ${pathname}`);
+    };
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      DATABASE_URL: process.env.DATABASE_URL ?? '',
+      REDIS_URL: process.env.REDIS_URL ?? '',
+      COMMERCIAL_AUTOMATION_MODE: 'send',
+      SHOPEE_AFFILIATE_PROVIDER: 'official',
+      SHOPEE_AFFILIATE_API_ENABLED: 'true',
+      SHOPEE_AFFILIATE_API_URL: 'https://example.invalid/graphql',
+      SHOPEE_AFFILIATE_APP_ID: 'r8-synthetic-app',
+      SHOPEE_AFFILIATE_SECRET: 'r8-synthetic-secret',
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://127.0.0.1:1',
+      EVOLUTION_API_KEY: 'r8-synthetic-key',
+      EVOLUTION_INSTANCE_NAME: seed.instance,
+      EVOLUTION_ALLOWED_DESTINATIONS: seed.destination,
+      EVOLUTION_MAX_MESSAGES_PER_BOOT: '1',
+      EVOLUTION_SAFE_MODE: 'true',
+      WHATSAPP_GROUP_SEND_ENABLED: 'true',
+      WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: '1',
+      WHATSAPP_DELIVERY_WEBHOOK_URL: webhookUrl,
+      WHATSAPP_DELIVERY_WEBHOOK_TOKEN: webhookToken,
+      SCHEDULER_ENABLED: 'false',
+      COMMERCIAL_SCHEDULER_ENABLED: 'false',
+      PORT: '3333',
+    });
+    const recoveryCoordinator = {
+      run: vi.fn(async () => ({
+        scanned: 0,
+        safeDbRecovered: 0,
+        safeQueueRecovered: 0,
+        noAction: 0,
+        humanRequired: 0,
+        jobsReused: 0,
+        jobsCreated: 0,
+        reservationsReleased: 0,
+        finalizersReplayed: 0,
+        historicalIgnored: 0,
+        ambiguitiesPreserved: 0,
+      })),
+    };
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(
+      (providerConfig, providerOptions) =>
+        createWhatsAppProvider(providerConfig, providerOptions),
+    );
+    const runtime = await startIsolatedWhatsAppDispatchWorker(config, {
+      recoveryCoordinator,
+      providerFactory,
+      providerFactoryOptions: {
+        httpClient,
+        deliveryWebhookHttpClient: httpClient,
+      },
+      workerFactory: (redisUrl, options) =>
+        createWhatsAppDispatchWorker(redisUrl, {
+          ...options,
+          prisma,
+          connection,
+          clock: () => seed.now,
+        }),
+      oneShotAuthorizationFence: fenceFor(seed),
+      logger,
+    });
+    try {
+      await enqueueControlledWhatsAppDispatch(
+        queue,
+        { dispatchId: seed.id, instanceName: seed.instance },
+        seed.jobId,
+      );
+      await waitForJob(
+        seed.jobId,
+        scenario === 'foreign-webhook' ? 'failed' : 'completed',
+      );
+    } finally {
+      await runtime.close();
+    }
+    return {
+      calls,
+      providerFactoryCalls: providerFactory.mock.calls.length,
+      recoveryCalls: recoveryCoordinator.run.mock.calls.length,
+    };
+  };
+
+  it('bounds the complete one-shot Evolution HTTP call graph', async () => {
+    const alreadyReady = await runEvolutionHttpBudgetCase('already-ready');
+    expect(alreadyReady.calls).toEqual(['find', 'send']);
+    expect(alreadyReady.calls).toHaveLength(2);
+    expect(alreadyReady.providerFactoryCalls).toBe(2);
+    expect(alreadyReady.recoveryCalls).toBe(1);
+
+    const syncRequired = await runEvolutionHttpBudgetCase('sync-required');
+    expect(syncRequired.calls).toEqual(['find', 'set', 'find', 'send']);
+    expect(syncRequired.calls).toHaveLength(4);
+    expect(syncRequired.providerFactoryCalls).toBe(2);
+    expect(syncRequired.recoveryCalls).toBe(1);
+
+    const foreignWebhook = await runEvolutionHttpBudgetCase('foreign-webhook');
+    expect(foreignWebhook.calls).toEqual(['find']);
+    expect(foreignWebhook.calls).toHaveLength(1);
+    expect(foreignWebhook.providerFactoryCalls).toBe(2);
+    expect(foreignWebhook.recoveryCalls).toBe(1);
+
+    process.stdout.write(
+      `R8_EVOLUTION_HTTP_BUDGET_SUMMARY=${JSON.stringify({
+        oneShotStartupReadinessCalls: 0,
+        alreadyReadyEvolutionHttpCount: alreadyReady.calls.length,
+        syncRequiredEvolutionHttpCount: syncRequired.calls.length,
+        foreignWebhookSendCount: foreignWebhook.calls.filter(
+          (call) => call === 'send',
+        ).length,
+        structuralMax: 4,
+        scope: 'ONE_AUTHORIZED_ONE_SHOT_EXECUTION',
+      })}\n`,
+    );
+  }, 60_000);
 
   it('persists one exact effect across duplicate, crash, restart, stale revision and webhook replay matrices', async () => {
     const fetchGuard = vi

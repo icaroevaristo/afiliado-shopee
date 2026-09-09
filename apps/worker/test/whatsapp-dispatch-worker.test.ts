@@ -2238,6 +2238,7 @@ describe('processWhatsAppDispatchJob', () => {
 
   it('vincula a autorização one-shot ao runtime seguro e ao destino único', () => {
     const validRuntime = {
+      instanceName: 'instance',
       allowedDestinations: [commercialGroupId],
       groupSendEnabled: true,
       safeMode: true,
@@ -2268,6 +2269,12 @@ describe('processWhatsAppDispatchJob', () => {
     ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
     expect(() =>
       createFence().assertRuntime({ ...validRuntime, schedulerEnabled: true }),
+    ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
+    expect(() =>
+      createFence().assertRuntime({
+        ...validRuntime,
+        instanceName: 'foreign-instance',
+      }),
     ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
     expect(() =>
       createFence({ expiresAt: '2026-08-14T11:59:59.999Z' }).assertRuntime(

@@ -39,6 +39,7 @@ export type R8OneShotPreSendInput = {
 
 export type R8OneShotAuthorizationFence = {
   assertRuntime(input: {
+    instanceName: string | undefined;
     allowedDestinations: readonly string[];
     groupSendEnabled: boolean;
     safeMode: boolean;
@@ -179,6 +180,7 @@ export const createR8OneShotAuthorizationFence = (input: {
     assertRuntime(runtime) {
       assertManifest();
       if (
+        runtime.instanceName !== manifest.instanceName ||
         runtime.allowedDestinations.length !== 1 ||
         r8DestinationSha256(runtime.allowedDestinations[0] ?? '') !==
           manifest.destinationSha256 ||

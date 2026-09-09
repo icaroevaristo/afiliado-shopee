@@ -149,6 +149,15 @@ mensagem divergem. O orçamento é consumido antes da chamada ao provider e não
 pode exceder um. A allowlist local do destino é validada antes da prontidão de
 webhook, pois essa prontidão pode sincronizar estado na Evolution.
 
+No runtime one-shot, a instância configurada também precisa coincidir com a
+instância autorizada antes de recovery, criação do provider ou worker. A
+readiness genérica de startup permanece no runtime normal, mas é omitida no
+one-shot porque o provider a executa após os guards locais e imediatamente
+antes do request. Com transporte TEST em memória, o call graph completo usa
+dois requests Evolution quando o webhook já está correto e quatro quando exige
+sincronização (`find`, `set`, `find`, SEND), dentro do orçamento estrutural de
+uma execução autorizada.
+
 Essa certificação usa somente infraestrutura TEST e provider fake. Ela não
 autoriza Evolution, webhook real ou WhatsApp SEND. R8 live e R9 permanecem
 pendentes e `DAILY_USE_READY=false`.
