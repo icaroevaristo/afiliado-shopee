@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import {
@@ -169,7 +169,7 @@ const makeConfig = (databaseUrl: string, redisUrl: string) =>
     SCHEDULER_ENABLED: 'false',
   });
 
-describeIntegration('commercial fulfillment 100-slot disposable certification', () => {
+describeIntegration('commercial fulfillment 100-slot temporal-rotation certification', () => {
   const databaseUrl = process.env.DATABASE_URL ?? '';
   const redisUrl = process.env.REDIS_URL ?? '';
 
@@ -664,7 +664,10 @@ describeIntegration('commercial fulfillment 100-slot disposable certification', 
     await prisma.$disconnect();
   }, 120_000);
 
-  it('executa 100 dispatches reais com rotacao derivada de ACK persistido', async () => {
+  it('executa 100 dispatches de fixture com rotacao temporal persistida', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('EXTERNAL_NETWORK_BLOCKED_IN_R5_TEST'));
     let currentNow = new Date(BASE.getTime() + 2 * 60_000);
     const clock = () => new Date(currentNow.getTime());
     const config = makeConfig(databaseUrl, redisUrl);
@@ -815,9 +818,10 @@ describeIntegration('commercial fulfillment 100-slot disposable certification', 
         }
         const run = await prisma.commercialPipelineRun.findUnique({
           where: { id: execution.commercialRunId },
-          select: { id: true, dispatchId: true },
+          select: { id: true, dispatchId: true, instanceName: true },
         });
         if (!run?.dispatchId) throw new Error(`dispatch missing for ${slot.jobId}`);
+        expect(run.instanceName).toBe(expectedInstance);
 
         let submittedExternalMessageId: string | null = null;
         await waitUntil(async () => {
@@ -853,6 +857,13 @@ describeIntegration('commercial fulfillment 100-slot disposable certification', 
             where: { id: run.dispatchId },
             select: { status: true, externalMessageId: true, instanceName: true },
           });
+          expect(dispatchBeforeAck?.instanceName).toBe(expectedInstance);
+          await expect(
+            prisma.commercialDispatchOutbox.findUnique({
+              where: { dispatchId: run.dispatchId },
+              select: { instanceName: true },
+            }),
+          ).resolves.toEqual({ instanceName: expectedInstance });
           const existingAck = await prisma.whatsAppDeliveryEventInbox.findFirst({
             where: {
               instanceName: expectedInstance,
@@ -993,7 +1004,19 @@ describeIntegration('commercial fulfillment 100-slot disposable certification', 
       expect(lastSent?.instanceName).toBe(INSTANCE_B);
       expect(await refillJobs.getJob(`commercial-inventory-refill-${PREFIX}-001`)).toBeDefined();
       expect(await automationJobs.getJob('commercial-target-invalid')).toBeUndefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      console.log(JSON.stringify({
+        event: 'R5_100_SLOT_CERTIFIED',
+        theoreticalSlotACount: 50,
+        theoreticalSlotBCount: 50,
+        lifecycleInstanceDrift: 0,
+        duplicateFakeProviderCall: 0,
+        providerCallToWrongInstance: 0,
+        externalNetworkAttempts: fetchSpy.mock.calls.length,
+        fakeProviderCalls: provider.calls.length,
+      }));
     } finally {
+      fetchSpy.mockRestore();
       await dispatchWorker.close();
       await automationWorker.close();
       await dispatchJobs.close();

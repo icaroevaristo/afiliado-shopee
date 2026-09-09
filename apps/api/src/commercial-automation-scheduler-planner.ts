@@ -88,8 +88,8 @@ export type CommercialAutomationPlannerInput = {
   targets: CommercialAutomationPlannerTarget[];
   globalSentToday: number;
   horizonMinutes?: number;
-  /** Runtime planning must not advance ordered assignment before a real SENT. */
-  enforceConfirmedSentRotation?: boolean;
+  /** Bounds materialization without changing the temporal rotation phase. */
+  maxSlotsPerTarget?: number;
 };
 
 export type CommercialAutomationPlannerResult = {
@@ -234,17 +234,6 @@ const getGridIndexAtOrAfter = (
     ),
   );
 
-const nextInstanceAfterConfirmedSent = (
-  orderedInstanceNames: readonly string[],
-  lastSentInstanceName: string | null | undefined,
-) => {
-  if (!lastSentInstanceName) return orderedInstanceNames[0];
-  const sentIndex = orderedInstanceNames.indexOf(lastSentInstanceName);
-  return sentIndex < 0
-    ? orderedInstanceNames[0]
-    : orderedInstanceNames[(sentIndex + 1) % orderedInstanceNames.length];
-};
-
 const findNextGridSlot = ({
   candidate,
   horizonEnd,
@@ -305,7 +294,7 @@ export const planCommercialTargetSlots = ({
   targets,
   globalSentToday,
   horizonMinutes = PLANNER_HORIZON_MINUTES,
-  enforceConfirmedSentRotation = false,
+  maxSlotsPerTarget,
 }: CommercialAutomationPlannerInput): CommercialAutomationPlannerResult => {
   const dayRange = getLocalDayRange(now, schedule.timezone);
   const horizonEnd = new Date(
@@ -338,12 +327,12 @@ export const planCommercialTargetSlots = ({
       return [];
     }
     const groupLimit = Math.min(target.dailyLimit, schedule.dailyGroupLimit);
-    // Do not pre-commit a temporal A/B phase. A later slot is created only
-    // after this one becomes a persisted SENT, so B cannot be skipped after
-    // A fails before the provider boundary.
-    const remainingForGroup = enforceConfirmedSentRotation
-      ? Math.min(1, Math.max(0, groupLimit - target.groupSentToday))
-      : Math.max(0, groupLimit - target.groupSentToday);
+    const remainingForGroup = Math.min(
+      Math.max(0, groupLimit - target.groupSentToday),
+      maxSlotsPerTarget === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, Math.floor(maxSlotsPerTarget)),
+    );
     if (remainingForGroup === 0) {
       skippedTargets.push(target.campaignId);
       return [];
@@ -414,14 +403,10 @@ export const planCommercialTargetSlots = ({
         state.rotationAnchor,
         state.effectiveTargetIntervalMinutes,
       );
-      const selectedInstanceName = enforceConfirmedSentRotation
-        ? nextInstanceAfterConfirmedSent(
-            state.orderedInstanceNames,
-            state.target.lastSentInstanceName,
-          )
-        : state.orderedInstanceNames[
-            slotIndex % state.orderedInstanceNames.length
-          ];
+      const selectedInstanceName =
+        state.orderedInstanceNames[
+          slotIndex % state.orderedInstanceNames.length
+        ];
       state.remaining -= 1;
       state.nextBase = new Date(
         scheduledFor.getTime() +
@@ -629,7 +614,7 @@ export class CommercialAutomationSchedulerPlanner {
       schedule,
       targets,
       globalSentToday: globalHistory.globalSentToday,
-      enforceConfirmedSentRotation: true,
+      maxSlotsPerTarget: 1,
     });
     return result;
   }
