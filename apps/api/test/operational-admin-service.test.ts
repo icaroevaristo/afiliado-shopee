@@ -589,6 +589,23 @@ describe('OperationalAdminService', () => {
     expect(result.activeReservations).toBe(0);
   });
 
+  it('atribui bloqueio de janela operacional à fonte POLICY', async () => {
+    const previousReasons = readiness.reasons;
+    readiness.reasons = ['OUTSIDE_ALLOWED_WINDOW'];
+    try {
+      const { service } = createService();
+      const result = await service.getOverview();
+
+      expect(
+        result.blockers.find(
+          (blocker) => blocker.code === 'OUTSIDE_ALLOWED_WINDOW',
+        ),
+      ).toMatchObject({ source: 'POLICY', observedAt: NOW.toISOString() });
+    } finally {
+      readiness.reasons = previousReasons;
+    }
+  });
+
   it('T17 usa target pendente às 16:37 antes do slot hipotético do planner às 16:52', async () => {
     const queuedAt = new Date('2026-08-28T19:37:00.000Z');
     const plannerAt = new Date('2026-08-28T19:52:00.000Z');

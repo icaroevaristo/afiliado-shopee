@@ -472,6 +472,7 @@ const sourceForBlocker = (
     blocker.code.includes('LIMIT') ||
     blocker.code.includes('BUDGET') ||
     blocker.code.includes('ELIGIBLE') ||
+    blocker.code === 'OUTSIDE_ALLOWED_WINDOW' ||
     blocker.code === 'WHATSAPP_GROUP_SEND_DISABLED' ||
     blocker.code === 'WHATSAPP_GROUP_SAFE_MODE_REQUIRED'
   ) {
