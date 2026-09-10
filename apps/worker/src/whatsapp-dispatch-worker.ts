@@ -31,6 +31,7 @@ import {
   assertCommercialStickyIdentity,
   isCommercialInstanceAssigned,
 } from '../../api/src/commercial-instance-stickiness';
+import type { R8OneShotAuthorizationFence } from './r8-one-shot-authorization-fence';
 
 export type WhatsAppDispatchWorkerLogger = {
   info: (obj: unknown, msg?: string) => void;
@@ -123,6 +124,7 @@ type WhatsAppDispatchProcessorBaseOptions = {
   deliveryConfirmationTimeoutMs?: number;
   deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
+  oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
 };
 
 export type WhatsAppDispatchProcessorOptions =
@@ -160,6 +162,7 @@ type CreateWhatsAppDispatchWorkerOptions = {
   deliveryConfirmationTimeoutMs?: number;
   deliveryConfirmationExpiryIntervalMs?: number;
   manualLifecycleFinalizer?: ManualPublicationLifecycleFinalizerPort;
+  oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
 };
 
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
@@ -355,7 +358,11 @@ const resolveCommercialDispatchProvider = async (input: {
         'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
       );
     }
-    return { provider: input.defaultProvider, instanceName: undefined };
+    return {
+      provider: input.defaultProvider,
+      instanceName: undefined,
+      dispatch: undefined,
+    };
   }
   const dispatch =
     await input.repositories.whatsappDispatches.findByIdWithDetails(
@@ -378,7 +385,11 @@ const resolveCommercialDispatchProvider = async (input: {
     jobInstanceName: input.job.data.instanceName,
   });
   if (!stickyInstanceName) {
-    return { provider: input.defaultProvider, instanceName: undefined };
+    return {
+      provider: input.defaultProvider,
+      instanceName: undefined,
+      dispatch,
+    };
   }
   if (!outbox) {
     throw reservationHandoffError(
@@ -418,6 +429,7 @@ const resolveCommercialDispatchProvider = async (input: {
   return {
     provider: await input.providerResolver(stickyInstanceName),
     instanceName: stickyInstanceName,
+    dispatch,
   };
 };
 
@@ -451,6 +463,7 @@ const revalidateCommercialDispatchBeforeSend = async (input: {
       'COMMERCIAL_INSTANCE_LIFECYCLE_MISMATCH',
     );
   }
+  return revalidated.dispatch;
 };
 
 export const processWhatsAppDispatchJob = async (
@@ -474,6 +487,12 @@ export const processWhatsAppDispatchJob = async (
       'Dispatch WhatsApp comercial indisponivel em modo preview',
     );
   }
+
+  options.oneShotAuthorizationFence?.assertJob({
+    jobId: job.id,
+    dispatchId: job.data.dispatchId,
+    instanceName: job.data.instanceName,
+  });
 
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
@@ -561,13 +580,31 @@ export const processWhatsAppDispatchJob = async (
     draftService: options.draftService ?? new CommercialMessageDraftService(),
     clock,
     confirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
+    preSendFence: options.oneShotAuthorizationFence
+      ? (input) => options.oneShotAuthorizationFence?.assertPreSend(input)
+      : undefined,
   });
   await revalidateCommercialDispatchBeforeSend({
     job,
     repositories,
     resolvedProvider,
   });
-  resolvedProvider.provider.beginRun?.(job.id ?? job.data.dispatchId);
+  if (options.oneShotAuthorizationFence) {
+    const authorizationDispatch =
+      await repositories.whatsappDispatches.findByIdForSending(
+        job.data.dispatchId,
+      );
+    options.oneShotAuthorizationFence.assertDispatch(
+      authorizationDispatch ?? undefined,
+    );
+  }
+  const providerRunId = options.oneShotAuthorizationFence
+    ? options.oneShotAuthorizationFence.providerRunId(
+        job.id,
+        job.data.dispatchId,
+      )
+    : (job.id ?? job.data.dispatchId);
+  resolvedProvider.provider.beginRun?.(providerRunId);
   let dispatch;
   try {
     dispatch = await sender.sendDispatch(job.data.dispatchId);
@@ -649,6 +686,12 @@ export const createWhatsAppDispatchWorker = (
   redisUrl: string,
   options: CreateWhatsAppDispatchWorkerOptions,
 ) => {
+  if (options.oneShotAuthorizationFence) {
+    throw new AppError(
+      'O consumer BullMQ genérico não pode executar autorização one-shot R8',
+      'R8_ONE_SHOT_GENERIC_CONSUMER_FORBIDDEN',
+    );
+  }
   if (options.commercialAutomationMode === 'preview') {
     throw new AppError(
       'O worker de dispatch WhatsApp nao pode iniciar em modo preview',
@@ -712,6 +755,7 @@ export const createWhatsAppDispatchWorker = (
     reservationLeaseMilliseconds: options.reservationLeaseMilliseconds,
     deliveryConfirmationTimeoutMs: options.deliveryConfirmationTimeoutMs,
     manualLifecycleFinalizer,
+    oneShotAuthorizationFence: options.oneShotAuthorizationFence,
   };
   const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,

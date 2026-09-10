@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { EvolutionDeliveryWebhookReadiness } from './evolution-delivery-webhook';
+import {
+  EvolutionDeliveryWebhookReadiness,
+  type EvolutionWebhookHttpClient,
+} from './evolution-delivery-webhook';
 
 const callbackUrl =
   'http://host.docker.internal:3001/whatsapp/events/messages.update';
@@ -136,6 +139,47 @@ describe('EvolutionDeliveryWebhookReadiness', () => {
       code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
     });
     expect(httpClient).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when readiness times out', async () => {
+    const httpClient = vi.fn<EvolutionWebhookHttpClient>((_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      }),
+    );
+    const readiness = new EvolutionDeliveryWebhookReadiness({
+      baseUrl: 'http://evolution.invalid:8080',
+      apiKey: 'api-key-not-logged',
+      instanceName: 'affiliate-instance',
+      callbackUrl,
+      callbackToken,
+      httpClient,
+      timeoutMs: 5,
+    });
+
+    await expect(readiness.ensureReady()).rejects.toMatchObject({
+      code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+    });
+    expect(httpClient).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the post-set readback does not confirm the callback', async () => {
+    const httpClient = vi
+      .fn()
+      .mockResolvedValueOnce(response({ enabled: false, url: '', events: [] }))
+      .mockResolvedValueOnce(response({ webhook: configuredWebhook }, 201))
+      .mockResolvedValueOnce(
+        response({
+          webhook: { ...configuredWebhook, enabled: false },
+        }),
+      );
+
+    await expect(createReadiness(httpClient).ensureReady()).rejects.toMatchObject({
+      code: 'WHATSAPP_DELIVERY_CONFIRMATION_NOT_READY',
+    });
+    expect(httpClient).toHaveBeenCalledTimes(3);
   });
 
   it('rejects a callback outside the Docker-to-host-only topology before any Evolution request', () => {

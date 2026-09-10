@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import {
   WhatsAppSendError,
   type WhatsAppProvider,
+  type WhatsAppSendInput,
 } from '@shopee-auto-affiliate-ai/providers';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type {
@@ -39,6 +40,11 @@ export type SenderServiceOptions = {
   clock?: () => Date;
   /** Bounded window for an Evolution MESSAGES_UPDATE confirmation. */
   confirmationTimeoutMs?: number;
+  preSendFence?: (input: {
+    dispatch: WhatsAppDispatchDetails;
+    providerInput: WhatsAppSendInput;
+    deliveryMode: 'TEXT' | 'IMAGE';
+  }) => void | Promise<void>;
 };
 
 export const DEFAULT_WHATSAPP_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15 * 60_000;
@@ -390,14 +396,20 @@ export class SenderService {
           }
         }
       }
-      const result = await this.options.provider.sendMessage({
+      const providerInput: WhatsAppSendInput = {
         destination: dispatch.destination.destination,
         message,
         ...(imageUrl && deliveryMode === 'IMAGE' ? { imageUrl } : {}),
         ...(dispatch.destination.type === 'GROUP'
           ? { destinationType: 'GROUP' as const }
           : {}),
+      };
+      await this.options.preSendFence?.({
+        dispatch,
+        providerInput,
+        deliveryMode,
       });
+      const result = await this.options.provider.sendMessage(providerInput);
 
       const submittedAt = result.sentAt;
       const updated = await this.options.dispatches.markSubmitted(dispatch.id, {

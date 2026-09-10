@@ -10,6 +10,11 @@ import {
   startIsolatedWhatsAppDispatchWorker,
   type WhatsAppDispatchWorkerFactory,
 } from '../src/whatsapp-dispatch-runtime';
+import {
+  createR8OneShotAuthorizationFence,
+  r8DestinationSha256,
+  r8MessagePayloadSha256,
+} from '../src/r8-one-shot-authorization-fence';
 
 const previewConfig = loadConfig({
   NODE_ENV: 'test',
@@ -96,6 +101,188 @@ describe('isolated WhatsApp dispatch worker', () => {
     expect(workerFactory).not.toHaveBeenCalled();
   });
 
+  it('valida a autorização one-shot antes de recovery e readiness', async () => {
+    const providerFactory = vi.fn();
+    const workerFactory = vi.fn();
+    const recoveryCoordinator = { run: vi.fn() };
+    const authorizationError = Object.assign(
+      new Error('one-shot authorization invalid'),
+      { code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' },
+    );
+    const oneShotAuthorizationFence = {
+      assertRuntime: vi.fn(() => {
+        throw authorizationError;
+      }),
+      assertJob: vi.fn(),
+      assertDispatch: vi.fn(),
+      providerRunId: vi.fn(),
+      assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
+      sendBudgetConsumed: 0,
+    };
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(sendConfig, {
+        providerFactory,
+        workerFactory,
+        recoveryCoordinator,
+        oneShotAuthorizationFence,
+      }),
+    ).rejects.toBe(authorizationError);
+
+    expect(oneShotAuthorizationFence.assertRuntime).toHaveBeenCalledOnce();
+    expect(oneShotAuthorizationFence.assertRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ instanceName: 'test-instance' }),
+    );
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+  });
+
+  it('não duplica readiness no startup one-shot', async () => {
+    const assertReady = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
+    const oneShotAuthorizationFence = {
+      assertRuntime: vi.fn(),
+      assertJob: vi.fn(),
+      assertDispatch: vi.fn(),
+      providerRunId: vi.fn(),
+      assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
+      sendBudgetConsumed: 0,
+    };
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => ({
+      assertReady,
+      sendMessage: vi.fn(),
+    }));
+    const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => ({
+      close,
+    }));
+    const oneShotExecutor = vi.fn(async () => ({
+      close,
+      done: Promise.resolve(),
+    }));
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory,
+      workerFactory,
+      oneShotAuthorizationFence,
+      oneShotQueuePreflight: vi.fn(async () => ({
+        hasAuthorizedProcessableJob: true,
+      })),
+      oneShotExecutor,
+      logger: { info: vi.fn(), error: vi.fn() },
+    });
+
+    expect(assertReady).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(oneShotExecutor).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it('não executa recovery mutante no startup one-shot', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ safeQueueRecovered: 1 })),
+    };
+    const oneShotAuthorizationFence = {
+      assertRuntime: vi.fn(),
+      assertJob: vi.fn(),
+      assertDispatch: vi.fn(),
+      providerRunId: vi.fn(),
+      assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
+      sendBudgetConsumed: 0,
+    };
+    const oneShotExecutor = vi.fn(async () => ({
+      close: harness.close,
+      done: Promise.resolve(),
+    }));
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory: harness.providerFactory,
+      workerFactory: harness.workerFactory,
+      recoveryCoordinator,
+      oneShotAuthorizationFence,
+      oneShotQueuePreflight: vi.fn(async () => ({
+        hasAuthorizedProcessableJob: true,
+      })),
+      oneShotExecutor,
+      logger: harness.logger,
+    });
+
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(harness.providerFactory).toHaveBeenCalledOnce();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(oneShotExecutor).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it('bloqueia instância runtime divergente antes de recovery e factories', async () => {
+    const destination = '120363000000000000@g.us';
+    const now = new Date('2026-09-09T12:00:00.000Z');
+    const fence = createR8OneShotAuthorizationFence({
+      manifest: {
+        authorizationId: 'runtime-instance-binding',
+        authorized: true,
+        approvedAt: '2026-09-09T11:59:00.000Z',
+        expiresAt: '2026-09-09T12:01:00.000Z',
+        candidateHead: 'candidate-head',
+        candidateTree: 'candidate-tree',
+        jobId: 'job-id',
+        dispatchId: 'dispatch-id',
+        targetFingerprint: 'target-fingerprint',
+        destinationSha256: r8DestinationSha256(destination),
+        instanceName: 'authorized-instance',
+        assignmentRevision: 1,
+        campaignId: 'campaign-id',
+        productId: 'product-id',
+        candidateId: 'candidate-id',
+        snapshotId: 'snapshot-id',
+        snapshotRevision: 1,
+        generatedCopyId: 'copy-id',
+        deliveryMode: 'TEXT',
+        messagePayloadSha256: r8MessagePayloadSha256({
+          deliveryMode: 'TEXT',
+          message: 'Synthetic message',
+        }),
+        maxWhatsAppSend: 1,
+        maxEvolutionHttpRequests: 4,
+        allowWebhookReadinessSync: true,
+        allowSingleDispatchLifecycleWrites: true,
+      },
+      candidateHead: 'candidate-head',
+      candidateTree: 'candidate-tree',
+      clock: () => now,
+    });
+    const recoveryCoordinator = { run: vi.fn() };
+    const providerFactory = vi.fn();
+    const workerFactory = vi.fn();
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(
+        {
+          ...sendConfig,
+          EVOLUTION_INSTANCE_NAME: 'foreign-instance',
+          EVOLUTION_ALLOWED_DESTINATIONS: [destination],
+        },
+        {
+          oneShotAuthorizationFence: fence,
+          recoveryCoordinator,
+          providerFactory,
+          workerFactory,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+  });
+
   it('compoe somente provider, politica e consumer de whatsapp-dispatch', async () => {
     const provider: WhatsAppProvider = {
       sendMessage: vi.fn<WhatsAppProvider['sendMessage']>(async () => ({
@@ -160,6 +347,9 @@ describe('isolated WhatsApp dispatch worker', () => {
     });
 
     expect(providerFactory).toHaveBeenCalledOnce();
+    expect(
+      providerFactory.mock.results[0]?.value.assertReady,
+    ).toHaveBeenCalledOnce();
     expect(workerFactory).not.toHaveBeenCalled();
   });
 
