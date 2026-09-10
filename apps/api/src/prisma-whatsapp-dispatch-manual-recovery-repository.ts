@@ -97,16 +97,16 @@ const buildRecoveryTarget = (
     } | null;
   },
   destinationId: string,
+  requireSendReadiness: boolean,
 ) => {
   const destination = campaign.anchorDestination;
   if (
-    !campaign.active ||
-    !campaign.niche.active ||
     !destination ||
     campaign.anchorDestinationId !== destinationId ||
     destination.id !== destinationId ||
     !destination.fingerprint ||
-    destination.fingerprint !== campaign.logicalGroupFingerprint
+    destination.fingerprint !== campaign.logicalGroupFingerprint ||
+    (requireSendReadiness && (!campaign.active || !campaign.niche.active))
   ) {
     fail(
       'Target persistido diverge do dispatch/campaign do recovery',
@@ -150,6 +150,7 @@ const loadLifecycle = async (
   recoveryExists: boolean,
   expectedConfirmation: string =
     WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+  requireSendReadiness = true,
 ) => {
   if (input.confirmation !== expectedConfirmation) {
     fail(
@@ -297,7 +298,7 @@ const loadLifecycle = async (
     },
     { allowMissingJob: true },
   );
-  if (stickyInstanceName) {
+  if (requireSendReadiness && stickyInstanceName) {
     const instance = await db.whatsAppInstance.findUnique({
       where: { name: stickyInstanceName },
       select: { active: true },
@@ -411,7 +412,11 @@ const loadLifecycle = async (
     );
   }
 
-  const target = buildRecoveryTarget(campaign!, dispatch.destinationId);
+  const target = buildRecoveryTarget(
+    campaign!,
+    dispatch.destinationId,
+    requireSendReadiness,
+  );
   return {
     dispatch,
     run,
@@ -773,7 +778,11 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         'Campaign do recovery divergiu',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH',
       );
-    const target = buildRecoveryTarget(campaign!, dispatch!.destinationId);
+    const target = buildRecoveryTarget(
+      campaign!,
+      dispatch!.destinationId,
+      true,
+    );
     if (
       recovery.jobId !== run.jobId! ||
       recovery.campaignId !== candidate.campaignId ||
@@ -986,6 +995,7 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
               'PROCESSING',
               false,
               WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+              false,
             );
             const created = await tx.whatsAppDispatchManualRecovery.create({
               data: {

@@ -8574,6 +8574,24 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
   ) {}
 
   async getCounts(now: Date): Promise<OperationalStatusCounts> {
+    const closedAmbiguityRunExclusion: Prisma.CommercialPipelineRunWhereInput = {
+      NOT: {
+        dispatch: {
+          is: {
+            manualRecovery: {
+              is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+            },
+          },
+        },
+      },
+    };
+    const closedAmbiguityDispatchExclusion: Prisma.WhatsAppDispatchWhereInput = {
+      NOT: {
+        manualRecovery: {
+          is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+        },
+      },
+    };
     const [
       activeExecutions,
       activeReservations,
@@ -8598,17 +8616,31 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
       }),
       this.prisma.commercialPipelineRun.count({
         where: {
-          OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+          AND: [
+            {
+              OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+            },
+            closedAmbiguityRunExclusion,
+          ],
         },
       }),
       this.prisma.whatsAppDispatch.count({
-        where: { status: 'AMBIGUOUS' },
+        where: {
+          status: 'AMBIGUOUS',
+          ...closedAmbiguityDispatchExclusion,
+        },
       }),
       this.prisma.commercialPipelineRun.count({
-        where: { investigationRequired: true },
+        where: {
+          investigationRequired: true,
+          ...closedAmbiguityRunExclusion,
+        },
       }),
       this.prisma.whatsAppDispatch.count({
-        where: { status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] } },
+        where: {
+          status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+          ...closedAmbiguityDispatchExclusion,
+        },
       }),
       this.prisma.commercialDispatchOutbox.count({
         where: { status: 'PENDING' },

@@ -42,10 +42,20 @@ const makeState = () => ({
     generatedCopyId: 'copy-1',
     productId: 'product-1',
     destinationId: 'destination-1',
+    instanceName: 'instance-a' as string | null,
+    destination: {
+      type: 'GROUP' as const,
+      assignedInstanceName: 'instance-a' as string | null,
+      instanceAssignments: [] as Array<{
+        instanceName: string;
+        position: number;
+      }>,
+    },
   },
   run: {
     id: 'run-1',
     executionId: 'execution-1',
+    instanceName: 'instance-a' as string | null,
     mode: 'CONFIRMED',
     status: 'FAILED',
     finalStatus: 'AMBIGUOUS',
@@ -58,6 +68,7 @@ const makeState = () => ({
     commercialRunId: 'run-1',
     dispatchId: 'dispatch-1',
     jobId: 'job-1',
+    instanceName: 'instance-a' as string | null,
     status: 'PUBLISHED',
   },
   copy: {
@@ -94,10 +105,18 @@ const makeState = () => ({
       fingerprint: 'group-fp-1',
       active: true,
       available: true,
+      assignedInstanceName: 'instance-a' as string | null,
+      instanceAssignments: [] as Array<{
+        instanceName: string;
+        position: number;
+      }>,
     },
     attemptExecutionId: 'execution-1',
     attemptReservedAt: new Date(now.getTime() - 60_000),
     attemptLeaseExpiresAt: new Date(now.getTime() - 1_000),
+  },
+  instance: {
+    active: true,
   },
   recovery: null as RecoveryRow | null,
   recoveryCreates: 0,
@@ -182,6 +201,9 @@ const fakeDb = (s: State) => {
   db.commercialAutomationExecution = {
     findUnique: async () => (s.execution ? { ...s.execution } : null),
   };
+  db.whatsAppInstance = {
+    findUnique: async () => (s.instance ? { ...s.instance } : null),
+  };
   db.commercialGroupCampaign = {
     findUnique: async () => (s.campaign ? { ...s.campaign } : null),
     updateMany: async ({ where, data }: DbArgs) => {
@@ -241,6 +263,92 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     });
     expect(s.recoveryCreates).toBe(1);
   });
+
+  it.each([
+    [
+      'inactive instance',
+      (state: State) => {
+        state.instance.active = false;
+      },
+    ],
+    [
+      'inactive campaign',
+      (state: State) => {
+        state.campaign.active = false;
+      },
+    ],
+    [
+      'inactive niche',
+      (state: State) => {
+        state.campaign.niche.active = false;
+      },
+    ],
+  ] as const)(
+    'closes ambiguity without send readiness for %s',
+    async (_condition, deactivate) => {
+      const s = makeState();
+      deactivate(s);
+
+      await expect(
+        repoFor(s).acceptAmbiguityWithoutRetry({
+          ...input,
+          confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+          closedAt: now,
+        }),
+      ).resolves.toMatchObject({ kind: 'CLOSED' });
+      expect(s.dispatch).toMatchObject({
+        status: 'PROCESSING',
+        attemptCount: 1,
+        externalMessageId: null,
+        sentAt: null,
+      });
+      expect(s.run).toMatchObject({
+        finalStatus: 'AMBIGUOUS',
+        investigationRequired: true,
+      });
+      expect(s.recoveryCreates).toBe(1);
+      expect(s.dispatchRearms).toBe(0);
+    },
+  );
+
+  it.each([
+    [
+      'inactive instance',
+      (state: State) => {
+        state.instance.active = false;
+      },
+      'COMMERCIAL_INSTANCE_INACTIVE',
+    ],
+    [
+      'inactive campaign',
+      (state: State) => {
+        state.campaign.active = false;
+      },
+      'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH',
+    ],
+    [
+      'inactive niche',
+      (state: State) => {
+        state.campaign.niche.active = false;
+      },
+      'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH',
+    ],
+  ] as const)(
+    'keeps confirmed non-delivery send readiness for %s',
+    async (_condition, deactivate, expectedCode) => {
+      const s = makeState();
+      deactivate(s);
+
+      await expect(
+        repoFor(s).authorizeConfirmedNonDelivery({
+          ...input,
+          authorizedAt: now,
+        }),
+      ).rejects.toMatchObject({ code: expectedCode });
+      expect(s.recoveryCreates).toBe(0);
+      expect(s.dispatchRearms).toBe(0);
+    },
+  );
 
   it('closes ambiguity as no-retry atomically and preserves the original lifecycle', async () => {
     const s = makeState();
@@ -539,6 +647,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
   const integratedQueue = (state: string, attemptsMade: number) => {
     const job = {
       id: 'job-1',
+      instanceName: 'instance-a',
       attemptsMade,
       getState: vi.fn(async () => state as never),
       retry: vi.fn(async () => undefined),
@@ -626,6 +735,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     let jobState = 'failed';
     const job = {
       id: 'job-1',
+      instanceName: 'instance-a',
       attemptsMade: 1,
       getState: vi.fn(async () => {
         if (jobState === 'failed') {
@@ -670,6 +780,7 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
     const job = jobState
       ? {
           id: 'job-1',
+          instanceName: 'instance-a',
           attemptsMade: 1,
           getState: vi.fn(async () => jobState as never),
           retry: vi.fn(async () => undefined),

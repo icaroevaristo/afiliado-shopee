@@ -23,6 +23,13 @@ const readWhere = (args?: FakeCallArgs) => {
   return args.where as Record<string, unknown>;
 };
 
+const containsNoRetryCloseout = (value: unknown): boolean => {
+  if (value === 'AMBIGUITY_ACCEPTED_NO_RETRY') return true;
+  if (Array.isArray(value)) return value.some(containsNoRetryCloseout);
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value).some(containsNoRetryCloseout);
+};
+
 const manualTargetMatches = (
   args: FakeCallArgs | undefined,
   mode: RequestMode,
@@ -239,6 +246,73 @@ describe('manual publication lifecycle mode guards', () => {
           },
         },
       });
+    });
+
+    it('mantem ambiguidades sem closeout nos contadores operacionais', async () => {
+      const prisma = {
+        commercialAutomationExecution: {
+          count: vi.fn().mockResolvedValue(0),
+        },
+        commercialGroupCampaign: { count: vi.fn().mockResolvedValue(0) },
+        commercialPipelineRun: { count: vi.fn().mockResolvedValue(1) },
+        whatsAppDispatch: { count: vi.fn().mockResolvedValue(1) },
+        commercialDispatchOutbox: { count: vi.fn().mockResolvedValue(0) },
+        manualPublicationTarget: { count: vi.fn().mockResolvedValue(0) },
+      };
+      const repository = new PrismaOperationalStatusRepository(
+        prisma as never,
+      );
+
+      await expect(repository.getCounts(NOW)).resolves.toMatchObject({
+        ambiguity: 2,
+        investigationRequired: 1,
+        pendingDispatches: 1,
+        pendingOutboxes: 0,
+      });
+    });
+
+    it('exclui do operacional somente a ambiguidade encerrada sem retry', async () => {
+      const runCount = vi.fn(async (args?: FakeCallArgs) =>
+        containsNoRetryCloseout(readWhere(args)) ? 0 : 1,
+      );
+      const dispatchCount = vi.fn(async (args?: FakeCallArgs) =>
+        containsNoRetryCloseout(readWhere(args)) ? 0 : 1,
+      );
+      const prisma = {
+        commercialAutomationExecution: {
+          count: vi.fn().mockResolvedValue(0),
+        },
+        commercialGroupCampaign: { count: vi.fn().mockResolvedValue(0) },
+        commercialPipelineRun: { count: runCount },
+        whatsAppDispatch: { count: dispatchCount },
+        commercialDispatchOutbox: {
+          count: vi.fn().mockResolvedValue(0),
+        },
+        manualPublicationTarget: { count: vi.fn().mockResolvedValue(0) },
+        whatsAppDispatchManualRecovery: {},
+      };
+      const repository = new PrismaOperationalStatusRepository(
+        prisma as never,
+      );
+
+      await expect(repository.getCounts(NOW)).resolves.toMatchObject({
+        ambiguity: 0,
+        investigationRequired: 0,
+        pendingDispatches: 0,
+        pendingOutboxes: 0,
+      });
+      expect(runCount).toHaveBeenCalledTimes(2);
+      expect(dispatchCount).toHaveBeenCalledTimes(2);
+      expect(
+        runCount.mock.calls.every(([args]) =>
+          containsNoRetryCloseout(readWhere(args)),
+        ),
+      ).toBe(true);
+      expect(
+        dispatchCount.mock.calls.every(([args]) =>
+          containsNoRetryCloseout(readWhere(args)),
+        ),
+      ).toBe(true);
     });
 
     it.each(['dispatch', 'run', 'outbox', 'reservation'] as const)(
