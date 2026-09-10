@@ -40,6 +40,69 @@ export type R8OneShotQueuePreflight = (
   fence: R8OneShotAuthorizationFence,
 ) => Promise<{ hasAuthorizedProcessableJob: boolean }>;
 
+export type R8ClosedHistoricalDispatchEvidence = {
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+  jobId: string;
+  decision: string;
+  attemptCountObserved: number;
+  rearmedAt: Date | null;
+  requeuedAt: Date | null;
+  dispatch: {
+    id: string;
+    instanceName: string | null;
+    status: string;
+    attemptCount: number;
+    externalMessageId: string | null;
+    sentAt: Date | null;
+    commercialPipelineRun: {
+      id: string;
+      executionId: string | null;
+      jobId: string | null;
+      status: string;
+      finalStatus: string | null;
+      investigationRequired: boolean;
+    } | null;
+  } | null;
+};
+
+export const isClosedHistoricalR8OneShotJob = (input: {
+  jobId: string | undefined;
+  dispatchId: string;
+  instanceName: string | undefined;
+  evidence: R8ClosedHistoricalDispatchEvidence | null;
+}) => {
+  const { evidence } = input;
+  const dispatch = evidence?.dispatch;
+  const run = dispatch?.commercialPipelineRun;
+  return Boolean(
+    evidence &&
+      dispatch &&
+      run &&
+      input.jobId &&
+      input.instanceName &&
+      evidence.decision === 'AMBIGUITY_ACCEPTED_NO_RETRY' &&
+      evidence.dispatchId === input.dispatchId &&
+      evidence.jobId === input.jobId &&
+      dispatch.id === evidence.dispatchId &&
+      dispatch.instanceName === input.instanceName &&
+      evidence.runId === run.id &&
+      evidence.executionId === run.executionId &&
+      evidence.jobId === run.jobId &&
+      evidence.attemptCountObserved === 1 &&
+      evidence.rearmedAt === null &&
+      evidence.requeuedAt === null &&
+      dispatch.status === 'PROCESSING' &&
+      dispatch.attemptCount === 1 &&
+      dispatch.externalMessageId === null &&
+      dispatch.sentAt === null &&
+      run.status === 'FAILED' &&
+      run.finalStatus === 'AMBIGUOUS' &&
+      run.investigationRequired === true,
+  );
+};
+
 export type R8OneShotExecutor = (input: {
   config: AppEnv;
   fence: R8OneShotAuthorizationFence;
@@ -319,16 +382,68 @@ const preflightOneShotDispatchQueue: R8OneShotQueuePreflight = async (
 ) => {
   const connection = createRedisConnection(config.REDIS_URL);
   const queue = createWhatsAppDispatchQueue(connection);
+  const prisma = createPrismaClient(config.DATABASE_URL);
   try {
     const jobs = await queue.getJobs([...ONE_SHOT_PENDING_QUEUE_STATES], 0, -1);
     let hasAuthorizedProcessableJob = false;
     for (const job of jobs) {
+      const state = await job.getState();
+      const isAuthorizedJob =
+        job.id === fence.authorizedJob.jobId &&
+        job.data.dispatchId === fence.authorizedJob.dispatchId &&
+        job.data.instanceName === fence.authorizedJob.instanceName;
+      if (!isAuthorizedJob && state !== 'active') {
+        const evidence = job.data.dispatchId
+          ? await prisma.whatsAppDispatchManualRecovery.findUnique({
+              where: { dispatchId: job.data.dispatchId },
+              select: {
+                dispatchId: true,
+                runId: true,
+                executionId: true,
+                jobId: true,
+                decision: true,
+                attemptCountObserved: true,
+                rearmedAt: true,
+                requeuedAt: true,
+                dispatch: {
+                  select: {
+                    id: true,
+                    instanceName: true,
+                    status: true,
+                    attemptCount: true,
+                    externalMessageId: true,
+                    sentAt: true,
+                    commercialPipelineRun: {
+                      select: {
+                        id: true,
+                        executionId: true,
+                        jobId: true,
+                        status: true,
+                        finalStatus: true,
+                        investigationRequired: true,
+                      },
+                    },
+                  },
+                },
+              },
+            })
+          : null;
+        if (
+          isClosedHistoricalR8OneShotJob({
+            jobId: job.id,
+            dispatchId: job.data.dispatchId,
+            instanceName: job.data.instanceName,
+            evidence,
+          })
+        ) {
+          continue;
+        }
+      }
       fence.assertJob({
         jobId: job.id,
         dispatchId: job.data.dispatchId,
         instanceName: job.data.instanceName,
       });
-      const state = await job.getState();
       if (
         job.id &&
         (state === 'waiting' || state === 'delayed' || state === 'prioritized')
@@ -338,7 +453,11 @@ const preflightOneShotDispatchQueue: R8OneShotQueuePreflight = async (
     }
     return { hasAuthorizedProcessableJob };
   } finally {
-    await Promise.allSettled([queue.close(), connection.quit()]);
+    await Promise.allSettled([
+      queue.close(),
+      connection.quit(),
+      prisma.$disconnect(),
+    ]);
   }
 };
 

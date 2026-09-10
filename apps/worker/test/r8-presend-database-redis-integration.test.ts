@@ -100,6 +100,9 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
     await prisma.commercialDispatchOutbox.deleteMany({
       where: { id: { startsWith: PREFIX } },
     });
+    await prisma.whatsAppDispatchManualRecovery.deleteMany({
+      where: { dispatchId: { startsWith: PREFIX } },
+    });
     await prisma.whatsAppDispatch.deleteMany({
       where: { id: { startsWith: PREFIX } },
     });
@@ -434,6 +437,92 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
         fakeSendCalls: 0,
       })}\n`,
     );
+  }, 60_000);
+
+  it('ignora no preflight somente job historico fechado e preserva os dois jobs', async () => {
+    const old = await seedLifecycle('closed-historical-queue');
+    await prisma.whatsAppDispatch.update({
+      where: { id: old.id },
+      data: { status: 'PROCESSING', attemptCount: 1 },
+    });
+    await prisma.commercialPipelineRun.update({
+      where: { id: old.id },
+      data: {
+        status: 'FAILED',
+        finalStatus: 'AMBIGUOUS',
+        investigationRequired: true,
+      },
+    });
+    await prisma.commercialGroupCampaign.update({
+      where: { id: old.id },
+      data: {
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+      },
+    });
+    await prisma.commercialPromotionCandidate.update({
+      where: { id: old.id },
+      data: {
+        status: 'BLOCKED',
+        blockedReason: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+      },
+    });
+    await prisma.whatsAppDispatchManualRecovery.create({
+      data: {
+        id: `${old.id}-manual-recovery`,
+        dispatchId: old.id,
+        runId: old.id,
+        executionId: old.id,
+        candidateId: old.id,
+        campaignId: old.id,
+        jobId: old.jobId,
+        decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+        confirmation: 'ENCERRAR_AMBIGUIDADE_SEM_RETRY',
+        attemptCountObserved: 1,
+        authorizedAt: new Date(old.now.getTime() + 1_000),
+      },
+    });
+    const oldJob = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: old.id, instanceName: old.instance },
+      old.jobId,
+    );
+
+    const fresh = await seedLifecycle('new-authorized-queue');
+    const freshJob = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: fresh.id, instanceName: fresh.instance },
+      fresh.jobId,
+    );
+    const provider: WhatsAppProvider = { sendMessage: vi.fn() };
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => provider);
+    const oneShotExecutor = vi.fn(async () => ({
+      close: async () => undefined,
+      done: Promise.resolve(),
+    }));
+    const runtime = await startIsolatedWhatsAppDispatchWorker(
+      oneShotRuntimeConfig(fresh),
+      {
+        providerFactory,
+        oneShotAuthorizationFence: fenceFor(fresh),
+        oneShotExecutor,
+        logger,
+      },
+    );
+
+    try {
+      expect(providerFactory).toHaveBeenCalledOnce();
+      expect(oneShotExecutor).toHaveBeenCalledOnce();
+      expect(await oldJob.getState()).toBe('waiting');
+      expect(oldJob.attemptsMade).toBe(0);
+      expect(await freshJob.getState()).toBe('waiting');
+      expect(freshJob.attemptsMade).toBe(0);
+      expect(provider.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close();
+      await Promise.allSettled([oldJob.remove(), freshJob.remove()]);
+    }
   }, 60_000);
 
   it('never claims an unrelated job added after one-shot preflight', async () => {

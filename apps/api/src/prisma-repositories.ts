@@ -8765,6 +8765,8 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       lastSent,
       groupLastSent,
       acceptedAmbiguities,
+      latestAcceptedGlobalRecord,
+      latestAcceptedGroupRecord,
     ] = await Promise.all([
       this.prisma.whatsAppDispatch.groupBy({
         by: ['destinationId'],
@@ -8809,6 +8811,43 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
             },
           })
         : Promise.resolve([]),
+      this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findFirst({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              dispatch: {
+                is: { destination: { is: { type: 'GROUP' } } },
+              },
+            },
+            orderBy: { authorizedAt: 'desc' },
+            select: {
+              authorizedAt: true,
+              dispatch: {
+                select: { instanceName: true },
+              },
+            },
+          })
+        : Promise.resolve(null),
+      groupId && this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findFirst({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              dispatch: {
+                is: {
+                  destinationId: groupId,
+                  destination: { is: { type: 'GROUP' } },
+                },
+              },
+            },
+            orderBy: { authorizedAt: 'desc' },
+            select: {
+              authorizedAt: true,
+              dispatch: {
+                select: { instanceName: true },
+              },
+            },
+          })
+        : Promise.resolve(null),
     ]);
     const countDispatches = (row: (typeof countsByGroup)[number]) => {
       const count = row._count;
@@ -8838,22 +8877,13 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
             acceptedGroupToday,
           )
       : 0;
-    const latestAcceptedGlobal = acceptedAmbiguities.reduce<Date | null>(
-      (latest, { authorizedAt }) =>
-        !latest || authorizedAt > latest ? authorizedAt : latest,
-      null,
-    );
-    const latestAcceptedGroup = groupId
-      ? acceptedAmbiguities.reduce<
-          { at: Date; instanceName: string | null } | null
-        >(
-          (latest, { authorizedAt, dispatch }) =>
-            dispatch.destinationId !== groupId ||
-            (latest && latest.at >= authorizedAt)
-              ? latest
-              : { at: authorizedAt, instanceName: dispatch.instanceName },
-          null,
-        )
+    const latestAcceptedGlobal =
+      latestAcceptedGlobalRecord?.authorizedAt ?? null;
+    const latestAcceptedGroup = latestAcceptedGroupRecord
+      ? {
+          at: latestAcceptedGroupRecord.authorizedAt,
+          instanceName: latestAcceptedGroupRecord.dispatch.instanceName,
+        }
       : null;
     const latestGlobal =
       lastSent?.sentAt && latestAcceptedGlobal
