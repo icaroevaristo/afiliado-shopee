@@ -59,6 +59,73 @@ const createProvider = (
 describe('EvolutionApiWhatsAppProvider', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it.each([400, 500])(
+    'retains bounded diagnostic for HTTP %i without weakening ambiguity or retry protection',
+    async (status) => {
+      const httpClient = vi
+        .fn()
+        .mockResolvedValue(
+          response(
+            {
+              error: 'Internal Server Error',
+              response: {
+                message: ['invalid image buffer ' + API_KEY + ' 5511999999999'],
+              },
+            },
+            status,
+          ),
+        );
+      const logger = createLogger();
+      const provider = createProvider(httpClient, { logger });
+      await expect(
+        provider.sendMessage({
+          destination: '5511999999999',
+          message: 'Oferta',
+          imageUrl: 'https://example.invalid/extensionless',
+        }),
+      ).rejects.toMatchObject({ deliveryMayHaveStarted: true });
+      expect(httpClient).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status,
+          diagnostic: {
+            bodyFormat: 'JSON',
+            classification: 'MEDIA_PROCESSING_ERROR',
+            observedErrorFields: ['error', 'response.message'],
+          },
+        }),
+        'Evolution API message failed',
+      );
+      expect(JSON.stringify(vi.mocked(logger.error).mock.calls)).not.toContain(
+        API_KEY,
+      );
+      expect(JSON.stringify(vi.mocked(logger.error).mock.calls)).not.toContain(
+        '5511999999999',
+      );
+    },
+  );
+
+  it('preserves the observed HTTP error when the response diagnostic times out', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => undefined);
+      },
+    });
+    const httpClient = vi
+      .fn()
+      .mockResolvedValue(new Response(body, { status: 500 }));
+    await expect(
+      createProvider(httpClient, { timeoutMs: 1 }).sendMessage({
+        destination: '5511999999999',
+        message: 'Oferta',
+      }),
+    ).rejects.toMatchObject({
+      code: 'EVOLUTION_SERVER_ERROR',
+      deliveryMayHaveStarted: true,
+    });
+    expect(httpClient).toHaveBeenCalledTimes(1);
+  });
+
   it('envia texto e mapeia o resultado sem expor a resposta externa', async () => {
     const provider = createProvider();
 

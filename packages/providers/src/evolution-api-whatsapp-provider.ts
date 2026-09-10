@@ -14,6 +14,10 @@ import { fingerprintWhatsAppGroupId } from './whatsapp-group-directory';
 import { WhatsAppSendError } from './whatsapp-send-error';
 import { buildEvolutionMessagePayload } from './evolution-payload-builder';
 import { EvolutionDeliveryWebhookReadiness } from './evolution-delivery-webhook';
+import {
+  readEvolutionErrorDiagnostic,
+  type EvolutionErrorDiagnostic,
+} from './evolution-error-diagnostic';
 
 export type HttpClient = (
   input: string | URL | Request,
@@ -304,6 +308,8 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
     const requestStartedAt = Date.now();
     let responseStatus: number | undefined;
     let deliveryMayHaveStarted = false;
+    let httpFailure: AppError | undefined;
+    let diagnostic: EvolutionErrorDiagnostic | undefined;
 
     try {
       deliveryMayHaveStarted = true;
@@ -318,7 +324,11 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
       });
       responseStatus = response.status;
 
-      if (!response.ok) throw httpError(response.status);
+      if (!response.ok) {
+        httpFailure = httpError(response.status);
+        diagnostic = await readEvolutionErrorDiagnostic(response);
+        throw httpFailure;
+      }
 
       let body: unknown;
       try {
@@ -353,7 +363,7 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
       );
       return result;
     } catch (error) {
-      const mappedError = controller.signal.aborted
+      const mappedError = httpFailure ?? (controller.signal.aborted
         ? new AppError(
             'Timeout ao acessar a Evolution API',
             'EVOLUTION_TIMEOUT',
@@ -363,7 +373,7 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
           : new AppError(
               'Falha de rede ao acessar a Evolution API',
               'EVOLUTION_NETWORK_ERROR',
-            );
+            ));
       this.logger?.error(
         {
           event: 'evolution.message.failed',
@@ -376,6 +386,7 @@ export class EvolutionApiWhatsAppProvider implements WhatsAppProvider {
           elapsedMilliseconds: Date.now() - requestStartedAt,
           configuredTimeoutMs: this.timeoutMs,
           ...(responseStatus === undefined ? {} : { status: responseStatus }),
+          ...(diagnostic === undefined ? {} : { diagnostic }),
         },
         'Evolution API message failed',
       );
