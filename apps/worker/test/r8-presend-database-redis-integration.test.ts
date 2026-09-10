@@ -215,6 +215,34 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
       },
     );
 
+  const oneShotRuntimeConfig = (seed: Seed) =>
+    loadConfig({
+      NODE_ENV: 'test',
+      DATABASE_URL: process.env.DATABASE_URL ?? '',
+      REDIS_URL: process.env.REDIS_URL ?? '',
+      COMMERCIAL_AUTOMATION_MODE: 'send',
+      SHOPEE_AFFILIATE_PROVIDER: 'official',
+      SHOPEE_AFFILIATE_API_ENABLED: 'true',
+      SHOPEE_AFFILIATE_API_URL: 'https://example.invalid/graphql',
+      SHOPEE_AFFILIATE_APP_ID: 'r8-synthetic-app',
+      SHOPEE_AFFILIATE_SECRET: 'r8-synthetic-secret',
+      WHATSAPP_PROVIDER: 'evolution',
+      EVOLUTION_API_URL: 'http://127.0.0.1:1',
+      EVOLUTION_API_KEY: 'r8-synthetic-key',
+      EVOLUTION_INSTANCE_NAME: seed.instance,
+      EVOLUTION_ALLOWED_DESTINATIONS: seed.destination,
+      EVOLUTION_MAX_MESSAGES_PER_BOOT: '1',
+      EVOLUTION_SAFE_MODE: 'true',
+      WHATSAPP_GROUP_SEND_ENABLED: 'true',
+      WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: '1',
+      WHATSAPP_DELIVERY_WEBHOOK_URL:
+        'http://host.docker.internal:3333/whatsapp/events/messages.update',
+      WHATSAPP_DELIVERY_WEBHOOK_TOKEN: 'r8-synthetic-webhook-token',
+      SCHEDULER_ENABLED: 'false',
+      COMMERCIAL_SCHEDULER_ENABLED: 'false',
+      PORT: '3333',
+    });
+
   const runEvolutionHttpBudgetCase = async (
     scenario: 'already-ready' | 'sync-required' | 'foreign-webhook',
   ) => {
@@ -263,31 +291,7 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
       }
       throw new Error(`Unexpected synthetic Evolution path: ${pathname}`);
     };
-    const config = loadConfig({
-      NODE_ENV: 'test',
-      DATABASE_URL: process.env.DATABASE_URL ?? '',
-      REDIS_URL: process.env.REDIS_URL ?? '',
-      COMMERCIAL_AUTOMATION_MODE: 'send',
-      SHOPEE_AFFILIATE_PROVIDER: 'official',
-      SHOPEE_AFFILIATE_API_ENABLED: 'true',
-      SHOPEE_AFFILIATE_API_URL: 'https://example.invalid/graphql',
-      SHOPEE_AFFILIATE_APP_ID: 'r8-synthetic-app',
-      SHOPEE_AFFILIATE_SECRET: 'r8-synthetic-secret',
-      WHATSAPP_PROVIDER: 'evolution',
-      EVOLUTION_API_URL: 'http://127.0.0.1:1',
-      EVOLUTION_API_KEY: 'r8-synthetic-key',
-      EVOLUTION_INSTANCE_NAME: seed.instance,
-      EVOLUTION_ALLOWED_DESTINATIONS: seed.destination,
-      EVOLUTION_MAX_MESSAGES_PER_BOOT: '1',
-      EVOLUTION_SAFE_MODE: 'true',
-      WHATSAPP_GROUP_SEND_ENABLED: 'true',
-      WHATSAPP_GROUP_MAX_MESSAGES_PER_RUN: '1',
-      WHATSAPP_DELIVERY_WEBHOOK_URL: webhookUrl,
-      WHATSAPP_DELIVERY_WEBHOOK_TOKEN: webhookToken,
-      SCHEDULER_ENABLED: 'false',
-      COMMERCIAL_SCHEDULER_ENABLED: 'false',
-      PORT: '3333',
-    });
+    const config = oneShotRuntimeConfig(seed);
     const recoveryCoordinator = {
       run: vi.fn(async () => ({
         scanned: 0,
@@ -307,6 +311,11 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
       (providerConfig, providerOptions) =>
         createWhatsAppProvider(providerConfig, providerOptions),
     );
+    await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: seed.id, instanceName: seed.instance },
+      seed.jobId,
+    );
     const runtime = await startIsolatedWhatsAppDispatchWorker(config, {
       recoveryCoordinator,
       providerFactory,
@@ -325,11 +334,6 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
       logger,
     });
     try {
-      await enqueueControlledWhatsAppDispatch(
-        queue,
-        { dispatchId: seed.id, instanceName: seed.instance },
-        seed.jobId,
-      );
       await waitForJob(
         seed.jobId,
         scenario === 'foreign-webhook' ? 'failed' : 'completed',
@@ -349,19 +353,19 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
     expect(alreadyReady.calls).toEqual(['find', 'send']);
     expect(alreadyReady.calls).toHaveLength(2);
     expect(alreadyReady.providerFactoryCalls).toBe(2);
-    expect(alreadyReady.recoveryCalls).toBe(1);
+    expect(alreadyReady.recoveryCalls).toBe(0);
 
     const syncRequired = await runEvolutionHttpBudgetCase('sync-required');
     expect(syncRequired.calls).toEqual(['find', 'set', 'find', 'send']);
     expect(syncRequired.calls).toHaveLength(4);
     expect(syncRequired.providerFactoryCalls).toBe(2);
-    expect(syncRequired.recoveryCalls).toBe(1);
+    expect(syncRequired.recoveryCalls).toBe(0);
 
     const foreignWebhook = await runEvolutionHttpBudgetCase('foreign-webhook');
     expect(foreignWebhook.calls).toEqual(['find']);
     expect(foreignWebhook.calls).toHaveLength(1);
     expect(foreignWebhook.providerFactoryCalls).toBe(2);
-    expect(foreignWebhook.recoveryCalls).toBe(1);
+    expect(foreignWebhook.recoveryCalls).toBe(0);
 
     process.stdout.write(
       `R8_EVOLUTION_HTTP_BUDGET_SUMMARY=${JSON.stringify({
@@ -374,6 +378,105 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
         structuralMax: 4,
         scope: 'ONE_AUTHORIZED_ONE_SHOT_EXECUTION',
       })}\n`,
+    );
+  }, 60_000);
+
+  it('fails closed before consumer, provider or recovery when the queue has an unrelated job', async () => {
+    const seed = await seedLifecycle('queue-isolation');
+    const config = oneShotRuntimeConfig(seed);
+    const unrelatedJobId = `${seed.id}-unrelated`;
+    const unrelated = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: `${seed.id}-unrelated`, instanceName: seed.instance },
+      unrelatedJobId,
+    );
+    const authorized = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: seed.id, instanceName: seed.instance },
+      seed.jobId,
+    );
+    const recoveryCoordinator = { run: vi.fn() };
+    const providerFactory = vi.fn<typeof createWhatsAppProvider>();
+    const workerFactory = vi.fn<typeof createWhatsAppDispatchWorker>();
+
+    await expect(
+      startIsolatedWhatsAppDispatchWorker(config, {
+        recoveryCoordinator,
+        providerFactory,
+        workerFactory,
+        oneShotAuthorizationFence: fenceFor(seed),
+        logger,
+      }),
+    ).rejects.toMatchObject({
+      code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+      deliveryMayHaveStarted: false,
+    });
+
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(providerFactory).not.toHaveBeenCalled();
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(await unrelated.getState()).toBe('waiting');
+    expect(unrelated.attemptsMade).toBe(0);
+    expect(unrelated.failedReason).toBeUndefined();
+    expect(await authorized.getState()).toBe('waiting');
+    expect(authorized.attemptsMade).toBe(0);
+
+    await Promise.all([unrelated.remove(), authorized.remove()]);
+
+    process.stdout.write(
+      `R8_ONE_SHOT_QUEUE_ISOLATION_SUMMARY=${JSON.stringify({
+        defaultMutatingRecoveryCalls: 0,
+        unrelatedJobConsumed: 0,
+        unrelatedJobStateMutations: 0,
+        maxConsumedJobs: 1,
+        fakeEvolutionHttpCalls: 0,
+        fakeSendCalls: 0,
+      })}\n`,
+    );
+  }, 60_000);
+
+  it('does not reenter processing, submitted or terminal lifecycle state through the one-shot runtime', async () => {
+    const outcomes: Record<string, { evolutionHttp: number; sends: number }> = {};
+    for (const status of ['PROCESSING', 'SUBMITTED', 'SENT'] as const) {
+      const seed = await seedLifecycle(`runtime-reentry-${status.toLowerCase()}`);
+      await prisma.whatsAppDispatch.update({
+        where: { id: seed.id },
+        data:
+          status === 'PROCESSING'
+            ? { status }
+            : status === 'SUBMITTED'
+              ? {
+                  status,
+                  externalMessageId: `${seed.id}-external`,
+                  submittedAt: seed.now,
+                }
+              : {
+                  status,
+                  externalMessageId: `${seed.id}-external`,
+                  sentAt: seed.now,
+                },
+      });
+      const recoveryCoordinator = { run: vi.fn() };
+      const providerFactory = vi.fn<typeof createWhatsAppProvider>();
+      const workerFactory = vi.fn<typeof createWhatsAppDispatchWorker>();
+      const runtime = await startIsolatedWhatsAppDispatchWorker(
+        oneShotRuntimeConfig(seed),
+        {
+          recoveryCoordinator,
+          providerFactory,
+          workerFactory,
+          oneShotAuthorizationFence: fenceFor(seed),
+          logger,
+        },
+      );
+      await runtime.close();
+      expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+      expect(providerFactory).not.toHaveBeenCalled();
+      expect(workerFactory).not.toHaveBeenCalled();
+      outcomes[status] = { evolutionHttp: 0, sends: 0 };
+    }
+    process.stdout.write(
+      `R8_ONE_SHOT_RUNTIME_REENTRY_SUMMARY=${JSON.stringify(outcomes)}\n`,
     );
   }, 60_000);
 
@@ -424,6 +527,19 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
           success.jobId,
         );
         await waitForJob(success.jobId, 'completed');
+        const injectedUnrelated = await enqueueControlledWhatsAppDispatch(
+          queue,
+          {
+            dispatchId: `${success.id}-injected-unrelated`,
+            instanceName: success.instance,
+          },
+          `${success.jobId}-injected-unrelated`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await injectedUnrelated.getState()).toBe('waiting');
+        expect(injectedUnrelated.attemptsMade).toBe(0);
+        expect(injectedUnrelated.failedReason).toBeUndefined();
+        await injectedUnrelated.remove();
       } finally {
         await runtime.close();
       }
@@ -617,6 +733,8 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
           postProviderCrashStatus: 'PROCESSING',
           submittedRestartAdditionalProviderCalls: 0,
           staleAssignmentProviderCalls: 0,
+          additionalInjectedUnrelatedConsumed: 0,
+          maxConsumedJobs: 1,
           finalActiveQueueJobs: 0,
           externalNetworkAttempts: 0,
         })}\n`,

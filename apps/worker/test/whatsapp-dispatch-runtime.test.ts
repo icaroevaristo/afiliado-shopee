@@ -161,11 +161,45 @@ describe('isolated WhatsApp dispatch worker', () => {
       providerFactory,
       workerFactory,
       oneShotAuthorizationFence,
+      oneShotQueuePreflight: vi.fn(async () => ({
+        hasAuthorizedProcessableJob: true,
+      })),
       logger: { info: vi.fn(), error: vi.fn() },
     });
 
     expect(assertReady).not.toHaveBeenCalled();
     expect(workerFactory).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it('não executa recovery mutante no startup one-shot', async () => {
+    const harness = createWorkerHarness();
+    const recoveryCoordinator = {
+      run: vi.fn(async () => recoveryReport({ safeQueueRecovered: 1 })),
+    };
+    const oneShotAuthorizationFence = {
+      assertRuntime: vi.fn(),
+      assertJob: vi.fn(),
+      assertDispatch: vi.fn(),
+      providerRunId: vi.fn(),
+      assertPreSend: vi.fn(),
+      sendBudgetConsumed: 0,
+    };
+
+    const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
+      providerFactory: harness.providerFactory,
+      workerFactory: harness.workerFactory,
+      recoveryCoordinator,
+      oneShotAuthorizationFence,
+      oneShotQueuePreflight: vi.fn(async () => ({
+        hasAuthorizedProcessableJob: true,
+      })),
+      logger: harness.logger,
+    });
+
+    expect(recoveryCoordinator.run).not.toHaveBeenCalled();
+    expect(harness.providerFactory).toHaveBeenCalledOnce();
+    expect(harness.workerFactory).toHaveBeenCalledOnce();
     await runtime.close();
   });
 

@@ -2282,4 +2282,67 @@ describe('processWhatsAppDispatchJob', () => {
       ),
     ).toThrowError(expect.objectContaining({ code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID' }));
   });
+
+  it('limita a autorização one-shot a trinta minutos', () => {
+    const validRuntime = {
+      instanceName: 'instance',
+      allowedDestinations: [commercialGroupId],
+      groupSendEnabled: true,
+      safeMode: true,
+      maxMessagesPerRun: 1,
+      schedulerEnabled: false,
+      commercialSchedulerEnabled: false,
+    };
+    const createFence = (overrides: Partial<R8OneShotAuthorizationManifest> = {}) =>
+      createR8OneShotAuthorizationFence({
+        manifest: r8AuthorizationManifest(overrides),
+        candidateHead: 'candidate-head',
+        candidateTree: 'candidate-tree',
+        clock: () => handoffNow,
+      });
+
+    expect(() =>
+      createFence({
+        approvedAt: '2026-08-14T11:30:00.000Z',
+        expiresAt: '2026-08-14T12:00:00.000Z',
+      }).assertRuntime(validRuntime),
+    ).not.toThrow();
+    expect(() =>
+      createFence({
+        approvedAt: '2026-08-14T11:30:00.001Z',
+        expiresAt: '2026-08-14T12:00:00.000Z',
+      }).assertRuntime(validRuntime),
+    ).not.toThrow();
+    for (const expiresAt of [
+      '2026-08-14T12:00:00.001Z',
+      '2026-08-14T12:30:00.000Z',
+      '2026-08-15T11:30:00.000Z',
+    ]) {
+      expect(() =>
+        createFence({
+          approvedAt: '2026-08-14T11:30:00.000Z',
+          expiresAt,
+        }).assertRuntime(validRuntime),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+          deliveryMayHaveStarted: false,
+        }),
+      );
+    }
+    for (const overrides of [
+      { approvedAt: '2026-08-14T11:30:00.000Z', expiresAt: '2026-08-14T11:59:59.999Z' },
+      { approvedAt: '2026-08-14T12:00:00.001Z', expiresAt: '2026-08-14T12:10:00.000Z' },
+      { approvedAt: 'not-a-date', expiresAt: '2026-08-14T12:00:00.000Z' },
+      { approvedAt: '2026-08-14T11:50:00.000Z', expiresAt: '2026-08-14T11:50:00.000Z' },
+      { approvedAt: '2026-08-14T11:55:00.000Z', expiresAt: '2026-08-14T11:54:59.999Z' },
+    ]) {
+      expect(() => createFence(overrides).assertRuntime(validRuntime)).toThrowError(
+        expect.objectContaining({
+          code: 'R8_ONE_SHOT_AUTHORIZATION_INVALID',
+          deliveryMayHaveStarted: false,
+        }),
+      );
+    }
+  });
 });

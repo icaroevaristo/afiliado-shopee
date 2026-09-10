@@ -751,9 +751,24 @@ export const createWhatsAppDispatchWorker = (
     manualLifecycleFinalizer,
     oneShotAuthorizationFence: options.oneShotAuthorizationFence,
   };
-  const worker = new Worker<WhatsAppDispatchJob>(
+  let oneShotJobClaimed = false;
+  let worker: Worker<WhatsAppDispatchJob>;
+  worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,
-    async (job) => processWhatsAppDispatchJob(job, processorOptions),
+    async (job) => {
+      if (options.oneShotAuthorizationFence) {
+        if (oneShotJobClaimed) {
+          options.oneShotAuthorizationFence.assertJob({
+            jobId: undefined,
+            dispatchId: job.data.dispatchId,
+            instanceName: job.data.instanceName,
+          });
+        }
+        oneShotJobClaimed = true;
+        await worker.pause(true);
+      }
+      return processWhatsAppDispatchJob(job, processorOptions);
+    },
     { connection },
   );
   let closePromise: Promise<void> | undefined;

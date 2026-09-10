@@ -33,6 +33,20 @@ export type WhatsAppDispatchWorkerFactory = (
   options: Parameters<typeof createWhatsAppDispatchWorker>[1],
 ) => Pick<ReturnType<typeof createWhatsAppDispatchWorker>, 'close'>;
 
+export type R8OneShotQueuePreflight = (
+  config: AppEnv,
+  fence: R8OneShotAuthorizationFence,
+) => Promise<{ hasAuthorizedProcessableJob: boolean }>;
+
+const ONE_SHOT_PENDING_QUEUE_STATES = [
+  'waiting',
+  'active',
+  'delayed',
+  'prioritized',
+  'waiting-children',
+  'paused',
+] as const;
+
 const consoleLogger: WhatsAppDispatchWorkerLogger = {
   info: (data, message) => console.info(message, data),
   error: (data, message) => console.error(message, data),
@@ -73,6 +87,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     workerFactory?: WhatsAppDispatchWorkerFactory;
     recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
     oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
+    oneShotQueuePreflight?: R8OneShotQueuePreflight;
   } = {},
 ) => {
   if (config.COMMERCIAL_AUTOMATION_MODE !== 'send') {
@@ -91,13 +106,32 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     commercialSchedulerEnabled: config.COMMERCIAL_SCHEDULER_ENABLED,
   });
   const logger = options.logger ?? consoleLogger;
-  const recovery = options.recoveryCoordinator
-    ? await options.recoveryCoordinator.run()
-    : process.env.NODE_ENV !== 'test'
-      ? await runDefaultRecoveryCoordinator(config, logger)
-      : undefined;
-  if (recovery) {
-    logRecoveryStartupResult(recovery, logger);
+  if (options.oneShotAuthorizationFence) {
+    const preflight = await (
+      options.oneShotQueuePreflight ?? preflightOneShotDispatchQueue
+    )(
+      config,
+      options.oneShotAuthorizationFence,
+    );
+    if (!preflight.hasAuthorizedProcessableJob) {
+      logger.info(
+        {
+          event: 'whatsapp-dispatch.one-shot.queue-idle',
+          queue: QUEUE_NAMES.whatsappDispatch,
+        },
+        'One-shot authorization has no processable exact job',
+      );
+      return { close: async () => undefined };
+    }
+  } else {
+    const recovery = options.recoveryCoordinator
+      ? await options.recoveryCoordinator.run()
+      : process.env.NODE_ENV !== 'test'
+        ? await runDefaultRecoveryCoordinator(config, logger)
+        : undefined;
+    if (recovery) {
+      logRecoveryStartupResult(recovery, logger);
+    }
   }
   const provider = (options.providerFactory ?? createWhatsAppProvider)(config, {
     ...options.providerFactoryOptions,
@@ -147,6 +181,35 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     'Isolated WhatsApp dispatch worker started',
   );
   return runtime;
+};
+
+const preflightOneShotDispatchQueue: R8OneShotQueuePreflight = async (
+  config,
+  fence,
+) => {
+  const connection = createRedisConnection(config.REDIS_URL);
+  const queue = createWhatsAppDispatchQueue(connection);
+  try {
+    const jobs = await queue.getJobs([...ONE_SHOT_PENDING_QUEUE_STATES], 0, -1);
+    let hasAuthorizedProcessableJob = false;
+    for (const job of jobs) {
+      fence.assertJob({
+        jobId: job.id,
+        dispatchId: job.data.dispatchId,
+        instanceName: job.data.instanceName,
+      });
+      const state = await job.getState();
+      if (
+        job.id &&
+        (state === 'waiting' || state === 'delayed' || state === 'prioritized')
+      ) {
+        hasAuthorizedProcessableJob = true;
+      }
+    }
+    return { hasAuthorizedProcessableJob };
+  } finally {
+    await Promise.allSettled([queue.close(), connection.quit()]);
+  }
 };
 
 const runDefaultRecoveryCoordinator = async (

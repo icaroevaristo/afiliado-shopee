@@ -58,6 +58,8 @@ export type R8OneShotAuthorizationFence = {
   readonly sendBudgetConsumed: number;
 };
 
+export const MAX_R8_AUTHORIZATION_VALIDITY_MS = 30 * 60 * 1000;
+
 const sha256 = (value: string) =>
   createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -119,6 +121,8 @@ export const createR8OneShotAuthorizationFence = (input: {
       !Number.isFinite(expiresAt) ||
       approvedAt > now ||
       expiresAt < now ||
+      expiresAt <= approvedAt ||
+      expiresAt - approvedAt > MAX_R8_AUTHORIZATION_VALIDITY_MS ||
       manifest.candidateHead !== input.candidateHead ||
       manifest.candidateTree !== input.candidateTree ||
       !Number.isSafeInteger(manifest.assignmentRevision) ||
