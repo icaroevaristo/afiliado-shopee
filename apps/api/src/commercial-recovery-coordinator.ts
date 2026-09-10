@@ -90,6 +90,13 @@ type RecoveryDependencies = {
     outboxId: string,
   ) => Promise<CommercialRecoveryPublishResult>;
   finalizeAfterDispatch?: (dispatchId: string) => Promise<unknown>;
+  findManualRecoveryDecision?: (
+    dispatchId: string,
+  ) => Promise<
+    | 'CONFIRMED_NON_DELIVERY'
+    | 'AMBIGUITY_ACCEPTED_NO_RETRY'
+    | null
+  >;
   clock?: () => Date;
   logger: CommercialRecoveryLogger;
   pageSize?: number;
@@ -338,6 +345,34 @@ export class CommercialRecoveryCoordinator {
     const finalizedDispatches = new Set<string>();
     for (const outbox of outboxes) {
       report.scanned += 1;
+      let manualRecoveryDecision:
+        | 'CONFIRMED_NON_DELIVERY'
+        | 'AMBIGUITY_ACCEPTED_NO_RETRY'
+        | null = null;
+      if (this.dependencies.findManualRecoveryDecision) {
+        try {
+          manualRecoveryDecision =
+            await this.dependencies.findManualRecoveryDecision(
+              outbox.dispatchId,
+            );
+        } catch (error) {
+          this.dependencies.logger.error(
+            {
+              event: 'commercial-recovery.manual-recovery-inspection-failed',
+              dispatchId: outbox.dispatchId,
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            },
+            'Commercial manual recovery inspection failed',
+          );
+          this.markHuman(report, true);
+          continue;
+        }
+      }
+      if (manualRecoveryDecision === 'AMBIGUITY_ACCEPTED_NO_RETRY') {
+        report.historicalIgnored += 1;
+        report.noAction += 1;
+        continue;
+      }
       const context = await this.dependencies.outboxes.findPublicationContext(
         outbox.id,
       );

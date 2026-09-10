@@ -496,6 +496,25 @@ export const processWhatsAppDispatchJob = async (
 
   const repositories =
     options.repositories ?? createPrismaRepositories(options.prisma);
+  const manualResolution =
+    await repositories.whatsappDispatchManualRecoveries?.findByDispatchId?.(
+      job.data.dispatchId,
+    );
+  if (manualResolution?.decision === 'AMBIGUITY_ACCEPTED_NO_RETRY') {
+    options.logger.error(
+      {
+        event: 'commercial-dispatch.ambiguity-no-retry-fence',
+        dispatchId: job.data.dispatchId,
+        providerCallAllowed: false,
+        retryAllowed: false,
+        requeueAllowed: false,
+      },
+      'Commercial dispatch rejected because ambiguity was closed without retry',
+    );
+    throw new UnrecoverableError(
+      'Dispatch comercial encerrado como ambiguo sem retry',
+    );
+  }
   const commercialRun = await repositories.commercialRuns.findByDispatchId(
     job.data.dispatchId,
   );

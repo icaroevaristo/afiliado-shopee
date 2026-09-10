@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PrismaWhatsAppDispatchManualRecoveryRepository } from '../src/prisma-whatsapp-dispatch-manual-recovery-repository';
 import { WhatsAppDispatchManualRecoveryService } from '../src/whatsapp-dispatch-manual-recovery-service';
-import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from '../src/repositories';
+import {
+  WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+  WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+} from '../src/repositories';
 
 type RecoveryRow = {
   id: string;
@@ -163,6 +166,18 @@ const fakeDb = (s: State) => {
   };
   db.commercialPromotionCandidate = {
     findMany: async () => (s.candidate ? [{ ...s.candidate }] : []),
+    updateMany: async ({ where, data }: DbArgs) => {
+      if (
+        !s.candidate ||
+        s.candidate.id !== where.id ||
+        s.candidate.campaignId !== where.campaignId ||
+        s.candidate.generatedCopyId !== where.generatedCopyId ||
+        s.candidate.status !== where.status
+      )
+        return { count: 0 };
+      Object.assign(s.candidate, data);
+      return { count: 1 };
+    },
   };
   db.commercialAutomationExecution = {
     findUnique: async () => (s.execution ? { ...s.execution } : null),
@@ -173,7 +188,11 @@ const fakeDb = (s: State) => {
       if (
         !s.campaign ||
         s.campaign.id !== where.id ||
-        s.campaign.attemptExecutionId !== where.attemptExecutionId
+        s.campaign.attemptExecutionId !== where.attemptExecutionId ||
+        ('attemptReservedAt' in where &&
+          s.campaign.attemptReservedAt !== where.attemptReservedAt) ||
+        ('attemptLeaseExpiresAt' in where &&
+          s.campaign.attemptLeaseExpiresAt !== where.attemptLeaseExpiresAt)
       )
         return { count: 0 };
       Object.assign(s.campaign, data);
@@ -221,6 +240,83 @@ describe('PrismaWhatsAppDispatchManualRecoveryRepository', () => {
       confirmation: WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
     });
     expect(s.recoveryCreates).toBe(1);
+  });
+
+  it('closes ambiguity as no-retry atomically and preserves the original lifecycle', async () => {
+    const s = makeState();
+    const before = {
+      dispatch: { ...s.dispatch },
+      run: { ...s.run },
+      outbox: { ...s.outbox },
+      copy: { ...s.copy },
+      execution: { ...s.execution },
+    };
+    const repo = repoFor(s);
+    const closeoutInput = {
+      ...input,
+      confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+    };
+
+    await expect(
+      repo.acceptAmbiguityWithoutRetry({ ...closeoutInput, closedAt: now }),
+    ).resolves.toMatchObject({
+      kind: 'CLOSED',
+      recovery: {
+        decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+        confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+        attemptCountObserved: 1,
+      },
+    });
+    expect(s.dispatch).toEqual(before.dispatch);
+    expect(s.run).toEqual(before.run);
+    expect(s.outbox).toEqual(before.outbox);
+    expect(s.copy).toEqual(before.copy);
+    expect(s.execution).toEqual(before.execution);
+    expect(s.candidate).toMatchObject({
+      status: 'BLOCKED',
+      blockedReason: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+    });
+    expect(s.campaign).toMatchObject({
+      attemptExecutionId: null,
+      attemptReservedAt: null,
+      attemptLeaseExpiresAt: null,
+    });
+
+    await expect(
+      repo.acceptAmbiguityWithoutRetry({
+        ...closeoutInput,
+        closedAt: new Date(now.getTime() + 1),
+      }),
+    ).resolves.toMatchObject({ kind: 'ALREADY_CLOSED' });
+    expect(s.recoveryCreates).toBe(1);
+    await expect(
+      repo.authorizeConfirmedNonDelivery({ ...input, authorizedAt: now }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DISPATCH_MANUAL_RECOVERY_ALREADY_EXISTS',
+    });
+    await expect(repo.findByDispatchId(s.dispatch.id)).resolves.toEqual({
+      decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+    });
+  });
+
+  it('requires the distinct no-retry confirmation and rejects a conflicting resolution', async () => {
+    const s = makeState();
+    const repo = repoFor(s);
+    await repo.acceptAmbiguityWithoutRetry({
+      ...input,
+      confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+      closedAt: now,
+    });
+    await expect(
+      repo.acceptAmbiguityWithoutRetry({
+        ...input,
+        expectedRunId: 'other-run',
+        confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+        closedAt: now,
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFLICT',
+    });
   });
   it('authorize is idempotent and creates no second recovery', async () => {
     const s = makeState(),

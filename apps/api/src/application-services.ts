@@ -115,7 +115,7 @@ export type ApplicationRepositories = {
   whatsappDispatches: WhatsAppDispatchRepository;
   whatsappDispatchManualRecoveries?: Pick<
     WhatsAppDispatchManualRecoveryRepository,
-    'inspectAuthorizedRecovery'
+    'inspectAuthorizedRecovery' | 'findByDispatchId'
   >;
   whatsappDeliveryEvents?: WhatsAppDeliveryEventInboxRepository;
   whatsappGroups: WhatsAppGroupDirectoryRepository;

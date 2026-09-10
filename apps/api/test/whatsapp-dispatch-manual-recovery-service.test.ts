@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WhatsAppDispatchManualRecoveryService } from '../src/whatsapp-dispatch-manual-recovery-service';
 import {
+  WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
   type WhatsAppDispatchManualRecoveryInspection,
   type WhatsAppDispatchManualRecoveryRecord,
@@ -47,6 +48,17 @@ const repository = (initial = inspection()) => {
       current = { ...current, recovery: { ...current.recovery, requeuedAt: now } };
       return current.recovery;
     }),
+    acceptAmbiguityWithoutRetry: vi.fn(async () => ({
+      kind: 'CLOSED' as const,
+      recovery: current.recovery,
+      dispatchId: current.dispatchId,
+      runId: current.runId,
+      executionId: current.executionId,
+      campaignId: current.campaignId,
+      candidateId: current.candidateId,
+      jobId: current.jobId,
+    })),
+    findByDispatchId: vi.fn(async () => null),
     setInspection(value: WhatsAppDispatchManualRecoveryInspection) { current = value; },
   } satisfies WhatsAppDispatchManualRecoveryRepository & { setInspection(value: WhatsAppDispatchManualRecoveryInspection): void };
 };
@@ -74,6 +86,35 @@ const policy = (allowed = true, reasons: string[] = []) => ({
 
 
 describe('WhatsAppDispatchManualRecoveryService review boundaries', () => {
+  it('closes ambiguity with its own confirmation and never needs a queue', async () => {
+    const repo = repository();
+    const service = new WhatsAppDispatchManualRecoveryService(repo, undefined, {
+      clock: () => now,
+    });
+
+    await expect(
+      service.closeAmbiguityWithoutRetry({
+        ...input,
+        confirmation: 'CONFIRMAR_NAO_ENTREGA_E_RETRY_UNICO',
+      }),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION_REQUIRED',
+    });
+
+    const result = await service.closeAmbiguityWithoutRetry({
+      ...input,
+      confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+    });
+    expect(result.kind).toBe('CLOSED');
+    expect(repo.acceptAmbiguityWithoutRetry).toHaveBeenCalledWith({
+      dispatchId: input.dispatchId,
+      expectedRunId: input.expectedRunId,
+      expectedExecutionId: input.expectedExecutionId,
+      confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+      closedAt: now,
+    });
+  });
+
   it('authorize requires literal confirmation and does not require a queue', async () => {
     const repo = repository();
     const service = new WhatsAppDispatchManualRecoveryService(repo, undefined, { clock: () => now });

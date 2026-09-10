@@ -676,6 +676,32 @@ describe('PrismaCommercialPromotionRepository', () => {
     });
   });
 
+  it('mantem o candidato de ambiguidade encerrada fora da fila no mesmo snapshot', async () => {
+    const state = initialState();
+    state.campaigns[0].queueTargetSize = 1;
+    addProducts(state, 'a');
+    const blocked = candidate('campaign-1', 'a', {
+      status: 'BLOCKED',
+      blockedReason: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+    });
+    state.candidates.push(blocked);
+    const fake = new PromotionPrismaFake(state);
+    const repository = new PrismaCommercialPromotionRepository(fake.asClient());
+
+    const result = await repository.materialize(
+      materializationInput([
+        ranked('a', blocked as CommercialPromotionCandidateRecord),
+      ]),
+    );
+
+    expect(result.queuedReactivated).toBe(0);
+    expect(fake.state.candidates[0]).toMatchObject({
+      status: 'BLOCKED',
+      snapshotId: 'snapshot-a',
+      blockedReason: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+    });
+  });
+
   it('ignora terminais na capacidade util e permite que o rank 5 preencha a fila', async () => {
     const state = initialState();
     state.campaigns[0].queueTargetSize = 4;
@@ -907,6 +933,38 @@ describe('PrismaCommercialPromotionRepository', () => {
         sentAtOrAfter: new Date(NOW.getTime() - 1),
       }),
     ).resolves.toEqual(new Set(['a']));
+  });
+
+  it('deduplica closeout ambiguo recente no mesmo grupo logico', async () => {
+    const client = new PromotionPrismaFake(initialState()).asClient();
+    const acceptedFindMany = vi.fn().mockResolvedValue([
+      { dispatch: { productId: 'b' } },
+    ]);
+    client.whatsAppDispatchManualRecovery = { findMany: acceptedFindMany };
+    const repository = new PrismaCommercialPromotionRepository(client);
+
+    await expect(
+      repository.findRecentlySentProductIds({
+        productIds: ['a', 'b'],
+        logicalGroupFingerprint: 'grp-campaign-1',
+        sentAtOrAfter: new Date(NOW.getTime() - 1),
+      }),
+    ).resolves.toEqual(new Set(['b']));
+    expect(acceptedFindMany).toHaveBeenCalledWith({
+      where: {
+        decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+        authorizedAt: { gte: new Date(NOW.getTime() - 1) },
+        dispatch: {
+          is: {
+            productId: { in: ['a', 'b'] },
+            destination: {
+              is: { type: 'GROUP', fingerprint: 'grp-campaign-1' },
+            },
+          },
+        },
+      },
+      select: { dispatch: { select: { productId: true } } },
+    });
   });
 
   it('lista a fila sem links, IDs externos ou breakdown completo', async () => {
@@ -1178,6 +1236,60 @@ describe('PrismaCommercialPromotionRepository', () => {
       },
       select: { productId: true },
       distinct: ['productId'],
+    });
+  });
+
+  it('trata closeout ambiguo sem retry como historico conservador de grupo', async () => {
+    const acceptedAt = new Date('2026-07-29T16:00:00.000Z');
+    const acceptedFindFirst = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'recovery-1' })
+      .mockResolvedValueOnce({ authorizedAt: acceptedAt });
+    const acceptedFindMany = vi.fn().mockResolvedValue([
+      { dispatch: { productId: 'product-a' } },
+    ]);
+    const repository = new PrismaCommercialDeliveryHistoryRepository({
+      commercialPromotionCandidate: {
+        findMany: vi.fn().mockResolvedValue([{ productId: 'product-a' }]),
+      },
+      whatsAppDispatch: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      commercialPipelineRun: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      whatsAppDispatchManualRecovery: {
+        findFirst: acceptedFindFirst,
+        findMany: acceptedFindMany,
+      },
+    } as never);
+
+    await expect(
+      repository.wasProductSentToGroup('product-a', 'group-1'),
+    ).resolves.toBe(true);
+    await expect(repository.findLastSentAtByGroup('group-1')).resolves.toEqual(
+      acceptedAt,
+    );
+    await expect(
+      repository.countSentCampaignProductsToGroup({
+        campaignId: 'campaign-1',
+        groupId: 'group-1',
+      }),
+    ).resolves.toBe(1);
+    expect(acceptedFindMany).toHaveBeenCalledWith({
+      where: {
+        decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+        campaignId: 'campaign-1',
+        dispatch: {
+          is: {
+            productId: { in: ['product-a'] },
+            destinationId: 'group-1',
+          },
+        },
+      },
+      select: { dispatch: { select: { productId: true } } },
     });
   });
 

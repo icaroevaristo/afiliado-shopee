@@ -2423,6 +2423,9 @@ export interface CommercialExternalProviderUsageRepository {
 export const WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION =
   'CONFIRMAR_NAO_ENTREGA_E_RETRY_UNICO' as const;
 
+export const WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION =
+  'ENCERRAR_AMBIGUIDADE_SEM_RETRY' as const;
+
 export type WhatsAppDispatchManualRecoveryRecord = {
   id: string;
   dispatchId: string;
@@ -2431,7 +2434,7 @@ export type WhatsAppDispatchManualRecoveryRecord = {
   candidateId: string;
   campaignId: string;
   jobId: string;
-  decision: 'CONFIRMED_NON_DELIVERY';
+  decision: 'CONFIRMED_NON_DELIVERY' | 'AMBIGUITY_ACCEPTED_NO_RETRY';
   confirmation: string;
   attemptCountObserved: number;
   authorizedAt: Date;
@@ -2446,6 +2449,13 @@ export type WhatsAppDispatchManualRecoveryInput = {
   expectedRunId: string;
   expectedExecutionId: string;
   confirmation: typeof WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION;
+};
+
+export type WhatsAppDispatchAmbiguityNoRetryInput = {
+  dispatchId: string;
+  expectedRunId: string;
+  expectedExecutionId: string;
+  confirmation: typeof WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION;
 };
 
 export type WhatsAppDispatchManualRecoveryAuthorization = {
@@ -2480,6 +2490,17 @@ export type WhatsAppDispatchManualRecoveryInspection = {
 export type WhatsAppDispatchManualRecoveryRequeueContext =
   WhatsAppDispatchManualRecoveryInspection;
 
+export type WhatsAppDispatchAmbiguityNoRetryResult = {
+  kind: 'CLOSED' | 'ALREADY_CLOSED';
+  recovery: WhatsAppDispatchManualRecoveryRecord;
+  dispatchId: string;
+  runId: string;
+  executionId: string;
+  campaignId: string;
+  candidateId: string;
+  jobId: string;
+};
+
 export interface WhatsAppDispatchManualRecoveryRepository {
   authorizeConfirmedNonDelivery(
     input: WhatsAppDispatchManualRecoveryInput & { authorizedAt: Date },
@@ -2497,6 +2518,12 @@ export interface WhatsAppDispatchManualRecoveryRepository {
     dispatchId: string;
     requeuedAt: Date;
   }): Promise<WhatsAppDispatchManualRecoveryRecord>;
+  acceptAmbiguityWithoutRetry?(
+    input: WhatsAppDispatchAmbiguityNoRetryInput & { closedAt: Date },
+  ): Promise<WhatsAppDispatchAmbiguityNoRetryResult>;
+  findByDispatchId?(
+    dispatchId: string,
+  ): Promise<Pick<WhatsAppDispatchManualRecoveryRecord, 'decision'> | null>;
 }
 
 export interface WhatsAppDispatchRepository {

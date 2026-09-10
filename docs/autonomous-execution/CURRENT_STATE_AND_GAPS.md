@@ -180,6 +180,16 @@ Essa certificação usa somente infraestrutura TEST e provider fake. Ela não
 autoriza Evolution, webhook real ou WhatsApp SEND. R8 live e R9 permanecem
 pendentes e `DAILY_USE_READY=false`.
 
+O candidate R8 também implementa a resolução manual terminal
+`AMBIGUITY_ACCEPTED_NO_RETRY`, confirmada somente por
+`ENCERRAR_AMBIGUIDADE_SEM_RETRY`. Ela mantém o run ambíguo, o possível efeito
+externo e o histórico original, libera apenas a reserva operacional vinculada e
+impede retry, requeue e novo provider call para o dispatch encerrado. O
+closeout não foi aplicado ao lifecycle operacional; o caminho separado
+`CONFIRMED_NON_DELIVERY` continua reservado aos casos em que a não-entrega foi
+realmente comprovada. A implementação permanece candidate até revisão e merge
+no GitHub.
+
 ## 6. Limites das evidências R3 e R4
 
 A fixture SAFE isolada comprovou `paused=true`, health local de PostgreSQL e

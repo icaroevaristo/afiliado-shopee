@@ -1,7 +1,9 @@
 ﻿import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import {
+  WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
   type CommercialAutomationTarget,
+  type WhatsAppDispatchAmbiguityNoRetryInput,
   type WhatsAppDispatchManualRecoveryInput,
   type WhatsAppDispatchManualRecoveryInspection,
   type WhatsAppDispatchManualRecoveryRepository,
@@ -46,6 +48,17 @@ const assertConfirmation = (confirmation: string) => {
     );
   }
 };
+
+function assertAmbiguityNoRetryConfirmation(
+  confirmation: string,
+): asserts confirmation is typeof WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION {
+  if (confirmation !== WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION) {
+    throw new AppError(
+      'Confirmacao humana literal obrigatoria para encerramento sem retry',
+      'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION_REQUIRED',
+    );
+  }
+}
 
 const isAmbiguousRun = (inspection: WhatsAppDispatchManualRecoveryInspection) =>
   inspection.runStatus === 'FAILED' &&
@@ -175,6 +188,27 @@ export class WhatsAppDispatchManualRecoveryService {
     return this.repository.authorizeConfirmedNonDelivery({
       ...input,
       authorizedAt: now,
+    });
+  }
+
+  async closeAmbiguityWithoutRetry(
+    input: Omit<WhatsAppDispatchAmbiguityNoRetryInput, 'confirmation'> & {
+      confirmation: string;
+    },
+  ) {
+    const confirmation = input.confirmation;
+    assertAmbiguityNoRetryConfirmation(confirmation);
+    if (!this.repository.acceptAmbiguityWithoutRetry) {
+      throw new AppError(
+        'Repositorio de closeout sem retry indisponivel',
+        'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_REPOSITORY_REQUIRED',
+      );
+    }
+    const now = this.options.clock?.() ?? new Date();
+    return this.repository.acceptAmbiguityWithoutRetry({
+      ...input,
+      confirmation,
+      closedAt: now,
     });
   }
 

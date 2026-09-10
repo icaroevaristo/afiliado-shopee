@@ -692,6 +692,7 @@ enum WhatsAppDeliveryEventInboxState {
 
 enum WhatsAppDispatchManualRecoveryDecision {
   CONFIRMED_NON_DELIVERY
+  AMBIGUITY_ACCEPTED_NO_RETRY
 }
 
 enum WhatsAppDestinationType {

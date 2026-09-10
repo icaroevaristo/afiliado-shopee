@@ -187,6 +187,60 @@ describe('manual publication lifecycle mode guards', () => {
       },
     );
 
+    it('libera o blocker de grupo do dispatch encerrado como ambiguidade sem retry', async () => {
+      const dispatchCount = vi.fn(async (args?: FakeCallArgs) => {
+        const where = readWhere(args);
+        return 'NOT' in where ? 0 : 1;
+      });
+      const outboxCount = vi.fn(async (args?: FakeCallArgs) => {
+        const where = readWhere(args);
+        const dispatch =
+          typeof where.dispatch === 'object' && where.dispatch !== null
+            ? (where.dispatch as Record<string, unknown>)
+            : {};
+        return 'NOT' in dispatch ? 0 : 1;
+      });
+      const prisma = {
+        whatsAppDispatch: { count: dispatchCount },
+        commercialPipelineRun: { count: vi.fn().mockResolvedValue(0) },
+        commercialDispatchOutbox: { count: outboxCount },
+        commercialGroupCampaign: { count: vi.fn().mockResolvedValue(0) },
+        manualPublicationTarget: { count: vi.fn().mockResolvedValue(0) },
+        whatsAppDispatchManualRecovery: {},
+      };
+      const repository = new PrismaOperationalStatusRepository(
+        prisma as never,
+      );
+
+      await expect(
+        repository.hasActiveGroupLifecycle('group-id', NOW),
+      ).resolves.toBe(false);
+      expect(dispatchCount).toHaveBeenCalledWith({
+        where: {
+          destinationId: 'group-id',
+          status: { in: ['PENDING', 'PROCESSING'] },
+          NOT: {
+            manualRecovery: {
+              is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+            },
+          },
+        },
+      });
+      expect(outboxCount).toHaveBeenCalledWith({
+        where: {
+          dispatch: {
+            destinationId: 'group-id',
+            status: { in: ['PENDING', 'PROCESSING'] },
+            NOT: {
+              manualRecovery: {
+                is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+              },
+            },
+          },
+        },
+      });
+    });
+
     it.each(['dispatch', 'run', 'outbox', 'reservation'] as const)(
       'preserves the %s blocker while a preview target exists',
       async (otherLifecycle) => {
