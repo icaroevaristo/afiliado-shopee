@@ -226,6 +226,72 @@ describe('commercial automation Prisma repositories', () => {
     });
   });
 
+  it('preserva o cooldown de ambiguidade aceita ao atravessar a meia-noite', async () => {
+    const groupBy = vi.fn().mockResolvedValue([]);
+    const dispatchFindFirst = vi.fn().mockResolvedValue(null);
+    const acceptedFindMany = vi.fn().mockResolvedValue([]);
+    const acceptedFindFirst = vi
+      .fn()
+      .mockResolvedValueOnce({
+        authorizedAt: new Date('2026-07-26T02:50:00.000Z'),
+        dispatch: { instanceName: 'instance-a' },
+      })
+      .mockResolvedValueOnce({
+        authorizedAt: new Date('2026-07-26T02:50:00.000Z'),
+        dispatch: { instanceName: 'instance-a' },
+      });
+    const repository = new PrismaCommercialAutomationHistoryRepository({
+      whatsAppDispatch: { groupBy, findFirst: dispatchFindFirst },
+      whatsAppDispatchManualRecovery: {
+        findMany: acceptedFindMany,
+        findFirst: acceptedFindFirst,
+      },
+      commercialPipelineRun: { findFirst: vi.fn().mockResolvedValue(null) },
+    } as never);
+
+    const result = await repository.getSnapshot({
+      groupId: 'group-1',
+      dayStartsAt: new Date('2026-07-26T03:00:00.000Z'),
+      dayEndsAt: new Date('2026-07-27T03:00:00.000Z'),
+    });
+
+    expect(result).toEqual({
+      globalSentToday: 0,
+      groupSentToday: 0,
+      lastSentAt: new Date('2026-07-26T02:50:00.000Z'),
+      globalLastSentAt: new Date('2026-07-26T02:50:00.000Z'),
+      groupLastSentAt: new Date('2026-07-26T02:50:00.000Z'),
+      lastSentInstanceName: 'instance-a',
+    });
+    expect(acceptedFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          authorizedAt: {
+            gte: new Date('2026-07-26T03:00:00.000Z'),
+            lt: new Date('2026-07-27T03:00:00.000Z'),
+          },
+        }),
+      }),
+    );
+    expect(acceptedFindFirst).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.not.objectContaining({ authorizedAt: expect.anything() }),
+        orderBy: { authorizedAt: 'desc' },
+      }),
+    );
+    expect(acceptedFindFirst).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          dispatch: expect.objectContaining({
+            is: expect.objectContaining({ destinationId: 'group-1' }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it('detecta finalStatus ambiguo ou investigacao pendente', async () => {
     const runFindFirst = vi.fn().mockResolvedValue({ id: 'run-ambiguous' });
     const executionFindFirst = vi.fn().mockResolvedValue(null);

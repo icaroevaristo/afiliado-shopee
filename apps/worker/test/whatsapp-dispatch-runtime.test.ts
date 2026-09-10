@@ -7,7 +7,9 @@ import {
 import type { CommercialRecoveryReport } from '../../api/src/commercial-recovery-coordinator';
 
 import {
+  isClosedHistoricalR8OneShotJob,
   startIsolatedWhatsAppDispatchWorker,
+  type R8ClosedHistoricalDispatchEvidence,
   type WhatsAppDispatchWorkerFactory,
 } from '../src/whatsapp-dispatch-runtime';
 import {
@@ -83,7 +85,68 @@ const createWorkerHarness = () => {
   return { provider, close, providerFactory, workerFactory, logger };
 };
 
+const closedHistoricalEvidence = (
+  overrides: Partial<R8ClosedHistoricalDispatchEvidence> = {},
+): R8ClosedHistoricalDispatchEvidence => ({
+  dispatchId: 'old-dispatch',
+  runId: 'old-run',
+  executionId: 'old-execution',
+  jobId: 'old-job',
+  decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+  attemptCountObserved: 1,
+  rearmedAt: null,
+  requeuedAt: null,
+  dispatch: {
+    id: 'old-dispatch',
+    instanceName: 'old-instance',
+    status: 'PROCESSING',
+    attemptCount: 1,
+    externalMessageId: null,
+    sentAt: null,
+    commercialPipelineRun: {
+      id: 'old-run',
+      executionId: 'old-execution',
+      jobId: 'old-job',
+      status: 'FAILED',
+      finalStatus: 'AMBIGUOUS',
+      investigationRequired: true,
+    },
+  },
+  ...overrides,
+});
+
 describe('isolated WhatsApp dispatch worker', () => {
+  it('ignora somente job historico fechado com ambiguidade aceita sem retry', () => {
+    expect(
+      isClosedHistoricalR8OneShotJob({
+        jobId: 'old-job',
+        dispatchId: 'old-dispatch',
+        instanceName: 'old-instance',
+        evidence: closedHistoricalEvidence(),
+      }),
+    ).toBe(true);
+    expect(
+      isClosedHistoricalR8OneShotJob({
+        jobId: 'old-job',
+        dispatchId: 'old-dispatch',
+        instanceName: 'old-instance',
+        evidence: closedHistoricalEvidence({
+          decision: 'CONFIRMED_NON_DELIVERY',
+        }),
+      }),
+    ).toBe(false);
+    expect(
+      isClosedHistoricalR8OneShotJob({
+        jobId: 'old-job',
+        dispatchId: 'old-dispatch',
+        instanceName: 'old-instance',
+        evidence: closedHistoricalEvidence({
+          rearmedAt: new Date('2026-09-10T12:00:00.000Z'),
+        }),
+      }),
+    ).toBe(false);
+  });
+
   it('fails closed in preview before creating provider or worker', async () => {
     const providerFactory = vi.fn();
     const workerFactory = vi.fn();
