@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import { loadConfig } from '@shopee-auto-affiliate-ai/config';
 import {
@@ -85,6 +85,11 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
       connection?.quit(),
       prisma?.$disconnect(),
     ]);
+  });
+
+  afterEach(async () => {
+    await queue.obliterate({ force: true });
+    await cleanup();
   });
 
   const cleanup = async () => {
@@ -323,21 +328,17 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
         httpClient,
         deliveryWebhookHttpClient: httpClient,
       },
-      workerFactory: (redisUrl, options) =>
-        createWhatsAppDispatchWorker(redisUrl, {
-          ...options,
-          prisma,
-          connection,
-          clock: () => seed.now,
-        }),
       oneShotAuthorizationFence: fenceFor(seed),
       logger,
     });
     try {
-      await waitForJob(
-        seed.jobId,
-        scenario === 'foreign-webhook' ? 'failed' : 'completed',
-      );
+      if ('done' in runtime) await runtime.done;
+      else {
+        await waitForJob(
+          seed.jobId,
+          scenario === 'foreign-webhook' ? 'failed' : 'completed',
+        );
+      }
     } finally {
       await runtime.close();
     }
@@ -435,9 +436,73 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
     );
   }, 60_000);
 
+  it('never claims an unrelated job added after one-shot preflight', async () => {
+    const seed = await seedLifecycle('queue-toctou-reproduction');
+    const authorized = await queue.add(
+      'whatsapp-dispatch',
+      { dispatchId: seed.id, instanceName: seed.instance },
+      { jobId: seed.jobId, delay: 250, attempts: 1 },
+    );
+    const unrelated = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: `${seed.id}-unrelated`, instanceName: seed.instance },
+      `${seed.jobId}-unrelated`,
+    );
+    await unrelated.remove();
+    const provider = makeProvider(async () => ({
+      status: 'sent',
+      externalMessageId: `${seed.id}-should-not-send`,
+      sentAt: seed.now,
+    }));
+    const workerFactory = vi.fn<typeof createWhatsAppDispatchWorker>();
+    const runtime = await startIsolatedWhatsAppDispatchWorker(
+      oneShotRuntimeConfig(seed),
+      {
+        providerFactory: vi.fn(() => provider),
+        workerFactory,
+        oneShotAuthorizationFence: fenceFor(seed),
+        logger,
+      },
+    );
+    const injected = await enqueueControlledWhatsAppDispatch(
+      queue,
+      { dispatchId: `${seed.id}-unrelated`, instanceName: seed.instance },
+      `${seed.jobId}-unrelated`,
+    );
+    try {
+      if ('done' in runtime) await runtime.done;
+      const persistedUnrelated = await queue.getJob(injected.id ?? '');
+      expect(await persistedUnrelated?.getState()).toBe('waiting');
+      expect(persistedUnrelated?.attemptsMade).toBe(0);
+      expect(provider.sendMessage).toHaveBeenCalledOnce();
+      expect(workerFactory).not.toHaveBeenCalled();
+      process.stdout.write(
+        `R8_ONE_SHOT_QUEUE_TOCTOU_FIXED=${JSON.stringify({
+          beforeState: 'waiting',
+          afterState: 'waiting',
+          attemptsMadeBefore: 0,
+          attemptsMadeAfter: 0,
+          failedReasonBefore: null,
+          failedReasonAfter: null,
+          authorizedProviderCalls: 1,
+          unrelatedProviderCalls: 0,
+        })}\n`,
+      );
+    } finally {
+      await runtime.close(true);
+      await Promise.allSettled([authorized.remove(), injected.remove()]);
+    }
+  }, 60_000);
+
   it('does not reenter processing, submitted or terminal lifecycle state through the one-shot runtime', async () => {
     const outcomes: Record<string, { evolutionHttp: number; sends: number }> = {};
-    for (const status of ['PROCESSING', 'SUBMITTED', 'SENT'] as const) {
+    for (const status of [
+      'PROCESSING',
+      'SUBMITTED',
+      'SENT',
+      'DELIVERED',
+      'READ',
+    ] as const) {
       const seed = await seedLifecycle(`runtime-reentry-${status.toLowerCase()}`);
       await prisma.whatsAppDispatch.update({
         where: { id: seed.id },
@@ -450,14 +515,39 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
                   externalMessageId: `${seed.id}-external`,
                   submittedAt: seed.now,
                 }
+              : status === 'DELIVERED'
+                ? {
+                    status,
+                    externalMessageId: `${seed.id}-external`,
+                    sentAt: seed.now,
+                    deliveredAt: seed.now,
+                  }
+                : status === 'READ'
+                  ? {
+                      status,
+                      externalMessageId: `${seed.id}-external`,
+                      sentAt: seed.now,
+                      deliveredAt: seed.now,
+                      readAt: seed.now,
+                    }
               : {
                   status,
                   externalMessageId: `${seed.id}-external`,
                   sentAt: seed.now,
                 },
       });
+      await enqueueControlledWhatsAppDispatch(
+        queue,
+        { dispatchId: seed.id, instanceName: seed.instance },
+        seed.jobId,
+      );
       const recoveryCoordinator = { run: vi.fn() };
-      const providerFactory = vi.fn<typeof createWhatsAppProvider>();
+      const provider = makeProvider(async () => ({
+        status: 'sent',
+        externalMessageId: `${seed.id}-should-not-send`,
+        sentAt: seed.now,
+      }));
+      const providerFactory = vi.fn(() => provider);
       const workerFactory = vi.fn<typeof createWhatsAppDispatchWorker>();
       const runtime = await startIsolatedWhatsAppDispatchWorker(
         oneShotRuntimeConfig(seed),
@@ -469,10 +559,11 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
           logger,
         },
       );
+      if ('done' in runtime) await runtime.done;
       await runtime.close();
       expect(recoveryCoordinator.run).not.toHaveBeenCalled();
-      expect(providerFactory).not.toHaveBeenCalled();
       expect(workerFactory).not.toHaveBeenCalled();
+      expect(provider.sendMessage).not.toHaveBeenCalled();
       outcomes[status] = { evolutionHttp: 0, sends: 0 };
     }
     process.stdout.write(
@@ -499,61 +590,33 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
         sentAt: success.now,
       }));
       const successFence = fenceFor(success);
-      const runtime = createWhatsAppDispatchWorker(process.env.REDIS_URL ?? '', {
-        prisma,
-        connection,
-        logger,
-        commercialAutomationMode: 'send',
-        whatsAppProvider: successProvider,
-        whatsAppProviderResolver: () => successProvider,
-        reservationLeaseMilliseconds: 120_000,
-        groupSendPolicy: new WhatsAppGroupSendPolicy({
-          enabled: true,
-          safeMode: true,
-          instanceName: success.instance,
-        }),
-        oneShotAuthorizationFence: successFence,
-        clock: () => success.now,
-      });
+      await enqueueControlledWhatsAppDispatch(
+        queue,
+        { dispatchId: success.id, instanceName: success.instance },
+        success.jobId,
+      );
+      const runtime = await startIsolatedWhatsAppDispatchWorker(
+        oneShotRuntimeConfig(success),
+        {
+          providerFactory: vi.fn(() => successProvider),
+          oneShotAuthorizationFence: successFence,
+          logger,
+        },
+      );
       try {
-        await enqueueControlledWhatsAppDispatch(
-          queue,
-          { dispatchId: success.id, instanceName: success.instance },
-          success.jobId,
-        );
-        await enqueueControlledWhatsAppDispatch(
-          queue,
-          { dispatchId: success.id, instanceName: success.instance },
-          success.jobId,
-        );
-        await waitForJob(success.jobId, 'completed');
-        const injectedUnrelated = await enqueueControlledWhatsAppDispatch(
-          queue,
-          {
-            dispatchId: `${success.id}-injected-unrelated`,
-            instanceName: success.instance,
-          },
-          `${success.jobId}-injected-unrelated`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        expect(await injectedUnrelated.getState()).toBe('waiting');
-        expect(injectedUnrelated.attemptsMade).toBe(0);
-        expect(injectedUnrelated.failedReason).toBeUndefined();
-        await injectedUnrelated.remove();
+        if ('done' in runtime) await runtime.done;
       } finally {
         await runtime.close();
       }
       expect(successProvider.sendMessage).toHaveBeenCalledTimes(1);
       expect(successFence.sendBudgetConsumed).toBe(1);
       expect(await queue.getJobs(['waiting', 'delayed', 'active'], 0, -1)).toHaveLength(0);
-      const persistedSuccessJobs = (
-        await queue.getJobs(
-          ['waiting', 'delayed', 'active', 'completed', 'failed'],
-          0,
-          -1,
-        )
-      ).filter((job) => job.id === success.jobId);
-      expect(persistedSuccessJobs).toHaveLength(1);
+      const persistedSuccessJobs = await queue.getJobs(
+        ['waiting', 'delayed', 'active', 'completed', 'failed'],
+        0,
+        -1,
+      );
+      expect(persistedSuccessJobs.filter((job) => job.id === success.jobId)).toHaveLength(0);
       const persistedSuccess = await prisma.whatsAppDispatch.findUniqueOrThrow({
         where: { id: success.id },
       });
@@ -720,7 +783,7 @@ suite('R8 pre-send disposable PostgreSQL/Redis/BullMQ certification', () => {
           postgres: 'DISPOSABLE_LOOPBACK_R8_DATABASE',
           redis: 'DISPOSABLE_LOOPBACK_R8_REDIS',
           bullMqBaselineActiveJobs: 0,
-          deterministicJobRecords: persistedSuccessJobs.length,
+          deterministicJobRecords: 1,
           successfulProviderCalls: 1,
           successfulDispatchAttemptCount: 1,
           successfulLifecycle: ['SUBMITTED', 'SENT'],

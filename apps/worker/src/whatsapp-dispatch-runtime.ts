@@ -24,7 +24,9 @@ import {
 } from '../../api/src/commercial-recovery-coordinator';
 import {
   createWhatsAppDispatchWorker,
+  processWhatsAppDispatchJob,
   type WhatsAppDispatchWorkerLogger,
+  type WhatsAppDispatchProcessorOptions,
 } from './whatsapp-dispatch-worker';
 import type { R8OneShotAuthorizationFence } from './r8-one-shot-authorization-fence';
 
@@ -37,6 +39,13 @@ export type R8OneShotQueuePreflight = (
   config: AppEnv,
   fence: R8OneShotAuthorizationFence,
 ) => Promise<{ hasAuthorizedProcessableJob: boolean }>;
+
+export type R8OneShotExecutor = (input: {
+  config: AppEnv;
+  fence: R8OneShotAuthorizationFence;
+  logger: WhatsAppDispatchWorkerLogger;
+  workerOptions: Parameters<typeof createWhatsAppDispatchWorker>[1];
+}) => Promise<{ close: () => Promise<void>; done: Promise<void> }>;
 
 const ONE_SHOT_PENDING_QUEUE_STATES = [
   'waiting',
@@ -88,6 +97,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     recoveryCoordinator?: Pick<CommercialRecoveryCoordinator, 'run'>;
     oneShotAuthorizationFence?: R8OneShotAuthorizationFence;
     oneShotQueuePreflight?: R8OneShotQueuePreflight;
+    oneShotExecutor?: R8OneShotExecutor;
   } = {},
 ) => {
   if (config.COMMERCIAL_AUTOMATION_MODE !== 'send') {
@@ -153,10 +163,7 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     safeMode: config.EVOLUTION_SAFE_MODE,
     instanceName: config.EVOLUTION_INSTANCE_NAME,
   });
-  const workerFactory = options.workerFactory ?? createWhatsAppDispatchWorker;
-  const runtime = workerFactory(
-    config.REDIS_URL,
-    {
+  const workerOptions = {
       logger,
       commercialAutomationMode: config.COMMERCIAL_AUTOMATION_MODE,
       whatsAppProvider: provider,
@@ -169,8 +176,26 @@ export const startIsolatedWhatsAppDispatchWorker = async (
       deliveryConfirmationExpiryIntervalMs:
         config.WHATSAPP_DELIVERY_CONFIRMATION_EXPIRY_INTERVAL_SECONDS * 1000,
       oneShotAuthorizationFence: options.oneShotAuthorizationFence,
-    },
-  );
+    };
+  if (options.oneShotAuthorizationFence) {
+    const runtime = await (options.oneShotExecutor ?? executeOneShotDispatch)({
+      config,
+      fence: options.oneShotAuthorizationFence,
+      logger,
+      workerOptions,
+    });
+    logger.info(
+      {
+        event: 'whatsapp-dispatch.one-shot.started',
+        queue: QUEUE_NAMES.whatsappDispatch,
+        provider: config.WHATSAPP_PROVIDER,
+      },
+      'One-shot WhatsApp dispatch executor started',
+    );
+    return runtime;
+  }
+  const workerFactory = options.workerFactory ?? createWhatsAppDispatchWorker;
+  const runtime = workerFactory(config.REDIS_URL, workerOptions);
 
   logger.info(
     {
@@ -181,6 +206,111 @@ export const startIsolatedWhatsAppDispatchWorker = async (
     'Isolated WhatsApp dispatch worker started',
   );
   return runtime;
+};
+
+const waitUntilDue = async (input: {
+  timestamp: number;
+  delay: number | undefined;
+  cancelled: () => boolean;
+}) => {
+  const dueAt = input.timestamp + (input.delay ?? 0);
+  const remaining = dueAt - Date.now();
+  if (remaining <= 0 || input.cancelled()) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+};
+
+const executeOneShotDispatch: R8OneShotExecutor = async (input) => {
+  const connection = createRedisConnection(input.config.REDIS_URL);
+  const queue = createWhatsAppDispatchQueue(connection);
+  const prisma = createPrismaClient(input.config.DATABASE_URL);
+  let closed = false;
+  let exactJob: Awaited<ReturnType<typeof queue.getJob>>;
+  const done = (async () => {
+    try {
+      const job = await queue.getJob(input.fence.authorizedJob.jobId);
+      input.fence.assertJob({
+        jobId: job?.id,
+        dispatchId: job?.data.dispatchId ?? '',
+        instanceName: job?.data.instanceName,
+      });
+      if (!job) return;
+      const initialState = await job.getState();
+      if (!['waiting', 'delayed', 'prioritized'].includes(initialState)) {
+        input.fence.assertJob({
+          jobId: undefined,
+          dispatchId: job.data.dispatchId,
+          instanceName: job.data.instanceName,
+        });
+      }
+      await waitUntilDue({
+        timestamp: job.timestamp,
+        delay: job.opts.delay,
+        cancelled: () => closed,
+      });
+      if (closed) return;
+      exactJob = await queue.getJob(input.fence.authorizedJob.jobId);
+      input.fence.assertJob({
+        jobId: exactJob?.id,
+        dispatchId: exactJob?.data.dispatchId ?? '',
+        instanceName: exactJob?.data.instanceName,
+      });
+      if (!exactJob) return;
+      const state = await exactJob.getState();
+      if (state === 'delayed') await exactJob.promote();
+      if (!['waiting', 'prioritized', 'delayed'].includes(state)) {
+        input.fence.assertJob({
+          jobId: undefined,
+          dispatchId: exactJob.data.dispatchId,
+          instanceName: exactJob.data.instanceName,
+        });
+      }
+      const processorOptions: WhatsAppDispatchProcessorOptions = {
+        prisma,
+        logger: input.logger,
+        commercialAutomationMode: input.workerOptions.commercialAutomationMode,
+        whatsAppProvider: input.workerOptions.whatsAppProvider,
+        whatsAppProviderResolver:
+          input.workerOptions.whatsAppProviderResolver,
+        clock: input.workerOptions.clock,
+        messageBuilder: input.workerOptions.messageBuilder,
+        groupSendPolicy: input.workerOptions.groupSendPolicy,
+        draftService: input.workerOptions.draftService,
+        reservationLeaseMilliseconds:
+          input.workerOptions.reservationLeaseMilliseconds,
+        deliveryConfirmationTimeoutMs:
+          input.workerOptions.deliveryConfirmationTimeoutMs,
+        manualLifecycleFinalizer:
+          input.workerOptions.manualLifecycleFinalizer,
+        oneShotAuthorizationFence:
+          input.workerOptions.oneShotAuthorizationFence,
+      };
+      await processWhatsAppDispatchJob(exactJob, processorOptions);
+      await exactJob.remove();
+    } catch (error) {
+      if (exactJob && input.fence.sendBudgetConsumed === 0) {
+        await exactJob.remove().catch(() => undefined);
+      }
+      input.logger.error(
+        {
+          event: 'whatsapp-dispatch.one-shot.execution-failed',
+          errorCode: error instanceof AppError ? error.code : 'UNKNOWN',
+        },
+        'One-shot WhatsApp dispatch execution failed closed',
+      );
+    }
+  })();
+  return {
+    done,
+    close: async () => {
+      closed = true;
+      await done;
+      await Promise.allSettled([
+        queue.close(),
+        connection.quit(),
+        prisma.$disconnect(),
+      ]);
+    },
+  };
 };
 
 const preflightOneShotDispatchQueue: R8OneShotQueuePreflight = async (

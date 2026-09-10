@@ -686,6 +686,12 @@ export const createWhatsAppDispatchWorker = (
   redisUrl: string,
   options: CreateWhatsAppDispatchWorkerOptions,
 ) => {
+  if (options.oneShotAuthorizationFence) {
+    throw new AppError(
+      'O consumer BullMQ genérico não pode executar autorização one-shot R8',
+      'R8_ONE_SHOT_GENERIC_CONSUMER_FORBIDDEN',
+    );
+  }
   if (options.commercialAutomationMode === 'preview') {
     throw new AppError(
       'O worker de dispatch WhatsApp nao pode iniciar em modo preview',
@@ -751,24 +757,9 @@ export const createWhatsAppDispatchWorker = (
     manualLifecycleFinalizer,
     oneShotAuthorizationFence: options.oneShotAuthorizationFence,
   };
-  let oneShotJobClaimed = false;
-  let worker: Worker<WhatsAppDispatchJob>;
-  worker = new Worker<WhatsAppDispatchJob>(
+  const worker = new Worker<WhatsAppDispatchJob>(
     QUEUE_NAMES.whatsappDispatch,
-    async (job) => {
-      if (options.oneShotAuthorizationFence) {
-        if (oneShotJobClaimed) {
-          options.oneShotAuthorizationFence.assertJob({
-            jobId: undefined,
-            dispatchId: job.data.dispatchId,
-            instanceName: job.data.instanceName,
-          });
-        }
-        oneShotJobClaimed = true;
-        await worker.pause(true);
-      }
-      return processWhatsAppDispatchJob(job, processorOptions);
-    },
+    async (job) => processWhatsAppDispatchJob(job, processorOptions),
     { connection },
   );
   let closePromise: Promise<void> | undefined;

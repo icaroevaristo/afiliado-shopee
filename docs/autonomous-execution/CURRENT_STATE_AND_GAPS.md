@@ -160,17 +160,21 @@ uma execução autorizada.
 
 O one-shot faz primeiro uma leitura da fila e falha fechada se houver qualquer
 job pendente que não corresponda exatamente à autorização; ele não executa o
-recovery mutante nessa modalidade. Depois de consumir o único job autorizado,
-o worker é pausado antes de processá-lo para impedir consumo subsequente. A
-autorização tem janela máxima de trinta minutos, exige `approvedAt <= now`,
-`expiresAt >= now` e um intervalo positivo. Estados `PROCESSING`, `SUBMITTED`
-e terminais sem job pendente não reentram pelo runtime one-shot. Essas regras
+recovery mutante nessa modalidade. Após o preflight, ele consulta somente o
+`jobId` autorizado e executa diretamente a mesma função canônica de dispatch,
+sem criar um consumer BullMQ genérico. Assim, um job estranho inserido entre o
+preflight e a execução não é claimado, não perde tentativas e não é removido.
+A autorização tem janela máxima de trinta minutos, exige `approvedAt <= now`,
+`expiresAt >= now` e um intervalo positivo. Estados `PROCESSING`, `SUBMITTED`,
+`SENT`, `DELIVERED` e `READ` não reentram pelo runtime one-shot. Essas regras
 foram exercitadas somente com PostgreSQL, Redis e BullMQ TEST descartáveis.
 
 Os manifestos schemaVersion 2 são validados contra o protocolo canônico: os
-doze nomes são fechados, os campos e enums obrigatórios são verificados, e
-identidades de review HEAD/tree precisam ser coerentes. A revisão independente
-externa continua pendente; isso não é codificado como um statusFinal inventado.
+doze nomes são fechados; os campos obrigatórios de cada manifesto, gates,
+evidence entries e ledger mensal são verificados; as dez categorias de efeitos
+e os pares HEAD/tree de candidate/review precisam ser coerentes. A revisão
+independente externa continua pendente; isso não é codificado como um
+`statusFinal` inventado.
 
 Essa certificação usa somente infraestrutura TEST e provider fake. Ela não
 autoriza Evolution, webhook real ou WhatsApp SEND. R8 live e R9 permanecem

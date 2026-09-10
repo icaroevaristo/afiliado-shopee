@@ -117,6 +117,7 @@ describe('isolated WhatsApp dispatch worker', () => {
       assertDispatch: vi.fn(),
       providerRunId: vi.fn(),
       assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
       sendBudgetConsumed: 0,
     };
 
@@ -147,6 +148,7 @@ describe('isolated WhatsApp dispatch worker', () => {
       assertDispatch: vi.fn(),
       providerRunId: vi.fn(),
       assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
       sendBudgetConsumed: 0,
     };
     const providerFactory = vi.fn<typeof createWhatsAppProvider>(() => ({
@@ -156,6 +158,10 @@ describe('isolated WhatsApp dispatch worker', () => {
     const workerFactory = vi.fn<WhatsAppDispatchWorkerFactory>(() => ({
       close,
     }));
+    const oneShotExecutor = vi.fn(async () => ({
+      close,
+      done: Promise.resolve(),
+    }));
 
     const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
       providerFactory,
@@ -164,11 +170,13 @@ describe('isolated WhatsApp dispatch worker', () => {
       oneShotQueuePreflight: vi.fn(async () => ({
         hasAuthorizedProcessableJob: true,
       })),
+      oneShotExecutor,
       logger: { info: vi.fn(), error: vi.fn() },
     });
 
     expect(assertReady).not.toHaveBeenCalled();
-    expect(workerFactory).toHaveBeenCalledOnce();
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(oneShotExecutor).toHaveBeenCalledOnce();
     await runtime.close();
   });
 
@@ -183,8 +191,13 @@ describe('isolated WhatsApp dispatch worker', () => {
       assertDispatch: vi.fn(),
       providerRunId: vi.fn(),
       assertPreSend: vi.fn(),
+      authorizedJob: { jobId: 'authorized-job', dispatchId: 'authorized-dispatch', instanceName: 'test-instance' },
       sendBudgetConsumed: 0,
     };
+    const oneShotExecutor = vi.fn(async () => ({
+      close: harness.close,
+      done: Promise.resolve(),
+    }));
 
     const runtime = await startIsolatedWhatsAppDispatchWorker(sendConfig, {
       providerFactory: harness.providerFactory,
@@ -194,12 +207,14 @@ describe('isolated WhatsApp dispatch worker', () => {
       oneShotQueuePreflight: vi.fn(async () => ({
         hasAuthorizedProcessableJob: true,
       })),
+      oneShotExecutor,
       logger: harness.logger,
     });
 
     expect(recoveryCoordinator.run).not.toHaveBeenCalled();
     expect(harness.providerFactory).toHaveBeenCalledOnce();
-    expect(harness.workerFactory).toHaveBeenCalledOnce();
+    expect(harness.workerFactory).not.toHaveBeenCalled();
+    expect(oneShotExecutor).toHaveBeenCalledOnce();
     await runtime.close();
   });
 

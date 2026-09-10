@@ -38,6 +38,11 @@ export type R8OneShotPreSendInput = {
 };
 
 export type R8OneShotAuthorizationFence = {
+  readonly authorizedJob: {
+    jobId: string;
+    dispatchId: string;
+    instanceName: string;
+  };
   assertRuntime(input: {
     instanceName: string | undefined;
     allowedDestinations: readonly string[];
@@ -181,6 +186,11 @@ export const createR8OneShotAuthorizationFence = (input: {
   };
 
   return {
+    authorizedJob: {
+      jobId: manifest.jobId,
+      dispatchId: manifest.dispatchId,
+      instanceName: manifest.instanceName,
+    },
     assertRuntime(runtime) {
       assertManifest();
       if (
