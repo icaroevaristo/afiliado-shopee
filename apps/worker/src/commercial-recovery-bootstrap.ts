@@ -93,6 +93,7 @@ export const createCommercialRecoveryCoordinator = (input: {
       );
     },
   });
+  const manualRecoveries = repositories.whatsappDispatchManualRecoveries;
   const manualFinalizerMethod =
     repositories.manualPublicationRequests.finalizeAfterCommercialDispatch;
   const manualFinalizer = manualFinalizerMethod
@@ -112,6 +113,12 @@ export const createCommercialRecoveryCoordinator = (input: {
     outboxes: repositories.commercialDispatchOutboxes,
     queue: input.queue,
     recoverExecution: (executionId) => recoveryService.recover(executionId),
+    findManualRecoveryDecision: manualRecoveries?.findByDispatchId
+      ? (dispatchId) =>
+          manualRecoveries.findByDispatchId!(dispatchId).then(
+            (row) => row?.decision ?? null,
+          )
+      : undefined,
     publishOutbox: publisher
       ? async (outboxId) => {
           const before = await repositories.commercialDispatchOutboxes.findById(

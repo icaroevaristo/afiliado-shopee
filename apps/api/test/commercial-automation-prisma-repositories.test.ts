@@ -250,6 +250,65 @@ describe('commercial automation Prisma repositories', () => {
     });
   });
 
+  it('retira do blocker somente o run com closeout de ambiguidade sem retry', async () => {
+    const acceptedRunFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'accepted-run' }]);
+    const runFindFirst = vi.fn().mockResolvedValue(null);
+    const executionFindFirst = vi.fn().mockResolvedValue(null);
+    const repository = new PrismaCommercialAutomationHistoryRepository({
+      whatsAppDispatch: {},
+      whatsAppDispatchManualRecovery: { findMany: vi.fn() },
+      commercialPipelineRun: {
+        findMany: acceptedRunFindMany,
+        findFirst: runFindFirst,
+      },
+      commercialAutomationExecution: { findFirst: executionFindFirst },
+    } as never);
+
+    await expect(
+      repository.hasAmbiguousCommercialExecution(),
+    ).resolves.toBe(false);
+    expect(runFindFirst).toHaveBeenCalledWith({
+      where: {
+        OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+        id: { notIn: ['accepted-run'] },
+      },
+      select: { id: true },
+    });
+    expect(executionFindFirst).toHaveBeenCalledWith({
+      where: {
+        status: 'AMBIGUOUS',
+        OR: [
+          { commercialRunId: null },
+          { commercialRunId: { notIn: ['accepted-run'] } },
+        ],
+      },
+      select: { id: true },
+    });
+
+    await expect(
+      repository.hasActiveCommercialExecution(
+        new Date('2026-07-26T15:00:00.000Z'),
+      ),
+    ).resolves.toBe(false);
+    expect(runFindFirst).toHaveBeenLastCalledWith({
+      where: {
+        OR: [
+          { mode: 'CONFIRMED', status: 'STARTED' },
+          { finalStatus: 'PENDING' },
+          {
+            dispatch: {
+              status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+            },
+          },
+        ],
+        id: { notIn: ['accepted-run'] },
+      },
+      select: { id: true },
+    });
+  });
+
   it('detecta run confirmado ativo, final pendente ou dispatch comercial em processamento', async () => {
     const findFirst = vi.fn().mockResolvedValue({ id: 'run-active' });
     const executionFindFirst = vi.fn().mockResolvedValue(null);

@@ -69,10 +69,13 @@ const POSTERIOR_MIGRATIONS = [
   '20260907100000_fulfillment_fences_and_ready_expiry',
   '20260907130000_prepared_message_repreparation',
   '20260908010000_prepared_inventory_schema_contract',
+  '20260910110000_ambiguity_no_retry_closeout',
 ] as const;
 
 const HISTORICAL_HASHES: Record<string, string> = {
   '20260908010000_prepared_inventory_schema_contract': '4b29c4829ca4a41367fe29c941905531b418f969915052bb8f39722e8df216dc',
+  '20260910110000_ambiguity_no_retry_closeout':
+    'f4887349eb87a532d8d0b7a7d742832038f2dca0c706a3aaef97312a447a1f64',
   '20260724000000_whatsapp_dispatch':
     '1ab160ded4df9a8af18d73989ee6d95bd480d0ca59294aacd559ca2495fa44e6',
   '20260724190000_whatsapp_group_directory':

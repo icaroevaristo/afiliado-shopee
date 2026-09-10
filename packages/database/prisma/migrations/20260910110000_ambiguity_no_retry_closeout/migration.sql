@@ -1,0 +1,2 @@
+ALTER TYPE "WhatsAppDispatchManualRecoveryDecision"
+ADD VALUE 'AMBIGUITY_ACCEPTED_NO_RETRY';

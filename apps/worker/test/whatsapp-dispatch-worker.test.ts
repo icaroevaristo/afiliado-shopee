@@ -513,6 +513,46 @@ describe('processWhatsAppDispatchJob', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('bloqueia um dispatch fechado como ambiguidade sem retry antes do provider', async () => {
+    const { repositories } = createHandoffRepositories({
+      dispatch: commercialDispatch,
+    });
+    const findByDispatchId = vi
+      .fn()
+      .mockResolvedValue({ decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' as const });
+    repositories.whatsappDispatchManualRecoveries = {
+      inspectAuthorizedRecovery: vi.fn(),
+      findByDispatchId,
+    };
+    const provider: WhatsAppProvider = {
+      sendMessage: vi.fn(async () => ({
+        status: 'sent' as const,
+        externalMessageId: 'must-not-send',
+        sentAt: handoffNow,
+      })),
+    };
+
+    await expect(
+      processWhatsAppDispatchJob(
+        {
+          id: 'closed-ambiguity-job',
+          name: JOB_NAMES.whatsappDispatch,
+          data: { dispatchId: commercialDispatch.id },
+          opts: { attempts: 1 },
+        },
+        {
+          repositories,
+          whatsAppProvider: provider,
+          logger: { info: vi.fn(), error: vi.fn() },
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'UnrecoverableError' });
+
+    expect(findByDispatchId).toHaveBeenCalledWith(commercialDispatch.id);
+    expect(provider.sendMessage).not.toHaveBeenCalled();
+    expect(repositories.whatsappDispatches.markAttemptPending).not.toHaveBeenCalled();
+  });
+
   it('mantem um unico processamento quando dois consumers disputam o mesmo job comercial', async () => {
     const fixture = createHandoffRepositories({ dispatch: commercialDispatch });
     let currentDispatch: WhatsAppDispatchDetails = commercialDispatch;

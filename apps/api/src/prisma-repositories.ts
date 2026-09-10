@@ -3066,20 +3066,45 @@ export class PrismaCommercialPromotionRepository
     sentAtOrAfter: Date;
   }) {
     if (input.productIds.length === 0) return new Set<string>();
-    const rows = await this.prisma.whatsAppDispatch.findMany({
-      where: {
-        productId: { in: input.productIds },
-        status: { in: ['SENT', 'DELIVERED', 'READ'] },
-        sentAt: { gte: input.sentAtOrAfter },
-        destination: {
-          type: 'GROUP',
-          fingerprint: input.logicalGroupFingerprint,
+    const [rows, acceptedAmbiguities] = await Promise.all([
+      this.prisma.whatsAppDispatch.findMany({
+        where: {
+          productId: { in: input.productIds },
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
+          sentAt: { gte: input.sentAtOrAfter },
+          destination: {
+            type: 'GROUP',
+            fingerprint: input.logicalGroupFingerprint,
+          },
         },
-      },
-      select: { productId: true },
-      distinct: ['productId'],
-    });
-    return new Set(rows.map(({ productId }) => productId));
+        select: { productId: true },
+        distinct: ['productId'],
+      }),
+      this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findMany({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              authorizedAt: { gte: input.sentAtOrAfter },
+              dispatch: {
+                is: {
+                  productId: { in: input.productIds },
+                  destination: {
+                    is: {
+                      type: 'GROUP',
+                      fingerprint: input.logicalGroupFingerprint,
+                    },
+                  },
+                },
+              },
+            },
+            select: { dispatch: { select: { productId: true } } },
+          })
+        : Promise.resolve([]),
+    ]);
+    return new Set([
+      ...rows.map(({ productId }) => productId),
+      ...acceptedAmbiguities.map(({ dispatch }) => dispatch.productId),
+    ]);
   }
 
   async materialize(input: CommercialPromotionMaterializationInput) {
@@ -3475,7 +3500,7 @@ export class PrismaCommercialPromotionRepository
     const sentProductIds = new Set<string>();
     if (input.capacityOnly && input.groupId && capacityRecords.length) {
       const productIds = capacityRecords.map(({ productId }) => productId);
-      const [dispatches, runs] = await Promise.all([
+      const [dispatches, runs, acceptedAmbiguities] = await Promise.all([
         transaction.whatsAppDispatch.findMany({
           where: { productId: { in: productIds }, destinationId: input.groupId,
             status: { in: ['SENT', 'DELIVERED', 'READ'] } },
@@ -3486,9 +3511,27 @@ export class PrismaCommercialPromotionRepository
             mode: 'CONFIRMED', status: 'COMPLETED' },
           select: { productId: true }, distinct: ['productId'],
         }),
+        transaction.whatsAppDispatchManualRecovery
+          ? transaction.whatsAppDispatchManualRecovery.findMany({
+              where: {
+                decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+                campaignId: input.campaignId,
+                dispatch: {
+                  is: {
+                    productId: { in: productIds },
+                    destinationId: input.groupId,
+                  },
+                },
+              },
+              select: { dispatch: { select: { productId: true } } },
+            })
+          : Promise.resolve([]),
       ]);
       for (const row of [...dispatches, ...runs]) {
         if (row.productId) sentProductIds.add(row.productId);
+      }
+      for (const { dispatch } of acceptedAmbiguities) {
+        if (dispatch.productId) sentProductIds.add(dispatch.productId);
       }
     }
     return {
@@ -4941,14 +4984,15 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
       | 'whatsAppDispatch'
       | 'commercialPipelineRun'
       | 'commercialPromotionCandidate'
-    >,
+    > &
+      Partial<Pick<DatabaseClient, 'whatsAppDispatchManualRecovery'>>,
   ) {}
 
   async wasProductSentToGroup(
     productId: string,
     groupId: string,
   ): Promise<boolean> {
-    const [sentDispatch, confirmedRun] = await Promise.all([
+    const [sentDispatch, confirmedRun, acceptedAmbiguity] = await Promise.all([
       this.prisma.whatsAppDispatch.findFirst({
         where: {
           productId,
@@ -4966,21 +5010,48 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
         },
         select: { id: true },
       }),
+      this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findFirst({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              dispatch: {
+                is: { productId, destinationId: groupId },
+              },
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
     ]);
-    return Boolean(sentDispatch || confirmedRun);
+    return Boolean(sentDispatch || confirmedRun || acceptedAmbiguity);
   }
 
   async findLastSentAtByGroup(groupId: string): Promise<Date | null> {
-    const dispatch = await this.prisma.whatsAppDispatch.findFirst({
-      where: {
-        destinationId: groupId,
-        status: { in: ['SENT', 'DELIVERED', 'READ'] },
-        sentAt: { not: null },
-      },
-      orderBy: { sentAt: 'desc' },
-      select: { sentAt: true },
-    });
-    return dispatch?.sentAt ?? null;
+    const [dispatch, acceptedAmbiguity] = await Promise.all([
+      this.prisma.whatsAppDispatch.findFirst({
+        where: {
+          destinationId: groupId,
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
+          sentAt: { not: null },
+        },
+        orderBy: { sentAt: 'desc' },
+        select: { sentAt: true },
+      }),
+      this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findFirst({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              dispatch: { is: { destinationId: groupId } },
+            },
+            orderBy: { authorizedAt: 'desc' },
+            select: { authorizedAt: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    const sentAt = dispatch?.sentAt ?? null;
+    const ambiguityAcceptedAt = acceptedAmbiguity?.authorizedAt ?? null;
+    if (!sentAt) return ambiguityAcceptedAt;
+    if (!ambiguityAcceptedAt) return sentAt;
+    return sentAt >= ambiguityAcceptedAt ? sentAt : ambiguityAcceptedAt;
   }
 
   async countSentCampaignProductsToGroup(input: {
@@ -5023,30 +5094,50 @@ export class PrismaCommercialDeliveryHistoryRepository implements CommercialDeli
     }
     if (productIds.length === 0) return 0;
 
-    const [sentDispatches, confirmedRuns] = await Promise.all([
-      this.prisma.whatsAppDispatch.findMany({
-        where: {
-          productId: { in: productIds },
-          destinationId: input.groupId,
-          status: { in: ['SENT', 'DELIVERED', 'READ'] },
-        },
-        select: { productId: true },
-        distinct: ['productId'],
-      }),
-      this.prisma.commercialPipelineRun.findMany({
-        where: {
-          productId: { in: productIds },
-          groupDestinationId: input.groupId,
-          mode: 'CONFIRMED',
-          status: 'COMPLETED',
-        },
-        select: { productId: true },
-        distinct: ['productId'],
-      }),
-    ]);
+    const [sentDispatches, confirmedRuns, acceptedAmbiguities] =
+      await Promise.all([
+        this.prisma.whatsAppDispatch.findMany({
+          where: {
+            productId: { in: productIds },
+            destinationId: input.groupId,
+            status: { in: ['SENT', 'DELIVERED', 'READ'] },
+          },
+          select: { productId: true },
+          distinct: ['productId'],
+        }),
+        this.prisma.commercialPipelineRun.findMany({
+          where: {
+            productId: { in: productIds },
+            groupDestinationId: input.groupId,
+            mode: 'CONFIRMED',
+            status: 'COMPLETED',
+          },
+          select: { productId: true },
+          distinct: ['productId'],
+        }),
+        this.prisma.whatsAppDispatchManualRecovery
+          ? this.prisma.whatsAppDispatchManualRecovery.findMany({
+              where: {
+                decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+                campaignId: input.campaignId,
+                dispatch: {
+                  is: {
+                    productId: { in: productIds },
+                    destinationId: input.groupId,
+                  },
+                },
+              },
+              select: { dispatch: { select: { productId: true } } },
+            })
+          : Promise.resolve([]),
+      ]);
     const sentProductIds = new Set<string>();
     for (const { productId } of sentDispatches) sentProductIds.add(productId);
     for (const { productId } of confirmedRuns) {
+      if (productId) sentProductIds.add(productId);
+    }
+    for (const recovery of acceptedAmbiguities) {
+      const productId = recovery.dispatch.productId;
       if (productId) sentProductIds.add(productId);
     }
     return sentProductIds.size;
@@ -8478,10 +8569,29 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
       | 'whatsAppDispatch'
       | 'commercialDispatchOutbox'
       | 'manualPublicationTarget'
-    >,
+    > &
+      Partial<Pick<DatabaseClient, 'whatsAppDispatchManualRecovery'>>,
   ) {}
 
   async getCounts(now: Date): Promise<OperationalStatusCounts> {
+    const closedAmbiguityRunExclusion: Prisma.CommercialPipelineRunWhereInput = {
+      NOT: {
+        dispatch: {
+          is: {
+            manualRecovery: {
+              is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+            },
+          },
+        },
+      },
+    };
+    const closedAmbiguityDispatchExclusion: Prisma.WhatsAppDispatchWhereInput = {
+      NOT: {
+        manualRecovery: {
+          is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+        },
+      },
+    };
     const [
       activeExecutions,
       activeReservations,
@@ -8506,17 +8616,31 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
       }),
       this.prisma.commercialPipelineRun.count({
         where: {
-          OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+          AND: [
+            {
+              OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+            },
+            closedAmbiguityRunExclusion,
+          ],
         },
       }),
       this.prisma.whatsAppDispatch.count({
-        where: { status: 'AMBIGUOUS' },
+        where: {
+          status: 'AMBIGUOUS',
+          ...closedAmbiguityDispatchExclusion,
+        },
       }),
       this.prisma.commercialPipelineRun.count({
-        where: { investigationRequired: true },
+        where: {
+          investigationRequired: true,
+          ...closedAmbiguityRunExclusion,
+        },
       }),
       this.prisma.whatsAppDispatch.count({
-        where: { status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] } },
+        where: {
+          status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+          ...closedAmbiguityDispatchExclusion,
+        },
       }),
       this.prisma.commercialDispatchOutbox.count({
         where: { status: 'PENDING' },
@@ -8537,12 +8661,22 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
     destinationId: string,
     now: Date,
   ): Promise<boolean> {
+    const closedAmbiguityFilter = this.prisma.whatsAppDispatchManualRecovery
+      ? {
+          NOT: {
+            manualRecovery: {
+              is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' as const },
+            },
+          },
+        }
+      : {};
     const [dispatches, runs, outboxes, reservations, manualTargets] =
       await Promise.all([
         this.prisma.whatsAppDispatch.count({
           where: {
             destinationId,
             status: { in: ['PENDING', 'PROCESSING'] },
+            ...closedAmbiguityFilter,
           },
         }),
         this.prisma.commercialPipelineRun.count({
@@ -8556,6 +8690,7 @@ export class PrismaOperationalStatusRepository implements OperationalStatusRepos
             dispatch: {
               destinationId,
               status: { in: ['PENDING', 'PROCESSING'] },
+              ...closedAmbiguityFilter,
             },
           },
         }),
@@ -8585,8 +8720,31 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       | 'whatsAppDispatch'
       | 'commercialPipelineRun'
       | 'commercialAutomationExecution'
-    >,
+    > &
+      Partial<Pick<DatabaseClient, 'whatsAppDispatchManualRecovery'>>,
   ) {}
+
+  private async findAmbiguityNoRetryRunIds(): Promise<string[]> {
+    const recoveryModel = this.prisma.whatsAppDispatchManualRecovery;
+    if (!recoveryModel || typeof recoveryModel.findMany !== 'function') {
+      return [];
+    }
+    const findMany = this.prisma.commercialPipelineRun.findMany;
+    if (typeof findMany !== 'function') return [];
+    const records = await findMany.call(this.prisma.commercialPipelineRun, {
+      where: {
+        dispatch: {
+          is: {
+            manualRecovery: {
+              is: { decision: 'AMBIGUITY_ACCEPTED_NO_RETRY' },
+            },
+          },
+        },
+      },
+      select: { id: true },
+    });
+    return records.map(({ id }) => id);
+  }
 
   async getSnapshot({
     groupId,
@@ -8602,7 +8760,12 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       sentAt: { gte: dayStartsAt, lt: dayEndsAt },
       destination: { type: 'GROUP' as const },
     };
-    const [countsByGroup, lastSent, groupLastSent] = await Promise.all([
+    const [
+      countsByGroup,
+      lastSent,
+      groupLastSent,
+      acceptedAmbiguities,
+    ] = await Promise.all([
       this.prisma.whatsAppDispatch.groupBy({
         by: ['destinationId'],
         where: sentDuringDay,
@@ -8629,6 +8792,23 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
             select: { sentAt: true, instanceName: true },
           })
         : Promise.resolve(null),
+      this.prisma.whatsAppDispatchManualRecovery
+        ? this.prisma.whatsAppDispatchManualRecovery.findMany({
+            where: {
+              decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+              authorizedAt: { gte: dayStartsAt, lt: dayEndsAt },
+              dispatch: {
+                is: { destination: { is: { type: 'GROUP' } } },
+              },
+            },
+            select: {
+              authorizedAt: true,
+              dispatch: {
+                select: { destinationId: true, instanceName: true },
+              },
+            },
+          })
+        : Promise.resolve([]),
     ]);
     const countDispatches = (row: (typeof countsByGroup)[number]) => {
       const count = row._count;
@@ -8640,41 +8820,101 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
       }
       return count._all;
     };
+    const acceptedGlobalToday = acceptedAmbiguities.length;
+    const acceptedGroupToday = groupId
+      ? acceptedAmbiguities.filter(
+          ({ dispatch }) => dispatch.destinationId === groupId,
+        ).length
+      : 0;
     const globalSentToday = countsByGroup.reduce(
       (total, row) => total + countDispatches(row),
-      0,
+      acceptedGlobalToday,
     );
     const groupSentToday = groupId
       ? countsByGroup
           .filter((row) => row.destinationId === groupId)
-          .reduce((total, row) => total + countDispatches(row), 0)
+          .reduce(
+            (total, row) => total + countDispatches(row),
+            acceptedGroupToday,
+          )
       : 0;
+    const latestAcceptedGlobal = acceptedAmbiguities.reduce<Date | null>(
+      (latest, { authorizedAt }) =>
+        !latest || authorizedAt > latest ? authorizedAt : latest,
+      null,
+    );
+    const latestAcceptedGroup = groupId
+      ? acceptedAmbiguities.reduce<
+          { at: Date; instanceName: string | null } | null
+        >(
+          (latest, { authorizedAt, dispatch }) =>
+            dispatch.destinationId !== groupId ||
+            (latest && latest.at >= authorizedAt)
+              ? latest
+              : { at: authorizedAt, instanceName: dispatch.instanceName },
+          null,
+        )
+      : null;
+    const latestGlobal =
+      lastSent?.sentAt && latestAcceptedGlobal
+        ? lastSent.sentAt >= latestAcceptedGlobal
+          ? lastSent.sentAt
+          : latestAcceptedGlobal
+        : (lastSent?.sentAt ?? latestAcceptedGlobal);
+    const latestGroup =
+      groupLastSent?.sentAt && latestAcceptedGroup
+        ? groupLastSent.sentAt >= latestAcceptedGroup.at
+          ? { at: groupLastSent.sentAt, instanceName: groupLastSent.instanceName }
+          : latestAcceptedGroup
+        : groupLastSent?.sentAt
+          ? { at: groupLastSent.sentAt, instanceName: groupLastSent.instanceName }
+          : latestAcceptedGroup;
     return {
       globalSentToday,
       groupSentToday,
-      lastSentAt: lastSent?.sentAt ?? null,
-      globalLastSentAt: lastSent?.sentAt ?? null,
-      groupLastSentAt: groupLastSent?.sentAt ?? null,
-      lastSentInstanceName: groupLastSent?.instanceName ?? null,
+      lastSentAt: latestGlobal,
+      globalLastSentAt: latestGlobal,
+      groupLastSentAt: latestGroup?.at ?? null,
+      lastSentInstanceName: latestGroup?.instanceName ?? null,
     };
   }
 
   async hasAmbiguousCommercialExecution(
     excludedRunId?: string,
   ): Promise<boolean> {
+    const acceptedRunIds = await this.findAmbiguityNoRetryRunIds();
+    const runWhere: Prisma.CommercialPipelineRunWhereInput = {
+      OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
+    };
+    if (excludedRunId || acceptedRunIds.length > 0) {
+      runWhere.id = {
+        ...(excludedRunId ? { not: excludedRunId } : {}),
+        ...(acceptedRunIds.length > 0 ? { notIn: acceptedRunIds } : {}),
+      };
+    }
+    const executionWhere: Prisma.CommercialAutomationExecutionWhereInput = {
+      status: 'AMBIGUOUS',
+      ...(excludedRunId ? { commercialRunId: { not: excludedRunId } } : {}),
+    };
+    if (acceptedRunIds.length > 0) {
+      executionWhere.OR = [
+        { commercialRunId: null },
+        {
+          commercialRunId: {
+            ...(excludedRunId ? { not: excludedRunId } : {}),
+            notIn: acceptedRunIds,
+          },
+        },
+      ];
+      delete executionWhere.commercialRunId;
+    }
     const [run, execution] = await Promise.all([
       this.prisma.commercialPipelineRun.findFirst({
-        where: {
-          OR: [{ finalStatus: 'AMBIGUOUS' }, { investigationRequired: true }],
-          ...(excludedRunId ? { id: { not: excludedRunId } } : {}),
-        },
+        where: runWhere,
         select: { id: true },
       }),
       this.prisma.commercialAutomationExecution.findFirst({
-        where: {
-          status: 'AMBIGUOUS',
-          ...(excludedRunId ? { commercialRunId: { not: excludedRunId } } : {}),
-        },
+        where: executionWhere,
         select: { id: true },
       }),
     ]);
@@ -8686,20 +8926,27 @@ export class PrismaCommercialAutomationHistoryRepository implements CommercialAu
     excludedExecutionId?: string,
     excludedRunId?: string,
   ): Promise<boolean> {
+    const acceptedRunIds = await this.findAmbiguityNoRetryRunIds();
+    const runWhere: Prisma.CommercialPipelineRunWhereInput = {
+      OR: [
+        { mode: 'CONFIRMED', status: 'STARTED' },
+        { finalStatus: 'PENDING' },
+        {
+          dispatch: {
+            status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
+          },
+        },
+      ],
+    };
+    if (excludedRunId || acceptedRunIds.length > 0) {
+      runWhere.id = {
+        ...(excludedRunId ? { not: excludedRunId } : {}),
+        ...(acceptedRunIds.length > 0 ? { notIn: acceptedRunIds } : {}),
+      };
+    }
     const [run, execution] = await Promise.all([
       this.prisma.commercialPipelineRun.findFirst({
-        where: {
-          OR: [
-            { mode: 'CONFIRMED', status: 'STARTED' },
-            { finalStatus: 'PENDING' },
-            {
-              dispatch: {
-                status: { in: ['PENDING', 'PROCESSING', 'SUBMITTED'] },
-              },
-            },
-          ],
-          ...(excludedRunId ? { id: { not: excludedRunId } } : {}),
-        },
+        where: runWhere,
         select: { id: true },
       }),
       this.prisma.commercialAutomationExecution.findFirst({

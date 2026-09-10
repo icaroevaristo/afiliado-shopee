@@ -120,6 +120,9 @@ const createSubject = (input: {
     outboxId: string,
   ) => Promise<CommercialRecoveryPublishResult>;
   finalizeAfterDispatch?: (dispatchId: string) => Promise<unknown>;
+  manualRecoveryDecision?: (
+    dispatchId: string,
+  ) => Promise<'CONFIRMED_NON_DELIVERY' | 'AMBIGUITY_ACCEPTED_NO_RETRY' | null>;
 }) => {
   const executions = input.executions ?? [];
   const outboxes = input.outboxes ?? [];
@@ -153,6 +156,7 @@ const createSubject = (input: {
     recoverExecution,
     publishOutbox,
     finalizeAfterDispatch,
+    findManualRecoveryDecision: input.manualRecoveryDecision,
     clock: () => now,
     logger,
     pageSize: 10,
@@ -215,6 +219,33 @@ describe('commercial recovery coordinator', () => {
       safeQueueRecovered: 0,
     });
     expect(harness.publishOutbox).not.toHaveBeenCalled();
+    expect(harness.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('ignora no recovery a ambiguidade encerrada sem retry e nao ressuscita o outbox', async () => {
+    const currentOutbox = outbox({ status: 'PUBLISHED', publishedAt: now });
+    const context = publicationContext({
+      outbox: currentOutbox,
+      run: { status: 'FAILED', finalStatus: 'AMBIGUOUS', investigationRequired: true },
+      dispatch: { status: 'PROCESSING', attemptCount: 1 },
+    });
+    const publishOutbox = vi.fn();
+    const harness = createSubject({
+      paused: false,
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, context]]),
+      publishOutbox,
+      manualRecoveryDecision: async () => 'AMBIGUITY_ACCEPTED_NO_RETRY',
+    });
+
+    await expect(harness.subject.run()).resolves.toMatchObject({
+      scanned: 1,
+      historicalIgnored: 1,
+      noAction: 1,
+      humanRequired: 0,
+      ambiguitiesPreserved: 0,
+    });
+    expect(publishOutbox).not.toHaveBeenCalled();
     expect(harness.enqueue).not.toHaveBeenCalled();
   });
 

@@ -12,7 +12,9 @@ import {
 } from './application-services';
 import { WhatsAppDispatchManualRecoveryService } from './whatsapp-dispatch-manual-recovery-service';
 import {
+  WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
   WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+  type WhatsAppDispatchAmbiguityNoRetryInput,
   type WhatsAppDispatchManualRecoveryInput,
 } from './repositories';
 
@@ -29,29 +31,46 @@ const expectedRunId = readArg('run-id');
 const expectedExecutionId = readArg('execution-id');
 const confirmation = readArg('confirmation');
 
+const isNoRetryCloseout = action === 'close-ambiguity-no-retry';
+const expectedConfirmation = isNoRetryCloseout
+  ? WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION
+  : WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION;
+
 if (
-  (action !== 'authorize' && action !== 'requeue') ||
+  (!isNoRetryCloseout && action !== 'authorize' && action !== 'requeue') ||
   !dispatchId ||
   !expectedRunId ||
   !expectedExecutionId ||
-  confirmation !== WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION
+  confirmation !== expectedConfirmation
 ) {
   throw new Error(
-    'Usage: <authorize|requeue> --dispatch-id=... --run-id=... --execution-id=... --confirmation=CONFIRMAR_NAO_ENTREGA_E_RETRY_UNICO',
+    'Usage: <authorize|requeue|close-ambiguity-no-retry> --dispatch-id=... --run-id=... --execution-id=... --confirmation=<literal da acao>',
   );
 }
-
-const input: WhatsAppDispatchManualRecoveryInput = {
-  dispatchId,
-  expectedRunId,
-  expectedExecutionId,
-  confirmation: WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
-};
 
 const prisma = createPrismaClient();
 const repository = new PrismaWhatsAppDispatchManualRecoveryRepository(prisma);
 
 const main = async () => {
+  if (isNoRetryCloseout) {
+    const input: WhatsAppDispatchAmbiguityNoRetryInput = {
+      dispatchId,
+      expectedRunId,
+      expectedExecutionId,
+      confirmation: WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+    };
+    const service = new WhatsAppDispatchManualRecoveryService(repository);
+    const result = await service.closeAmbiguityWithoutRetry(input);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  const input: WhatsAppDispatchManualRecoveryInput = {
+    dispatchId,
+    expectedRunId,
+    expectedExecutionId,
+    confirmation: WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+  };
   if (action === 'authorize') {
     const service = new WhatsAppDispatchManualRecoveryService(repository);
     const result = await service.authorize(input);

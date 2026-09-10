@@ -1,6 +1,8 @@
 import type { DatabaseClient } from '@shopee-auto-affiliate-ai/database';
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 import type {
+  WhatsAppDispatchAmbiguityNoRetryInput,
+  WhatsAppDispatchAmbiguityNoRetryResult,
   WhatsAppDispatchManualRecoveryAuthorization,
   WhatsAppDispatchManualRecoveryInput,
   WhatsAppDispatchManualRecoveryInspection,
@@ -8,7 +10,10 @@ import type {
   WhatsAppDispatchManualRecoveryRepository,
   WhatsAppDispatchManualRecoveryRequeueContext,
 } from './repositories';
-import { WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION } from './repositories';
+import {
+  WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+  WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+} from './repositories';
 import {
   assertCommercialStickyIdentity,
   getOrderedAssignedInstanceNames,
@@ -53,10 +58,18 @@ const mapRecovery = (record: {
   requeuedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
-}): WhatsAppDispatchManualRecoveryRecord => ({
-  ...record,
-  decision: 'CONFIRMED_NON_DELIVERY',
-});
+}): WhatsAppDispatchManualRecoveryRecord => {
+  const decision =
+    record.decision === 'CONFIRMED_NON_DELIVERY'
+      ? 'CONFIRMED_NON_DELIVERY'
+      : record.decision === 'AMBIGUITY_ACCEPTED_NO_RETRY'
+        ? 'AMBIGUITY_ACCEPTED_NO_RETRY'
+        : fail(
+            'Decisao de recovery desconhecida; bloqueio fail-closed',
+            'WHATSAPP_DISPATCH_MANUAL_RECOVERY_DECISION_UNKNOWN',
+          );
+  return { ...record, decision };
+};
 
 const buildRecoveryTarget = (
   campaign: {
@@ -84,16 +97,16 @@ const buildRecoveryTarget = (
     } | null;
   },
   destinationId: string,
+  requireSendReadiness: boolean,
 ) => {
   const destination = campaign.anchorDestination;
   if (
-    !campaign.active ||
-    !campaign.niche.active ||
     !destination ||
     campaign.anchorDestinationId !== destinationId ||
     destination.id !== destinationId ||
     !destination.fingerprint ||
-    destination.fingerprint !== campaign.logicalGroupFingerprint
+    destination.fingerprint !== campaign.logicalGroupFingerprint ||
+    (requireSendReadiness && (!campaign.active || !campaign.niche.active))
   ) {
     fail(
       'Target persistido diverge do dispatch/campaign do recovery',
@@ -125,13 +138,21 @@ const buildRecoveryTarget = (
   };
 };
 
+type ManualRecoveryLifecycleInput = Pick<
+  WhatsAppDispatchManualRecoveryInput,
+  'dispatchId' | 'expectedRunId' | 'expectedExecutionId'
+> & { confirmation: string };
+
 const loadLifecycle = async (
   db: RecoveryDb,
-  input: WhatsAppDispatchManualRecoveryInput,
+  input: ManualRecoveryLifecycleInput,
   expectedDispatchStatus: 'PROCESSING' | 'PENDING',
   recoveryExists: boolean,
+  expectedConfirmation: string =
+    WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION,
+  requireSendReadiness = true,
 ) => {
-  if (input.confirmation !== WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION) {
+  if (input.confirmation !== expectedConfirmation) {
     fail(
       'Confirmacao humana literal invalida',
       'WHATSAPP_DISPATCH_MANUAL_RECOVERY_CONFIRMATION_REQUIRED',
@@ -277,7 +298,7 @@ const loadLifecycle = async (
     },
     { allowMissingJob: true },
   );
-  if (stickyInstanceName) {
+  if (requireSendReadiness && stickyInstanceName) {
     const instance = await db.whatsAppInstance.findUnique({
       where: { name: stickyInstanceName },
       select: { active: true },
@@ -391,7 +412,11 @@ const loadLifecycle = async (
     );
   }
 
-  const target = buildRecoveryTarget(campaign!, dispatch.destinationId);
+  const target = buildRecoveryTarget(
+    campaign!,
+    dispatch.destinationId,
+    requireSendReadiness,
+  );
   return {
     dispatch,
     run,
@@ -423,6 +448,26 @@ const assertExistingRecoveryMatches = (
   }
 };
 
+const assertExistingNoRetryCloseoutMatches = (
+  recovery: WhatsAppDispatchManualRecoveryRecord,
+  input: WhatsAppDispatchAmbiguityNoRetryInput,
+) => {
+  if (
+    recovery.runId !== input.expectedRunId ||
+    recovery.executionId !== input.expectedExecutionId ||
+    recovery.confirmation !== input.confirmation ||
+    recovery.decision !== 'AMBIGUITY_ACCEPTED_NO_RETRY' ||
+    recovery.attemptCountObserved !== 1 ||
+    recovery.rearmedAt !== null ||
+    recovery.requeuedAt !== null
+  ) {
+    fail(
+      'Resolucao de ambiguidade existente diverge desta decisao',
+      'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFLICT',
+    );
+  }
+};
+
 export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppDispatchManualRecoveryRepository {
   constructor(private readonly prisma: DatabaseClient) {}
 
@@ -441,6 +486,9 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
               await tx.whatsAppDispatchManualRecovery.findUnique({
                 where: { dispatchId: input.dispatchId },
               });
+            if (existingRaw) {
+              assertExistingRecoveryMatches(mapRecovery(existingRaw), input);
+            }
             const lifecycle = await loadLifecycle(
               tx as RecoveryDb,
               input,
@@ -730,7 +778,11 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
         'Campaign do recovery divergiu',
         'WHATSAPP_DISPATCH_MANUAL_RECOVERY_TARGET_MISMATCH',
       );
-    const target = buildRecoveryTarget(campaign!, dispatch!.destinationId);
+    const target = buildRecoveryTarget(
+      campaign!,
+      dispatch!.destinationId,
+      true,
+    );
     if (
       recovery.jobId !== run.jobId! ||
       recovery.campaignId !== candidate.campaignId ||
@@ -890,5 +942,156 @@ export class PrismaWhatsAppDispatchManualRecoveryRepository implements WhatsAppD
       );
     }
     return mapRecovery(record);
+  }
+
+  async acceptAmbiguityWithoutRetry(
+    input: WhatsAppDispatchAmbiguityNoRetryInput & { closedAt: Date },
+  ): Promise<WhatsAppDispatchAmbiguityNoRetryResult> {
+    if (
+      input.confirmation !==
+      WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION
+    ) {
+      fail(
+        'Confirmacao humana literal invalida',
+        'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION_REQUIRED',
+      );
+    }
+
+    const resultFor = (
+      kind: WhatsAppDispatchAmbiguityNoRetryResult['kind'],
+      recovery: WhatsAppDispatchManualRecoveryRecord,
+    ): WhatsAppDispatchAmbiguityNoRetryResult => ({
+      kind,
+      recovery,
+      dispatchId: recovery.dispatchId,
+      runId: recovery.runId,
+      executionId: recovery.executionId,
+      campaignId: recovery.campaignId,
+      candidateId: recovery.candidateId,
+      jobId: recovery.jobId,
+    });
+
+    for (
+      let transactionAttempt = 0;
+      transactionAttempt < 2;
+      transactionAttempt += 1
+    ) {
+      try {
+        return await this.prisma.$transaction(
+          async (tx) => {
+            const existingRaw =
+              await tx.whatsAppDispatchManualRecovery.findUnique({
+                where: { dispatchId: input.dispatchId },
+              });
+            if (existingRaw) {
+              const existing = mapRecovery(existingRaw);
+              assertExistingNoRetryCloseoutMatches(existing, input);
+              return resultFor('ALREADY_CLOSED', existing);
+            }
+
+            const lifecycle = await loadLifecycle(
+              tx as RecoveryDb,
+              input,
+              'PROCESSING',
+              false,
+              WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CONFIRMATION,
+              false,
+            );
+            const created = await tx.whatsAppDispatchManualRecovery.create({
+              data: {
+                dispatchId: input.dispatchId,
+                runId: input.expectedRunId,
+                executionId: input.expectedExecutionId,
+                candidateId: lifecycle.candidate.id,
+                campaignId: lifecycle.candidate.campaignId,
+                jobId: lifecycle.run.jobId!,
+                decision: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+                confirmation: input.confirmation,
+                attemptCountObserved: lifecycle.dispatch.attemptCount,
+                authorizedAt: input.closedAt,
+              },
+            });
+
+            const released = await tx.commercialGroupCampaign.updateMany({
+              where: {
+                id: lifecycle.campaign.id,
+                attemptExecutionId: input.expectedExecutionId,
+                attemptReservedAt: lifecycle.campaign.attemptReservedAt,
+                attemptLeaseExpiresAt: lifecycle.campaign.attemptLeaseExpiresAt,
+              },
+              data: {
+                attemptExecutionId: null,
+                attemptReservedAt: null,
+                attemptLeaseExpiresAt: null,
+              },
+            });
+            if (released.count !== 1) {
+              fail(
+                'Reservation nao pertence mais ao lifecycle ambiguo',
+                'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_RESERVATION_CONFLICT',
+              );
+            }
+
+            const blocked =
+              await tx.commercialPromotionCandidate.updateMany({
+                where: {
+                  id: lifecycle.candidate.id,
+                  campaignId: lifecycle.candidate.campaignId,
+                  generatedCopyId: lifecycle.dispatch.generatedCopyId,
+                  status: 'RESERVED',
+                },
+                data: {
+                  status: 'BLOCKED',
+                  blockedReason: 'AMBIGUITY_ACCEPTED_NO_RETRY',
+                },
+              });
+            if (blocked.count !== 1) {
+              fail(
+                'Candidate reservado mudou antes do closeout',
+                'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_CANDIDATE_CONFLICT',
+              );
+            }
+
+            return resultFor('CLOSED', mapRecovery(created));
+          },
+          { isolationLevel: 'Serializable' },
+        );
+      } catch (error) {
+        if (isPrismaCode(error, 'P2034') && transactionAttempt === 0) {
+          continue;
+        }
+        if (isPrismaCode(error, 'P2002')) {
+          const existing =
+            await this.prisma.whatsAppDispatchManualRecovery.findUnique({
+              where: { dispatchId: input.dispatchId },
+            });
+          if (existing) {
+            const mapped = mapRecovery(existing);
+            assertExistingNoRetryCloseoutMatches(mapped, input);
+            return resultFor('ALREADY_CLOSED', mapped);
+          }
+        }
+        throw error;
+      }
+    }
+    throw new AppError(
+      'Closeout de ambiguidade nao convergiu',
+      'WHATSAPP_DISPATCH_AMBIGUITY_NO_RETRY_TRANSACTION_CONFLICT',
+    );
+  }
+
+  async findByDispatchId(
+    dispatchId: string,
+  ): Promise<Pick<WhatsAppDispatchManualRecoveryRecord, 'decision'> | null> {
+    const recoveryModel = this.prisma.whatsAppDispatchManualRecovery;
+    if (!recoveryModel || typeof recoveryModel.findUnique !== 'function') {
+      return null;
+    }
+    const recovery =
+      await recoveryModel.findUnique({
+        where: { dispatchId },
+      });
+    if (!recovery) return null;
+    return { decision: mapRecovery(recovery).decision };
   }
 }
