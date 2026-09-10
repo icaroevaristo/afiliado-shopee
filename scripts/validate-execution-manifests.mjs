@@ -10,6 +10,7 @@ export const manifestFileNames = Object.freeze([
 ]);
 const statuses = new Set(['PLANNED','PREFLIGHTED','RUNNING','QUIESCING','RESTORING','PASSED','FAILED','BLOCKED','HUMAN_REQUIRED','CLOSED']);
 const finalStatuses = new Set(['READY_FOR_GITHUB_REVIEW','DONE_NO_GIT_CHANGE','BLOCKED','HUMAN_REQUIRED','FAILED_VALIDATION']);
+const gateStatuses = new Set(['PASS','FAIL','BLOCKED','HUMAN_REQUIRED','NOT_RUN']);
 const decisions = new Set(['SHIP','FIX_FIRST','BLOCKED','HUMAN_REQUIRED']);
 const effects = ['Shopee','OpenAI','Evolution','WhatsAppSEND','OperationalPostgresWrites','OperationalRedisWrites','SchedulerChanges','DockerVolumeChanges','SecretsChanges','PaidCost'];
 const commonFields = ['schemaVersion','runId','createdAt','updatedAt','status','evidenceIds'];
@@ -65,7 +66,17 @@ export async function validateExecutionManifestRoot(root) {
   for (const [file, required] of Object.entries(fields)) { validateCommon(docs[file],file.replace('.json',''),runId,errors); requireKeys(docs[file],required,file.replace('.json',''),errors); }
   const gates = docs['GATES.json'];
   if (!isObject(gates) || !Array.isArray(gates.gates)) errors.push('GATES.gates must be an array');
-  else for (const gate of gates.gates) { requireKeys(gate,['gateId','status','preconditions','evidenceIds','blocker','owner'],'GATES.gates[]',errors); if (isObject(gate) && gate.status === 'PASS') assert(Array.isArray(gate.evidenceIds) && gate.evidenceIds.length > 0,'PASS gate requires evidenceIds',errors); }
+  else for (const gate of gates.gates) {
+    requireKeys(gate,['gateId','status','preconditions','evidenceIds','blocker','owner'],'GATES.gates[]',errors);
+    if (!isObject(gate)) continue;
+    assert(nonEmpty(gate.gateId), 'GATES.gates[].gateId must be a nonempty string', errors);
+    assert(gateStatuses.has(gate.status), 'GATES.gates[].status is not canonical', errors);
+    assert(Array.isArray(gate.preconditions), 'GATES.gates[].preconditions must be an array', errors);
+    assert(Array.isArray(gate.evidenceIds), 'GATES.gates[].evidenceIds must be an array', errors);
+    assert(gate.blocker === null || typeof gate.blocker === 'string', 'GATES.gates[].blocker must be null or a string', errors);
+    assert(nonEmpty(gate.owner), 'GATES.gates[].owner must be a nonempty string', errors);
+    if (gate.status === 'PASS' && Array.isArray(gate.evidenceIds)) assert(gate.evidenceIds.length > 0,'PASS gate requires evidenceIds',errors);
+  }
   const evidence = docs['EVIDENCE_INDEX.json'];
   if (!isObject(evidence) || !Array.isArray(evidence.entries)) errors.push('EVIDENCE_INDEX.entries must be an array');
   else for (const entry of evidence.entries) {
