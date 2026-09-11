@@ -514,6 +514,72 @@ const service = (
   });
 
 describe('CommercialPromotionCopyGenerationService', () => {
+  it('executa o marker somente imediatamente antes do provider externo', async () => {
+    const repository = new MemoryCopyRepository();
+    const events: string[] = [];
+    const provider: CommercialAiCopyProvider = {
+      generate: vi.fn(async () => {
+        events.push('provider');
+        return {
+          output: {
+            headline: 'OFERTA CONFIÁVEL',
+            body: 'Produto verificado para sua rotina.',
+          },
+          provider: 'openai' as const,
+          model: 'selected-model',
+          usage: {
+            inputTokens: 10,
+            outputTokens: 20,
+            totalTokens: 30,
+            reasoningTokens: 4,
+          },
+        };
+      }),
+    };
+    const marker = vi.fn(async () => {
+      events.push('marker');
+    });
+
+    await service(repository, provider).generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+      marker,
+    );
+
+    expect(events).toEqual(['marker', 'provider']);
+    expect(marker).toHaveBeenCalledOnce();
+  });
+
+  it('nao marca fronteira externa quando usa fallback deterministico', async () => {
+    const repository = new MemoryCopyRepository();
+    const marker = vi.fn(async () => undefined);
+    const provider = { generate: vi.fn() };
+    const fallbackService = new CommercialPromotionCopyGenerationService({
+      repository,
+      provider,
+      config: {
+        enabled: false,
+        provider: 'openai',
+        model: null,
+        apiKeyConfigured: false,
+        timeoutMs: 30_000,
+        maxOutputTokens: 300,
+        reasoningEffort: 'minimal',
+        maximumCopyLength: 1_000,
+      },
+      clock: () => now,
+    });
+
+    await fallbackService.generate(
+      'candidate-internal',
+      'GERAR_COPY_COM_IA',
+      marker,
+    );
+
+    expect(marker).not.toHaveBeenCalled();
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+
   it.each(['FAILED', 'AMBIGUOUS', 'STARTED'] as const)('claim Prisma rejeita %s do snapshot inserido após precheck, mesmo com outro fingerprint', async (status) => {
     const repository = new MemoryCopyRepository();
     const expected = contextFixture();

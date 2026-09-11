@@ -1887,7 +1887,7 @@ describe('commercial automation Prisma repositories', () => {
     });
   });
 
-  it('terminaliza falha segura pre-externa com CAS e libera somente a reserva exata', async () => {
+  it.each(['STARTED', 'QUEUED'] as const)('terminaliza falha segura pre-externa com CAS e libera somente a reserva exata quando a execution esta %s', async (executionStatus) => {
     const now = new Date('2026-09-10T20:00:00.000Z');
     const reservedAt = new Date('2026-09-10T19:58:00.000Z');
     const leaseExpiresAt = new Date('2026-09-10T20:05:00.000Z');
@@ -1895,12 +1895,15 @@ describe('commercial automation Prisma repositories', () => {
       id: 'execution-safe-pre-external',
       schedulerJobId: 'scheduled-commercial-automation',
       bullMqJobId: 'commercial-target-slot-safe',
-      activeKey: 'commercial-automation' as string | null,
+      activeKey:
+        executionStatus === 'STARTED'
+          ? ('commercial-automation' as string | null)
+          : null,
       ownerId: 'owner-safe',
       heartbeatAt: new Date('2026-09-10T19:59:00.000Z'),
       leaseExpiresAt,
       mode: 'SEND',
-      status: 'STARTED',
+      status: executionStatus as string,
       externalStage: 'NOT_REACHED',
       reasons: [],
       commercialRunId: 'run-safe-pre-external',
