@@ -420,7 +420,15 @@ describe('commercial recovery coordinator', () => {
       [startedExecution.id, pendingRecoveryContext],
     ]);
     const recoverSafePreExternalFailure = vi.fn(
-      async (input: CommercialSafePreExternalFailureInput) => {
+      async function (
+        this: unknown,
+        input: CommercialSafePreExternalFailureInput,
+      ) {
+        expect(this).toBeDefined();
+        expect(
+          typeof (this as { findRecoveryContext?: unknown })
+            .findRecoveryContext,
+        ).toBe('function');
         expect(input).toMatchObject({
           executionId: startedExecution.id,
           expectedRunId: currentOutbox.commercialRunId,

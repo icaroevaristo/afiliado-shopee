@@ -707,15 +707,18 @@ export const processWhatsAppDispatchJob = async (
             outbox &&
             typeof jobId === 'string'
           ) {
-            const recovery = await recoverSafePreExternalFailure({
-              executionId,
-              expectedRunId: commercialRun.id,
-              expectedDispatchId: failedDispatch.id,
-              expectedOutboxId: outbox.id,
-              expectedJobId: jobId,
-              expectedInstanceName: instanceName,
-              completedAt: clock(),
-            });
+            const recovery = await recoverSafePreExternalFailure.call(
+              repositories.commercialAutomationExecutions,
+              {
+                executionId,
+                expectedRunId: commercialRun.id,
+                expectedDispatchId: failedDispatch.id,
+                expectedOutboxId: outbox.id,
+                expectedJobId: jobId,
+                expectedInstanceName: instanceName,
+                completedAt: clock(),
+              },
+            );
             if (recovery.outcome === 'BLOCKED') {
               options.logger.error(
                 {

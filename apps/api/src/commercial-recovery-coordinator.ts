@@ -550,15 +550,18 @@ export class CommercialRecoveryCoordinator {
           this.markHuman(report, false);
           return true;
         }
-        const recovery = await recoverSafePreExternalFailure({
-          executionId,
-          expectedRunId: context.run.id,
-          expectedDispatchId: context.dispatch.id,
-          expectedOutboxId: context.outbox.id,
-          expectedJobId: context.outbox.jobId,
-          expectedInstanceName: context.outbox.instanceName,
-          completedAt: this.clock(),
-        });
+        const recovery = await recoverSafePreExternalFailure.call(
+          this.dependencies.executions,
+          {
+            executionId,
+            expectedRunId: context.run.id,
+            expectedDispatchId: context.dispatch.id,
+            expectedOutboxId: context.outbox.id,
+            expectedJobId: context.outbox.jobId,
+            expectedInstanceName: context.outbox.instanceName,
+            completedAt: this.clock(),
+          },
+        );
         if (recovery.outcome === 'BLOCKED') {
           this.markHuman(report, false);
           return true;
