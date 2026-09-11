@@ -26,6 +26,15 @@ const recoveryLogger = (logger: CommercialAutomationRuntimeLogger) => ({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
+const SAFE_PRE_EXTERNAL_REMOVABLE_JOB_STATES = new Set([
+  'waiting',
+  'delayed',
+  'prioritized',
+  'waiting-children',
+  'paused',
+  'failed',
+]);
+
 export const createCommercialRecoveryQueue = (
   queue: ReturnType<typeof createWhatsAppDispatchQueue>,
 ): CommercialRecoveryQueue => ({
@@ -41,7 +50,30 @@ export const createCommercialRecoveryQueue = (
       ...(typeof job.data.instanceName === 'string'
         ? { instanceName: job.data.instanceName }
         : {}),
+      state: await job.getState(),
     };
+  },
+  removeSafe: async ({ jobId, dispatchId, instanceName }) => {
+    const job = await queue.getJob(jobId);
+    if (!job) return 'ABSENT' as const;
+    if (!isRecord(job.data) || typeof job.data.dispatchId !== 'string') {
+      return 'MISMATCH' as const;
+    }
+    const state = await job.getState();
+    if (!SAFE_PRE_EXTERNAL_REMOVABLE_JOB_STATES.has(state)) {
+      return state === 'active' ? ('ACTIVE' as const) : ('UNSAFE_STATE' as const);
+    }
+    if (
+      String(job.id ?? '') !== jobId ||
+      job.data.dispatchId !== dispatchId ||
+      (typeof job.data.instanceName === 'string'
+        ? job.data.instanceName
+        : null) !== (instanceName ?? null)
+    ) {
+      return 'MISMATCH' as const;
+    }
+    await job.remove();
+    return 'REMOVED' as const;
   },
   enqueue: async (dispatchId, jobId, instanceName) => {
     await enqueueControlledWhatsAppDispatch(

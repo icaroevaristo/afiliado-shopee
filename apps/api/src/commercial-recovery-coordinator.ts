@@ -1,6 +1,8 @@
 import { AppError } from '@shopee-auto-affiliate-ai/shared';
 
 import { isCommercialAutomationExecutionStale } from './commercial-automation-execution-domain';
+import { isPersistedSafePreExternalFailure } from './commercial-automation-execution-recovery-service';
+import { COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE } from './repositories';
 import type {
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRecoveryContext,
@@ -54,11 +56,24 @@ export type CommercialRecoveryJob = {
   id: string;
   dispatchId: string;
   instanceName?: string | null;
+  state?: string;
 };
+
+export type CommercialRecoveryJobRemoval =
+  | 'REMOVED'
+  | 'ABSENT'
+  | 'ACTIVE'
+  | 'UNSAFE_STATE'
+  | 'MISMATCH';
 
 export type CommercialRecoveryQueue = {
   hasJob(jobId: string): Promise<boolean>;
   getJob?(jobId: string): Promise<CommercialRecoveryJob | null>;
+  removeSafe?(input: {
+    jobId: string;
+    dispatchId: string;
+    instanceName?: string | null;
+  }): Promise<CommercialRecoveryJobRemoval>;
   enqueue(
     dispatchId: string,
     jobId: string,
@@ -77,7 +92,13 @@ type RecoveryDependencies = {
   executions: Pick<
     CommercialAutomationExecutionRepository,
     'list' | 'findRecoveryContext'
-  >;
+  > &
+    Partial<
+      Pick<
+        CommercialAutomationExecutionRepository,
+        'recoverSafePreExternalFailure'
+      >
+    >;
   outboxes: Pick<
     CommercialDispatchOutboxRepository,
     'list' | 'findPublicationContext'
@@ -282,6 +303,29 @@ const isSafePostSendFinalization = (
   );
 };
 
+const isPersistedSafePreExternalFailureFromPublication = (
+  context: CommercialDispatchOutboxPublicationContext,
+) => {
+  const { outbox, run, dispatch } = context;
+  return (
+    lifecycleIdentitiesAreConsistent(context) &&
+    outbox.status === 'PUBLISHED' &&
+    run.mode === 'CONFIRMED' &&
+    typeof run.executionId === 'string' &&
+    run.dispatchId === dispatch.id &&
+    dispatch.errorMessage ===
+      COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE &&
+    ((run.status === 'STARTED' && run.finalStatus === 'PENDING') ||
+      (run.status === 'FAILED' && run.finalStatus === 'FAILED')) &&
+    !run.investigationRequired &&
+    run.jobId === outbox.jobId &&
+    dispatch.status === 'FAILED' &&
+    dispatch.attemptCount === 1 &&
+    dispatch.externalMessageId === null &&
+    dispatch.sentAt === null
+  );
+};
+
 const jobMatchesOutbox = (
   job: CommercialRecoveryJob | null,
   outbox: CommercialDispatchOutboxRecord,
@@ -392,6 +436,9 @@ export class CommercialRecoveryCoordinator {
         );
         continue;
       }
+      if (await this.reconcileSafePreExternalFailure(context, report)) {
+        continue;
+      }
       if (context.dispatch.attemptCount > 1) {
         this.markHuman(report, true);
         continue;
@@ -472,6 +519,120 @@ export class CommercialRecoveryCoordinator {
         'Commercial execution recovery requires review',
       );
       this.markHuman(report, false);
+    }
+  }
+
+  private async reconcileSafePreExternalFailure(
+    context: CommercialDispatchOutboxPublicationContext,
+    report: CommercialRecoveryReport,
+  ) {
+    if (!isPersistedSafePreExternalFailureFromPublication(context)) {
+      return false;
+    }
+    const executionId = context.run.executionId;
+    const queue = this.dependencies.queue;
+    if (!executionId || !queue?.getJob) {
+      this.markHuman(report, false);
+      return true;
+    }
+
+    try {
+      let recoveryContext =
+        await this.dependencies.executions.findRecoveryContext(executionId);
+      if (!recoveryContext) {
+        this.markHuman(report, false);
+        return true;
+      }
+      if (!isPersistedSafePreExternalFailure(recoveryContext)) {
+        const recoverSafePreExternalFailure =
+          this.dependencies.executions.recoverSafePreExternalFailure;
+        if (!recoverSafePreExternalFailure) {
+          this.markHuman(report, false);
+          return true;
+        }
+        const recovery = await recoverSafePreExternalFailure({
+          executionId,
+          expectedRunId: context.run.id,
+          expectedDispatchId: context.dispatch.id,
+          expectedOutboxId: context.outbox.id,
+          expectedJobId: context.outbox.jobId,
+          expectedInstanceName: context.outbox.instanceName,
+          completedAt: this.clock(),
+        });
+        if (recovery.outcome === 'BLOCKED') {
+          this.markHuman(report, false);
+          return true;
+        }
+        recoveryContext =
+          await this.dependencies.executions.findRecoveryContext(executionId);
+      }
+      if (
+        !recoveryContext ||
+        !isPersistedSafePreExternalFailure(recoveryContext) ||
+        recoveryContext.run?.id !== context.run.id ||
+        recoveryContext.run.dispatchId !== context.dispatch.id ||
+        recoveryContext.run.jobId !== context.outbox.jobId ||
+        recoveryContext.run.outbox?.id !== context.outbox.id
+      ) {
+        this.markHuman(report, false);
+        return true;
+      }
+
+      const job = await queue.getJob(context.outbox.jobId);
+      if (!job) {
+        if (await queue.hasJob(context.outbox.jobId)) {
+          this.markHuman(report, false);
+        } else {
+          report.noAction += 1;
+        }
+        return true;
+      }
+      if (
+        job.id !== context.outbox.jobId ||
+        job.dispatchId !== context.outbox.dispatchId ||
+        (job.instanceName ?? null) !== (context.outbox.instanceName ?? null) ||
+        !job.state ||
+        ![
+          'waiting',
+          'delayed',
+          'prioritized',
+          'waiting-children',
+          'paused',
+          'failed',
+        ].includes(
+          job.state,
+        )
+      ) {
+        this.markHuman(report, false);
+        return true;
+      }
+      if (!queue.removeSafe) {
+        this.markHuman(report, false);
+        return true;
+      }
+      const removed = await queue.removeSafe({
+        jobId: context.outbox.jobId,
+        dispatchId: context.outbox.dispatchId,
+        instanceName: context.outbox.instanceName,
+      });
+      if (removed === 'REMOVED' || removed === 'ABSENT') {
+        report.safeQueueRecovered += 1;
+      } else {
+        this.markHuman(report, false);
+      }
+      return true;
+    } catch (error) {
+      this.dependencies.logger.error(
+        {
+          event: 'commercial-recovery.safe-pre-external-cleanup-failed',
+          outboxId: context.outbox.id,
+          executionId,
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Safe pre-external queue cleanup failed closed',
+      );
+      this.markHuman(report, false);
+      return true;
     }
   }
 

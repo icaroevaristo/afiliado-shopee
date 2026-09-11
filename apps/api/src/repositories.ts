@@ -467,6 +467,7 @@ export type CommercialDispatchOutboxPublicationContext = {
     WhatsAppDispatchRecord,
     'id' | 'status' | 'attemptCount' | 'instanceName'
   > & {
+    errorMessage?: string | null;
     externalMessageId?: string | null;
     sentAt?: Date | null;
   };
@@ -1122,6 +1123,12 @@ export type CommercialAutomationExecutionStatus =
 export type CommercialAutomationExecutionExternalStage =
   'NOT_REACHED' | 'EXTERNAL_MAY_HAVE_STARTED';
 
+export const COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE =
+  'COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE' as const;
+
+export const COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE =
+  'Envio bloqueado antes do request externo' as const;
+
 export type CommercialAutomationExecutionRecord = {
   id: string;
   schedulerJobId: string;
@@ -1149,15 +1156,16 @@ export type CommercialAutomationExecutionRecoveryContext = {
   execution: CommercialAutomationExecutionRecord;
   run:
     | (Pick<
-        CommercialPipelineRunRecord,
-        | 'id'
-        | 'mode'
-        | 'dispatchId'
-        | 'jobId'
+      CommercialPipelineRunRecord,
+      | 'id'
+      | 'mode'
+      | 'dispatchId'
+      | 'jobId'
         | 'instanceName'
-        | 'finalStatus'
-        | 'investigationRequired'
-      > & {
+      | 'finalStatus'
+      | 'investigationRequired'
+    > & {
+        status?: CommercialPipelineRunRecord['status'];
         dispatch:
           | (Pick<
               WhatsAppDispatchRecord,
@@ -1167,6 +1175,7 @@ export type CommercialAutomationExecutionRecoveryContext = {
               destinationType?: 'INDIVIDUAL' | 'GROUP';
               destinationAssignedInstanceName?: string | null;
               destinationAssignedInstanceNames?: string[];
+              errorMessage?: string | null;
               externalMessageId?: string | null;
               sentAt?: Date | null;
             })
@@ -1175,6 +1184,37 @@ export type CommercialAutomationExecutionRecoveryContext = {
       })
     | null;
 };
+
+export type CommercialSafePreExternalFailureInput = {
+  executionId: string;
+  expectedRunId: string;
+  expectedDispatchId: string;
+  expectedOutboxId: string;
+  expectedJobId: string;
+  expectedInstanceName: string | null;
+  completedAt: Date;
+};
+
+export type CommercialSafePreExternalFailureResult =
+  | {
+      outcome: 'RECOVERED' | 'ALREADY_RECOVERED';
+      execution: CommercialAutomationExecutionRecord;
+    }
+  | {
+      outcome: 'BLOCKED';
+      reason:
+        | 'EXECUTION_NOT_FOUND'
+        | 'EXECUTION_NOT_STARTABLE'
+        | 'EXECUTION_EVIDENCE'
+        | 'RUN_EVIDENCE'
+        | 'DISPATCH_EVIDENCE'
+        | 'OUTBOX_EVIDENCE'
+        | 'INSTANCE_EVIDENCE'
+        | 'CANDIDATE_EVIDENCE'
+        | 'RESERVATION_EVIDENCE'
+        | 'CAS_CONFLICT'
+        | 'LOOKUP_FAILED';
+    };
 
 export type CommercialPreMarkerReservationRecoveryResult =
   | {
@@ -1301,6 +1341,9 @@ export interface CommercialAutomationExecutionRepository {
   findRecoveryContext(
     id: string,
   ): Promise<CommercialAutomationExecutionRecoveryContext | null>;
+  recoverSafePreExternalFailure?(
+    input: CommercialSafePreExternalFailureInput,
+  ): Promise<CommercialSafePreExternalFailureResult>;
   recoverStalePreMarkerReservation?(
     id: string,
     input: {

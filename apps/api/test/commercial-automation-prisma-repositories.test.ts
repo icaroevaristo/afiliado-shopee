@@ -5,6 +5,10 @@ import {
   PrismaCommercialAutomationHistoryRepository,
   PrismaCommercialAutomationSettingsRepository,
 } from '../src/prisma-repositories';
+import {
+  COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+  COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+} from '../src/repositories';
 
 describe('commercial automation Prisma repositories', () => {
   it('atualiza agenda com CAS de revision e incremento atomico', async () => {
@@ -1881,5 +1885,176 @@ describe('commercial automation Prisma repositories', () => {
       status: 'STARTED',
       failureCode: null,
     });
+  });
+
+  it('terminaliza falha segura pre-externa com CAS e libera somente a reserva exata', async () => {
+    const now = new Date('2026-09-10T20:00:00.000Z');
+    const reservedAt = new Date('2026-09-10T19:58:00.000Z');
+    const leaseExpiresAt = new Date('2026-09-10T20:05:00.000Z');
+    const executionBase = {
+      id: 'execution-safe-pre-external',
+      schedulerJobId: 'scheduled-commercial-automation',
+      bullMqJobId: 'commercial-target-slot-safe',
+      activeKey: 'commercial-automation' as string | null,
+      ownerId: 'owner-safe',
+      heartbeatAt: new Date('2026-09-10T19:59:00.000Z'),
+      leaseExpiresAt,
+      mode: 'SEND',
+      status: 'STARTED',
+      externalStage: 'NOT_REACHED',
+      reasons: [],
+      commercialRunId: 'run-safe-pre-external',
+      failureCode: null as string | null,
+      startedAt: new Date('2026-09-10T19:57:00.000Z'),
+      completedAt: null as Date | null,
+    };
+    let execution = { ...executionBase };
+    let campaign = {
+      id: 'campaign-safe',
+      anchorDestinationId: 'group-safe',
+      logicalGroupFingerprint: 'fingerprint-safe',
+      attemptExecutionId: execution.id as string | null,
+      attemptReservedAt: reservedAt as Date | null,
+      attemptLeaseExpiresAt: leaseExpiresAt as Date | null,
+    };
+    let candidate = {
+      id: 'candidate-safe',
+      campaignId: campaign.id,
+      productId: 'product-safe',
+      generatedCopyId: 'copy-safe' as string | null,
+      status: 'BLOCKED',
+    };
+    const run = {
+      id: 'run-safe-pre-external',
+      executionId: execution.id,
+      mode: 'CONFIRMED',
+      status: 'FAILED',
+      productId: 'product-safe',
+      groupDestinationId: 'group-safe',
+      groupFingerprint: 'fingerprint-safe',
+      dispatchId: 'dispatch-safe',
+      jobId: 'job-safe',
+      instanceName: 'instance-safe',
+      finalStatus: 'FAILED',
+      investigationRequired: false,
+      dispatch: {
+        id: 'dispatch-safe',
+        productId: 'product-safe',
+        generatedCopyId: 'copy-safe',
+        instanceName: 'instance-safe',
+        status: 'FAILED',
+        attemptCount: 1,
+        errorMessage: COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+        externalMessageId: null,
+        sentAt: null,
+      },
+      dispatchOutbox: {
+        id: 'outbox-safe',
+        commercialRunId: 'run-safe-pre-external',
+        dispatchId: 'dispatch-safe',
+        jobId: 'job-safe',
+        instanceName: 'instance-safe',
+        status: 'PUBLISHED',
+      },
+    };
+    const executionFindUnique = vi.fn(async () => execution);
+    const campaignFindUnique = vi.fn(async () => campaign);
+    const campaignUpdateMany = vi.fn(async () => {
+      campaign = {
+        ...campaign,
+        attemptExecutionId: null,
+        attemptReservedAt: null,
+        attemptLeaseExpiresAt: null,
+      };
+      return { count: 1 };
+    });
+    const candidateFindMany = vi.fn(async () => [candidate]);
+    const candidateUpdateMany = vi.fn(async () => {
+      candidate = { ...candidate, status: 'BLOCKED' };
+      return { count: 1 };
+    });
+    const executionUpdateMany = vi.fn(async () => {
+      execution = {
+        ...execution,
+        activeKey: null,
+        status: 'FAILED',
+        failureCode: COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+        completedAt: now,
+      };
+      return { count: 1 };
+    });
+    const transaction = {
+      commercialAutomationExecution: {
+        findUnique: executionFindUnique,
+        updateMany: executionUpdateMany,
+      },
+      commercialPipelineRun: {
+        findUnique: vi.fn().mockResolvedValue(run),
+      },
+      commercialPromotionCandidate: {
+        findMany: candidateFindMany,
+        updateMany: candidateUpdateMany,
+      },
+      commercialGroupCampaign: {
+        findUnique: campaignFindUnique,
+        updateMany: campaignUpdateMany,
+      },
+    };
+    const prismaTransaction = vi.fn(
+      async (callback: (tx: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    );
+    const repository = new PrismaCommercialAutomationExecutionRepository({
+      $transaction: prismaTransaction,
+      commercialAutomationExecution: { findUnique: executionFindUnique },
+      commercialPipelineRun: {},
+      commercialGroupCampaign: {},
+      commercialPromotionCandidate: {},
+      commercialCopyGenerationAttempt: {},
+    } as never);
+    const input = {
+      executionId: execution.id,
+      expectedRunId: run.id,
+      expectedDispatchId: run.dispatchId,
+      expectedOutboxId: run.dispatchOutbox.id,
+      expectedJobId: run.jobId,
+      expectedInstanceName: run.instanceName,
+      completedAt: now,
+    };
+
+    await expect(repository.recoverSafePreExternalFailure(input)).resolves.toMatchObject({
+      outcome: 'RECOVERED',
+      execution: {
+        status: 'FAILED',
+        failureCode: COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+      },
+    });
+    await expect(repository.recoverSafePreExternalFailure(input)).resolves.toMatchObject({
+      outcome: 'ALREADY_RECOVERED',
+    });
+
+    expect(prismaTransaction).toHaveBeenCalledTimes(2);
+    expect(campaignUpdateMany).toHaveBeenCalledOnce();
+    expect(executionUpdateMany).toHaveBeenCalledOnce();
+    expect(candidateUpdateMany).not.toHaveBeenCalled();
+    expect(campaign).toMatchObject({
+      attemptExecutionId: null,
+      attemptReservedAt: null,
+      attemptLeaseExpiresAt: null,
+    });
+    expect(execution).toMatchObject({
+      status: 'FAILED',
+      failureCode: COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+      activeKey: null,
+    });
+
+    await expect(
+      repository.recoverSafePreExternalFailure({
+        ...input,
+        expectedJobId: 'foreign-job',
+      }),
+    ).resolves.toEqual({ outcome: 'BLOCKED', reason: 'RUN_EVIDENCE' });
+    expect(campaignUpdateMany).toHaveBeenCalledOnce();
+    expect(executionUpdateMany).toHaveBeenCalledOnce();
   });
 });

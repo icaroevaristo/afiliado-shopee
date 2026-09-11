@@ -5,6 +5,7 @@ import type {
   HunterProvider,
   WhatsAppProvider,
 } from '@shopee-auto-affiliate-ai/providers';
+import { WhatsAppSendError } from '@shopee-auto-affiliate-ai/providers';
 import {
   createRedisConnection,
   JOB_NAMES,
@@ -50,10 +51,10 @@ export type WhatsAppDispatchProcessorRepositories = Pick<
     | 'findAttemptContextByGeneratedCopyId'
     | 'releaseAttempt'
   >;
-  commercialAutomationExecutions?: Pick<
+  commercialAutomationExecutions?: Partial<Pick<
     ApplicationRepositories['commercialAutomationExecutions'],
-    'findById'
-  >;
+    'findById' | 'recoverSafePreExternalFailure'
+  >>;
   commercialGroupCampaigns?: Pick<
     ApplicationRepositories['commercialGroupCampaigns'],
     'renewAttempt'
@@ -169,6 +170,11 @@ const consoleLogger: WhatsAppDispatchWorkerLogger = {
   info: (obj, msg) => console.info(msg, obj),
   error: (obj, msg) => console.error(msg, obj),
 };
+
+const isSafePreExternalProviderFailure = (
+  error: unknown,
+): error is WhatsAppSendError =>
+  error instanceof WhatsAppSendError && !error.deliveryMayHaveStarted;
 
 const errorType = (error: unknown) =>
   error instanceof Error ? error.name : 'UnknownError';
@@ -675,6 +681,78 @@ export const processWhatsAppDispatchJob = async (
               requeueAllowed: false,
             },
             'Manual publication lifecycle finalization failed after provider error',
+          );
+        }
+      }
+      if (isSafePreExternalProviderFailure(error)) {
+        const executionId = commercialRun?.executionId;
+        const jobId = job.id;
+        const instanceName =
+          job.data.instanceName ??
+          failedDispatch.instanceName ??
+          commercialRun?.instanceName ??
+          null;
+        try {
+          const recoverSafePreExternalFailure =
+            repositories.commercialAutomationExecutions
+              ?.recoverSafePreExternalFailure;
+          const outbox =
+            await repositories.commercialDispatchOutboxes?.findByDispatchId?.(
+              failedDispatch.id,
+            );
+          if (
+            recoverSafePreExternalFailure &&
+            commercialRun &&
+            executionId &&
+            outbox &&
+            typeof jobId === 'string'
+          ) {
+            const recovery = await recoverSafePreExternalFailure({
+              executionId,
+              expectedRunId: commercialRun.id,
+              expectedDispatchId: failedDispatch.id,
+              expectedOutboxId: outbox.id,
+              expectedJobId: jobId,
+              expectedInstanceName: instanceName,
+              completedAt: clock(),
+            });
+            if (recovery.outcome === 'BLOCKED') {
+              options.logger.error(
+                {
+                  event: 'commercial-dispatch.safe-pre-external-recovery-blocked',
+                  dispatchId: failedDispatch.id,
+                  executionId,
+                  recoveryReason: recovery.reason,
+                  providerRetryAllowed: false,
+                  requeueAllowed: false,
+                },
+                'Safe pre-external commercial failure requires reconciliation',
+              );
+            }
+          } else {
+            options.logger.error(
+              {
+                event: 'commercial-dispatch.safe-pre-external-recovery-unavailable',
+                dispatchId: failedDispatch.id,
+                executionId: executionId ?? null,
+                providerRetryAllowed: false,
+                requeueAllowed: false,
+              },
+              'Safe pre-external commercial failure lacks exact recovery evidence',
+            );
+          }
+        } catch (recoveryError) {
+          options.logger.error(
+            {
+              event: 'commercial-dispatch.safe-pre-external-recovery-failed',
+              dispatchId: failedDispatch.id,
+              executionId,
+              recoveryErrorType: errorType(recoveryError),
+              recoveryErrorCode: errorCode(recoveryError),
+              providerRetryAllowed: false,
+              requeueAllowed: false,
+            },
+            'Safe pre-external commercial failure recovery failed closed',
           );
         }
       }

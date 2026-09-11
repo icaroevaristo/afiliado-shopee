@@ -10,6 +10,7 @@ import type {
   WhatsAppDispatchRecord,
   WhatsAppDispatchDetails,
 } from './repositories';
+import { COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE } from './repositories';
 import type { WhatsAppGroupSendPolicy } from './whatsapp-group-send-policy';
 import {
   COMMERCIAL_AI_COPY_PROMPT_VERSION,
@@ -440,7 +441,7 @@ export class SenderService {
         try {
           await this.options.dispatches.markFailed(
             dispatch.id,
-            'Envio bloqueado antes do request externo',
+            COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
           );
         } catch (persistenceError) {
           this.options.logger.error(
