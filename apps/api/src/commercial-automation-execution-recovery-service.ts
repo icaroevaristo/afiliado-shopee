@@ -7,6 +7,10 @@ import {
   assertActiveCommercialInstance,
   assertCommercialStickyIdentity,
 } from './commercial-instance-stickiness';
+import {
+  COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+  COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+} from './repositories';
 import type {
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRecoveryContext,
@@ -24,6 +28,43 @@ export const COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS =
   'COMMERCIAL_EXECUTION_RECOVERY_AMBIGUOUS';
 export const COMMERCIAL_EXECUTION_DISPATCH_FAILED =
   'COMMERCIAL_EXECUTION_DISPATCH_FAILED';
+
+export const isPersistedSafePreExternalFailure = (
+  context: CommercialAutomationExecutionRecoveryContext,
+) => {
+  const { execution, run } = context;
+  const dispatch = run?.dispatch;
+  const outbox = run?.outbox;
+  return Boolean(
+    execution.status === 'FAILED' &&
+    execution.failureCode ===
+        COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE &&
+      execution.mode === 'SEND' &&
+      execution.externalStage === 'NOT_REACHED' &&
+      execution.activeKey === null &&
+      execution.completedAt instanceof Date &&
+      !Number.isNaN(execution.completedAt.getTime()) &&
+      run &&
+      dispatch &&
+      outbox &&
+      execution.commercialRunId === run.id &&
+      run.mode === 'CONFIRMED' &&
+      run.finalStatus === 'FAILED' &&
+      !run.investigationRequired &&
+      run.dispatchId === dispatch?.id &&
+      run.jobId === outbox?.jobId &&
+      outbox.commercialRunId === run.id &&
+      outbox.dispatchId === dispatch.id &&
+      outbox.status === 'PUBLISHED' &&
+      dispatch.errorMessage ===
+        COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE &&
+      run.status === 'FAILED' &&
+      dispatch.status === 'FAILED' &&
+      dispatch.attemptCount === 1 &&
+      dispatch.externalMessageId === null &&
+      dispatch.sentAt === null,
+  );
+};
 
 type RecoveryDecision = {
   status: 'QUEUED' | 'FAILED' | 'AMBIGUOUS';

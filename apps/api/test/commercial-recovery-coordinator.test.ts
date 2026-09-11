@@ -4,13 +4,20 @@ import {
   CommercialRecoveryCoordinator,
   type CommercialRecoveryJob,
   type CommercialRecoveryPublishResult,
+  type CommercialRecoveryQueue,
 } from '../src/commercial-recovery-coordinator';
 import type {
   CommercialAutomationExecutionRecord,
   CommercialAutomationExecutionRecoveryContext,
   CommercialAutomationSettingsRecord,
+  CommercialSafePreExternalFailureInput,
+  CommercialSafePreExternalFailureResult,
   CommercialDispatchOutboxPublicationContext,
   CommercialDispatchOutboxRecord,
+} from '../src/repositories';
+import {
+  COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+  COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
 } from '../src/repositories';
 
 const now = new Date('2026-08-29T12:00:00.000Z');
@@ -120,6 +127,10 @@ const createSubject = (input: {
     outboxId: string,
   ) => Promise<CommercialRecoveryPublishResult>;
   finalizeAfterDispatch?: (dispatchId: string) => Promise<unknown>;
+  recoverSafePreExternalFailure?: (
+    input: CommercialSafePreExternalFailureInput,
+  ) => Promise<CommercialSafePreExternalFailureResult>;
+  removeSafe?: CommercialRecoveryQueue['removeSafe'];
   manualRecoveryDecision?: (
     dispatchId: string,
   ) => Promise<'CONFIRMED_NON_DELIVERY' | 'AMBIGUITY_ACCEPTED_NO_RETRY' | null>;
@@ -132,9 +143,11 @@ const createSubject = (input: {
   const hasJob = vi.fn(async (jobId: string) => queueJobs.has(jobId));
   const getJob = vi.fn(async (jobId: string) => queueJobs.get(jobId) ?? null);
   const enqueue = vi.fn(async () => undefined);
+  const removeSafe = input.removeSafe ?? vi.fn(async () => 'REMOVED' as const);
   const recoverExecution =
     input.recoverExecution ??
     vi.fn(async () => ({ outcome: 'recovered' as const }));
+  const recoverSafePreExternalFailure = input.recoverSafePreExternalFailure;
   const publishOutbox = input.publishOutbox ?? vi.fn();
   const finalizeAfterDispatch = input.finalizeAfterDispatch ?? vi.fn();
   const logger = { info: vi.fn(), error: vi.fn() };
@@ -146,13 +159,16 @@ const createSubject = (input: {
     executions: {
       list: async () => ({ items: executions, total: executions.length }),
       findRecoveryContext: async (id) => executionContexts.get(id) ?? null,
+      recoverSafePreExternalFailure,
     },
     outboxes: {
       list: async () => ({ items: outboxes, total: outboxes.length }),
       findPublicationContext: async (id) => publicationContexts.get(id) ?? null,
     },
     queue:
-      input.queueAvailable === false ? undefined : { hasJob, getJob, enqueue },
+      input.queueAvailable === false
+        ? undefined
+        : { hasJob, getJob, removeSafe, enqueue },
     recoverExecution,
     publishOutbox,
     finalizeAfterDispatch,
@@ -167,6 +183,7 @@ const createSubject = (input: {
     hasJob,
     getJob,
     enqueue,
+    removeSafe,
     recoverExecution,
     publishOutbox,
     finalizeAfterDispatch,
@@ -247,6 +264,204 @@ describe('commercial recovery coordinator', () => {
     });
     expect(publishOutbox).not.toHaveBeenCalled();
     expect(harness.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('remove somente o job waiting apos a falha segura pre-externa persistida', async () => {
+    const currentOutbox = outbox({
+      status: 'PUBLISHED',
+      publishedAt: now,
+    });
+    const safeExecution = execution({
+      id: 'execution-safe-pre-external',
+      status: 'FAILED',
+      activeKey: null,
+      commercialRunId: currentOutbox.commercialRunId,
+      failureCode: COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+      completedAt: now,
+    });
+    const publication = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        status: 'FAILED',
+        finalStatus: 'FAILED',
+        investigationRequired: false,
+        jobId: currentOutbox.jobId,
+        executionId: safeExecution.id,
+      },
+      dispatch: {
+        status: 'FAILED',
+        attemptCount: 1,
+        errorMessage: COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+        externalMessageId: null,
+        sentAt: null,
+      },
+    });
+    const recoveryContext: CommercialAutomationExecutionRecoveryContext = {
+      execution: safeExecution,
+      run: {
+        id: currentOutbox.commercialRunId,
+        mode: 'CONFIRMED',
+        status: 'FAILED',
+        dispatchId: currentOutbox.dispatchId,
+        jobId: currentOutbox.jobId,
+        instanceName: currentOutbox.instanceName,
+        finalStatus: 'FAILED',
+        investigationRequired: false,
+        dispatch: {
+          id: currentOutbox.dispatchId,
+          status: 'FAILED',
+          attemptCount: 1,
+          instanceName: currentOutbox.instanceName,
+          errorMessage: COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+          externalMessageId: null,
+          sentAt: null,
+        },
+        outbox: currentOutbox,
+      },
+    };
+    const harness = createSubject({
+      paused: false,
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, publication]]),
+      executionContexts: new Map([[safeExecution.id, recoveryContext]]),
+      queueJobs: new Map([
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+            state: 'waiting',
+          },
+        ],
+      ]),
+    });
+
+    await expect(harness.subject.run()).resolves.toMatchObject({
+      safeQueueRecovered: 1,
+      humanRequired: 0,
+      noAction: 0,
+    });
+    expect(harness.removeSafe).toHaveBeenCalledWith({
+      jobId: currentOutbox.jobId,
+      dispatchId: currentOutbox.dispatchId,
+      instanceName: currentOutbox.instanceName,
+    });
+    expect(harness.publishOutbox).not.toHaveBeenCalled();
+    expect(harness.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('converge no restart quando o dispatch falhou antes da finalizacao do run', async () => {
+    const currentOutbox = outbox({
+      status: 'PUBLISHED',
+      publishedAt: now,
+    });
+    const startedExecution = execution({
+      id: 'execution-safe-restart',
+      commercialRunId: currentOutbox.commercialRunId,
+    });
+    const recoveredExecution = execution({
+      ...startedExecution,
+      status: 'FAILED',
+      activeKey: null,
+      failureCode: COMMERCIAL_EXECUTION_SAFE_PRE_EXTERNAL_SEND_FAILURE,
+      completedAt: now,
+    });
+    const publication = publicationContext({
+      outbox: currentOutbox,
+      run: {
+        status: 'STARTED',
+        finalStatus: 'PENDING',
+        investigationRequired: false,
+        jobId: currentOutbox.jobId,
+        executionId: startedExecution.id,
+      },
+      dispatch: {
+        status: 'FAILED',
+        attemptCount: 1,
+        errorMessage: COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+        externalMessageId: null,
+        sentAt: null,
+      },
+    });
+    const pendingRecoveryContext: CommercialAutomationExecutionRecoveryContext = {
+      execution: startedExecution,
+      run: {
+        id: currentOutbox.commercialRunId,
+        mode: 'CONFIRMED',
+        status: 'STARTED',
+        dispatchId: currentOutbox.dispatchId,
+        jobId: currentOutbox.jobId,
+        instanceName: currentOutbox.instanceName,
+        finalStatus: 'PENDING',
+        investigationRequired: false,
+        dispatch: {
+          id: currentOutbox.dispatchId,
+          status: 'FAILED',
+          attemptCount: 1,
+          instanceName: currentOutbox.instanceName,
+          errorMessage: COMMERCIAL_DISPATCH_SAFE_PRE_EXTERNAL_FAILURE_MESSAGE,
+          externalMessageId: null,
+          sentAt: null,
+        },
+        outbox: currentOutbox,
+      },
+    };
+    const recoveredContext: CommercialAutomationExecutionRecoveryContext = {
+      ...pendingRecoveryContext,
+      execution: recoveredExecution,
+      run: {
+        ...pendingRecoveryContext.run!,
+        status: 'FAILED',
+        finalStatus: 'FAILED',
+      },
+    };
+    const executionContexts = new Map([
+      [startedExecution.id, pendingRecoveryContext],
+    ]);
+    const recoverSafePreExternalFailure = vi.fn(
+      async (input: CommercialSafePreExternalFailureInput) => {
+        expect(input).toMatchObject({
+          executionId: startedExecution.id,
+          expectedRunId: currentOutbox.commercialRunId,
+          expectedDispatchId: currentOutbox.dispatchId,
+          expectedOutboxId: currentOutbox.id,
+          expectedJobId: currentOutbox.jobId,
+          expectedInstanceName: currentOutbox.instanceName,
+        });
+        executionContexts.set(startedExecution.id, recoveredContext);
+        return {
+          outcome: 'RECOVERED' as const,
+          execution: recoveredExecution,
+        };
+      },
+    );
+    const harness = createSubject({
+      paused: false,
+      outboxes: [currentOutbox],
+      publicationContexts: new Map([[currentOutbox.id, publication]]),
+      executionContexts,
+      recoverSafePreExternalFailure,
+      queueJobs: new Map([
+        [
+          currentOutbox.jobId,
+          {
+            id: currentOutbox.jobId,
+            dispatchId: currentOutbox.dispatchId,
+            instanceName: currentOutbox.instanceName,
+            state: 'waiting',
+          },
+        ],
+      ]),
+    });
+
+    await expect(harness.subject.run()).resolves.toMatchObject({
+      safeQueueRecovered: 1,
+      humanRequired: 0,
+      noAction: 0,
+    });
+    expect(recoverSafePreExternalFailure).toHaveBeenCalledOnce();
+    expect(harness.removeSafe).toHaveBeenCalledOnce();
   });
 
   it('preserves a pending dispatch when persisted external evidence exists', async () => {

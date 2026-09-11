@@ -385,6 +385,7 @@ const createHandoffRepositories = (input: {
             ? executionForHandoff()
             : input.execution,
         ),
+      recoverSafePreExternalFailure: vi.fn(),
     },
     commercialGroupCampaigns: { renewAttempt },
     commercialDispatchOutboxes: {
@@ -1836,6 +1837,13 @@ describe('processWhatsAppDispatchJob', () => {
       },
     };
     const { repositories } = createHandoffRepositories({ dispatch });
+    const safePreExternalRecovery = vi
+      .fn()
+      .mockResolvedValue({ outcome: 'RECOVERED' as const, execution: executionForHandoff() });
+    repositories.commercialAutomationExecutions = {
+      ...repositories.commercialAutomationExecutions,
+      recoverSafePreExternalFailure: safePreExternalRecovery,
+    };
     const provider: WhatsAppProvider = {
       beginRun: vi.fn(),
       sendMessage: vi
@@ -1896,6 +1904,13 @@ describe('processWhatsAppDispatchJob', () => {
     expect(
       manualLifecycleFinalizer.finalizeAfterDispatch,
     ).toHaveBeenCalledOnce();
+    expect(safePreExternalRecovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedDispatchId: dispatch.id,
+        expectedJobId: 'job-manual-safe-failure',
+        expectedInstanceName: 'instance',
+      }),
+    );
   });
 
   it('não repete provider quando o finalizer manual falha depois de SENT', async () => {

@@ -4,6 +4,7 @@ import { createPrismaClient } from '@shopee-auto-affiliate-ai/database';
 import {
   createWhatsAppProvider,
   type WhatsAppProviderFactoryOptions,
+  WhatsAppSendError,
 } from '@shopee-auto-affiliate-ai/providers';
 import {
   createRedisConnection,
@@ -17,11 +18,13 @@ import {
   createCommercialRecoveryQueue,
   createCommercialRecoveryCoordinator,
 } from './commercial-recovery-bootstrap';
+import { createPrismaRepositories } from '../../api/src/application-services';
 import {
   assertCommercialRecoveryStartupSafe,
   type CommercialRecoveryCoordinator,
   type CommercialRecoveryReport,
 } from '../../api/src/commercial-recovery-coordinator';
+import { isPersistedSafePreExternalFailure } from '../../api/src/commercial-automation-execution-recovery-service';
 import {
   createWhatsAppDispatchWorker,
   processWhatsAppDispatchJob,
@@ -352,6 +355,54 @@ const executeOneShotDispatch: R8OneShotExecutor = async (input) => {
     } catch (error) {
       if (exactJob && input.fence.sendBudgetConsumed === 0) {
         await exactJob.remove().catch(() => undefined);
+      }
+      if (
+        exactJob &&
+        error instanceof WhatsAppSendError &&
+        !error.deliveryMayHaveStarted
+      ) {
+        try {
+          const state = await exactJob.getState();
+          const removableStates = new Set([
+            'waiting',
+            'delayed',
+            'prioritized',
+            'waiting-children',
+            'paused',
+            'failed',
+          ]);
+          if (
+            removableStates.has(state) &&
+            exactJob.id === input.fence.authorizedJob.jobId &&
+            exactJob.data.dispatchId === input.fence.authorizedJob.dispatchId &&
+            exactJob.data.instanceName === input.fence.authorizedJob.instanceName
+          ) {
+            const repositories = createPrismaRepositories(prisma);
+            const run = await repositories.commercialRuns.findByDispatchId(
+              input.fence.authorizedJob.dispatchId,
+            );
+            const recoveryContext = run?.executionId
+              ? await repositories.commercialAutomationExecutions.findRecoveryContext(
+                  run.executionId,
+                )
+              : null;
+            if (
+              recoveryContext &&
+              isPersistedSafePreExternalFailure(recoveryContext) &&
+              recoveryContext.run &&
+              recoveryContext.run?.id === run?.id &&
+              recoveryContext.run.jobId === exactJob.id &&
+              recoveryContext.run.dispatchId === exactJob.data.dispatchId &&
+              (recoveryContext.run.dispatch?.instanceName ?? null) ===
+                (exactJob.data.instanceName ?? null)
+            ) {
+              await exactJob.remove();
+            }
+          }
+        } catch {
+          // Preserve the exact job when safe terminal evidence cannot be
+          // revalidated. Startup recovery will fail closed instead.
+        }
       }
       input.logger.error(
         {
