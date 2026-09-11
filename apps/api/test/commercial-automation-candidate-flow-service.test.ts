@@ -667,12 +667,13 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
   });
 
-  it('executa o callback do marker imediatamente antes de gerar copy para QUEUED', async () => {
+  it('passa o marker para a geracao e o executa na fronteira externa real', async () => {
     const subject = createSubject({
       candidate: { status: 'QUEUED', generatedCopyId: null },
     });
     const events: string[] = [];
-    subject.copyGeneration.generate.mockImplementation(async () => {
+    subject.copyGeneration.generate.mockImplementation(async (...args) => {
+      await (args[2] as (() => Promise<void>) | undefined)?.();
       events.push('copyGenerate');
       subject.setCandidate({ status: 'COPY_READY', generatedCopyId: 'copy-1' });
     });
@@ -693,7 +694,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
   });
 
-  it('preserva o receiver do selector manual durante o preparo de candidate QUEUED', async () => {
+  it('preserva o receiver do selector manual e a ordem do marker na geracao', async () => {
     let receiverPreserved = false;
     const mining = {
       receiverToken: 'candidate-mining',
@@ -722,7 +723,8 @@ describe('CommercialAutomationCandidateFlowService', () => {
       mining,
     });
     const events: string[] = [];
-    subject.copyGeneration.generate.mockImplementation(async () => {
+    subject.copyGeneration.generate.mockImplementation(async (...args) => {
+      await (args[2] as (() => Promise<void>) | undefined)?.();
       events.push('generate');
       subject.setCandidate({ status: 'COPY_READY', generatedCopyId: 'copy-1' });
     });
@@ -738,11 +740,15 @@ describe('CommercialAutomationCandidateFlowService', () => {
     expect(events).toEqual(['marker', 'generate']);
   });
 
-  it('nao chama generate quando o callback do marker falha', async () => {
+  it('propaga falha do marker sem executar a geracao externa', async () => {
     const subject = createSubject({
       candidate: { status: 'QUEUED', generatedCopyId: null },
     });
     const markerFailure = new Error('marker unavailable');
+
+    subject.copyGeneration.generate.mockImplementation(async (...args) => {
+      await (args[2] as (() => Promise<void>) | undefined)?.();
+    });
 
     await expect(
       subject.service.prepare(selection(subject.target, 'QUEUED'), {
@@ -753,7 +759,7 @@ describe('CommercialAutomationCandidateFlowService', () => {
       }),
     ).rejects.toBe(markerFailure);
 
-    expect(subject.copyGeneration.generate).not.toHaveBeenCalled();
+    expect(subject.copyGeneration.generate).toHaveBeenCalledOnce();
     expect(subject.pipeline.dryRunFromPromotionCandidate).not.toHaveBeenCalled();
   });
 

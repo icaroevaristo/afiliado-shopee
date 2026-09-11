@@ -9727,17 +9727,19 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
             };
           }
 
-          if (execution.status !== 'STARTED') {
+          const queuedExecution = execution.status === 'QUEUED';
+          if (execution.status !== 'STARTED' && !queuedExecution) {
             return {
               outcome: 'BLOCKED' as const,
               reason: 'EXECUTION_NOT_STARTABLE' as const,
             };
           }
           if (
-            !execution.ownerId ||
-            !execution.activeKey ||
-            !execution.heartbeatAt ||
-            !execution.leaseExpiresAt
+            !queuedExecution &&
+            (!execution.ownerId ||
+              !execution.activeKey ||
+              !execution.heartbeatAt ||
+              !execution.leaseExpiresAt)
           ) {
             return {
               outcome: 'BLOCKED' as const,
@@ -9809,13 +9811,17 @@ export class PrismaCommercialAutomationExecutionRepository implements Commercial
             await transaction.commercialAutomationExecution.updateMany({
               where: {
                 id: input.executionId,
-                status: 'STARTED',
+                status: queuedExecution ? 'QUEUED' : 'STARTED',
                 externalStage: 'NOT_REACHED',
                 commercialRunId: input.expectedRunId,
-                ownerId: execution.ownerId,
-                activeKey: execution.activeKey,
-                heartbeatAt: execution.heartbeatAt,
-                leaseExpiresAt: execution.leaseExpiresAt,
+                ...(queuedExecution
+                  ? {}
+                  : {
+                      ownerId: execution.ownerId,
+                      activeKey: execution.activeKey,
+                      heartbeatAt: execution.heartbeatAt,
+                      leaseExpiresAt: execution.leaseExpiresAt,
+                    }),
               },
               data: {
                 activeKey: null,

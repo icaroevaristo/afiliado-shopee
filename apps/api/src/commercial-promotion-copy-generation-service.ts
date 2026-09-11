@@ -874,7 +874,11 @@ export class CommercialPromotionCopyGenerationService {
     return this.result(context, completed.copy, false);
   }
 
-  async generate(candidateId: string, confirmation: string) {
+  async generate(
+    candidateId: string,
+    confirmation: string,
+    beforeExternalProviderCall?: () => Promise<void>,
+  ) {
     if (confirmation !== COMMERCIAL_AI_COPY_CONFIRMATION) {
       fail(
         'Confirmacao de geracao invalida',
@@ -1013,6 +1017,10 @@ export class CommercialPromotionCopyGenerationService {
 
     let providerResult: CommercialAiCopyProviderResult;
     try {
+      // Mark the external boundary only after the copy path has selected the
+      // real provider and claimed the attempt. Deterministic fallback copies
+      // never invoke this hook.
+      await beforeExternalProviderCall?.();
       providerResult = await provider.generate(providerFacts);
     } catch (error) {
       const providerError =

@@ -1116,11 +1116,18 @@ export class CommercialAutomationCandidateFlowService {
             campaign,
             group,
           );
-          await options.beforeExternalCopyGeneration?.();
-          await this.options.copyGeneration.generate(
-            currentSelection.candidateId,
-            COMMERCIAL_AI_COPY_CONFIRMATION,
-          );
+          if (options.beforeExternalCopyGeneration) {
+            await this.options.copyGeneration.generate(
+              currentSelection.candidateId,
+              COMMERCIAL_AI_COPY_CONFIRMATION,
+              options.beforeExternalCopyGeneration,
+            );
+          } else {
+            await this.options.copyGeneration.generate(
+              currentSelection.candidateId,
+              COMMERCIAL_AI_COPY_CONFIRMATION,
+            );
+          }
         }
         loaded = await this.loadSelectedReadyCandidate(
           currentSelection,

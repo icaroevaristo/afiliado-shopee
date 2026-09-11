@@ -3178,6 +3178,7 @@ describe('CommercialAutomationOrchestrator', () => {
     expect(statefulFlow.copyGeneration.generate).toHaveBeenCalledWith(
       'candidate-b',
       'GERAR_COPY_COM_IA',
+      expect.any(Function),
     );
 
     // Mirrors the dispatch finalizer: only a terminal SENT updates history and lifecycle.
