@@ -4,53 +4,43 @@
 
 Este documento descreve os agentes e componentes de orquestracao atuais do projeto. O estado atual mantem implementacoes locais e mocks como padrao seguro; Evolution API requer selecao e configuracao explicitas.
 
-## Agent Model Policy v2
+## Codex Agent Routing
 
 ### Arquitetura padrão
 
-DEFAULT ROOT + SINGLE MUTATOR
+PRINCIPAL / SINGLE MUTATOR
 
-- GPT-5.6 TERRA — HIGH
+- GPT-6 LUNA — MAX
+- Trabalho principal, implementação comum, testes e correções simples.
 
-CHEAP SCOUT / ANALYSIS
+INVESTIGATION
 
-- GPT-5.6 LUNA — HIGH
-- Usar somente para busca, inventário, documentação, manifests, scans,
-  localização de call-sites e subtarefas mecânicas.
+- `dev_investigator`: GPT-6 ASTRA — MEDIUM; HIGH para problema difícil ou gate
+  crítico; READ-ONLY.
+- Investiga causa desconhecida e fecha a causa raiz reutilizando o mesmo perfil.
 
-DEFAULT INDEPENDENT REVIEW
+NORMAL VERIFICATION AND REVIEW
 
-- GPT-5.6 SOL — HIGH
-- Executar uma vez após candidate freeze.
-- Review diff-first; não reler o repositório inteiro sem necessidade.
+- `dev_verifier`: GPT-6 LUNA — HIGH, READ-ONLY.
+- `dev_reviewer`: GPT-6 SOL — HIGH, READ-ONLY em contexto fresco.
 
-CRITICAL / ADVERSARIAL / ESCALATION
+STRUCTURAL ENGINEERING
 
-- GPT-6 ASTRA — HIGH
-
-ASTRA não é modelo padrão de implementação. Usar Astra somente quando houver
-migration ou banco operacional, risco de duplicate SEND, ambiguity/recovery após
-possível efeito externo, boundary de segurança, concorrência/idempotência
-crítica, blocker P0/P1 persistente após Terra/Sol, divergência entre reviewers
-ou certificação final `DAILY_USE_READY`.
+- `dev_engineer`: GPT-6 SOL — MAX, WORKSPACE-WRITE para mudança estrutural.
 
 ### Review policy
 
 - Single mutator sempre.
-- Um reviewer por padrão.
-- Segundo reviewer somente se o primeiro encontrar P0/P1, houver discordância
-  ou existir boundary crítico que justifique revisão adicional.
-- Não executar Reviewer A + Reviewer B + Adversarial por padrão.
+- Uma verificação por `dev_verifier` seguida de uma revisão por `dev_reviewer`.
+- Não acrescentar etapas nem permitir que um agente aprove o próprio trabalho.
 
 ### Reasoning policy
 
-- LUNA: HIGH.
-- TERRA: HIGH.
-- SOL: HIGH por padrão; MEDIUM é permitido em review simples.
-- ASTRA: HIGH.
-- MAX é proibido por padrão. Usá-lo somente com justificativa explícita para
-  problema que resistiu a tentativas anteriores ou decisão excepcionalmente
-  difícil.
+- Principal Luna e engineer Sol: MAX.
+- Investigator Astra: MEDIUM por padrão; HIGH para problema difícil ou gate
+  crítico.
+- Verifier Luna e reviewer Sol: HIGH.
+- Não usar GPT-5.6 como fallback.
 
 ### Context/token policy
 
@@ -64,16 +54,13 @@ ou certificação final `DAILY_USE_READY`.
 - Em correção posterior, revisar prioritariamente o delta desde o último
   candidate, sem recomeçar a auditoria completa.
 
-### Escalation
+### Fluxos
 
-Fluxo padrão: TERRA HIGH → SOL HIGH → ASTRA HIGH somente se necessário.
+Normal: Luna MAX → Luna HIGH verifier → Sol HIGH review.
 
-Para tarefas baratas: LUNA HIGH → TERRA somente se mutation real for necessária.
-
-Para tarefa crítica excepcional: TERRA HIGH como mutator → ASTRA HIGH como
-adversarial final.
-
-Astra como ROOT + MUTATOR + múltiplos reviewers Astra é proibido por padrão.
+Investigativo: Luna prepara dossiê factual → Astra investiga → Luna MAX para
+correção simples ou Sol MAX para correção estrutural → Luna verifier → Sol
+reviewer → Astra verifica o fechamento da causa usando `dev_investigator`.
 
 ### Runtime attestation
 
