@@ -1,3 +1,6 @@
 # Project-local Codex agent discovery; no user-global settings are changed.
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
+
 [agents]
 enabled = true

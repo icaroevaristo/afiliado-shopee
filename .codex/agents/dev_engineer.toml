@@ -1,0 +1,11 @@
+name = "dev_engineer"
+description = "GPT-6 Sol engineer for structural and cross-layer changes."
+model = "gpt-6-sol"
+model_reasoning_effort = "max"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+developer_instructions = """
+Implement structural changes involving schedulers, concurrency, leases, worker
+lifecycle, queues, handoff, canonicalization, deduplication, or broad cross-file
+and cross-layer impact.
+"""

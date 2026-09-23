@@ -17,9 +17,8 @@ são `NOT_RUN`, `IN_PROGRESS`, `PASS`, `FAIL`, `BLOCKED` e
 Uma fase não pode ser marcada como `PASS` por inspeção estática quando seu
 critério exige teste, browser, banco, fila ou provider. O próximo passo não
 herda autorização da fase anterior. O lifecycle documental de cada R1–R9 é o
-`PHASE_EXECUTION_PLAYBOOK.md`, com E0–E10, `ROOT_ORCHESTRATOR` READ_ONLY por
-padrão e `ACTIVE_MUTATOR` como único mutator (Luna HIGH principal; Sol MAX
-somente estrutural/autorizado).
+`PHASE_EXECUTION_PLAYBOOK.md`, com E0–E10, `SOL_SUPERVISOR` READ_ONLY e
+`LUNA_MAX` como único mutator.
 
 ## Fases planejadas
 
@@ -44,7 +43,7 @@ somente estrutural/autorizado).
   canônico e a mesma identidade após restart.
 - **INPUTS:** `runtime-identity.ts`, supervisor, Compose, Docker inspect,
   estado do banco e manifesto anterior.
-- **OWNER:** runtime/data specialist sob o `ROOT_ORCHESTRATOR`.
+- **OWNER:** runtime/data specialist sob o `SOL_SUPERVISOR`.
 - **SKILLS:** goal guard, safe command, git/worktree, backend, SQL, QA,
   observability e ship gate.
 - **EXPECTED_COMPONENTS:** `system:status`, `system:start`, `system:stop`,
@@ -203,7 +202,7 @@ somente estrutural/autorizado).
   destination/instance explícitas e lifecycle terminal.
 - **INPUTS:** todas as fases anteriores, provider configurado, banco/volume
   canônicos e autorização do proprietário.
-- **OWNER:** `ROOT_ORCHESTRATOR` com runtime/data/security specialists.
+- **OWNER:** `SOL_SUPERVISOR` com runtime/data/security specialists.
 - **SKILLS:** todas as hard guards, backend, SQL, QA, secrets,
   observability, code reviewer e ship gate.
 - **EXPECTED_COMPONENTS:** manifesto de budget/effects, target autorizado,

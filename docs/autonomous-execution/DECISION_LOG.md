@@ -15,10 +15,9 @@
 | D30-008 | Orchestrator | 2026-09-01 | Todo handoff usa manifesto versionado por contrato, sem secrets | handoff apenas narrativo | evita perda de estado/evidência entre agentes | `E30-DOC-004` | toda task | vigente |
 | D30-009 | Orchestrator | 2026-09-01 | O estado operacional atual desta fase é `UNVERIFIED` | inferir runtime verde | a missão não autoriza runtime/DB/Redis; nenhum PASS é inventado | `E30-OP-001` | R1–R9 | vigente |
 | D30-010 | SOL_SUPERVISOR | 2026-09-02 | `AUTO_CONTINUE` aceita mutation de código explicitamente autorizada quando reversível e cercada por gates | restringir toda mutation a docs/read-only | autonomia não deve parar por progresso; boundaries perigosos continuam bloqueados | `E30-DOC-008` | toda task | vigente |
-| D30-011 | SOL_SUPERVISOR | 2026-09-02 | Sol supervisiona READ_ONLY e `LUNA_MAX` é o único mutator | Sol e especialistas editarem em paralelo | uma única autoridade de escrita preserva diff e finding ledger | `E30-DOC-008` | toda task | superseded by D30-014 |
+| D30-011 | SOL_SUPERVISOR | 2026-09-02 | Sol supervisiona READ_ONLY e `LUNA_MAX` é o único mutator | Sol e especialistas editarem em paralelo | uma única autoridade de escrita preserva diff e finding ledger | `E30-DOC-008` | toda task | vigente |
 | D30-012 | SOL_SUPERVISOR | 2026-09-02 | Reviews e ship gate são vinculados a `CANDIDATE_HEAD` + `CANDIDATE_TREE` congelados | aceitar aprovação de SHA antigo | mutation pós-freeze exige novo candidato e invalida evidência anterior | `E30-DOC-008` | toda task | vigente |
 | D30-013 | SOL_SUPERVISOR | 2026-09-02 | E0–E10 em `PHASE_EXECUTION_PLAYBOOK.md` é o lifecycle documental LIVE_CANONICAL | checkpoints ad hoc por agente | owners, gates, recovery e saídas ficam auditáveis e não há parada por progresso | `E30-DOC-008` | R1–R9 | vigente |
-| D30-014 | Owner | 2026-09-22 | Substituir apenas o seletor de mutador vinculado ao modelo por principal Luna HIGH e Sol MAX estrutural via transferência serial; manter exatamente um mutador | Luna exclusivo em toda unidade ou escrita concorrente | adapta papéis GPT-6 sem relaxar SINGLE_MUTATOR, ambiguity, migrations, SEND ou gates produtivos | Owner mission IES_ORCHESTRATION_PROTOCOL_V1_GPT6_ROLLOUT | toda task | vigente |
 
 ## Regras para novas decisões
 

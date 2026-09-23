@@ -1,10 +1,10 @@
 # Phase Execution Playbook — R1–R9
 
 **Status:** `LIVE_CANONICAL`
-**Owner de governança:** ROOT_ORCHESTRATOR (MODEL_BINDING=NONE_FIXED; coordenação/governança)
-**Único mutator:** exatamente um ACTIVE_MUTATOR por candidate (Luna HIGH principal; Sol MAX estrutural autorizado)
-**Escrita de evidência:** `ROOT_ORCHESTRATOR` somente em
-`.runtime/autonomous-execution/manifests/<RUN_ID>/` (`ROOT_ORCHESTRATOR_MANIFEST_WRITE_ALLOWED=true`)
+**Owner de governança:** `SOL_SUPERVISOR` (`READ_ONLY=true`)
+**Único mutator:** `LUNA_MAX` (`SINGLE_MUTATOR=true`)
+**Escrita de evidência:** `SOL_SUPERVISOR` somente em
+`.runtime/autonomous-execution/manifests/<RUN_ID>/` (`SOL_MANIFEST_WRITE_ALLOWED=true`)
 
 Este playbook é o lifecycle padrão para as fases R1–R9 do
 `OPERATIONAL_READINESS_ROADMAP.md`. Ele organiza a execução, não concede
@@ -12,42 +12,21 @@ autorização para provider, migration, volume, SEND, remoção de pause ou
 produção. A missão atual, `AGENTS.md`, o código e a autorização explícita da
 task continuam superiores a este documento.
 
-## Roteamento GPT-6 V1
-
-O ROOT_ORCHESTRATOR coordena e julga gates, permanece READ_ONLY sobre a
-candidate e nunca é designado ACTIVE_MUTATOR. ACTIVE_MUTATOR é uma única função
-por candidate: principal
-GPT-6 Luna HIGH solicitado por padrão; dev_engineer GPT-6 Sol MAX somente para
-estrutura comprovada/autorizada ou após duas tentativas focais Luna pela mesma
-causa. A transferência exige parada de escrita do owner anterior, registro de
-base/head/tree e hashes do diff/untracked manifest, liberação explícita e aceite
-do snapshot pelo próximo. Não há mutação concorrente.
-
-Redescoberta read-only em 2026-09-23: Codex CLI 0.154.0 lista gpt-6-astra,
-mas não lista GPT-6 Luna/Sol. O seletor de agentes da sessão expõe
-gpt-6-luna e gpt-6-sol em superfície separada, ainda sem prova de descoberta
-project-local. Perfis Luna/Sol ficam pendentes do catálogo e schema local.
-GPT-6 Luna MAX não está entre os esforços oferecidos pelo seletor; não reduzir
-effort nem usar fallback GPT-5.6. Registre REQUESTED_MODEL, MODEL_IDENTIFIER e
-EFFECTIVE_MODEL separadamente; sem attestation do runtime, effective model e
-effort permanecem UNVERIFIED. Os gates de migration, banco, provider, SEND,
-payment, scheduler, ambiguity e produção permanecem inalterados.
-
 ## Regras globais
 
-- Um único `ROOT_ORCHESTRATOR` congela scope, baseline, findings, gates e decisão.
-- `ACTIVE_MUTATOR` é o único agente que escreve na candidate branch; reviewers e
+- Um único `SOL_SUPERVISOR` congela scope, baseline, findings, gates e decisão.
+- `LUNA_MAX` é o único agente que escreve na candidate branch; reviewers e
   especialistas são READ_ONLY.
 - Cada run usa exatamente os doze arquivos de
   `EXECUTION_MANIFEST_PROTOCOL.md`; nenhum extra é permitido e nenhum
   manifesto fechado é sobrescrito.
-- `ROOT_ORCHESTRATOR_READ_ONLY=true` e
-  `ROOT_ORCHESTRATOR_CANDIDATE_WRITE=NO` em todo run. O root nunca é designado
-  `ACTIVE_MUTATOR` e nunca escreve na candidate. A escrita de manifestos no
-  path local/ignorado é separada e não concede mutação da candidate.
+- `SOL_SUPERVISOR_READ_ONLY=true` significa sem escrita na candidate, runtime,
+  banco, Redis ou documentação versionada. A única exceção delimitada é a
+  criação/atualização dos doze artifacts no path de execução local/ignorado;
+  isso é escrita de evidência, não mutation da candidate.
 - Antes de qualquer mutation, registrar scope/autorização e criar
   `RUN_MANIFEST.json` e `BASELINE.json`.
-- Antes da revisão final, ROOT_ORCHESTRATOR atesta e o run-artifact store registra
+- Antes da revisão final, SOL atesta e o run-artifact store registra
   `CANDIDATE_HEAD`, `CANDIDATE_TREE` e `CANDIDATE_FROZEN=true`. Toda revisão
   registra `reviewedHead` e `reviewedTree`.
 - Mutation depois do freeze invalida o candidato e as evidências afetadas;
@@ -75,7 +54,7 @@ E0 FREEZE_SCOPE
   → E7 REVIEWER_B
   → E8 FIX_LOOP ───────────────┐
   → E9 FINAL_ADVERSARIAL       │
-  → E10 ROOT_ORCHESTRATOR_RECONCILIATION ◄───┘ quando houver finding
+  → E10 SOL_RECONCILIATION ◄───┘ quando houver finding
 ```
 
 Cada transição registra `EVIDENCE_ID`, owner, estado do gate e recovery. Um
@@ -91,13 +70,13 @@ autorização humana e ambiente informado.
 
 ### OWNER
 
-`ROOT_ORCHESTRATOR`.
+`SOL_SUPERVISOR`.
 
 ### ALLOWED_ACTIONS
 
 Interpretar objetivo; delimitar fase R1–R9; registrar `scope`,
 `authorizedActions`, `prohibitedActions` e `humanRequiredBoundaries`; atribuir
-`FINDING_ID`/`GATE_ID`; declarar `ROOT_ORCHESTRATOR`, `ACTIVE_MUTATOR` e reviewers;
+`FINDING_ID`/`GATE_ID`; declarar `SOL_SUPERVISOR`, `LUNA_MAX` e reviewers;
 iniciar os manifestos sem segredo.
 
 ### PROHIBITED_ACTIONS
@@ -132,7 +111,7 @@ Scope congelado e manifestos de E0.
 
 ### OWNER
 
-`ROOT_ORCHESTRATOR`, com especialistas READ_ONLY para suas áreas.
+`SOL_SUPERVISOR`, com especialistas READ_ONLY para suas áreas.
 
 ### ALLOWED_ACTIONS
 
@@ -174,7 +153,7 @@ Preflight aprovado e classificação `TEST`, `LOCAL_ISOLATED` ou
 
 ### OWNER
 
-`ROOT_ORCHESTRATOR` coordena; QA/especialistas executam somente testes aprovados.
+`SOL_SUPERVISOR` coordena; QA/especialistas executam somente testes aprovados.
 
 ### ALLOWED_ACTIONS
 
@@ -216,7 +195,7 @@ Preflight e janela segura aprovados; mutation explicitamente dentro do scope.
 
 ### OWNER
 
-`ACTIVE_MUTATOR` exclusivamente.
+`LUNA_MAX` exclusivamente.
 
 ### ALLOWED_ACTIONS
 
@@ -258,7 +237,7 @@ Diff de E3, finding(s), contrato esperado e hipótese causal.
 
 ### OWNER
 
-`ACTIVE_MUTATOR` executa; `ROOT_ORCHESTRATOR` verifica a evidência.
+`LUNA_MAX` executa; `SOL_SUPERVISOR` verifica a evidência.
 
 ### ALLOWED_ACTIONS
 
@@ -299,7 +278,7 @@ Causal tests, blast radius, change manifest e contratos afetados.
 
 ### OWNER
 
-`ACTIVE_MUTATOR`, com QA/especialistas READ_ONLY.
+`LUNA_MAX`, com QA/especialistas READ_ONLY.
 
 ### ALLOWED_ACTIONS
 
@@ -344,7 +323,7 @@ Diff final provisório, ledger, manifestos, evidências e candidato a congelar.
 
 ### ALLOWED_ACTIONS
 
-O ROOT_ORCHESTRATOR atesta o snapshot e registra os campos no run-artifact store
+O SOL_SUPERVISOR atesta o snapshot e registra os campos no run-artifact store
 permitido; Reviewer A audita segurança, escopo, contratos e
 testes somente nesse snapshot.
 
@@ -422,7 +401,7 @@ Finding de Reviewer A/B ou adversarial, ligado a head/tree e ao finding ledger.
 
 ### OWNER
 
-`ROOT_ORCHESTRATOR` registra/coordena; `ACTIVE_MUTATOR` é o único mutator.
+`SOL_SUPERVISOR` registra/coordena; `LUNA_MAX` é o único mutator.
 
 ### ALLOWED_ACTIONS
 
@@ -508,7 +487,7 @@ conclui `FIX_FIRST`, `BLOCKED` ou `HUMAN_REQUIRED` e o fluxo retorna a E8/E10
 com o finding ou impedimento preservado. Nenhum dos quatro estados é convertido
 em outro por conveniência.
 
-## E10 — ROOT_ORCHESTRATOR_RECONCILIATION
+## E10 — SOL_RECONCILIATION
 
 ### INPUT
 
@@ -517,7 +496,7 @@ adversarial, efeitos, custos, recovery, cleanup e documentação.
 
 ### OWNER
 
-`ROOT_ORCHESTRATOR`, READ_ONLY.
+`SOL_SUPERVISOR`, READ_ONLY.
 
 ### ALLOWED_ACTIONS
 

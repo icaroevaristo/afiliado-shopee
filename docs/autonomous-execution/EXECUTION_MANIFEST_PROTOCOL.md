@@ -10,19 +10,6 @@ O manifesto é a unidade de handoff entre tasks e agentes. Deve ser criado
 antes de uma operação relevante e fechado somente depois do estado final. O
 manifesto não autoriza provider, migration, volume ou remoção de pause.
 
-## Compatibilidade de papéis V1
-
-O schema v2 e os nomes de campos permanecem inalterados. `singleMutator`
-continua sendo uma string obrigatória, sem enum fixo de modelos. Para uma
-execução `read_only` ou sem mutation autorizada, use o sentinel reservado
-`NONE_READ_ONLY`, que declara que não existe writer ativo. Em qualquer execução
-que possa mutar a candidate, registre exatamente uma função concreta, por
-exemplo `principal_luna_high_requested`,
-`dev_engineer_sol_max_requested` ou `root_orchestrator` quando explicitamente
-designado como mutator. Nunca grave o literal genérico `ACTIVE_MUTATOR` nem
-atribua um papel mutador a uma execução read-only. Valores históricos
-permanecem como evidência histórica. O roteamento solicitado e a attestation
-efetiva pertencem ao evidence bundle, sem inferência pelo campo `singleMutator`.
 ## Arquivos obrigatórios
 
 Cada `<RUN_ID>` no diretório de execução contém:
@@ -100,9 +87,9 @@ arquivo ao conjunto fechado ou use um campo de revisão sem seu par
   "runId": "R1-2026-09-01-example",
   "createdAt": "2026-09-01T00:00:00Z",
   "updatedAt": "2026-09-01T00:00:00Z",
-  "mission": "inspeção somente leitura",
-  "scope": "read_only",
-  "owner": "ROOT_ORCHESTRATOR",
+  "mission": "texto curto",
+  "scope": "docs|read_only|mutation_controlled",
+  "owner": "SOL_SUPERVISOR",
   "branch": "branch verificada",
   "head": "sha",
   "status": "PLANNED|PREFLIGHTED|RUNNING|QUIESCING|RESTORING|PASSED|FAILED|BLOCKED|HUMAN_REQUIRED|CLOSED",
@@ -111,8 +98,8 @@ arquivo ao conjunto fechado ou use um campo de revisão sem seu par
   "findingIds": [],
   "gateIds": [],
   "evidenceIds": [],
-  "supervisor": "ROOT_ORCHESTRATOR",
-  "singleMutator": "NONE_READ_ONLY",
+  "supervisor": "SOL_SUPERVISOR",
+  "singleMutator": "LUNA_MAX",
   "reviewerA": null,
   "reviewerB": null,
   "finalAdversarial": null,
@@ -308,7 +295,7 @@ PLANNED → PREFLIGHTED → RUNNING → QUIESCING → RESTORING → PASSED → C
 ```
 
 Após possível efeito externo, o run não volta para `RUNNING` por retry. O
-ROOT_ORCHESTRATOR congela novos efeitos, preserva o lifecycle e registra
+SOL_SUPERVISOR congela novos efeitos, preserva o lifecycle e registra
 investigação. Nenhum agente apaga manifesto fechado para “limpar” histórico.
 
 ## Validação

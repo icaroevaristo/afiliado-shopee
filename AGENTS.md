@@ -4,91 +4,81 @@
 
 Este documento descreve os agentes e componentes de orquestracao atuais do projeto. O estado atual mantem implementacoes locais e mocks como padrao seguro; Evolution API requer selecao e configuracao explicitas.
 
-## Agent Model Policy v3 — GPT-6 Adaptive Orchestration
+## Codex Agent Routing
 
-### ROOT_ORCHESTRATOR e principal operacional
+### Arquitetura padrão
 
-ROOT_ORCHESTRATOR
-MODEL_BINDING=NONE_FIXED
-ROLE=COORDINATION_GOVERNANCE_INTEGRATION
+PRINCIPAL / SINGLE MUTATOR
 
-ROOT_ORCHESTRATOR é função de coordenação/governança, sem binding próprio de
-modelo e sem profile root. Escolhe lane, controla scope e single-mutator,
-congela candidate, integra evidence bundles, arbitra conflitos, aplica gates e
-apresenta Human Gate. Não substitui investigator, verifier, reviewer ou
-executor. Permissão: READ_ONLY sobre a candidate; escrita da candidate é
-proibida e o root nunca é designado ACTIVE_MUTATOR.
+- GPT-6 LUNA — MAX
+- Trabalho principal, implementação comum, testes e correções simples.
 
-PRINCIPAL OPERACIONAL — GPT-6 Luna HIGH solicitado; MAX solicitado somente por
-escalada. É a rota comum para implementação, documentação, testes e evidence
-bundle quando designado ACTIVE_MUTATOR único.
+INVESTIGATION
 
-### Papéis
+- `dev_investigator`: GPT-6 ASTRA — MEDIUM; HIGH para problema difícil ou gate
+  crítico; READ-ONLY.
+- Investiga causa desconhecida e fecha a causa raiz reutilizando o mesmo perfil.
 
-- dev_investigator — GPT-6 Astra MEDIUM solicitado; HIGH para causa difícil,
-  incidente, boundary crítico ou evidência contraditória. READ_ONLY. Formula e
-  confronta hipóteses; declara ROOT_CAUSE=NOT_PROVEN sem prova.
-  ROOT_CAUSE_CLOSURE reutiliza esta função.
-- dev_engineer — GPT-6 Sol MAX solicitado; WORKSPACE_WRITE somente como único
-  mutador em lane estrutural comprovada/autorizada.
-- dev_verifier — GPT-6 Luna HIGH solicitado; READ_ONLY. Executa checks e
-  registra RAW EVIDENCE; não corrige o candidato nem declara SHIP.
-- dev_reviewer — GPT-6 Sol HIGH solicitado; READ_ONLY em contexto fresco,
-  diff-first. Sol executor não pode revisar seu próprio trabalho.
-- Root Orchestrator — NO FIXED MODEL, somente coordenação/governança; READ_ONLY
-  sobre a candidate, sem permissão de escrita.
-- Não criar profiles Astra finais ou papéis redundantes.
+NORMAL VERIFICATION AND REVIEW
 
-### Identificadores, permissões e attestation
+- `dev_verifier`: GPT-6 LUNA — HIGH, READ-ONLY.
+- `dev_reviewer`: GPT-6 SOL — HIGH, READ-ONLY em contexto fresco.
 
-Redescoberta read-only em 2026-09-23: Codex CLI 0.154.0, comando
-codex debug models, lista gpt-6-astra com esforços low/medium/high/xhigh/max/
-ultra e não lista GPT-6 Luna nem GPT-6 Sol. O schema do seletor de agentes desta
-sessão expõe separadamente gpt-6-luna (low/medium/high) e gpt-6-sol
-(low/medium/high/xhigh/max/ultra); isso não prova discovery project-local.
+STRUCTURAL ENGINEERING
 
-GPT6_ASTRA_MODEL_ID=gpt-6-astra; PROJECT_LOCAL_DISCOVERY=LISTED.
-GPT6_LUNA_MODEL_ID=gpt-6-luna; PROJECT_LOCAL_DISCOVERY=UNVERIFIED.
-GPT6_SOL_MODEL_ID=gpt-6-sol; PROJECT_LOCAL_DISCOVERY=UNVERIFIED.
-GPT-6 Luna MAX é esforço solicitado, porém não listado pelo seletor da sessão
-nem pelo catálogo CLI atual. Não reduzir esforço silenciosamente. Se MAX for
-necessário e indisponível, pausar com Human Gate. Não substituir por GPT-5.6.
+- `dev_engineer`: GPT-6 SOL — MAX, WORKSPACE-WRITE para mudança estrutural.
 
-O profile TOML existente dev_investigator usa Astra MEDIUM, read-only. Profiles
-dev_engineer, dev_verifier e dev_reviewer ficam
-PENDING_LOCAL_MODEL_CATALOG_AND_SCHEMA; não criar TOMLs Luna/Sol antes da
-descoberta project-local e schema estrito comprovarem suporte.
-REQUESTED_MODEL/REQUESTED_EFFORT não provam EFFECTIVE_MODEL/EFFECTIVE_EFFORT.
-Sem metadados observados do runtime, registrar ambos como UNVERIFIED; não
-inferir modelo efetivo pelo nome do agente, prompt ou configuração.
+### Review policy
 
-### Fluxo e invariantes
+- Single mutator sempre.
+- Uma verificação por `dev_verifier` seguida de uma revisão por `dev_reviewer`.
+- Não acrescentar etapas nem permitir que um agente aprove o próprio trabalho.
 
-Fluxo normal solicitado: Luna HIGH executor → freeze exato → Luna HIGH
-verifier → RAW EVIDENCE → Sol HIGH fresh reviewer. Na lane investigativa:
-dossier factual → Astra MEDIUM/HIGH read-only → correção simples por Luna HIGH;
-Luna MAX somente após duas tentativas focais falharem pela mesma causa, com
-escalada registrada. Trabalho estrutural por Sol MAX exige autorização da
-missão ou a mesma escalada → verifier → reviewer → Astra faz
-ROOT_CAUSE_CLOSURE. Na lane estrutural direta, Sol MAX é o único mutador e não
-pode revisar seu próprio contexto. Revisor adicional somente por finding
-P0/P1, discordância ou boundary crítico.
+### Reasoning policy
 
-Um candidate sempre tem SINGLE_MUTATOR=true. A transferência é serial: o
-mutador atual para toda escrita, registra base/head/tree e hashes do diff e
-manifest de untracked, libera a posse; o próximo mutador reconhece o snapshot e
-assume sozinho. Mudança após freeze invalida review/evidence. Preserve qualquer
-teto anti-loop mais estrito já vigente, incluindo STOP após três ciclos.
+- Principal Luna e engineer Sol: MAX.
+- Investigator Astra: MEDIUM por padrão; HIGH para problema difícil ou gate
+  crítico.
+- Verifier Luna e reviewer Sol: HIGH.
+- Não usar GPT-5.6 como fallback.
 
-Nenhum papel/modelo reduz os gates de migrations, preview, scheduler, dispatch
-ambiguity, no-blind-retry, Evolution, maintenance ownership, runtime attestation
-ou autorização humana. Antes de escrever, registrar
-REQUIRED_REPOSITORY, ACTUAL_REPOSITORY, REMOTE_ORIGIN, CURRENT_WORKTREE,
-CURRENT_BRANCH, CURRENT_HEAD, EXPECTED_HEAD e WORKTREE_STATUS. Provar Repo,
-origin, worktree, branch, HEAD, expected HEAD e status do worktree; qualquer
-mismatch significa DO_NOT_EDIT_CURRENT_REPOSITORY.
-Cross-repo exige CROSS_REPO_SCOPE. Human Gate continua obrigatório para
-provider/SEND, migration operacional, pagamento, produção e efeitos protegidos.
+### Context/token policy
+
+- Trabalhar diff-first.
+- Não carregar todo o README, roadmap ou specs em cada agente sem necessidade.
+- Usar o contexto mínimo suficiente: `BASE_SHA`, `HEAD_SHA`, `OBJECTIVE`,
+  `OPEN_FINDINGS`, `INVARIANTS`, `RELEVANT_FILES`, `REQUIRED_GATES` e
+  `PROHIBITED_ACTIONS`.
+- Reviewer recebe candidate freeze, delta e evidência; abre contexto adicional
+  somente sob demanda.
+- Em correção posterior, revisar prioritariamente o delta desde o último
+  candidate, sem recomeçar a auditoria completa.
+
+### Fluxos
+
+Normal: Luna MAX → Luna HIGH verifier → Sol HIGH review.
+
+Investigativo: Luna prepara dossiê factual → Astra investiga → Luna MAX para
+correção simples ou Sol MAX para correção estrutural → Luna verifier → Sol
+reviewer → Astra verifica o fechamento da causa usando `dev_investigator`.
+
+### Runtime attestation
+
+Requested model/effort e effective model/effort são conceitos diferentes.
+Nunca declarar modelo ou esforço efetivo sem evidência do runtime. Se não for
+verificável:
+
+```text
+EFFECTIVE_MODEL=UNVERIFIED
+EFFECTIVE_EFFORT=UNVERIFIED
+```
+
+### Safety
+
+Esta política de custo nunca reduz os gates de segurança existentes. Nenhum
+modelo, inclusive Astra, pode ultrapassar sem autorização explícita: SEND real,
+provider pago/real, migration operacional, alteração de estado ambíguo,
+unpause/ativação ou ações externas explicitamente protegidas.
 
 ## Camadas de aplicacao e persistencia
 

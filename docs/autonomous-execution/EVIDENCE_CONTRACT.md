@@ -66,7 +66,7 @@ caso o gate permanece `NOT_RUN` ou `BLOCKED`, nunca ganha um sexto estado.
 
 ## Candidate freeze
 
-Antes da revisão final, o `ROOT_ORCHESTRATOR` calcula e atesta um digest verificável
+Antes da revisão final, o `SOL_SUPERVISOR` calcula e atesta um digest verificável
 da árvore Git junto ao SHA; o registro é escrito somente no armazenamento de
 evidência local/ignorado `.runtime/autonomous-execution/manifests/<RUN_ID>/`:
 
@@ -76,15 +76,13 @@ CANDIDATE_TREE=<tree digest>
 CANDIDATE_FROZEN=true
 ```
 
-Cada `REVIEWER_A`, `REVIEWER_B`, adversarial, ship gate e ROOT_ORCHESTRATOR
-reconciliation declara `reviewedHead` e `reviewedTree`; no `RUN_MANIFEST`/
-`FINAL_MANIFEST`, os pares existentes são `reviewAHead`/`reviewATree`,
-`reviewBHead`/`reviewBTree`, `adversarialHead`/`adversarialTree` e os nomes de
-compatibilidade `solReconciliationHead`/`solReconciliationTree`. Esses dois
-campos identificam a evidência da reconciliação atual e não atestam GPT-6 Sol.
-Uma mutation depois do freeze exige `NEW_CANDIDATE_REQUIRED=true`, lista de
-`invalidatedEvidenceIds` e nova revisão; nenhuma aprovação de snapshot anterior
-permanece válida.
+Cada `REVIEWER_A`, `REVIEWER_B`, adversarial, ship gate e Sol reconciliation
+declara `reviewedHead` e `reviewedTree`; no `RUN_MANIFEST`/`FINAL_MANIFEST`, os
+pares são `reviewAHead`/`reviewATree`, `reviewBHead`/`reviewBTree`,
+`adversarialHead`/`adversarialTree` e
+`solReconciliationHead`/`solReconciliationTree`. Uma mutation depois do freeze exige
+`NEW_CANDIDATE_REQUIRED=true`, lista de `invalidatedEvidenceIds` e nova revisão;
+nenhuma aprovação de snapshot anterior permanece válida.
 
 ## Tempo e escopo
 

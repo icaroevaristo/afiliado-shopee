@@ -18,9 +18,9 @@ depois de um novo candidate freeze.
 | G30-004 | Skills | paths reais lidos | `E30-SKILL-002` | PASS | skill hard missing → HUMAN_REQUIRED |
 | G30-005 | Evidence contract | schema definido | `E30-DOC-009` | PASS | evidence ausente → NOT_RUN/BLOCKED; claim → UNVERIFIED |
 | G30-006 | Red-team documental | artefatos completos | `E30-REDTEAM-002` | NOT_RUN | P0/P1 → reparar e repetir |
-| G30-007 | Revisor independente fresh (GPT-6 Sol HIGH solicitado; efetivo exige attestation) | review sem viés | `identidade/contexto fresco + diff exato + evidence bundle` | NOT_RUN | self-review, snapshot divergente ou evidência ausente → FAIL |
+| G30-007 | Sol independente | review sem viés | `E30-SOL-002` | NOT_RUN | P0/P1 → reparar e repetir |
 | G30-008 | Ship docs | gates docs, secret scan | `E30-SHIP-002` | NOT_RUN | qualquer P0/P1 → FAIL |
-| G30-009 | Roles e single mutator | ROOT_ORCHESTRATOR, role owner concreto e handoff serial definidos | `diff exato + fresh review + attestation quando disponível` | NOT_RUN | papel ambíguo, claim efetivo sem attestation ou dois mutators → FAIL; ID solicitado não provado → NOT_RUN/BLOCKED |
+| G30-009 | Roles e single mutator | Sol supervisor e Luna mutator definidos | `E30-DOC-009` | PASS | papel ambíguo ou dois mutators → FAIL |
 | G30-010 | Candidate freeze | SHA/tree e invalidation definidos | `E30-DOC-009` | PASS | review sem snapshot exato → INVALID |
 | G30-011 | Phase execution playbook | E0–E10 com owner/gates/recovery | `E30-DOC-009` | PASS | etapa sem saída verificável → FAIL |
 | R1-001 | identidade Compose | runtime profile explícito | status/inspect sanitizado | NOT_RUN | ambígua → HUMAN_REQUIRED |

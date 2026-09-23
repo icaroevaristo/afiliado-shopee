@@ -8,22 +8,15 @@ skill carregada sem path real.
 
 | Papel | Estado | Regra operacional |
 | --- | --- | --- |
-| ROOT_ORCHESTRATOR | coordenação/governança; MODEL_BINDING=NONE_FIXED | READ_ONLY sobre a candidate; coordena scope, gates e decisão final, sem quarto model binding e sem escrita de candidate |
-| ACTIVE_MUTATOR | SINGLE_MUTATOR=true | exatamente um owner por candidate; principal GPT-6 Luna HIGH ou Sol MAX somente lane estrutural autorizada |
-| dev_investigator | READ_ONLY | GPT-6 Astra MEDIUM/HIGH solicitado; causa provada ou NOT_PROVEN |
-| dev_engineer | workspace-write quando único ACTIVE_MUTATOR | GPT-6 Sol MAX solicitado somente estrutural/escalada |
-| dev_verifier | READ_ONLY | GPT-6 Luna HIGH solicitado; produz RAW EVIDENCE sem corrigir |
-| dev_reviewer | READ_ONLY | GPT-6 Sol HIGH solicitado, contexto fresco e diff-first |
-| REVIEWER_A / REVIEWER_B | READ_ONLY | cada parecer vinculado ao HEAD/tree congelado conforme risco e gates locais |
-| FINAL_ADVERSARIAL | READ_ONLY | tenta refutar o candidato; não corrige |
+| `SOL_SUPERVISOR` | `READ_ONLY=true; SOL_MANIFEST_WRITE_ALLOWED=true` | congela scope/candidato, valida gates, reconcilia estado e decide SHIP/FIX_FIRST; não edita candidate; só escreve os doze artifacts no run store ignorado |
+| `LUNA_MAX` | `SINGLE_MUTATOR=true` | único agente que implementa, testa causalmente e prepara a candidate |
+| `REVIEWER_A` | `READ_ONLY=true` | revisa somente o `CANDIDATE_HEAD`/`CANDIDATE_TREE` recebido |
+| `REVIEWER_B` | `READ_ONLY=true` | revisa somente o snapshot exato recebido |
+| `FINAL_ADVERSARIAL` | `READ_ONLY=true` | tenta provar que a candidate não deve passar; não corrige |
 
-Redescoberta read-only em Codex CLI 0.154.0 lista gpt-6-astra e não lista
-GPT-6 Luna/Sol. O seletor de agentes da sessão expõe os IDs gpt-6-luna e
-gpt-6-sol, sem provar discovery project-local; Luna MAX não consta dos esforços
-expostos pelo seletor. Profiles Luna/Sol ficam pendentes de catálogo/schema
-local; não usar fallback GPT-5.6. REQUESTED_MODEL/MODEL_IDENTIFIER não provam
-EFFECTIVE_MODEL/EFFORT. Qualquer mutation após CANDIDATE_FROZEN=true invalida
-freeze e pareceres afetados.
+Qualquer mutation depois de `CANDIDATE_FROZEN=true` exige novo candidato e
+invalida aprovações do snapshot anterior.
+
 ## Skills carregadas nesta Fase 30
 
 | Skill | Path real | Aplicação nesta fase |
@@ -48,15 +41,15 @@ indisponível.
 
 | Fase | Agente | Required skills | Optional skills | Proibido/redundante | Gate mínimo |
 | --- | --- | --- | --- | --- | --- |
-| R1 runtime canônico | runtime/data sob ROOT_ORCHESTRATOR | goal-guard, safe-command, git, backend, SQL, QA, ship | observability | iniciar outra worktree/volume; cleanup amplo | identidade/volume/restart comprovados |
+| R1 runtime canônico | runtime/data sob SOL_SUPERVISOR | goal-guard, safe-command, git, backend, SQL, QA, ship | observability | iniciar outra worktree/volume; cleanup amplo | identidade/volume/restart comprovados |
 | R2 API/proxy/auth | API | goal-guard, safe-command, API reviewer, backend, QA, secrets | observability | endpoint genérico; token no browser | rotas usadas pela UI e quickstart autenticado |
 | R3 status/health | observability/backend | goal-guard, backend, observability, QA | API reviewer | inventar online; mascarar blocker | `UNKNOWN`/indisponível explicáveis |
 | R4 um número/muitos grupos | routing | goal-guard, backend, SQL, QA | observability | fanout, loop, reroute | assignments, stagger, quota e dedupe |
 | R5 N números/um grupo | scheduler/data | goal-guard, backend, SQL, QA, API reviewer | observability | contador de sucesso como cursor; fallback | N=1,2,3+, restart/replan e slot binding |
 | R6 UX rotação | frontend/API | goal-guard, API reviewer, QA, observability | frontend/design | estado local substituindo backend | assignment/rotation visual e CAS |
 | R7 offline/browser | QA/frontend | goal-guard, QA, secrets, ship | browser/webapp-testing | PASS sem execução visual | matriz 390/768/1024/1440 |
-| R8 SEND controlado | runtime/data/security sob ROOT_ORCHESTRATOR | todas as hard guards, backend, SQL, QA, secrets, observability, ship | API reviewer | provider sem autorização; retry incerto | autorização, budget, receipt e lifecycle |
-| R9 ativação diária | ROOT_ORCHESTRATOR + owner | goal-guard, safe-command, secrets, observability, ship | reviewer | remover pause automaticamente | decisão humana registrada |
+| R8 SEND controlado | runtime/data/security sob SOL_SUPERVISOR | todas as hard guards, backend, SQL, QA, secrets, observability, ship | API reviewer | provider sem autorização; retry incerto | autorização, budget, receipt e lifecycle |
+| R9 ativação diária | SOL_SUPERVISOR + owner | goal-guard, safe-command, secrets, observability, ship | reviewer | remover pause automaticamente | decisão humana registrada |
 
 ## Skills não carregadas por não serem necessárias
 

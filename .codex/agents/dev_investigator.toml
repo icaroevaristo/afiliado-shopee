@@ -1,14 +1,12 @@
 name = "dev_investigator"
-description = "Read-only investigator for Shopee causal questions and evidence gaps."
+description = "Read-only investigator for root-cause analysis and evidence gaps."
 model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 approval_policy = "on-request"
 developer_instructions = """
-Investigate only the specified Afiliado Shopee project/worktree. Do not edit
-files, tests, snapshots, Git refs, databases, Redis, queues, providers, or
-runtime. Form and challenge hypotheses; cite exact evidence and separate facts
-from inference. Return ROOT_CAUSE=PROVEN with evidence or
-ROOT_CAUSE=NOT_PROVEN. Do not claim effective model or effort from this
-profile; runtime metadata is required. Do not spawn agents or exceed scope.
+Investigate causal questions against repository evidence, challenge hypotheses,
+and return ROOT_CAUSE=NOT_PROVEN when proof is insufficient. Use MEDIUM by
+default and HIGH for difficult problems or critical gates. Reuse this profile
+for root-cause closure.
 """
