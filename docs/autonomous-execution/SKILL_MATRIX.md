@@ -8,7 +8,7 @@ skill carregada sem path real.
 
 | Papel | Estado | Regra operacional |
 | --- | --- | --- |
-| ROOT_ORCHESTRATOR | read-only por padrão; manifestos locais conforme contrato | coordena scope, gates e decisão final; requested GPT-6 Astra HIGH |
+| ROOT_ORCHESTRATOR | coordenação/governança; MODEL_BINDING=NONE_FIXED | READ_ONLY sobre a candidate; coordena scope, gates e decisão final, sem quarto model binding e sem escrita de candidate |
 | ACTIVE_MUTATOR | SINGLE_MUTATOR=true | exatamente um owner por candidate; principal GPT-6 Luna HIGH ou Sol MAX somente lane estrutural autorizada |
 | dev_investigator | READ_ONLY | GPT-6 Astra MEDIUM/HIGH solicitado; causa provada ou NOT_PROVEN |
 | dev_engineer | workspace-write quando único ACTIVE_MUTATOR | GPT-6 Sol MAX solicitado somente estrutural/escalada |
@@ -17,9 +17,13 @@ skill carregada sem path real.
 | REVIEWER_A / REVIEWER_B | READ_ONLY | cada parecer vinculado ao HEAD/tree congelado conforme risco e gates locais |
 | FINAL_ADVERSARIAL | READ_ONLY | tenta refutar o candidato; não corrige |
 
-IDs locais GPT-6 Luna/Sol não foram comprovados; não criar profiles TOML nem
-usar fallback GPT-5.6. REQUESTED_MODEL/effort não provam efetividade. Qualquer
-mutation após CANDIDATE_FROZEN=true invalida freeze e pareceres afetados.
+Redescoberta read-only em Codex CLI 0.154.0 lista gpt-6-astra e não lista
+GPT-6 Luna/Sol. O seletor de agentes da sessão expõe os IDs gpt-6-luna e
+gpt-6-sol, sem provar discovery project-local; Luna MAX não consta dos esforços
+expostos pelo seletor. Profiles Luna/Sol ficam pendentes de catálogo/schema
+local; não usar fallback GPT-5.6. REQUESTED_MODEL/MODEL_IDENTIFIER não provam
+EFFECTIVE_MODEL/EFFORT. Qualquer mutation após CANDIDATE_FROZEN=true invalida
+freeze e pareceres afetados.
 ## Skills carregadas nesta Fase 30
 
 | Skill | Path real | Aplicação nesta fase |

@@ -1,7 +1,7 @@
 # Phase Execution Playbook — R1–R9
 
 **Status:** `LIVE_CANONICAL`
-**Owner de governança:** ROOT_ORCHESTRATOR (GPT-6 Astra HIGH solicitado; effective exige attestation)
+**Owner de governança:** ROOT_ORCHESTRATOR (MODEL_BINDING=NONE_FIXED; coordenação/governança)
 **Único mutator:** exatamente um ACTIVE_MUTATOR por candidate (Luna HIGH principal; Sol MAX estrutural autorizado)
 **Escrita de evidência:** `ROOT_ORCHESTRATOR` somente em
 `.runtime/autonomous-execution/manifests/<RUN_ID>/` (`ROOT_ORCHESTRATOR_MANIFEST_WRITE_ALLOWED=true`)
@@ -14,18 +14,24 @@ task continuam superiores a este documento.
 
 ## Roteamento GPT-6 V1
 
-O ROOT_ORCHESTRATOR coordena e julga gates; não escreve enquanto outro
-mutator está ativo. ACTIVE_MUTATOR é uma única função por candidate: principal
+O ROOT_ORCHESTRATOR coordena e julga gates, permanece READ_ONLY sobre a
+candidate e nunca é designado ACTIVE_MUTATOR. ACTIVE_MUTATOR é uma única função
+por candidate: principal
 GPT-6 Luna HIGH solicitado por padrão; dev_engineer GPT-6 Sol MAX somente para
 estrutura comprovada/autorizada ou após duas tentativas focais Luna pela mesma
 causa. A transferência exige parada de escrita do owner anterior, registro de
 base/head/tree e hashes do diff/untracked manifest, liberação explícita e aceite
 do snapshot pelo próximo. Não há mutação concorrente.
 
-Neste runtime local, somente gpt-6-astra foi comprovado. IDs GPT-6 Luna e Sol
-não estão provados; nunca usar fallback GPT-5.6. Registre requested e effective
-model separadamente. Os gates de migration, banco, provider, SEND, payment,
-scheduler, ambiguity e produção permanecem inalterados.
+Redescoberta read-only em 2026-09-23: Codex CLI 0.154.0 lista gpt-6-astra,
+mas não lista GPT-6 Luna/Sol. O seletor de agentes da sessão expõe
+gpt-6-luna e gpt-6-sol em superfície separada, ainda sem prova de descoberta
+project-local. Perfis Luna/Sol ficam pendentes do catálogo e schema local.
+GPT-6 Luna MAX não está entre os esforços oferecidos pelo seletor; não reduzir
+effort nem usar fallback GPT-5.6. Registre REQUESTED_MODEL, MODEL_IDENTIFIER e
+EFFECTIVE_MODEL separadamente; sem attestation do runtime, effective model e
+effort permanecem UNVERIFIED. Os gates de migration, banco, provider, SEND,
+payment, scheduler, ambiguity e produção permanecem inalterados.
 
 ## Regras globais
 
@@ -35,11 +41,10 @@ scheduler, ambiguity e produção permanecem inalterados.
 - Cada run usa exatamente os doze arquivos de
   `EXECUTION_MANIFEST_PROTOCOL.md`; nenhum extra é permitido e nenhum
   manifesto fechado é sobrescrito.
-- `ROOT_ORCHESTRATOR_READ_ONLY=true` é o padrão: sem escrita na candidate, runtime,
-  banco, Redis ou documentação versionada. Somente se o root for explicitamente
-  designado `ACTIVE_MUTATOR`, registra `ROOT_ORCHESTRATOR_READ_ONLY=false` e
-  a autorização de escrita correspondente. A escrita de manifestos no path
-  local/ignorado é separada e não concede mutação da candidate.
+- `ROOT_ORCHESTRATOR_READ_ONLY=true` e
+  `ROOT_ORCHESTRATOR_CANDIDATE_WRITE=NO` em todo run. O root nunca é designado
+  `ACTIVE_MUTATOR` e nunca escreve na candidate. A escrita de manifestos no
+  path local/ignorado é separada e não concede mutação da candidate.
 - Antes de qualquer mutation, registrar scope/autorização e criar
   `RUN_MANIFEST.json` e `BASELINE.json`.
 - Antes da revisão final, ROOT_ORCHESTRATOR atesta e o run-artifact store registra

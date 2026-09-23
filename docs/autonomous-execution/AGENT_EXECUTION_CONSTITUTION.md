@@ -10,25 +10,50 @@ segurança, o `AGENTS.md`, o usuário ou os contratos do código.
 **Emenda V1:** por autorização do owner na missão IES_ORCHESTRATION_PROTOCOL_V1_GPT6_ROLLOUT, datada de 2026-09-22, a seleção de modelo/mutador desta seção substitui somente o seletor de papel de D30-011. A invariante SINGLE_MUTATOR e todos os gates de efeito permanecem.
 
 ROOT_ORCHESTRATOR=true.
-ROOT_ORCHESTRATOR_READ_ONLY=default.
+ROOT_ORCHESTRATOR_READ_ONLY=true.
+ROOT_ORCHESTRATOR_CANDIDATE_WRITE=NO.
+ROOT_ORCHESTRATOR_MODEL_BINDING=NONE_FIXED.
+ROOT_ORCHESTRATOR_ROLE=COORDINATION_GOVERNANCE_INTEGRATION.
 SINGLE_INTEGRATOR=true.
 SINGLE_MUTATOR=true.
 ACTIVE_MUTATOR=EXACTLY_ONE_ROLE.
 
-O ROOT_ORCHESTRATOR/integrator coordena estado, candidate, findings e gates.
-Ele não escreve na candidate enquanto houver outro mutador ativo; pode ser o
-único mutador quando isso for explicitamente registrado. O principal operacional
-solicitado é GPT-6 Luna HIGH. GPT-6 Sol MAX pode assumir somente uma unidade
-estrutural comprovada/autorizada ou após duas tentativas focais Luna falharem
-pela mesma causa. A seleção do papel não prova o modelo efetivo.
+ROOT_ORCHESTRATOR coordena scope, lane, candidate freeze, evidence bundles,
+conflitos e gates; apresenta Human Gate. Não possui model binding fixo, não é
+quarto model binding e não substitui investigator, verifier, reviewer ou
+ACTIVE_MUTATOR. Permanece READ_ONLY sobre a candidate e nunca pode ser
+designado ACTIVE_MUTATOR. Somente o mutador ativo designado para a lane
+autorizada escreve na candidate.
 
-A verificação local da missão comprovou somente o ID gpt-6-astra. GPT-6 Luna e
-GPT-6 Sol permanecem MODEL_IDENTIFIER_UNPROVEN e não recebem fallback GPT-5.6.
-Há uma distinção explícita entre candidato e evidência de execução:
+Matriz de papéis solicitados:
 
+| Papel | Modelo/effort | Permissão |
+| --- | --- | --- |
+| Principal operacional | GPT-6 Luna HIGH; MAX somente por escalada | workspace-write como único ACTIVE_MUTATOR |
+| Investigator | GPT-6 Astra MEDIUM; HIGH para causa difícil/boundary crítico | READ_ONLY |
+| Structural Engineer | GPT-6 Sol MAX | workspace-write somente na lane estrutural como único mutador |
+| Verifier | GPT-6 Luna HIGH | READ_ONLY |
+| Technical Reviewer | GPT-6 Sol HIGH | READ_ONLY, contexto fresco |
+| Root Cause Closure | GPT-6 Astra MEDIUM/HIGH; reutiliza investigator | READ_ONLY |
+| ROOT_ORCHESTRATOR | NONE_FIXED | coordenação/governança somente; READ_ONLY sobre a candidate |
+
+Redescoberta read-only em 2026-09-23 com Codex CLI 0.154.0 e codex debug
+models: o catálogo local lista gpt-6-astra com low/medium/high/xhigh/max/ultra,
+mas não lista GPT-6 Luna/Sol. O seletor de agentes desta sessão expõe
+gpt-6-luna (low/medium/high) e gpt-6-sol
+(low/medium/high/xhigh/max/ultra); isso não comprova descoberta project-local.
+Astra pode usar o profile existente dev_investigator. Perfis
+dev_engineer/dev_verifier/dev_reviewer permanecem
+PENDING_LOCAL_MODEL_CATALOG_AND_SCHEMA. GPT-6 Luna MAX é solicitado, porém não
+listado nos esforços do seletor da sessão; quando MAX for necessário e
+indisponível, não reduzir effort nem usar GPT-5.6, registrar bloqueio/Human Gate.
+
+REQUESTED_MODEL, MODEL_IDENTIFIER e EFFECTIVE_MODEL são distintos. IDs
+solicitados e parâmetros TOML não comprovam execução. Sem attestation do
+runtime, EFFECTIVE_MODEL=UNVERIFIED e EFFECTIVE_EFFORT=UNVERIFIED.
 ~~~text
-ROOT_ORCHESTRATOR_READ_ONLY=default
-ROOT_ORCHESTRATOR_CANDIDATE_WRITE=only_if_explicitly_ACTIVE_MUTATOR
+ROOT_ORCHESTRATOR_READ_ONLY=true
+ROOT_ORCHESTRATOR_CANDIDATE_WRITE=NO
 ROOT_ORCHESTRATOR_MANIFEST_WRITE_ALLOWED=true
 ROOT_ORCHESTRATOR_MANIFEST_WRITE_PATH=.runtime/autonomous-execution/manifests/<RUN_ID>/**
 SINGLE_MUTATOR=true
