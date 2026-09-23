@@ -47,7 +47,7 @@ converter a lacuna em PASS.
 
 ## Red-team da autonomia documental
 
-19. O `SOL_SUPERVISOR` consegue alterar candidate code/docs apesar de ser
+19. O `ROOT_ORCHESTRATOR` consegue alterar candidate code/docs apesar de ser
     `READ_ONLY`?
 20. Um reviewer consegue corrigir silenciosamente o próprio finding?
 21. Uma aprovação contra `HEAD`/tree antigo consegue liberar candidate novo?
@@ -59,7 +59,7 @@ converter a lacuna em PASS.
     sem execução?
 27. Handoff pode omitir diff, Git, gates, findings ou decisão final?
 28. O adversarial recebe contexto otimista suficiente para enviesar a revisão?
-29. SHIP adversarial consegue pular Sol reconciliation?
+29. SHIP adversarial consegue pular a reconciliação do ROOT_ORCHESTRATOR?
 30. Review de SHA antigo permanece válido depois de mutation?
 31. O playbook permite subtask implícita que contorne um gate?
 32. Os doze manifestos podem divergir quanto a scope, HEAD ou efeitos?

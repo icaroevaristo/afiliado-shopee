@@ -4,94 +4,69 @@
 
 Este documento descreve os agentes e componentes de orquestracao atuais do projeto. O estado atual mantem implementacoes locais e mocks como padrao seguro; Evolution API requer selecao e configuracao explicitas.
 
-## Agent Model Policy v2
+## Agent Model Policy v3 — GPT-6 Adaptive Orchestration
 
-### Arquitetura padrão
+### Coordenador e executor principal
 
-DEFAULT ROOT + SINGLE MUTATOR
+ROOT_ORCHESTRATOR — GPT-6 Astra HIGH solicitado: coordena, resolve conflitos e
+julga o gate final. Este papel é distinto do executor operacional e não mantém
+escrita concorrente na candidate.
 
-- GPT-5.6 TERRA — HIGH
+PRINCIPAL OPERACIONAL — GPT-6 Luna HIGH solicitado; MAX somente por escalada.
+É a rota comum para implementação, documentação, testes e evidence bundle,
+quando designado como único mutador.
 
-CHEAP SCOUT / ANALYSIS
+### Papéis
 
-- GPT-5.6 LUNA — HIGH
-- Usar somente para busca, inventário, documentação, manifests, scans,
-  localização de call-sites e subtarefas mecânicas.
+- dev_investigator — GPT-6 Astra MEDIUM solicitado; HIGH apenas para causa
+  difícil, incidente, boundary crítico ou evidência contraditória. READ_ONLY.
+  Formula e confronta hipóteses; declara ROOT_CAUSE=NOT_PROVEN sem prova.
+  ROOT_CAUSE_CLOSURE reutiliza esta função.
+- dev_engineer — GPT-6 Sol MAX solicitado; WORKSPACE_WRITE somente como único
+  mutador para trabalho estrutural/cross-layer, autorização direta da missão
+  ou duas tentativas focais Luna que falharam pela mesma causa.
+- dev_verifier — GPT-6 Luna HIGH solicitado; READ_ONLY. Executa checks e
+  registra RAW EVIDENCE; não corrige o candidato nem declara SHIP.
+- dev_reviewer — GPT-6 Sol HIGH solicitado; READ_ONLY em contexto fresco,
+  diff-first. Classifica BLOCKER, MAJOR, MINOR, NOT_PROVEN ou OPTIONAL.
+- Não criar profiles Astra finais ou papéis redundantes.
 
-DEFAULT INDEPENDENT REVIEW
+### Identificador e attestation
 
-- GPT-5.6 SOL — HIGH
-- Executar uma vez após candidate freeze.
-- Review diff-first; não reler o repositório inteiro sem necessidade.
+A verificação local desta missão comprovou somente o ID gpt-6-astra no Codex
+CLI. IDs exatos GPT-6 Luna e GPT-6 Sol permanecem
+MODEL_IDENTIFIER_UNPROVEN; seus papéis são intenção documental, sem profile
+TOML até schema, ID e descoberta project-local serem validados. É proibido
+fallback silencioso para GPT-5.6.
 
-CRITICAL / ADVERSARIAL / ESCALATION
+REQUESTED_MODEL/REQUESTED_EFFORT não provam EFFECTIVE_MODEL/EFFECTIVE_EFFORT.
+Sem metadados observados do runtime, registrar ambos como UNVERIFIED. Não
+inferir modelo efetivo pelo nome do agente, prompt ou configuração.
 
-- GPT-6 ASTRA — HIGH
+### Fluxo e invariantes
 
-ASTRA não é modelo padrão de implementação. Usar Astra somente quando houver
-migration ou banco operacional, risco de duplicate SEND, ambiguity/recovery após
-possível efeito externo, boundary de segurança, concorrência/idempotência
-crítica, blocker P0/P1 persistente após Terra/Sol, divergência entre reviewers
-ou certificação final `DAILY_USE_READY`.
+Fluxo normal solicitado: Luna HIGH executor → freeze exato → Luna HIGH
+verifier → RAW EVIDENCE → Sol HIGH fresh reviewer. Na lane investigativa:
+dossier factual → Astra MEDIUM/HIGH read-only → correção simples por Luna HIGH;
+Luna MAX somente após duas tentativas focais falharem pela mesma causa, com
+escalada registrada. Trabalho estrutural por Sol MAX exige autorização da
+missão ou a mesma escalada → verifier → reviewer → Astra faz
+ROOT_CAUSE_CLOSURE. Na lane estrutural direta, Sol MAX é o único mutador e não
+pode revisar seu próprio contexto. Revisor adicional somente por finding
+P0/P1, discordância ou boundary crítico.
 
-### Review policy
+Um candidate sempre tem SINGLE_MUTATOR=true. A transferência é serial: o
+mutador atual para toda escrita, registra base/head/tree e hashes do diff e
+manifest de untracked, libera a posse; o próximo mutador reconhece o snapshot e
+assume sozinho. Mudança após freeze invalida review/evidence. Preserve qualquer
+teto anti-loop mais estrito já vigente, incluindo STOP após três ciclos.
 
-- Single mutator sempre.
-- Um reviewer por padrão.
-- Segundo reviewer somente se o primeiro encontrar P0/P1, houver discordância
-  ou existir boundary crítico que justifique revisão adicional.
-- Não executar Reviewer A + Reviewer B + Adversarial por padrão.
-
-### Reasoning policy
-
-- LUNA: HIGH.
-- TERRA: HIGH.
-- SOL: HIGH por padrão; MEDIUM é permitido em review simples.
-- ASTRA: HIGH.
-- MAX é proibido por padrão. Usá-lo somente com justificativa explícita para
-  problema que resistiu a tentativas anteriores ou decisão excepcionalmente
-  difícil.
-
-### Context/token policy
-
-- Trabalhar diff-first.
-- Não carregar todo o README, roadmap ou specs em cada agente sem necessidade.
-- Usar o contexto mínimo suficiente: `BASE_SHA`, `HEAD_SHA`, `OBJECTIVE`,
-  `OPEN_FINDINGS`, `INVARIANTS`, `RELEVANT_FILES`, `REQUIRED_GATES` e
-  `PROHIBITED_ACTIONS`.
-- Reviewer recebe candidate freeze, delta e evidência; abre contexto adicional
-  somente sob demanda.
-- Em correção posterior, revisar prioritariamente o delta desde o último
-  candidate, sem recomeçar a auditoria completa.
-
-### Escalation
-
-Fluxo padrão: TERRA HIGH → SOL HIGH → ASTRA HIGH somente se necessário.
-
-Para tarefas baratas: LUNA HIGH → TERRA somente se mutation real for necessária.
-
-Para tarefa crítica excepcional: TERRA HIGH como mutator → ASTRA HIGH como
-adversarial final.
-
-Astra como ROOT + MUTATOR + múltiplos reviewers Astra é proibido por padrão.
-
-### Runtime attestation
-
-Requested model/effort e effective model/effort são conceitos diferentes.
-Nunca declarar modelo ou esforço efetivo sem evidência do runtime. Se não for
-verificável:
-
-```text
-EFFECTIVE_MODEL=UNVERIFIED
-EFFECTIVE_EFFORT=UNVERIFIED
-```
-
-### Safety
-
-Esta política de custo nunca reduz os gates de segurança existentes. Nenhum
-modelo, inclusive Astra, pode ultrapassar sem autorização explícita: SEND real,
-provider pago/real, migration operacional, alteração de estado ambíguo,
-unpause/ativação ou ações externas explicitamente protegidas.
+Nenhum papel/modelo reduz os gates de migrations, preview, scheduler, dispatch
+ambiguity, no-blind-retry, Evolution, maintenance ownership, runtime attestation
+ou autorização humana. Repo, origin, worktree, branch, HEAD e base precisam ser
+provados antes de escrever; mismatch significa DO_NOT_EDIT_CURRENT_REPOSITORY.
+Cross-repo exige CROSS_REPO_SCOPE. Human Gate continua obrigatório para
+provider/SEND, migration operacional, pagamento, produção e efeitos protegidos.
 
 ## Camadas de aplicacao e persistencia
 

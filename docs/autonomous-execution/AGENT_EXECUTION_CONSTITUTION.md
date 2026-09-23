@@ -7,58 +7,74 @@ segurança, o `AGENTS.md`, o usuário ou os contratos do código.
 
 ## 1. Princípio central
 
-`SOL_SUPERVISOR=true`.
-`SOL_SUPERVISOR_READ_ONLY=true`.
-`SINGLE_INTEGRATOR=true`.
-`SINGLE_MUTATOR=LUNA_MAX`.
+**Emenda V1:** por autorização do owner na missão IES_ORCHESTRATION_PROTOCOL_V1_GPT6_ROLLOUT, datada de 2026-09-22, a seleção de modelo/mutador desta seção substitui somente o seletor de papel de D30-011. A invariante SINGLE_MUTATOR e todos os gates de efeito permanecem.
 
-O SOL_SUPERVISOR é o Orchestrator/integrador de governança: mantém o estado da
-task, a branch candidate, o finding ledger, os gates e a decisão final, mas não
-edita a candidate. A LUNA_MAX é o único agente que pode mutar a candidate
-branch. Especialistas e reviewers podem analisar em paralelo, mas são
-READ_ONLY.
+ROOT_ORCHESTRATOR=true.
+ROOT_ORCHESTRATOR_READ_ONLY=default.
+SINGLE_INTEGRATOR=true.
+SINGLE_MUTATOR=true.
+ACTIVE_MUTATOR=EXACTLY_ONE_ROLE.
 
+O ROOT_ORCHESTRATOR/integrator coordena estado, candidate, findings e gates.
+Ele não escreve na candidate enquanto houver outro mutador ativo; pode ser o
+único mutador quando isso for explicitamente registrado. O principal operacional
+solicitado é GPT-6 Luna HIGH. GPT-6 Sol MAX pode assumir somente uma unidade
+estrutural comprovada/autorizada ou após duas tentativas focais Luna falharem
+pela mesma causa. A seleção do papel não prova o modelo efetivo.
+
+A verificação local da missão comprovou somente o ID gpt-6-astra. GPT-6 Luna e
+GPT-6 Sol permanecem MODEL_IDENTIFIER_UNPROVEN e não recebem fallback GPT-5.6.
 Há uma distinção explícita entre candidato e evidência de execução:
 
-```text
-SOL_SUPERVISOR_READ_ONLY=true
-SOL_CANDIDATE_WRITE=false
-SOL_MANIFEST_WRITE_ALLOWED=true
-SOL_MANIFEST_WRITE_PATH=.runtime/autonomous-execution/manifests/<RUN_ID>/**
-SINGLE_MUTATOR=LUNA_MAX
-```
+~~~text
+ROOT_ORCHESTRATOR_READ_ONLY=default
+ROOT_ORCHESTRATOR_CANDIDATE_WRITE=only_if_explicitly_ACTIVE_MUTATOR
+ROOT_ORCHESTRATOR_MANIFEST_WRITE_ALLOWED=true
+ROOT_ORCHESTRATOR_MANIFEST_WRITE_PATH=.runtime/autonomous-execution/manifests/<RUN_ID>/**
+SINGLE_MUTATOR=true
+ACTIVE_MUTATOR=exactly_one_role_for_this_candidate
+~~~
 
-`SOL_MANIFEST_WRITE_ALLOWED` autoriza somente criar/atualizar os doze arquivos
+`ROOT_ORCHESTRATOR_MANIFEST_WRITE_ALLOWED` autoriza somente criar/atualizar os doze arquivos
 da execução no caminho local/ignorado acima, registrar o freeze e anexar
 evidência. Isso não autoriza escrever código, documentação candidata,
 configuração, banco, Redis, volume ou runtime. Se os manifestos precisarem ser
-versionados por uma task, `LUNA_MAX` faz essa mutation na candidate e o SOL
-apenas fornece/valida os valores; a escrita de evidência nunca cria um segundo
-mutator.
+versionados por uma task, `ACTIVE_MUTATOR` faz a mutation na candidate; o
+`ROOT_ORCHESTRATOR` apenas fornece/valida os valores. Escrever evidência nunca
+cria um segundo mutator.
 Nunca existem dois mutators sobre o mesmo componente stateful.
 
-```text
-SOL SUPERVISOR / SINGLE INTEGRATOR / READ_ONLY
-├── LUNA MAX / SINGLE MUTATOR
-├── BACKEND / DATA SPECIALIST
-├── SCHEDULER / RUNTIME SPECIALIST
-├── FRONTEND / UX SPECIALIST
-├── QA / ADVERSARIAL TESTER
-├── SECURITY / SECRETS REVIEWER
-├── SOL INDEPENDENT REVIEWER
-└── FINAL ADVERSARIAL / SHIP GATE
-```
+~~~text
+ROOT_ORCHESTRATOR / SINGLE INTEGRATOR / gate owner
+├── PRINCIPAL / GPT-6 LUNA HIGH / default mutator
+├── DEV_INVESTIGATOR / GPT-6 ASTRA MEDIUM / READ_ONLY
+├── DEV_ENGINEER / GPT-6 SOL MAX / structural sole mutator when authorized
+├── DEV_VERIFIER / GPT-6 LUNA HIGH / READ_ONLY
+├── DEV_REVIEWER / GPT-6 SOL HIGH / READ_ONLY and fresh
+└── FINAL_ADVERSARIAL / READ_ONLY when risk gates require it
+~~~
 
 Reviewers são `READ_ONLY=true`. Não podem editar silenciosamente o código ou a
 documentação que estão auditando. Supervisão, review e mutation são papéis
-distintos; somente `LUNA_MAX` escreve na candidate.
+distintos; somente `ACTIVE_MUTATOR` escreve na candidate.
 
-## 2. Ordem de uma task
+### Transferência serial de mutação V1
+
+Antes de trocar o proprietário da candidate, o mutador anterior interrompe
+todas as escritas e registra BASE_SHA, HEAD_SHA, tree, diff/untracked manifest
+e hashes; libera explicitamente a posse. O próximo mutador confirma o mesmo
+snapshot e assume como único writer. Qualquer escrita pelo antigo owner após a
+liberação invalida a transferência. Não existem dois mutators simultâneos.
+
+O schema v2 dos manifestos mantém os nomes de campos existentes. O valor
+histórico SOL_SUPERVISOR nos manifestos é apenas o nome funcional legado do
+integrator, não uma attestation de GPT-6 Sol. Registros históricos não são
+reescritos.
 
 ```text
 baseline → scope → precheck → finding ledger → change → causal test
 → proportional regression → candidate freeze → independent review
-→ ship gate → Sol reconciliation → handoff
+→ ship gate → ROOT_ORCHESTRATOR reconciliation → handoff
 ```
 
 Cada transição precisa de `EVIDENCE_ID`. Se uma ferramenta não executou, o
@@ -82,7 +98,7 @@ estado é `NOT_RUN`, `BLOCKED` ou `HUMAN_REQUIRED`; nunca PASS inferido.
 
 Mutation de código explicitamente autorizada não é, por si só, motivo para
 `HUMAN_REQUIRED`. `AUTO_CONTINUE` não concede autorização nova e não atravessa
-nenhum boundary perigoso. O SOL_SUPERVISOR pode continuar quando a próxima
+nenhum boundary perigoso. O ROOT_ORCHESTRATOR pode continuar quando a próxima
 ação já estiver definida, os gates forem conhecidos e a decisão não depender do
 proprietário.
 
@@ -127,7 +143,7 @@ regressão proporcional e revisão independente. Para banco/runtime:
 
 ## 5.1 Candidate freeze e validade da revisão
 
-Antes do ciclo de revisão final, o SOL_SUPERVISOR calcula e atesta, e o
+Antes do ciclo de revisão final, o ROOT_ORCHESTRATOR calcula e atesta, e o
 manifest writer registra no armazenamento de evidência permitido:
 
 ```text
@@ -137,7 +153,7 @@ CANDIDATE_FROZEN=true
 ```
 
 Toda evidência, review e decisão deve carregar `reviewedHead` e `reviewedTree`.
-Se a LUNA_MAX alterar qualquer arquivo depois do freeze:
+Se a ACTIVE_MUTATOR alterar qualquer arquivo depois do freeze:
 
 ```text
 CANDIDATE_FROZEN=false
@@ -147,7 +163,7 @@ FINAL_ADVERSARIAL_HEAD_MISMATCH=INVALID
 SHIP_GATE_HEAD_MISMATCH=INVALID
 ```
 
-O SOL_SUPERVISOR calcula os gates/evidências invalidados e reinicia a revisão
+O ROOT_ORCHESTRATOR calcula os gates/evidências invalidados e reinicia a revisão
 afetada sobre o novo candidato. Componente já certificado só pode ser reaberto
 por finding causal:
 
@@ -200,7 +216,7 @@ consome geração. O boundary de SEND não pode ser duplicado.
 Um finding só passa de `OPEN` para `CLOSED` com:
 
 `FIX` + `CAUSAL_TEST_PASS` + `PROPORTIONAL_REGRESSION_PASS` + revisão quando o
-blast radius exigir. O SOL_SUPERVISOR nunca remove finding apenas porque uma
+blast radius exigir. O ROOT_ORCHESTRATOR nunca remove finding apenas porque uma
 nova task começou.
 
 ## 9. Revisão independente

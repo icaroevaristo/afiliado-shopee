@@ -1,0 +1,3 @@
+# Project-local Codex agent discovery; no user-global settings are changed.
+[agents]
+enabled = true
