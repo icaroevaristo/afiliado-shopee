@@ -1081,3 +1081,27 @@ Comportamento operacional:
   repetição do mesmo input; nenhuma tentativa é apagada e não há retry.
 - Preflight e preview são somente leitura. Nenhuma rota ou CLI desta camada
   cria pipeline run, automation execution, dispatch, outbox, job ou mensagem.
+
+## Pragmatismo obrigatório — projeto pessoal
+
+Este projeto é de uso próprio, operado por um único owner e em baixo volume. Não projetar como SaaS enterprise, multinacional ou plataforma para milhares de clientes.
+
+Prioridades:
+1. fazer funcionar;
+2. simplicidade;
+3. manutenção fácil;
+4. segurança proporcional ao risco.
+
+Para bugs normais: diagnosticar → corrigir → testar → continuar.
+
+Evitar governança, abstrações, gates, state machines, recovery systems, documentação e processos adicionais quando uma solução direta for suficiente. Não transformar risco teórico de baixo impacto, hipótese NOT_PROVEN ou possibilidade remota em blocker automático. Preferir teste real pequeno, barato, limitado e reversível quando ele responder a dúvida mais rápido que uma investigação extensa.
+
+Proteção forte continua obrigatória somente quando houver risco material de:
+- perda ou corrupção de dados;
+- exposição de credenciais;
+- gasto financeiro descontrolado;
+- envio real em massa ou duplicado;
+- efeito externo irreversível.
+
+Não criar arquitetura preventiva para escala hipotética sem evidência concreta de necessidade. Antes de adicionar uma camada de controle, perguntar: **isso resolve um problema real deste projeto hoje ou estamos projetando para uma empresa que não existe?**
+
